@@ -3,7 +3,7 @@
   "sources": {
     "zed-pkg/zed-cli": {
       "branch": "main",
-      "sha": "4fb352a608e36f34f88b0e62f75e8d9a0983cd5b",
+      "sha": "d0f70105d13ff1d3fddf7671bac50940f14d69a6",
       "exists": true
     },
     "zed-pkg/zed-clients": {
