@@ -1,0 +1,150 @@
+name: WASM browser transport contract
+
+'on':
+  pull_request:
+    paths:
+      - '.github/workflows/wasm-browser-contract.yml'
+      - 'tests/browser/wasm_transport_contract.mjs'
+      - 'tests/browser/wasm_fixture_csp_shim.mjs'
+      - 'tests/browser/wasm_expected_diagnostics_shim.mjs'
+      - 'clients/wasm/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/wasm-browser-contract.yml'
+      - 'tests/browser/wasm_transport_contract.mjs'
+      - 'tests/browser/wasm_fixture_csp_shim.mjs'
+      - 'tests/browser/wasm_expected_diagnostics_shim.mjs'
+      - 'clients/wasm/**'
+  schedule:
+    - cron: '37 8 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-browser-contract-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZED_INTERFACES_SHA: 6e893ad0f28ccfbb7722f007d75e88548f1bcfdf
+  CARGO_TERM_COLOR: always
+
+jobs:
+  browser:
+    name: ${{ matrix.engine }} browser contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox, webkit]
+    env:
+      BROWSER_ENGINE: ${{ matrix.engine }}
+      NO_COLOR: '1'
+      npm_config_audit: 'false'
+      npm_config_fund: 'false'
+      npm_config_package_lock: 'false'
+      npm_config_update_notifier: 'false'
+
+    steps:
+      - name: Check out exact client candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: zed-clients
+          persist-credentials: false
+
+      - name: Check out exact sibling interface contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ${{ env.ZED_INTERFACES_SHA }}
+          path: zed-interfaces
+          persist-credentials: false
+
+      - name: Install stable Rust with WebAssembly target
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Use Node.js 22.23.1
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.1'
+
+      - name: Record immutable test inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/wasm-transport/${{ matrix.engine }}"
+          mkdir -p "$artifact_dir"
+          {
+            printf 'browser=%s\n' '${{ matrix.engine }}'
+            printf 'client_commit=%s\n' "$(git -C zed-clients rev-parse HEAD)"
+            printf 'interfaces_commit=%s\n' "$(git -C zed-interfaces rev-parse HEAD)"
+            printf 'rustc=%s\n' "$(rustc --version)"
+            printf 'cargo=%s\n' "$(cargo --version)"
+            printf 'node=%s\n' "$(node --version)"
+            printf 'npm=%s\n' "$(npm --version)"
+          } > "$artifact_dir/environment.txt"
+          test "$(git -C zed-interfaces rev-parse HEAD)" = "$ZED_INTERFACES_SHA"
+
+      - name: Compile and test the hardened WebAssembly client
+        shell: bash
+        working-directory: zed-clients/clients/wasm
+        run: |
+          set -euo pipefail
+          cargo test --locked
+          cargo check --locked --target wasm32-unknown-unknown
+          cargo install wasm-pack --version 0.13.1 --locked
+          wasm-pack build --target web --release --out-dir pkg
+          test -f pkg/zed_client_wasm.js
+          test -f pkg/zed_client_wasm_bg.wasm
+
+      - name: Install exact browser driver
+        shell: bash
+        working-directory: zed-clients/tests/browser
+        run: |
+          set -euo pipefail
+          rm -rf node_modules package.json package-lock.json
+          printf '%s\n' '{"name":"zed-wasm-browser-contract","private":true,"type":"module"}' > package.json
+          npm install --no-save --no-package-lock --ignore-scripts playwright@1.61.1
+          ./node_modules/.bin/playwright install --with-deps '${{ matrix.engine }}'
+          node --check wasm_transport_contract.mjs
+          node --check wasm_fixture_csp_shim.mjs
+          node --check wasm_expected_diagnostics_shim.mjs
+
+      - name: Exercise hostile transport boundaries in a real browser
+        shell: bash
+        working-directory: zed-clients/tests/browser
+        env:
+          ZED_WASM_PKG: ${{ github.workspace }}/zed-clients/clients/wasm/pkg
+          BROWSER_ARTIFACT_DIR: ${{ runner.temp }}/wasm-transport/${{ matrix.engine }}
+          NODE_OPTIONS: >-
+            --import=${{ github.workspace }}/zed-clients/tests/browser/wasm_fixture_csp_shim.mjs
+            --import=${{ github.workspace }}/zed-clients/tests/browser/wasm_expected_diagnostics_shim.mjs
+        run: node --test --test-reporter=spec wasm_transport_contract.mjs
+
+      - name: Verify candidate source remained clean
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf \
+            zed-clients/clients/wasm/pkg \
+            zed-clients/tests/browser/node_modules \
+            zed-clients/tests/browser/package.json \
+            zed-clients/tests/browser/package-lock.json
+          git -C zed-clients status --short
+          test -z "$(git -C zed-clients status --porcelain)"
+
+      - name: Upload browser transport evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm-transport-${{ matrix.engine }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/wasm-transport/${{ matrix.engine }}/
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,13 @@
+[project]
+name = "zed-pkg-client"
+version = "0.1.0"
+description = "Python SDK for the zed-pkg registry (stdlib only)"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["zed_pkg_client"]

@@ -1,0 +1,14 @@
+{
+  "name": "@zed-pkg/client-wasm",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Browser/worker WebAssembly SDK for the zed-pkg registry",
+  "license": "MIT",
+  "repository": "github:zed-pkg/zed-clients",
+  "files": ["pkg"],
+  "scripts": {
+    "build": "wasm-pack build --target web --release",
+    "check": "cargo check --target wasm32-unknown-unknown",
+    "test": "cargo test"
+  }
+}

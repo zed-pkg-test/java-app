@@ -1,0 +1,40 @@
+{
+  "name": "@zed-pkg/client",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the zed-pkg registry (zero runtime deps)",
+  "license": "MIT",
+  "repository": "github:zed-pkg/zed-clients",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./nodejs": {
+      "types": "./dist/runtimes/nodejs/index.d.ts",
+      "default": "./dist/runtimes/nodejs/index.js"
+    },
+    "./deno": {
+      "types": "./dist/runtimes/deno/index.d.ts",
+      "default": "./dist/runtimes/deno/index.js"
+    },
+    "./bun": {
+      "types": "./dist/runtimes/bun/index.d.ts",
+      "default": "./dist/runtimes/bun/index.js"
+    },
+    "./edge": {
+      "types": "./dist/runtimes/edge/index.d.ts",
+      "default": "./dist/runtimes/edge/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
