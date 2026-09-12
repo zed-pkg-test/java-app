@@ -1,0 +1,52 @@
+name: Opto Sync adoption
+
+on:
+  push:
+    branches: [main]
+    paths: ['.opto-sync.json', '.github/workflows/opto-sync-adoption.yml']
+  pull_request:
+    paths: ['.opto-sync.json', '.github/workflows/opto-sync-adoption.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Zed clients
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Checkout pinned Opto Sync validator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: opto-sync/opto-sync-clients
+          ref: da7459fdf3ce4096ce6b88aeed5fc98066f804d9
+          path: .opto-sync-tools
+          persist-credentials: false
+      - name: Validate manifest and package-security boundary
+        run: |
+          set -euo pipefail
+          python3 .opto-sync-tools/scripts/check-adoption-manifest.py .opto-sync.json
+          python3 - <<'PY'
+          import json
+          manifest = json.load(open('.opto-sync.json', encoding='utf-8'))
+          assert manifest['project'] == 'zed-pkg/zed-clients'
+          assert manifest['rollout']['phase'] == 'declared'
+          assert manifest['background'] == {
+              'webServiceWorker': False,
+              'mobileWorker': False,
+              'desktopWorker': True,
+          }
+          assert {'installState', 'lockfileState', 'packageManifests'} <= set(manifest['dataScopes'])
+          notes = manifest['notes'].lower()
+          for excluded in ('registry credentials', 'signing keys', 'package blobs', 'environment secrets'):
+              assert excluded in notes
+          PY

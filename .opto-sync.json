@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "opto-sync.adoption.v1",
+  "project": "zed-pkg/zed-clients",
+  "clientPackage": {
+    "package": "opto-sync/opto-sync-clients",
+    "repository": "https://github.com/opto-sync/opto-sync-clients",
+    "version": "0.2.0",
+    "commit": "068414c8ff7d4262d0a395959b5209d5908f0fcc"
+  },
+  "languages": [
+    "dart",
+    "gleam",
+    "rust",
+    "typescript"
+  ],
+  "dataScopes": [
+    "installState",
+    "lockfileState",
+    "packageManifests",
+    "registryMetadata"
+  ],
+  "localStores": [
+    "indexeddb",
+    "sqlite"
+  ],
+  "transports": [
+    "http",
+    "websocket"
+  ],
+  "writeStrategies": [
+    "local-durable",
+    "local-then-remote",
+    "remote-confirmed"
+  ],
+  "conflictPolicy": {
+    "arrayStrategy": "mergeByKey",
+    "resolveByTimestamp": true,
+    "lwwKeys": [
+      "updatedAt"
+    ],
+    "arrayMatchKeys": [
+      "name"
+    ],
+    "tombstones": true
+  },
+  "background": {
+    "webServiceWorker": false,
+    "mobileWorker": false,
+    "desktopWorker": true
+  },
+  "security": {
+    "authenticatedTransport": true,
+    "encryptedAtRest": true,
+    "secretsInManifest": false
+  },
+  "rollout": {
+    "phase": "declared",
+    "owners": [
+      "zed-pkg"
+    ]
+  },
+  "notes": "Sync package manifests, lockfile state, registry metadata, install checkpoints, and user-visible operation history. Registry credentials, signing keys, package blobs, executable payloads, environment secrets, and shell output remain outside Opto Sync."
+}

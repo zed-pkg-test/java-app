@@ -1,0 +1,71 @@
+name: native lock provenance canary
+
+on:
+  push:
+    branches:
+      - agent/den-1565-native-lock-canary
+  pull_request:
+    paths:
+      - .github/workflows/native-lock-provenance-canary.yml
+      - tests/native-lock-consumer/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-lock-canary-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out independent consumer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: zed-clients
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out exact lock-provenance candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: a23cdd2ac509a39ca6fd6d21a3774fdd3a0f7660
+          path: zed-interfaces
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+
+      - name: Verify the exact product contract
+        working-directory: zed-interfaces
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = a23cdd2ac509a39ca6fd6d21a3774fdd3a0f7660
+          cargo fmt --all -- --check
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cp schemas/lockfile.json "$RUNNER_TEMP/lockfile.json"
+          cargo run --locked --example generate_schemas
+          cmp "$RUNNER_TEMP/lockfile.json" schemas/lockfile.json
+          git diff --exit-code
+
+      - name: Execute the external consumer locked and offline
+        run: |
+          set -euo pipefail
+          manifest=zed-clients/tests/native-lock-consumer/Cargo.toml
+          cargo generate-lockfile --offline --manifest-path "$manifest"
+          cargo run --locked --offline --manifest-path "$manifest"
+
+      - name: Verify the candidate and consumer trees stayed clean
+        run: |
+          set -euo pipefail
+          git -C zed-interfaces diff --exit-code
+          git -C zed-clients diff --exit-code -- . ':!tests/native-lock-consumer/Cargo.lock'

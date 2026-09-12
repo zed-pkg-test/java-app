@@ -1,0 +1,10 @@
+{application, zed_pkg_client, [
+    {description, "Erlang SDK for the zed-pkg registry (stdlib only: httpc + json + crypto)"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [kernel, stdlib, inets, ssl, crypto]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/zed-pkg/zed-clients"}]}
+]}.

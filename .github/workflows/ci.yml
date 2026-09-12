@@ -1,0 +1,267 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-clients-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - name: Validate the fourteen-language Zed target matrix
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path.cwd()
+          with (root / ".zpkg.toml").open("rb") as handle:
+              manifest = tomllib.load(handle)
+          with (root / ".zpkg.lock").open("rb") as handle:
+              lock = tomllib.load(handle)
+          assert lock["version"] == 1
+          assert manifest["dependencies"] == {"zed-pkg/zed-interfaces": "^0.1.0"}
+
+          required = {
+              "nodejs": ("clients/typescript", "package.json"),
+              "python": ("clients/python", "pyproject.toml"),
+              "golang": ("clients/go", "go.mod"),
+              "rust": ("clients/rust", "Cargo.toml"),
+              "rust-wasm": ("clients/wasm", "Cargo.toml"),
+              "dart": ("clients/dart", "pubspec.yaml"),
+              "gleam": ("clients/gleam", "gleam.toml"),
+              "erlang": ("clients/erlang", "rebar.config"),
+              "elixir": ("clients/elixir", "mix.exs"),
+              "java": ("clients/java", "pom.xml"),
+              "kotlin": ("clients/kotlin", "pom.xml"),
+              "ruby": ("clients/ruby", "zed_pkg_client.gemspec"),
+              "php": ("clients/php", "composer.json"),
+              "swift": ("clients/swift", "Package.swift"),
+          }
+          targets = manifest["targets"]
+          for target, (directory, native_manifest) in required.items():
+              assert targets[target]["dir"] == directory, (target, targets[target])
+              assert (root / directory / native_manifest).is_file(), (
+                  target,
+                  native_manifest,
+              )
+          assert targets["repository"]["dir"] == "."
+          assert targets["golang"]["native"]["package"].endswith("/clients/go")
+          assert targets["golang"]["native"]["tag_format"] == "clients/go/v{version}"
+          assert targets["java"]["native"]["package"] == "tech.zpkg:zed-client"
+          assert targets["kotlin"]["native"]["package"] == "tech.zpkg:zed-client-kotlin"
+
+          package_json = json.loads((root / "clients/typescript/package.json").read_text())
+          for runtime in ("nodejs", "deno", "bun", "edge"):
+              assert f"./{runtime}" in package_json["exports"]
+              assert (root / "clients/typescript/src/runtimes" / runtime / "index.ts").is_file()
+          print("zed-clients fourteen-language matrix is complete")
+          PY
+          python3 scripts/check-client-capability-drift.py
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: zed-clients
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: zed-pkg/zed-interfaces
+          path: zed-interfaces
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - run: cargo test
+        working-directory: zed-clients/clients/rust
+
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: zed-clients
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: zed-pkg/zed-interfaces
+          path: zed-interfaces
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - run: cargo test
+        working-directory: zed-clients/clients/wasm
+      - run: cargo check --target wasm32-unknown-unknown
+        working-directory: zed-clients/clients/wasm
+
+  typescript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - run: npm ci && npm run build && npm test
+        working-directory: clients/typescript
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - run: python -m compileall -q zed_pkg_client && python -m unittest -v
+        working-directory: clients/python
+
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.22"
+          cache-dependency-path: clients/go/go.mod
+      - run: go vet ./... && go test ./...
+        working-directory: clients/go
+
+  dart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260
+        with:
+          sdk: stable
+      - run: dart pub get && dart analyze && dart test
+        working-directory: clients/dart
+
+  gleam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93
+        with:
+          otp-version: "27"
+          gleam-version: "1.16"
+          rebar3-version: "3"
+      - run: gleam test
+        working-directory: clients/gleam
+
+  erlang:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93
+        with:
+          otp-version: "27"
+          rebar3-version: "3"
+      - run: rebar3 compile && rebar3 eunit
+        working-directory: clients/erlang
+
+  elixir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93
+        with:
+          otp-version: "27"
+          elixir-version: "1.17"
+      - run: mix deps.get && mix test
+        working-directory: clients/elixir
+
+  java:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: java -version
+      - run: mvn --batch-mode --no-transfer-progress verify
+        working-directory: clients/java
+
+  kotlin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: java -version
+      - run: mvn --batch-mode --no-transfer-progress verify
+        working-directory: clients/kotlin
+
+  ruby:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: ruby -c lib/zed_pkg_client.rb && ruby -Ilib test/client_test.rb
+        working-directory: clients/ruby
+
+  php:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: php -l src/Client.php && php tests/client_test.php
+        working-directory: clients/php
+
+  swift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: swift --version
+      - run: swift test --parallel
+        working-directory: clients/swift

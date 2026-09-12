@@ -12,3 +12,11 @@ tmp
 temp
 tmp/worktrees
 temp/worktrees
+
+# --- carried over from the grafted branch rescue/orphan-8060b10db775-feat-clients-complete-the-polyglot-sdk-m ---
+__pycache__/
+_build/
+*.egg-info/
+clients/dart/pubspec.lock
+clients/wasm/pkg/
+dist/
