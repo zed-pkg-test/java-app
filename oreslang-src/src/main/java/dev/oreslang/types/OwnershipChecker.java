@@ -453,6 +453,22 @@ public final class OwnershipChecker {
             }
         }
 
+        if (call.callee() instanceof Ast.MemberExpr qualified
+                && qualified.receiver() instanceof Ast.NameExpr namespace) {
+            Ast.FunctionDecl fn = findFunction(namespace.name() + "." + qualified.member());
+            if (fn != null) {
+                CallSignature signature = specializeCall(
+                        fn.genericParameters(), fn.genericParameters(),
+                        fn.parameters(), fn.returnType(), call, scope, Map.of());
+                checkArguments(
+                        call.arguments(),
+                        signature.parameters(),
+                        scope,
+                        "function " + namespace.name() + "." + qualified.member());
+                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+            }
+        }
+
         if (call.callee() instanceof Ast.MemberExpr member) {
             Ast.ClassDecl staticClass = classNamespaceOf(member.receiver(), scope);
             if (staticClass != null) {

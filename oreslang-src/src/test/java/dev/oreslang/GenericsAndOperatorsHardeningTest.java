@@ -164,6 +164,164 @@ final class GenericsAndOperatorsHardeningTest {
     }
 
     @Test
+    void qualifiedGenericCallsInferButUnspecializedGenericValuesAreRejected() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module util
+                  pub fnc identity<T>(T value) => T {
+                    return value;
+                  }
+                end
+
+                define module app
+                  fnc use() => void {
+                    val value = util.identity<>(7);
+                    stdio.println(value);
+                    stdio.println(value);
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc identity<T>(T value) => T { return value; }
+
+                  fnc bad() => void {
+                    val f = identity;
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module util
+                  pub fnc identity<T>(T value) => T { return value; }
+                end
+
+                define module app
+                  fnc bad() => void {
+                    val f = util.identity;
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class Box
+                    pub map<T>(T value) => T { return value; }
+                  end
+
+                  fnc bad(Box box) => void {
+                    val f = box.map;
+                    return;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void genericInterfaceMethodsAreAlphaEquivalentButPreserveGenericArity() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define interface Mapper<T>
+                    fnc map<U>(T input, U fallback) => U;
+                  end
+
+                  define class Good<T> implements Mapper<T>
+                    pub map<V>(T input, V fallback) => V {
+                      return fallback;
+                    }
+                  end
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define interface Mapper<T>
+                    fnc map<U>(T input, U fallback) => U;
+                  end
+
+                  define class Bad<T> implements Mapper<T>
+                    pub map<A, B>(T input, A fallback) => A {
+                      return fallback;
+                    }
+                  end
+                end
+                """)));
+    }
+
+    @Test
+    void genericNominalSubtypingPreservesConcreteArguments() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define interface HasValue<T>
+                    value: T;
+                  end
+
+                  define interface ExtendedValue<T> extends HasValue<T>
+                  end
+
+                  define class Parent<T>
+                    pub val T value;
+                  end
+
+                  define class Child<T> extends Parent<T> implements ExtendedValue<T>
+                  end
+
+                  fnc takeParentInt(Parent<int> value) => void { return; }
+                  fnc takeValueInt(HasValue<int> value) => void { return; }
+
+                  fnc ok(Child<int> value) => void {
+                    takeParentInt(value);
+                    takeValueInt(value);
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class Parent<T>
+                    pub val T value;
+                  end
+
+                  define class Child<T> extends Parent<T>
+                  end
+
+                  fnc takeString(Parent<String> value) => void { return; }
+
+                  fnc bad(Child<int> value) => void {
+                    takeString(value);
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define interface HasValue<T>
+                    value: T;
+                  end
+
+                  define interface ExtendedValue<T> extends HasValue<T>
+                  end
+
+                  define class Box<T> implements ExtendedValue<T>
+                    pub val T value;
+                  end
+
+                  fnc takeString(HasValue<String> value) => void { return; }
+
+                  fnc bad(Box<int> value) => void {
+                    takeString(value);
+                    return;
+                  }
+                end
+                """)));
+    }
+
+    @Test
     void staticFunctionsOwnTheirGenericParametersAndCannotCaptureClassGenerics() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module model

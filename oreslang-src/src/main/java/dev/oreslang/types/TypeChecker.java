@@ -150,9 +150,13 @@ public final class TypeChecker {
         Map<String, Type> members = new LinkedHashMap<>();
         for (Ast.Decl decl : module.declarations()) {
             if (decl instanceof Ast.FunctionDecl fn && fn.visibility() == Ast.Visibility.PUBLIC) {
-                Type signature = functionType(fn.parameters(), fn.returnType(), Set.copyOf(fn.genericParameters()), null);
+                Type signature = callableContractType(
+                        fn.genericParameters(), fn.parameters(), fn.returnType(), Set.of(), null);
                 mergeMember(members, fn.name(), signature, "module " + module.name());
-                mergeMember(members, methodKey(fn.name(), fn.parameters().size()), signature, "module " + module.name());
+                mergeMember(members,
+                        methodContractKey(fn.name(), fn.parameters().size(), fn.genericParameters().size()),
+                        signature,
+                        "module " + module.name());
             } else if (decl instanceof Ast.FieldDecl field && field.visibility() == Ast.Visibility.PUBLIC) {
                 Type type = field.type() == null ? typeOf(field.initializer(), new Env(null), Set.of(), null) : resolve(field.type(), Set.of(), null);
                 mergeMember(members, field.name(), type, "module " + module.name());
@@ -440,7 +444,14 @@ public final class TypeChecker {
             if (classNamespace != null) return new ClassNamespace(qualifiedClassName(classNamespace));
             if (importedValues.contains(name.name())) return Unknown.INSTANCE;
             Ast.FunctionDecl fn = findFunction(name.name());
-            if (fn != null) return functionType(fn.parameters(), fn.returnType(), Set.copyOf(fn.genericParameters()), null);
+            if (fn != null) {
+                if (!fn.genericParameters().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "generic callable '" + fn.name()
+                                    + "' must be specialized by a direct call; polymorphic function values are not supported yet");
+                }
+                return functionType(fn.parameters(), fn.returnType(), Set.of(), null);
+            }
             throw new IllegalArgumentException("unknown name '" + name.name() + "'");
         }
         if (expr instanceof Ast.AssignExpr assignment) {
@@ -520,6 +531,24 @@ public final class TypeChecker {
                 Ast.FunctionDecl target = findFunction(functionName.name());
                 if (target != null) {
                     String label = "function " + functionName.name();
+                    validateCallTypeArgumentMarker(call, target.genericParameters(), label);
+                    return checkGenericCallable(
+                            target.genericParameters(),
+                            target.parameters(),
+                            target.returnType(),
+                            call.arguments(),
+                            env, generics, self,
+                            null,
+                            explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
+                            label);
+                }
+            }
+            if (call.callee() instanceof Ast.MemberExpr qualifiedCall
+                    && qualifiedCall.receiver() instanceof Ast.NameExpr namespace
+                    && modules.containsKey(namespace.name())) {
+                Ast.FunctionDecl target = functions.get(namespace.name() + "." + qualifiedCall.member());
+                if (target != null) {
+                    String label = "function " + namespace.name() + "." + qualifiedCall.member();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
                     return checkGenericCallable(
                             target.genericParameters(),
@@ -631,6 +660,15 @@ public final class TypeChecker {
         }
         if (expr instanceof Ast.MemberExpr member) {
             if (member.receiver() instanceof Ast.NameExpr namespace && modules.containsKey(namespace.name())) {
+                Ast.FunctionDecl moduleFunction = functions.get(namespace.name() + "." + member.member());
+                if (moduleFunction != null) {
+                    if (!moduleFunction.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic callable '" + namespace.name() + "." + member.member()
+                                        + "' must be specialized by a direct call; polymorphic function values are not supported yet");
+                    }
+                    return functionType(moduleFunction.parameters(), moduleFunction.returnType(), Set.of(), null);
+                }
                 Ast.ClassDecl memberClass = classes.get(namespace.name() + "." + member.member());
                 if (memberClass != null) return new ClassNamespace(qualifiedClassName(memberClass));
             }
@@ -654,7 +692,12 @@ public final class TypeChecker {
                 List<Ast.MethodDecl> functions = findStaticFunctionsByName(klass, member.member(), new LinkedHashSet<>());
                 if (functions.size() == 1) {
                     Ast.MethodDecl fn = functions.getFirst();
-                    return functionType(fn.parameters(), fn.returnType(), Set.copyOf(fn.genericParameters()), null);
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic static function '" + klass.name() + "." + fn.name()
+                                        + "' must be specialized by a direct call; polymorphic function values are not supported yet");
+                    }
+                    return functionType(fn.parameters(), fn.returnType(), Set.of(), null);
                 }
                 if (functions.size() > 1) throw new IllegalArgumentException("overloaded static function '" + member.member() + "' must be called so arity can select the overload");
                 throw new IllegalArgumentException("unknown static member '" + member.member() + "' on " + klass.name());
@@ -676,6 +719,11 @@ public final class TypeChecker {
                     List<Ast.MethodDecl> methods = findMethodsByName(klass, member.member(), new LinkedHashSet<>());
                     if (methods.size() == 1) {
                         Ast.MethodDecl method = methods.getFirst();
+                        if (!method.genericParameters().isEmpty()) {
+                            throw new IllegalArgumentException(
+                                    "generic method '" + klass.name() + "." + method.name()
+                                            + "' must be specialized by a direct call; polymorphic bound-method values are not supported yet");
+                        }
                         ResolvedMethod target = findMethodTarget(klass, named, member.member(), method.arity(), new LinkedHashSet<>());
                         if (target == null) throw new IllegalArgumentException("cannot resolve method owner for '" + member.member() + "'");
                         Set<String> memberGenerics = new HashSet<>(target.owner().genericParameters());
@@ -1063,8 +1111,10 @@ public final class TypeChecker {
         for (Ast.FieldDecl field : klass.fields()) mergeMember(members, field.name(), resolve(field.type(), generics, self), "class " + klass.name());
         for (Ast.MethodDecl method : klass.methods()) {
             if (method.isStatic()) continue;
-            mergeMember(members, methodKey(method.name(), method.arity()),
-                    functionType(method.parameters(), method.returnType(), generics, self), "class " + klass.name());
+            mergeMember(members,
+                    methodContractKey(method.name(), method.arity(), method.genericParameters().size()),
+                    callableContractType(method.genericParameters(), method.parameters(), method.returnType(), generics, self),
+                    "class " + klass.name());
         }
         stack.remove(klass);
         Record result = new Record(members);
@@ -1092,8 +1142,10 @@ public final class TypeChecker {
         }
         for (Ast.MethodDecl method : klass.methods()) {
             if (!method.isStatic() && method.visibility() == Ast.Visibility.PUBLIC) {
-                mergeMember(members, methodKey(method.name(), method.arity()),
-                        functionType(method.parameters(), method.returnType(), generics, self), "class " + klass.name());
+                mergeMember(members,
+                        methodContractKey(method.name(), method.arity(), method.genericParameters().size()),
+                        callableContractType(method.genericParameters(), method.parameters(), method.returnType(), generics, self),
+                        "class " + klass.name());
             }
         }
         stack.remove(klass);
@@ -1119,10 +1171,10 @@ public final class TypeChecker {
         }
         for (Ast.InterfaceMember member : iface.members()) {
             if (member instanceof Ast.InterfaceFunctionDecl fn) {
-                Set<String> all = new HashSet<>(generics);
-                all.addAll(fn.genericParameters());
-                mergeMember(members, methodKey(fn.name(), fn.parameters().size()),
-                        functionType(fn.parameters(), fn.returnType(), all, null), "interface " + iface.name());
+                mergeMember(members,
+                        methodContractKey(fn.name(), fn.parameters().size(), fn.genericParameters().size()),
+                        callableContractType(fn.genericParameters(), fn.parameters(), fn.returnType(), generics, null),
+                        "interface " + iface.name());
             } else if (member instanceof Ast.InterfaceFieldDecl field) {
                 mergeMember(members, field.name(), resolve(field.type(), generics, null), "interface " + iface.name());
             }
@@ -1326,6 +1378,24 @@ public final class TypeChecker {
 
     private Function functionType(List<Ast.Param> params, Ast.TypeRef returns, Set<String> generics, Type self) {
         return new Function(params.stream().map(p -> resolveParam(p, generics, self)).toList(), resolve(returns, generics, self));
+    }
+
+    private Function callableContractType(
+            List<String> callableGenerics,
+            List<Ast.Param> params,
+            Ast.TypeRef returns,
+            Set<String> ownerGenerics,
+            Type self) {
+        Set<String> all = new HashSet<>(ownerGenerics);
+        all.addAll(callableGenerics);
+        Function raw = functionType(params, returns, all, self);
+        if (callableGenerics.isEmpty()) return raw;
+
+        Map<String, Type> canonical = new HashMap<>();
+        for (int i = 0; i < callableGenerics.size(); i++) {
+            canonical.put(callableGenerics.get(i), new Generic("$callable" + i));
+        }
+        return (Function) substituteGenerics(raw, canonical);
     }
 
     private Type resolveParam(Ast.Param param, Set<String> generics, Type self) {
@@ -1650,7 +1720,7 @@ public final class TypeChecker {
                 ref.inferArguments());
     }
 
-    private Type nominalClassType(Ast.ClassDecl klass) {
+    private Named nominalClassType(Ast.ClassDecl klass) {
         return new Named(qualifiedClassName(klass), klass.genericParameters().stream().map(Generic::new).map(Type.class::cast).toList());
     }
 
@@ -1675,50 +1745,103 @@ public final class TypeChecker {
 
         if (actual instanceof Named actualNamed && expected instanceof Record targetShape) {
             Ast.ClassDecl klass = findClass(actualNamed.name());
-            return klass != null && Types.isAssignable(publicClassShape(klass, new LinkedHashSet<>()), targetShape);
+            if (klass == null) return false;
+            Type specializedShape = substituteGenerics(
+                    publicClassShape(klass, new LinkedHashSet<>()),
+                    classGenericBindings(klass, actualNamed));
+            return Types.isAssignable(specializedShape, targetShape);
         }
 
         if (actual instanceof Named actualNamed && expected instanceof Named expectedNamed) {
-            Ast.ClassDecl actualClass = findClass(actualNamed.name());
-            if (actualClass != null) {
-                Ast.ClassDecl expectedClass = findClass(expectedNamed.name());
-                if (expectedClass != null && classExtends(actualClass, expectedClass, new LinkedHashSet<>())) return true;
-                Ast.InterfaceDecl expectedInterface = findInterface(expectedNamed.name());
-                if (expectedInterface != null && classImplements(actualClass, expectedInterface, new LinkedHashSet<>())) return true;
+            if (findClass(actualNamed.name()) != null) {
+                if (findClass(expectedNamed.name()) != null
+                        && classTypeExtends(actualNamed, expectedNamed, new LinkedHashSet<>())) {
+                    return true;
+                }
+                if (findInterface(expectedNamed.name()) != null
+                        && classTypeImplements(actualNamed, expectedNamed, new LinkedHashSet<>())) {
+                    return true;
+                }
+            }
+            if (findInterface(actualNamed.name()) != null
+                    && findInterface(expectedNamed.name()) != null
+                    && interfaceTypeExtends(actualNamed, expectedNamed, new LinkedHashSet<>())) {
+                return true;
             }
         }
         return false;
     }
 
-    private boolean classExtends(Ast.ClassDecl actual, Ast.ClassDecl expected, Set<Ast.ClassDecl> seen) {
-        if (actual == expected) return true;
-        if (!seen.add(actual)) return false;
+    private Named concreteClassReference(Ast.TypeRef ref, Ast.ClassDecl owner, Named ownerType) {
+        Type pattern = resolve(ref, Set.copyOf(owner.genericParameters()), nominalClassType(owner));
+        Type concrete = substituteGenerics(pattern, classGenericBindings(owner, ownerType));
+        if (!(concrete instanceof Named named)) {
+            throw new IllegalArgumentException("class relationship must resolve to a named type");
+        }
+        return named;
+    }
+
+    private boolean classTypeExtends(Named actualType, Named expectedType, Set<Named> seen) {
+        if (Types.isAssignable(actualType, expectedType)) return true;
+        if (!seen.add(actualType)) return false;
+
+        Ast.ClassDecl actual = findClass(actualType.name());
+        if (actual == null) return false;
         for (Ast.TypeRef parentRef : actual.parents()) {
             Ast.ClassDecl parent = resolveClassParent(parentRef, actual);
-            if (parent != null && classExtends(parent, expected, seen)) return true;
+            if (parent == null) continue;
+            Named parentType = concreteClassReference(parentRef, actual, actualType);
+            if (Types.isAssignable(parentType, expectedType)
+                    || classTypeExtends(parentType, expectedType, seen)) {
+                return true;
+            }
         }
         return false;
     }
 
-    private boolean classImplements(Ast.ClassDecl klass, Ast.InterfaceDecl expected, Set<Ast.ClassDecl> seen) {
-        if (!seen.add(klass)) return false;
-        for (Ast.TypeRef ifaceRef : klass.interfaces()) {
-            Ast.InterfaceDecl iface = findInterface(ifaceRef.name());
-            if (iface != null && (iface == expected || interfaceExtends(iface, expected, new LinkedHashSet<>()))) return true;
-        }
-        for (Ast.TypeRef parentRef : klass.parents()) {
-            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
-            if (parent != null && classImplements(parent, expected, seen)) return true;
-        }
-        return false;
-    }
+    private boolean classTypeImplements(Named actualType, Named expectedInterfaceType, Set<Named> seen) {
+        if (!seen.add(actualType)) return false;
+        Ast.ClassDecl actual = findClass(actualType.name());
+        if (actual == null) return false;
 
-    private boolean interfaceExtends(Ast.InterfaceDecl actual, Ast.InterfaceDecl expected, Set<Ast.InterfaceDecl> seen) {
-        if (actual == expected) return true;
-        if (!seen.add(actual)) return false;
+        for (Ast.TypeRef ifaceRef : actual.interfaces()) {
+            Named ifaceType = concreteClassReference(ifaceRef, actual, actualType);
+            if (interfaceTypeExtends(ifaceType, expectedInterfaceType, new LinkedHashSet<>())) {
+                return true;
+            }
+        }
+
         for (Ast.TypeRef parentRef : actual.parents()) {
-            Ast.InterfaceDecl parent = findInterface(parentRef.name());
-            if (parent != null && interfaceExtends(parent, expected, seen)) return true;
+            Ast.ClassDecl parent = resolveClassParent(parentRef, actual);
+            if (parent == null) continue;
+            Named parentType = concreteClassReference(parentRef, actual, actualType);
+            if (classTypeImplements(parentType, expectedInterfaceType, seen)) return true;
+        }
+        return false;
+    }
+
+    private boolean interfaceTypeExtends(Named actualType, Named expectedType, Set<Named> seen) {
+        if (Types.isAssignable(actualType, expectedType)) return true;
+        if (!seen.add(actualType)) return false;
+
+        Ast.InterfaceDecl actual = findInterface(actualType.name());
+        if (actual == null) return false;
+        Map<String, Type> bindings = genericBindings(
+                actual.genericParameters(),
+                actualType.arguments(),
+                "interface " + actual.name());
+        Set<String> generics = Set.copyOf(actual.genericParameters());
+
+        for (Ast.TypeRef parentRef : actual.parents()) {
+            Type pattern = resolve(parentRef, generics, null);
+            Type concrete = substituteGenerics(pattern, bindings);
+            if (!(concrete instanceof Named parentType)) {
+                throw new IllegalArgumentException("interface relationship must resolve to a named type");
+            }
+            if (Types.isAssignable(parentType, expectedType)
+                    || interfaceTypeExtends(parentType, expectedType, seen)) {
+                return true;
+            }
         }
         return false;
     }
@@ -1788,6 +1911,10 @@ public final class TypeChecker {
 
     private String methodKey(String name, int arity) {
         return name + "$arity" + arity;
+    }
+
+    private String methodContractKey(String name, int arity, int genericArity) {
+        return methodKey(name, arity) + "$generics" + genericArity;
     }
 
     private void validateRoutineRecursion() {
