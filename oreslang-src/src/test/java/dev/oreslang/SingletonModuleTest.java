@@ -273,15 +273,14 @@ final class SingletonModuleTest {
                         """)));
         assertTrue(classBoundary.getMessage().contains("not statically Sendable"));
 
-        IllegalArgumentException mutableBoundary = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module mutable_boundary as
-                          pub fnc consume(Array<int> mut values) => void {
-                            return;
-                          }
-                        end
-                        """)));
-        assertTrue(mutableBoundary.getMessage().contains("cannot accept mut parameters"));
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define singleton module mutable_boundary as
+                  pub fnc consume(Array<int> mut values) => void {
+                    values[0] = 2;
+                    return;
+                  }
+                end
+                """)));
     }
 
     @Test
