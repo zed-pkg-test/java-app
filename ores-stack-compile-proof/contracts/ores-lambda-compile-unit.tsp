@@ -24,7 +24,7 @@ scalar CargoFeature extends string;
 @pattern("^[A-Za-z0-9_-]+$")
 scalar CargoRegistry extends string;
 
-@pattern("^[0-9][A-Za-z0-9.+-]*\.[A-Za-z0-9.+-]+(\.[A-Za-z0-9.+-]+)*$")
+@pattern("^[0-9][A-Za-z0-9.+-]*\\.[A-Za-z0-9.+-]+(\\.[A-Za-z0-9.+-]+)*$")
 scalar ExactCargoVersion extends string;
 
 enum LambdaBuildProvider {
@@ -108,7 +108,7 @@ enum LambdaCompileTarget {
   ]
 )
 model LambdaCompileDependencyV1 {
-  alias: CargoAlias;
+  `alias`: CargoAlias;
   package: CargoPackage;
   kind: LambdaCompileDependencyKind;
   resolver: LambdaCompileResolver;
