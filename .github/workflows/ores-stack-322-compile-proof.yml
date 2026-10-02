@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Verify mirrored source identity
-        run: test "$(cat SOURCE_SHA)" = "a36f1da6602339c6d79bb7e4ca1300aa33d7a7cf"
+        run: test "$(cat SOURCE_SHA)" = "d571412af7db1f5896bd52c647c2e35e2077c6a5"
 
       - name: Install Rust 1.88.0
         uses: dtolnay/rust-toolchain@1.88.0
