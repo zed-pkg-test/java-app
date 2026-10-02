@@ -1,0 +1,13 @@
+{
+  "schema": "ores.typespec-json-schema-validator.mapping/v1",
+  "declarations": [
+    { "typespec": "OresLambdaCompileReceipt.Sha256Hex", "generated": "Sha256Hex", "authored": "sha256_hex" },
+    { "typespec": "OresLambdaCompileReceipt.LambdaBuildProvider", "generated": "LambdaBuildProvider", "authored": "lambda_build_provider" },
+    { "typespec": "OresLambdaCompileReceipt.LambdaFunctionKind", "generated": "LambdaFunctionKind", "authored": "lambda_function_kind" },
+    { "typespec": "OresLambdaCompileReceipt.LambdaCarrier", "generated": "LambdaCarrier", "authored": "lambda_carrier" },
+    { "typespec": "OresLambdaCompileReceipt.LambdaBuildArchitecture", "generated": "LambdaBuildArchitecture", "authored": "lambda_build_architecture" },
+    { "typespec": "OresLambdaCompileReceipt.LambdaCompileTarget", "generated": "LambdaCompileTarget", "authored": "lambda_compile_target" },
+    { "typespec": "OresLambdaCompileReceipt.LambdaCompileReceiptV1", "generated": "LambdaCompileReceiptV1", "authored": "receipt" }
+  ],
+  "ignore": { "typespec": [], "generated": [], "authored": [] }
+}
