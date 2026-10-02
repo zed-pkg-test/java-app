@@ -3,7 +3,7 @@ name: oreslang pr30 latest singleton regressions
 on:
   push:
     branches:
-      - "ci/oreslang-pr30-latest-singleton-regressions-20261002"
+      - "ci/oreslang-stateful-hardening-source-tests-20261002"
 
 permissions:
   contents: read
