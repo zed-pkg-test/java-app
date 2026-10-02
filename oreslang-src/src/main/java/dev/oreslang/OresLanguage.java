@@ -1,5 +1,7 @@
 package dev.oreslang;
 
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.RootCallTarget;
 import com.oracle.truffle.api.TruffleLanguage;
