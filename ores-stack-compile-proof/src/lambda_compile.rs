@@ -411,7 +411,7 @@ impl LambdaCompileUnit {
         out.push_str("publish = false\n\n");
         out.push_str("[workspace]\nresolver = \"2\"\n\n");
         out.push_str("[[bin]]\n");
-        out.push_str(&format!("name = {:?}\n", LAMBDA_COMPILE_BINARY));
+        out.push_str(&format!("name = {LAMBDA_COMPILE_BINARY:?}\n"));
         out.push_str("path = \"main.rs\"\n\n");
         out.push_str("[dependencies]\n");
 
@@ -445,7 +445,7 @@ impl LambdaCompileUnit {
                                 dependency.alias.clone(),
                             )
                         })?;
-                        out.push_str(&format!(", registry = {:?}", registry));
+                        out.push_str(&format!(", registry = {registry:?}"));
                     }
                 }
             }
