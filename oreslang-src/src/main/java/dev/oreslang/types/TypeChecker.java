@@ -357,7 +357,9 @@ public final class TypeChecker {
                 } else if (source instanceof Named named) {
                     Ast.ClassDecl klass = findClass(named.name());
                     if (klass == null) throw new IllegalArgumentException("object destructuring requires a record/map-like value");
-                    shape = publicClassShape(klass, new LinkedHashSet<>());
+                    shape = (Record) substituteGenerics(
+                            publicClassShape(klass, new LinkedHashSet<>()),
+                            classGenericBindings(klass, named));
                 } else if (source == Unknown.INSTANCE) {
                     shape = null;
                 } else {
@@ -1524,6 +1526,7 @@ public final class TypeChecker {
     }
 
     private void inferGenericBindings(Type pattern, Type actual, Map<String, Type> bindings, Set<String> fixedBindings, String label) {
+        if (containsUnknown(actual)) return;
         if (pattern instanceof Generic generic) {
             if (fixedBindings.contains(generic.name())) return;
             Type previous = bindings.putIfAbsent(generic.name(), actual);
@@ -1577,6 +1580,19 @@ public final class TypeChecker {
             return new Record(members);
         }
         return type;
+    }
+
+    private boolean containsUnknown(Type type) {
+        if (type == Unknown.INSTANCE) return true;
+        if (type instanceof Borrow borrow) return containsUnknown(borrow.target());
+        if (type instanceof ListType list) return containsUnknown(list.element());
+        if (type instanceof Tuple tuple) return tuple.elements().stream().anyMatch(this::containsUnknown);
+        if (type instanceof Union union) return union.options().stream().anyMatch(this::containsUnknown);
+        if (type instanceof Named named) return named.arguments().stream().anyMatch(this::containsUnknown);
+        if (type instanceof Function fn) return fn.parameters().stream().anyMatch(this::containsUnknown)
+                || containsUnknown(fn.result());
+        if (type instanceof Record record) return record.members().values().stream().anyMatch(this::containsUnknown);
+        return false;
     }
 
     private boolean containsGenericNamed(Type type, Set<String> names) {

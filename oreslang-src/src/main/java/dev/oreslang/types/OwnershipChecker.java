@@ -1201,9 +1201,21 @@ public final class OwnershipChecker {
             if ((source.name().equals("Array") || source.name().equals("List")) && source.arguments().size() == 1) {
                 return source.arguments().getFirst();
             }
-        } else if (source.isRecordType()) {
-            Ast.TypeRef member = source.recordMembers().get(name);
-            if (member != null) return member;
+        } else {
+            Ast.TypeRef concrete = source.isBorrow() ? source.borrowedTarget() : source;
+            if (concrete.isRecordType()) {
+                Ast.TypeRef member = concrete.recordMembers().get(name);
+                if (member != null) return member;
+            }
+            Ast.ClassDecl klass = findClass(concrete.name());
+            if (klass != null) {
+                ResolvedField target = findFieldTarget(klass, concrete, name, new LinkedHashSet<>());
+                if (target != null && target.field().visibility() == Ast.Visibility.PUBLIC) {
+                    return substituteType(
+                            target.field().type(),
+                            genericBindings(target.owner().genericParameters(), target.ownerType().arguments()));
+                }
+            }
         }
         return Ast.TypeRef.inferred();
     }

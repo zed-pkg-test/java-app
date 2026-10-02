@@ -221,6 +221,42 @@ final class GenericsAndOperatorsHardeningTest {
     }
 
     @Test
+    void genericInferenceRejectsUnknownArgumentShapes() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          fnc identity<T>(T value) => T {
+                            return value;
+                          }
+
+                          fnc bad() => void {
+                            val value = identity(arr[]);
+                            return;
+                          }
+                        end
+                        """)));
+        assertTrue(error.getMessage().contains("cannot infer"));
+    }
+
+    @Test
+    void genericObjectDestructuringPreservesConcreteFieldTypes() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class Box<T>
+                    pub val T value;
+                  end
+
+                  fnc use(Box<int> box) => void {
+                    const {value} = box;
+                    stdio.println(value);
+                    stdio.println(value);
+                    return;
+                  }
+                end
+                """)));
+    }
+
+    @Test
     void genericInterfaceMethodsAreAlphaEquivalentButPreserveGenericArity() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
@@ -272,9 +308,9 @@ final class GenericsAndOperatorsHardeningTest {
                   fnc takeParentInt(Parent<int> value) => void { return; }
                   fnc takeValueInt(HasValue<int> value) => void { return; }
 
-                  fnc ok(Child<int> value) => void {
-                    takeParentInt(value);
-                    takeValueInt(value);
+                  fnc ok(Child<int> parentValue, Child<int> interfaceValue) => void {
+                    takeParentInt(parentValue);
+                    takeValueInt(interfaceValue);
                     return;
                   }
                 end
