@@ -1,0 +1,53 @@
+name: ores-stack-322 compile contract proof
+
+on:
+  push:
+    branches:
+      - proof/ores-stack-322-8e9793d
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ores-stack-compile-proof
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify mirrored source identity
+        run: test "$(cat SOURCE_SHA)" = "8e9793d9f96dd85ea49026796bb5fb675f1c250a"
+
+      - name: Install Rust 1.88.0
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Rustfmt exact module proof
+        run: cargo fmt -- --check
+
+      - name: Cargo check exact module proof
+        run: cargo check --all-targets
+
+      - name: Cargo test exact module proof
+        run: cargo test --all-targets
+
+      - name: Strict Clippy exact module proof
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Install Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install contract toolchain
+        run: npm install --ignore-scripts
+
+      - name: Compile-unit peer parity
+        run: npm run check:lambda-compile-unit
+
+      - name: Compile-receipt peer parity
+        run: npm run check:lambda-compile-receipt
