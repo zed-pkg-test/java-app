@@ -194,6 +194,7 @@ public final class TypeChecker {
 
     private void checkFunction(String module, Ast.FunctionDecl fn) {
         if (module.equals(Parser.ROOT_MODULE) && fn.name().equals("init")) {
+            Ast.TypeRef initReturn = fn.returnType();
             if (fn.kind() != Ast.CallableKind.FNC
                     || fn.visibility() != Ast.Visibility.PRIVATE
                     || fn.async()
@@ -201,9 +202,10 @@ public final class TypeChecker {
                     || fn.actorKind() != Ast.ActorKind.NONE
                     || !fn.genericParameters().isEmpty()
                     || !fn.parameters().isEmpty()
-                    || !"void".equals(fn.returnType().name())
-                    || !fn.returnType().arguments().isEmpty()
-                    || fn.returnType().inferArguments()) {
+                    || initReturn == null
+                    || !"void".equals(initReturn.name())
+                    || !initReturn.arguments().isEmpty()
+                    || initReturn.inferArguments()) {
                 throw new IllegalArgumentException(
                         "file init hook must be exactly 'fnc init() => void' (private, synchronous, non-actor, non-generic)");
             }

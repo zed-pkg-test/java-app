@@ -64,12 +64,13 @@ final class CircularImportInitializationTest {
                 """);
 
         ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ByteArrayOutputStream error = new ByteArrayOutputStream();
         IncrementalCompiler.BuildResult build = LinkedProgramRunner.run(
                 a,
                 IsolatePolicy.developer(),
                 ExecutionProfile.serverJit(),
                 output,
-                output);
+                error);
 
         assertEquals("init-a:B|init-b:A|main:AB", output.toString(StandardCharsets.UTF_8));
 
