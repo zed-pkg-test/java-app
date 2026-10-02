@@ -7,23 +7,30 @@ import_decl     = "import" import_spec "from" STRING_LITERAL ";" ;
 import_spec     = "*" "as" IDENT
                 | "module" import_names
                 | "class" import_names
+                | "struct" import_names
                 | "fnc" import_names ;
 import_names    = IDENT
                 | "{" IDENT { "," IDENT } "}"
                 | "*" "as" IDENT ;
 
 top_level_item  = annotated_module_decl
+                | init_decl
                 | callable_decl
                 | class_decl
+                | struct_decl
+                | trait_decl
                 | interface_decl
                 | type_decl
                 | binding_decl ;
 
-annotated_module_decl = { annotation } "define" "module" IDENT
+annotated_module_decl = { annotation } "define" [ "singleton" ] "module" IDENT "as"
                         { module_member } "end" ;
 
-module_member   = callable_decl
+module_member   = init_decl
+                | callable_decl
                 | class_decl
+                | struct_decl
+                | trait_decl
                 | interface_decl
                 | type_decl
                 | binding_decl ;
@@ -35,10 +42,40 @@ callable_decl   = { annotation } visibility { callable_modifier } callable_kind 
                   "(" [ param_list ] ")" return_spec block ;
 callable_kind   = "fnc" | "routine" ;
 
+init_decl       = "init" "routine" "(" ")" "=>" "void" block ;
+
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
-                  [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
-                  { class_member } "end" ;
+                  [ ( "is" | "implements" | "impl" ) type_ref { "," type_ref } ]
+                  [ "with" type_ref { "," type_ref } ]
+                  "as" { class_member } "end" ;
+
+struct_decl     = "struct" IDENT [ generic_params ]
+                  [ ( "is" | "implements" | "impl" ) type_ref { "," type_ref } ]
+                  [ "with" type_ref { "," type_ref } ]
+                  "{" { struct_member } "}"
+                | "define" "struct" IDENT [ generic_params ]
+                  [ ( "is" | "implements" | "impl" ) type_ref { "," type_ref } ]
+                  [ "with" type_ref { "," type_ref } ]
+                  "as" { struct_member } "end" ;
+
+struct_member   = struct_field_decl
+                | method_decl
+                | static_function_decl ;
+
+struct_field_decl
+                = visibility binding_kind type_ref IDENT [ "=" expression ] stmt_terminator
+                | visibility binding_kind IDENT ":" type_ref [ "=" expression ] struct_field_terminator
+                | visibility type_ref IDENT [ "=" expression ] stmt_terminator
+                | visibility IDENT ":" type_ref [ "=" expression ] struct_field_terminator ;
+
+trait_decl      = [ "define" ] "trait" IDENT [ generic_params ]
+                  [ ( "is" | "implements" | "impl" ) type_ref { "," type_ref } ]
+                  [ "with" type_ref { "," type_ref } ]
+                  ( "{" { trait_member } "}" | "as" { trait_member } "end" ) ;
+
+trait_member    = field_decl
+                | method_decl ;
 
 class_member    = field_decl
                 | method_decl
@@ -64,11 +101,9 @@ interface_decl  = visibility "interface" IDENT [ generic_params ]
                   interface_body ;
 
 interface_body  = "{" { interface_member } "}"
-                | { interface_member } "end" ;
+                | [ "as" ] { interface_member } "end" ;
 
-interface_member= "fnc" IDENT [ generic_params ] "(" [ param_list ] ")" return_spec member_terminator
-                | IDENT ":" type_ref member_terminator
-                | [ binding_kind ] type_ref IDENT member_terminator ;
+interface_member= "fnc" IDENT [ generic_params ] "(" [ param_list ] ")" return_spec member_terminator ;
 
 type_decl       = "type" IDENT [ generic_params ] "=" type_ref stmt_terminator ;
 
@@ -83,14 +118,12 @@ param           = type_ref [ "mut" ] IDENT
 binding_decl    = binding_kind [ type_ref ] IDENT "=" expression stmt_terminator ;
 binding_kind    = "val" | "const" | "let" ;
 
-destructure_stmt= [ binding_kind ] sequence_pattern "=" expression stmt_terminator
-                | [ binding_kind ] object_pattern "=" expression stmt_terminator ;
-sequence_pattern= "[" destructure_item { "," destructure_item } "]" ;
-object_pattern  = "{" destructure_item { "," destructure_item } "}" ;
-destructure_item= [ binding_kind ] IDENT | "_" ;
+destructure_stmt= "[" destructure_item { "," destructure_item } "]" "=" expression stmt_terminator ;
+destructure_item= binding_kind IDENT ;
 
 block           = "{" { statement } "}" ;
-statement       = binding_decl
+statement       = local_type_decl
+                | binding_decl
                 | destructure_stmt
                 | return_stmt
                 | if_stmt
@@ -99,13 +132,27 @@ statement       = binding_decl
                 | for_stmt
                 | expression stmt_terminator ;
 
+local_type_decl = [ "define" ] "struct" IDENT [ generic_params ]
+                  [ ( "is" | "implements" | "impl" ) type_ref { "," type_ref } ]
+                  [ "with" type_ref { "," type_ref } ]
+                  ( "{" { struct_member } "}" | "as" { struct_member } "end" )
+                | [ "define" ] "trait" IDENT [ generic_params ]
+                  [ ( "is" | "implements" | "impl" ) type_ref { "," type_ref } ]
+                  [ "with" type_ref { "," type_ref } ]
+                  ( "{" { trait_member } "}" | "as" { trait_member } "end" )
+                | [ "define" ] "interface" IDENT [ generic_params ]
+                  [ "extends" type_ref { "," type_ref } ]
+                  interface_body
+                | "type" IDENT [ generic_params ] "=" type_ref stmt_terminator ;
+
 return_stmt     = "return" [ expression ] stmt_terminator ;
 defer_stmt      = "defer" expression stmt_terminator ;
 
 if_stmt         = "if" condition [ ";" ] "do" { statement }
                   { "elseif" condition [ ";" ] "do" { statement } }
                   [ "else" { statement } ] "fi" ;
-condition       = logic_or { "," logic_or } ;  (* comma is a legacy condition-only && alias *)
+condition       = condition_and { "|" condition_and } ;
+condition_and   = equality { "," equality } ;
 
 try_stmt        = "try" block "catch" "(" IDENT ")" block [ "finally" block ] ;
 
@@ -119,22 +166,15 @@ for_init        = binding_kind [ type_ref ] IDENT "=" expression
 expression      = assignment ;
 assignment      = conditional [ "=" assignment ] ;
 conditional     = logic_or [ "?" assignment ":" conditional ] ;
-logic_or        = logic_xor { "||" logic_xor } ;
-logic_xor       = logic_and { "^^" logic_and } ;
-logic_and       = bit_or { "&&" bit_or } ;
-bit_or          = bit_xor { "|" bit_xor } ;
-bit_xor         = bit_and { "^" bit_and } ;
-bit_and         = equality { "&" equality } ;
+logic_or        = equality { "|" equality } ;
 equality        = comparison { ( "==" | "!=" ) comparison } ;
-comparison      = shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
-shift           = additive { ( "<<" | ">>" | ">>>" ) additive } ;
+comparison      = additive { ( "<" | "<=" | ">" | ">=" ) additive } ;
 additive        = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative  = unary { ( "*" | "/" | "%" ) unary } ;
-unary           = [ "!" | "~" | "-" | "+" | "await" ] postfix
+unary           = [ "!" | "-" | "+" | "await" ] postfix
                 | "&" [ "mut" ] unary ;
 postfix         = primary { call_suffix | member_suffix | index_suffix } ;
-call_suffix     = [ generic_call_args ] "(" [ argument_list ] ")" ;
-generic_call_args = "<" [ type_args ] ">" ;
+call_suffix     = "(" [ argument_list ] ")" ;
 member_suffix   = "." IDENT ;
 index_suffix    = "[" expression "]" ;
 argument_list   = expression { "," expression } ;
@@ -143,6 +183,8 @@ primary         = literal
                 | IDENT
                 | "self"
                 | "new" type_ref "(" [ argument_list ] ")"
+                | named_struct_literal
+                | anonymous_struct_literal
                 | lambda
                 | tuple_literal
                 | array_literal
@@ -160,17 +202,15 @@ tuple_literal   = "(" expression "," expression { "," expression } ")" ;
 array_literal   = "arr" "[" [ expression { "," expression } ] "]" ;
 legacy_array_literal = "[" [ expression { "," expression } ] "]" ;
 object_literal  = "obj" "{" [ object_field { "," object_field } ] "}" ;
+named_struct_literal = type_ref "{" [ struct_value_field { "," struct_value_field } ] "}" ;
+anonymous_struct_literal = "struct" "{" [ struct_value_field { "," struct_value_field } ] "}" ;
+struct_value_field = IDENT ( "=" | ":" ) expression ;
 object_field    = ( IDENT | STRING_LITERAL ) ":" expression ;
 
 literal         = INT_LITERAL | FLOAT_LITERAL | IMAG_LITERAL | STRING_LITERAL
                 | "true" | "false" ;
 
-type_ref        = type_atom { "|" type_atom } ;
-
-type_atom       = borrow_type
-                | tuple_type
-                | record_type
-                | alias_marker
+type_ref        = borrow_type
                 | named_type
                 | function_type
                 | grouped_type
@@ -179,12 +219,7 @@ type_atom       = borrow_type
                 | "void"
                 | "null" ;
 
-borrow_type     = "&" [ "mut" ] type_atom ;
-tuple_type      = "[" [ type_ref { "," type_ref } ] "]" ;
-record_type     = "{" [ record_type_field { "," record_type_field } ] "}" ;
-record_type_field
-                = ( IDENT | STRING_LITERAL ) ":" type_ref ;
-alias_marker    = "type" named_type ;
+borrow_type     = "&" [ "mut" ] type_ref ;
 named_type      = qualified_name [ "<" [ type_args ] ">" ] ;
 function_type   = "typeof" "fnc" "(" [ function_type_params ] ")" "->" type_ref
                 | "(" [ function_type_params ] ")" "->" type_ref ;
@@ -204,6 +239,7 @@ qualified_name  = IDENT { "." IDENT } ;
 
 stmt_terminator   = ";" | SAFE_STRUCTURAL_BOUNDARY ;
 member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
+struct_field_terminator = ";" | "," | STRUCT_CLOSING_BOUNDARY | NEXT_NAME_COLON_BOUNDARY ;
 
 (* Semantic restrictions:
    - Each source file is a separately versioned compilation/code unit and is the
@@ -211,6 +247,42 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - Source namespaces are flat: namespace a.b; is illegal.
    - Modules are flat: module names are single identifiers and modules may not
      contain modules.
+   - "define singleton module X as" declares exactly one actor-backed module
+     state cell per OS process.
+   - "define module X as", "define class Y ... as", "define struct S ... as", and "define trait T ... as"
+     use "as" as the body marker. "as", "is", "with", and "trait" are reserved.
+   - Interfaces are storage-free contracts: they declare function signatures only.
+     They never allocate fields or contribute object layout.
+   - Stateful reusable composition uses traits. A class satisfies interfaces with
+     "is" and composes traits with "with". "implements"/"impl" remain migration
+     aliases for "is".
+   - Traits may contain initialized state, concrete methods, and abstract method
+     requirements, but are never directly instantiated and have no object identity.
+     Trait state is flattened into the host class before runtime.
+   - Traits are composition units, not runtime types. Trait names are rejected in
+     parameter/field/return/alias/generic-argument type positions, and a trait name
+     may not collide with a class/interface/type alias in the same module.
+   - Trait fields require initializers and are not positional constructor parameters.
+     Private trait state remains lexical to the defining trait.
+   - Multiple traits that contribute the same field are rejected. Multiple concrete
+     methods with the same name/arity require an explicit class override.
+   - v0 trait composition is module-local so flattening cannot silently change a
+     trait method's lexical module environment.
+   - "init routine() => void { ... }" is a lifecycle declaration, not an ordinary
+     callable. At file/root or ordinary-module scope it runs once per actor-local
+     module state. Inside a singleton module it runs exactly once when the
+     process singleton state cell is first created. Classes cannot declare it.
+   - Singleton bindings are actor-private by default. A public val/const class
+     instance may be exported as a typed proxy capability; the raw object never
+     crosses the singleton actor boundary and its method calls are request/reply.
+   - Other public singleton-module fields are illegal. Singleton state fields require
+     explicit process-stable types and context-free initializers.
+   - Public singleton functions are actor transport boundaries: generic/async
+     exports, mut/structural parameters, borrows, classes, and function/closure
+     values are rejected until explicit Send constraints exist.
+   - External singleton calls must be immediately awaited; singleton helper
+     classes are actor-private outside their owning singleton module.
+   - Cross-singleton mailbox waits are cycle-checked and policy-bounded.
    - fnc declarations may recurse; routines may not participate in a call cycle.
    - fnc and routine declarations do not overload.
    - instance methods may overload only when arity differs.
@@ -218,17 +290,6 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      dispatched through the class namespace, never through an instance.
    - "=>" belongs to named callable return declarations.
    - "->" belongs to function types and lambdas.
-   - "<...>" is generic/type-argument syntax in type/declaration context.
-   - "<>" remains the inferred-type-argument marker where inference is supported;
-     it is never an XOR operator. Logical XOR is "^^"; bitwise XOR is "^".
-   - "&&", "||", and "^^" are boolean operators. "&", "|", "^", "~", "<<",
-     ">>", and ">>>" are integer bitwise operators.
-   - In a destructure pattern, an explicit binding kind propagates to subsequent
-     unqualified names until another binding kind appears. A leading binding
-     kind (for example const [a, b]) seeds the whole pattern. "_" never binds.
-   - Sequence destructuring targets returned arrays/lists and finite tuple types;
-     object destructuring targets returned record/map-like values.
-   - Destructuring is not currently permitted in callable parameter lists.
    - Lambdas always have braces. Non-void lambdas must use explicit return and
      return on every path when a contextual function result type is known.
    - named class/interface types are nominal by default.

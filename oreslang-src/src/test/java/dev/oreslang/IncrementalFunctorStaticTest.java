@@ -23,7 +23,7 @@ final class IncrementalFunctorStaticTest {
         var program = TypeChecker.check(Parser.parse("""
                 namespace payments;
 
-                define module api
+                define module api as
                   pub fnc ping() => int { return 1; }
                 end
                 """));
@@ -41,8 +41,8 @@ final class IncrementalFunctorStaticTest {
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                define module outer
-                  define module inner
+                define module outer as
+                  define module inner as
                   end
                 end
                 """));
@@ -157,8 +157,8 @@ final class IncrementalFunctorStaticTest {
     @Test
     void staticClassFunctionsUseStaticFncAndDoNotReceiveSelf() throws Exception {
         String output = run("""
-                define module model
-                  define class Counter
+                define module model as
+                  define class Counter as
                     pub val int value = 9;
 
                     pub static fnc twice(int x) => int {
@@ -179,19 +179,19 @@ final class IncrementalFunctorStaticTest {
         assertEquals("18", output);
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                define class Bad
+                define class Bad as
                   static nope() => int { return 1; }
                 end
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   static fnc nope() => int { return self.value; }
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   static fnc make() => int { return 1; }
                 end
                 fnc bad() => int {
@@ -280,6 +280,60 @@ final class IncrementalFunctorStaticTest {
                 """)));
     }
 
+    @Test
+    void escapedLocalStructAbiTracksOnlyPublicSurface() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+
+        Map<String, String> first = Map.of(
+                "factory.ores", """
+                        pub fnc make() => T {
+                          struct T {
+                            pub value: int;
+                            private hidden: int = 1;
+                          }
+                          return obj{value: 7};
+                        }
+                        """,
+                "consumer.ores", """
+                        import fnc {make} from "./factory.ores";
+                        pub fnc consume() => void { return; }
+                        """);
+        compiler.compile(first);
+
+        Map<String, String> privateLayoutChange = Map.of(
+                "factory.ores", """
+                        pub fnc make() => T {
+                          struct T {
+                            pub value: int;
+                            private hidden: String = "internal";
+                          }
+                          return obj{value: 7};
+                        }
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+        var second = compiler.compile(privateLayoutChange);
+        assertTrue(second.rebuilt("factory.ores"));
+        assertTrue(second.reused("consumer.ores"),
+                "private local-struct layout changes must not invalidate importers");
+
+        Map<String, String> publicShapeChange = Map.of(
+                "factory.ores", """
+                        pub fnc make() => T {
+                          struct T {
+                            pub value: int;
+                            pub label: String = "visible";
+                            private hidden: String = "internal";
+                          }
+                          return obj{value: 7};
+                        }
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+        var third = compiler.compile(publicShapeChange);
+        assertTrue(third.rebuilt("factory.ores"));
+        assertTrue(third.rebuilt("consumer.ores"),
+                "public local-struct shape changes must invalidate importers");
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "incremental-functors.ores")
@@ -293,4 +347,135 @@ final class IncrementalFunctorStaticTest {
         }
         return output.toString(StandardCharsets.UTF_8);
     }
+    @Test
+    void traitCompositionParticipatesInExportedAbiInvalidation() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+
+        Map<String, String> first = Map.of(
+                "model.ores", """
+                        define module model as
+                          define trait Behavior as
+                            pub value() => int { return 1; }
+                          end
+
+                          define class Box with Behavior as
+                          end
+                        end
+                        """,
+                "consumer.ores", """
+                        import class {Box} from "./model.ores";
+                        pub fnc accept(Box value) => void { return; }
+                        """);
+        compiler.compile(first);
+
+        Map<String, String> implementationOnly = Map.of(
+                "model.ores", """
+                        define module model as
+                          define trait Behavior as
+                            pub value() => int { return 2; }
+                          end
+
+                          define class Box with Behavior as
+                          end
+                        end
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+        var second = compiler.compile(implementationOnly);
+        assertTrue(second.rebuilt("model.ores"));
+        assertTrue(second.reused("consumer.ores"),
+                "trait method body changes must not invalidate importers when composed ABI is unchanged");
+
+        Map<String, String> publicShapeChange = Map.of(
+                "model.ores", """
+                        define module model as
+                          define trait Behavior as
+                            pub value() => int { return 2; }
+                            pub label() => String { return "box"; }
+                          end
+
+                          define class Box with Behavior as
+                          end
+                        end
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+        var third = compiler.compile(publicShapeChange);
+        assertTrue(third.rebuilt("model.ores"));
+        assertTrue(third.rebuilt("consumer.ores"),
+                "trait changes that alter a composed public class shape must invalidate importers");
+    }
+    @Test
+    void nonEscapingCallableLocalTypeChangesDoNotInvalidateImporters() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+
+        Map<String, String> first = Map.of(
+                "producer.ores", """
+                        pub fnc value() => int {
+                          struct Helper {
+                            value: int;
+                          }
+                          return 1;
+                        }
+                        """,
+                "consumer.ores", """
+                        import fnc {value} from "./producer.ores";
+                        pub fnc main() => void {
+                          stdio.println(value());
+                          return;
+                        }
+                        """);
+        compiler.compile(first);
+
+        Map<String, String> changed = Map.of(
+                "producer.ores", """
+                        pub fnc value() => int {
+                          struct Helper {
+                            label: string;
+                            count: int;
+                          }
+                          return 1;
+                        }
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+
+        var second = compiler.compile(changed);
+        assertTrue(second.rebuilt("producer.ores"));
+        assertTrue(second.reused("consumer.ores"),
+                "implementation-only local type changes must not pollute exported ABI");
+    }
+
+    @Test
+    void escapingCallableLocalAliasChangesInvalidateImporters() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+
+        Map<String, String> first = Map.of(
+                "producer.ores", """
+                        pub fnc value() => Out {
+                          type Out = int;
+                          return 1;
+                        }
+                        """,
+                "consumer.ores", """
+                        import fnc {value} from "./producer.ores";
+                        pub fnc main() => void {
+                          stdio.println(value());
+                          return;
+                        }
+                        """);
+        compiler.compile(first);
+
+        Map<String, String> changed = Map.of(
+                "producer.ores", """
+                        pub fnc value() => Out {
+                          type Out = string;
+                          return "one";
+                        }
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+
+        var second = compiler.compile(changed);
+        assertTrue(second.rebuilt("producer.ores"));
+        assertTrue(second.rebuilt("consumer.ores"),
+                "escaping local aliases are part of the callable ABI");
+    }
+
 }

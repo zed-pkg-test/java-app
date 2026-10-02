@@ -11,6 +11,13 @@
 7. Hot reload never requires loading executable native libraries.
 8. Every hot-loaded generation is a fresh guest context and may be mapped to a stronger Graal/native isolate by the production host.
 9. `self` cannot be rebound.
+10. A `singleton module` has exactly one actor-owned state cell per OS process by language contract, not per actor or ordinary Graal context.
+11. A spawned Graal isolate has its own heap; the current adversarial profile therefore refuses `PROCESS_SINGLETON` until a trusted supervisor/process coordinator is installed.
+12. Importers/callers receive only a proxy/handle; mutable singleton state never leaves the singleton actor.
+13. Singleton call arguments and results pass the normal sendability/freezing boundary, and singleton calls are request/reply operations.
+14. Process-singleton mailboxes, registry cardinality, request wall time, message graph depth/node count/size, and individual singleton field values are bounded.
+15. Cross-singleton wait cycles are rejected before enqueue can create a mailbox deadlock.
+16. Singleton code replacement requires `HOT_CODE_LOAD`; managed hot-reload generations are monotonic and stale generations cannot roll behavior back.
 
 ## Deployment matrix
 
@@ -44,44 +51,29 @@ The strict production direction is:
 Method code is stored once per class declaration. Direct calls dispatch to that definition with the receiver as an implicit immutable argument. Only first-class method extraction allocates a bound method pair. This provides Go-like receiver safety without allocating a closure for every instance or every direct method invocation.
 
 
-## Mutex and shared-memory model
+## Process-wide singleton modules
 
-Oreslang has two deliberately different mutex domains:
+`define singleton module name as` has an OS-process singleton contract. In the non-isolated JVM/runtime profile, the current local backend uses static process-lifetime state independent of any one `OresContext`. A Graal ISOLATED/UNTRUSTED engine has a distinct heap and therefore cannot use isolate-local statics to satisfy that contract; the current adversarial profile rejects `PROCESS_SINGLETON` until an embedding supplies a trusted supervisor coordinator. The first access creates one virtual-thread actor with a serial mailbox and initializes the module bindings on that actor. Later contexts and isolates resolve the same canonical module key to the same actor identity. The key includes the defining source code-unit identity, its explicit namespace (or a default-namespace marker), and the module name. This prevents unrelated files/tenants from aliasing one another even if they choose the same namespace and module name, while hot-reload generations of the same code unit retain the same singleton identity.
 
-- `Mutex<T>` is actor/private-domain state. It owns the protected value, uses no JVM lock, is non-reentrant, and is confined to the creating semantic actor/execution domain. Shared actors may migrate between JVM workers without changing that domain.
-- `SharedMutex<T>` is an explicit same-OS-process shared-memory capability within one `ActorRuntime`. It is non-reentrant, uses acquire/release synchronization, may cross actor mailboxes only when both sides have `SHARED_MEMORY`, and binds to the first runtime that successfully publishes it. Later cross-runtime transport is rejected. It must never be treated as a distributed or cross-isolate lock.
-- The payload and declared type argument of `SharedMutex<T>` must be **SharedSafe**: concrete owned data whose reachable field graph contains no borrows, actor-local `Mutex`, `MutexGuard`, pending `Future`, closure/function values, or unresolved dynamic/generic state. This applies to signatures/fields/aliases as well as `SharedMutex.new(...)`. Until Oreslang has an explicit SharedSafe generic bound, unconstrained `SharedMutex<T>` is rejected conservatively. The type checker recursively validates class fields (including inherited generic substitutions), and the interpreter repeats runtime admission checks as defense in depth.
-- `MutexGuard<T>` is a lexical linear capability. The runtime releases it on normal scope exit and poisons a shared mutex on abnormal scope exit. Guest code may call `guard.release()` for early release; there is intentionally no `mutex.unlock()`. A released guard can no longer expose its protected value.
-- Guard access is deliberately non-escaping. Copy-like fields may be read, mutable fields may be replaced, and methods may be invoked directly when they return `void` or a copy-like value. Move-only nested fields and bound method values cannot be extracted through a guard. For compound mutation, use `with_lock(|state| -> { ... })`.
-- `with_lock` and `recover` require an inline one-argument, `void` lambda. The callback parameter is treated as a lexical exclusive mutable borrow of `T`: it may mutate protected state but cannot move or return that state, escape it through a closure, or suspend with `await`.
-- `await` while a guard is live and closure capture of a guard are compile-time ownership errors. Guard-bearing results must be bound once with `val`; they cannot be discarded, reassigned, stored in aggregates, passed through arbitrary calls, or hidden inside another mutex.
-- Blocking `SharedMutex.lock()`/timed acquisition is rejected while executing an actor. `lock_async()` returns a runtime-owned, caller-cancellable `GuardFuture` and is the nonblocking acquisition primitive. Contended async acquisition is queued inside the mutex and receives the permit by direct guard handoff; it does **not** allocate one virtual thread per waiter. Acquisitions reserve the semantic actor/execution domain before waiting, so recursive async acquisition fails instead of self-deadlocking even if an actor migrates JVM workers. Cancellation removes queued waiters and releases their domain reservation; poisoning drains queued async waiters with `PoisonedMutexException`. Admission is bounded by the current actor mailbox policy, an 8,192-waiter ceiling per mutex, and a 32,768-waiter JVM-process ceiling. When blocking host waiters and async waiters coexist, release alternates handoff preference so neither class monopolizes the mutex. When integrated with the bounded shared-actor platform-thread pool, the language `await` lowering must suspend/resume the actor turn rather than synchronously join the future; until that continuation lowering is in place, actor-backed singleton/mailbox serialization is preferred over contended shared-memory locking from shared actors. The runtime also exposes `lockAsyncFor(Duration)`: it uses the same queue plus one shared daemon timeout scheduler, completes exceptionally with `LockTimeoutException` on expiry, and removes the timed-out waiter immediately. This is a backend/runtime API until Oreslang's source-level Duration and Result/timeout representation is finalized; source syntax must not fall back to raw millisecond integers.
-- Cross-mutex waits participate in a process-wide semantic-domain wait-for graph. A wait edge that would close a cycle (for example, domain A holds M1 and waits M2 while domain B holds M2 and waits M1) fails immediately with `DeadlockDetectedException` instead of hanging. Wait edges are removed on acquisition, timeout, cancellation, interruption, poisoning, and failed admission. Zero-duration `lock_for` remains a pure try and therefore creates no wait edge.
-- A poisoned `SharedMutex<T>` rejects ordinary acquisition until `recover(...)` repairs invariants and clears poison. `recover` is not an ordinary lock operation: it is rejected when the mutex is healthy. Inside actor execution recovery is nonblocking; if another recovery owns the permit, the actor must retry on a later mailbox turn rather than park.
+Public functions are exposed through a typed module proxy. A call such as `await config.read()` enqueues a request to the singleton actor and waits for its reply. Cross-singleton calls must be immediately awaited; an un-awaited transport future may not escape into arbitrary code. Calls made by singleton code to another function in the same singleton module are direct calls against the already-owned state environment, including calls reached through singleton-private helper classes, methods, static functions, and iterators. This avoids self-mailbox re-entry.
 
-Example:
+The runtime tracks outstanding singleton-to-singleton waits. If adding an edge would close a wait cycle, the call fails before enqueue instead of allowing two serial actors to deadlock. Queue admission is bounded by both a process ceiling and the caller's `IsolatePolicy.maxMailboxMessages`. The caller's `maxWallTime` includes queueing time; expired queued work is skipped, and compiler/runtime safepoints enforce the same budget during singleton execution.
 
-```ores
-val state = Mutex.new(new Counter());
-val guard = state.lock();
-guard.count = guard.count + 1;
-guard.release();
+Singleton fields are actor-owned. Process-lifetime fields require explicit, process-stable storage types and context-free initializers. Public scalar/container fields remain forbidden. A `pub val` or `pub const` class instance is permitted only as an exported singleton-object capability: callers receive a typed proxy, never the raw object, and public method calls are serialized through the singleton mailbox. Type aliases and context-dependent initialization (capability access, function calls, class construction, awaiting work, mutation, or closures) are rejected for singleton state. Each field value is validated against the actor freeze graph/size limits before initialization or reassignment.
 
-val shared = SharedMutex.new(new Cache());
-val shared_guard = await shared.lock_async();
-shared_guard.increment_hits();
-shared_guard.release();
+### Init lifecycle
 
-shared.with_lock(|cache| -> {
-  cache.put("key", "value");
-  return;
-});
-```
+Field/binding initializers run before lifecycle init. A file/root or ordinary-module `init routine() => void` belongs to actor-local state and runs once for that actor-local scope. A singleton-module init belongs to the process singleton cell and runs exactly once when that cell is created. It is not rerun on hot reload.
 
-A process-wide `singleton module` is **not** raw shared memory. It is owned by one hidden singleton actor and accessed through its typed mailbox/proxy, so its mutable state is serialized by actor execution and normally requires no mutex. Do not wrap singleton-module state in `SharedMutex<T>` merely because multiple actors can call it. Use `SharedMutex<T>` only when code deliberately opts into a writable same-process memory object that multiple actor/execution domains may dereference directly.
+There is intentionally no ambient "process init" hook at file scope. Process-wide initialization must be owned by a singleton module so state, authority, serialization, and hot-reload behavior have one explicit lifecycle owner. Singleton init is deterministic/context-free and cannot depend on the first caller's capabilities or actor-local state.
 
-When the private-arena/`isoactor` runtime is stacked with this work, isolated actors must run without `SHARED_MEMORY` authority. An `isoactor` may receive copied/frozen messages, but it must not receive a `SharedMutex<T>` or any other writable JVM-heap alias; otherwise the language would no longer be able to claim true actor memory isolation.
+The public singleton transport surface is deliberately narrower than ordinary Oreslang APIs until explicit `Send` constraints exist: public singleton functions are non-generic, non-`async`, cannot accept `mut` or structural parameters, and may use only statically sendable scalar/container/Option values. Borrows, class instances, functions/closures, unresolved/generic types, and other actor-local values are rejected. Runtime freezing remains the second line of defense.
 
-The current reference runtime uses a one-permit JVM semaphore for `SharedMutex<T>`. Java semaphore release/acquire provides the required memory-ordering edge and, unlike a thread-owned `ReentrantLock`, allows an asynchronously acquired guard to be resumed and released by the actor execution context.
+Hot reload preserves the same singleton actor and state when a new generation keeps the same declared field schema, so new function code can operate on existing process state. A generation that changes the singleton field schema fails closed with a migration-required error; state is never silently reinterpreted. Changing singleton function code against live state requires the caller context to hold `HOT_CODE_LOAD`. `HotReloadManager` stamps contexts with a process-global monotonic generation number; an older generation cannot later roll the singleton's active behavior backward, and an unversioned context cannot replace code once managed generations are active. An explicit state-migration hook is intentionally a separate future language feature.
 
-Actor transport is independently hardened from mutex synchronization. Ordinary messages are recursively frozen with cycle detection and hard depth/node/byte budgets (256 levels, 100,000 nodes, 16 MiB estimated frozen size). Read-only shared wrappers are runtime-constructed and revalidated on every boundary. `ActorRef` capabilities may cross only inside their owning `ActorRuntime`; a wrapper cannot be used to smuggle a foreign actor reference into another runtime. Generated `Sendable` values are not trusted blindly—the representation returned by `freezeForSend()` is recursively frozen and validated again.
+
+## Actor message freezing limits
+
+The host actor boundary is defensive against malformed or adversarial object graphs. `ActorRuntime.freeze` rejects cycles and unknown mutable host objects, re-freezes public `Shared<T>` wrappers, and bounds traversal depth, node count, and approximate frozen size. Lists, sets, maps, and arrays become unmodifiable frozen copies. Duplicate set elements or map keys created by freezing are rejected rather than silently collapsing data.
+
+These are runtime defense-in-depth checks; source-level singleton APIs are also statically restricted to sendable types. Production cross-isolate transports should serialize the frozen representation rather than share writable Java object references.

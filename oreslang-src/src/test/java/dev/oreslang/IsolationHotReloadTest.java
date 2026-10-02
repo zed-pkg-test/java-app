@@ -112,6 +112,48 @@ final class IsolationHotReloadTest {
     }
 
     @Test
+    void staleHotReloadGenerationCannotRollBackSingletonCode() {
+        IsolatePolicy policy = IsolatePolicy.developer();
+        try (HotReloadManager hot = new HotReloadManager(policy, ExecutionProfile.serverJit())) {
+            var first = hot.load("managed-singleton-generation.ores", """
+                    define singleton module managed_generation as
+                      let int count = 0;
+                      pub fnc next() => int {
+                        count = count + 1;
+                        return count;
+                      }
+                    end
+
+                    pub routine main() => void {
+                      val int n = await managed_generation.next();
+                      return;
+                    }
+                    """);
+
+            var second = hot.load("managed-singleton-generation.ores", """
+                    define singleton module managed_generation as
+                      let int count = 0;
+                      pub fnc next() => int {
+                        count = count + 10;
+                        return count;
+                      }
+                    end
+
+                    pub routine main() => void {
+                      val int n = await managed_generation.next();
+                      return;
+                    }
+                    """);
+
+            assertDoesNotThrow(second::start);
+            RuntimeException stale = assertThrows(RuntimeException.class, first::start);
+            assertTrue(String.valueOf(stale.getMessage()).contains("stale singleton generation")
+                    || (stale.getCause() != null
+                    && String.valueOf(stale.getCause().getMessage()).contains("stale singleton generation")));
+        }
+    }
+
+    @Test
     void hotReloadRequiresExplicitCapability() {
         assertThrows(SecurityException.class,
                 () -> new HotReloadManager(IsolatePolicy.strictFaas(), ExecutionProfile.serverJit()));
@@ -121,12 +163,17 @@ final class IsolationHotReloadTest {
     void allExplicitStructuralParameterSpellingsWork() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 pub interface Bar {
-                  marker: 'brand'
+                  fnc marker() => String;
                 }
 
                 pub interface Foo extends Bar {
-                  markerBrand: 'marking/branding'
+                  fnc markerBrand() => String;
                 }
+
+                define class Branded as
+                  pub marker() => String { return "brand"; }
+                  pub markerBrand() => String { return "marking/branding"; }
+                end
 
                 fnc first(y structural Foo) => void {
                   return;
@@ -142,7 +189,7 @@ final class IsolationHotReloadTest {
                 }
 
                 pub routine main() => void {
-                  val branded = obj{marker: "brand", markerBrand: "marking/branding"};
+                  val branded = new Branded();
                   first(branded);
                   second(branded);
                   third(branded);
@@ -155,13 +202,17 @@ final class IsolationHotReloadTest {
     void structuralPermissionIsNotImplicit() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 pub interface Foo {
-                  marker: 'brand'
+                  fnc marker() => String;
                 }
+
+                define class Branded as
+                  pub marker() => String { return "brand"; }
+                end
 
                 fnc nominal(Foo y) => void { return; }
 
                 pub routine main() => void {
-                  val branded = obj{marker: "brand"};
+                  val branded = new Branded();
                   nominal(branded);
                   return;
                 }
@@ -171,7 +222,7 @@ final class IsolationHotReloadTest {
     @Test
     void extractedMethodValueKeepsReceiverAndSelfCannotBeRebound() throws Exception {
         String output = run("""
-                define class Box
+                define class Box as
                   val int value;
 
                   pub get() => int {
@@ -188,7 +239,7 @@ final class IsolationHotReloadTest {
         assertEquals("17", output);
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Box
+                define class Box as
                   pub bad() => void {
                     self = new Box();
                     return;
@@ -209,5 +260,24 @@ final class IsolationHotReloadTest {
             context.eval(source);
         }
         return output.toString(StandardCharsets.UTF_8);
+    }
+    @Test
+    void capabilityAdmissionInspectsMethodsInsideCallableLocalStructs() {
+        var program = TypeChecker.check(Parser.parse("""
+                define module app as
+                  fnc make() => T {
+                    struct T {
+                      pub context() => string {
+                        return process.context_id;
+                      }
+                    }
+                    return T {};
+                  }
+                end
+                """));
+
+        SecurityException denied = assertThrows(SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.strictFaas()));
+        assertTrue(denied.getMessage().contains("PROCESS_INFO"));
     }
 }

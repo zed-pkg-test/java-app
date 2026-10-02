@@ -8,9 +8,13 @@ import dev.oreslang.OresLanguage;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 public final class OresContext implements AutoCloseable {
     private static final ContextReference<OresContext> REFERENCE = ContextReference.create(OresLanguage.class);
@@ -22,8 +26,12 @@ public final class OresContext implements AutoCloseable {
     private final ActorRuntime actors;
     private final UUID contextId = UUID.randomUUID();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
+    private final Map<Object, Object> contextLocals = new LinkedHashMap<>();
+    private final Set<Object> contextLocalInitializing = new LinkedHashSet<>();
     private final IsolatePolicy isolatePolicy;
     private final ExecutionProfile executionProfile;
+    private final boolean graalIsolated;
+    private final long codeGeneration;
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
@@ -32,6 +40,8 @@ public final class OresContext implements AutoCloseable {
         this.output = new PrintWriter(env.out(), true);
         this.isolatePolicy = IsolatePolicy.fromApplicationArguments(env.getApplicationArguments());
         this.executionProfile = IsolatePolicy.executionProfileFromApplicationArguments(env.getApplicationArguments());
+        this.graalIsolated = IsolatePolicy.graalIsolatedFromApplicationArguments(env.getApplicationArguments());
+        this.codeGeneration = codeGenerationFromApplicationArguments(env.getApplicationArguments());
         this.actors = new ActorRuntime(isolatePolicy);
     }
 
@@ -47,6 +57,30 @@ public final class OresContext implements AutoCloseable {
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
     public ExecutionProfile executionProfile() { return executionProfile; }
+    public boolean graalIsolated() { return graalIsolated; }
+    public long codeGeneration() { return codeGeneration; }
+
+    /**
+     * Context-lifetime storage for ordinary module state evaluated outside an
+     * actor. Initialization is serialized and recursive same-key initialization
+     * is rejected deterministically.
+     */
+    @SuppressWarnings("unchecked")
+    public synchronized <T> T contextLocal(Object key, Supplier<? extends T> initializer) {
+        java.util.Objects.requireNonNull(key, "context-local key");
+        java.util.Objects.requireNonNull(initializer, "context-local initializer");
+        if (contextLocals.containsKey(key)) return (T) contextLocals.get(key);
+        if (!contextLocalInitializing.add(key)) {
+            throw new IllegalStateException("context-local initialization cycle for key " + key);
+        }
+        try {
+            T value = java.util.Objects.requireNonNull(initializer.get(), "context-local initializer returned null");
+            contextLocals.put(key, value);
+            return value;
+        } finally {
+            contextLocalInitializing.remove(key);
+        }
+    }
 
     public void requireCapability(IsolatePolicy.Capability capability, String api) {
         isolatePolicy.require(capability, api);
@@ -59,10 +93,21 @@ public final class OresContext implements AutoCloseable {
      */
     public void schedulerSafepoint() {
         schedulerSafepoints.incrementAndGet();
+        ProcessSingletonRegistry.checkExecutionBudget();
         actors.schedulerSafepoint();
     }
 
     public long schedulerSafepoints() { return schedulerSafepoints.get(); }
+
+    private static long codeGenerationFromApplicationArguments(String[] args) {
+        for (String arg : args) {
+            if (!arg.startsWith("--ores-code-generation=")) continue;
+            long generation = Long.parseLong(arg.substring("--ores-code-generation=".length()));
+            if (generation < 0) throw new IllegalArgumentException("ores code generation cannot be negative");
+            return generation;
+        }
+        return 0L;
+    }
 
     public Map<String, Object> processDescriptor() {
         return Map.of(
@@ -71,12 +116,17 @@ public final class OresContext implements AutoCloseable {
                 "language", "oreslang",
                 "execution_mode", executionProfile.mode().name(),
                 "platform", executionProfile.platform().name(),
+                "graal_isolated", graalIsolated,
                 "scheduler_safepoints", schedulerSafepoints.get());
     }
 
     @Override
     public void close() {
         actors.close();
+        synchronized (this) {
+            contextLocals.clear();
+            contextLocalInitializing.clear();
+        }
         output.flush();
     }
 }

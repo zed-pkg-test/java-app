@@ -14,7 +14,7 @@ public final class Ast {
         public Program(List<ModuleDecl> modules) { this(null, List.of(), modules); }
     }
 
-    public enum ImportKind { MODULE, CLASS, FUNCTION, ALL }
+    public enum ImportKind { MODULE, CLASS, STRUCT, FUNCTION, ALL }
 
     public record ImportDecl(
             ImportKind kind,
@@ -25,18 +25,24 @@ public final class Ast {
         public ImportDecl { names = List.copyOf(names); }
     }
 
-    public record ModuleDecl(String name, List<Annotation> annotations, List<Decl> declarations) {
+    public record ModuleDecl(String name, boolean singleton, List<Annotation> annotations, List<Decl> declarations) {
         public ModuleDecl {
             annotations = List.copyOf(annotations);
             declarations = List.copyOf(declarations);
         }
-        public ModuleDecl(String name, List<Decl> declarations) { this(name, List.of(), declarations); }
+        public ModuleDecl(String name, List<Annotation> annotations, List<Decl> declarations) {
+            this(name, false, annotations, declarations);
+        }
+        public ModuleDecl(String name, List<Decl> declarations) {
+            this(name, false, List.of(), declarations);
+        }
     }
 
-    public sealed interface Decl permits FunctionDecl, ClassDecl, InterfaceDecl, FieldDecl, TypeAliasDecl { }
+    public sealed interface Decl permits FunctionDecl, InitDecl, ClassDecl, TraitDecl, InterfaceDecl, FieldDecl, TypeAliasDecl { }
 
     public enum Visibility { PRIVATE, PUBLIC }
     public enum CallableKind { FNC, ROUTINE }
+    public enum AggregateKind { CLASS, STRUCT }
 
     public record Annotation(String name, List<TypeRef> arguments) {
         public Annotation { arguments = List.copyOf(arguments); }
@@ -63,58 +69,17 @@ public final class Ast {
         public static TypeRef stringLiteral(String value) { return new TypeRef("$string$" + value, List.of(), false); }
         public boolean isStringLiteral() { return name.startsWith("$string$"); }
         public String stringLiteralValue() { return name.substring("$string$".length()); }
-
-        public static TypeRef union(List<TypeRef> options) {
-            java.util.ArrayList<TypeRef> flattened = new java.util.ArrayList<>();
-            for (TypeRef option : options) {
-                if (option.isUnion()) {
-                    for (TypeRef nested : option.arguments()) if (!flattened.contains(nested)) flattened.add(nested);
-                } else if (!flattened.contains(option)) flattened.add(option);
-            }
-            if (flattened.isEmpty()) throw new IllegalArgumentException("union type requires at least one member");
-            if (flattened.size() == 1) return flattened.getFirst();
-            flattened.sort(java.util.Comparator.comparing(TypeRef::toString));
-            return new TypeRef("$union$", List.copyOf(flattened), false);
-        }
-        public boolean isUnion() { return name.equals("$union$"); }
-
-        public static TypeRef tupleType(List<TypeRef> elements) {
-            return new TypeRef("$tuple$", List.copyOf(elements), false);
-        }
-        public boolean isTupleType() { return name.equals("$tuple$"); }
-
-        public static TypeRef recordType(java.util.Map<String, TypeRef> members) {
-            java.util.ArrayList<TypeRef> fields = new java.util.ArrayList<>(members.size());
-            java.util.ArrayList<java.util.Map.Entry<String, TypeRef>> entries = new java.util.ArrayList<>(members.entrySet());
-            entries.sort(java.util.Map.Entry.comparingByKey());
-            for (java.util.Map.Entry<String, TypeRef> entry : entries) {
-                if (entry.getKey() == null || entry.getKey().isBlank()) {
-                    throw new IllegalArgumentException("record type field name cannot be blank");
-                }
-                fields.add(new TypeRef("$field$" + entry.getKey(), List.of(entry.getValue()), false));
-            }
-            return new TypeRef("$record$", List.copyOf(fields), false);
-        }
-        public boolean isRecordType() { return name.equals("$record$"); }
-        public java.util.Map<String, TypeRef> recordMembers() {
-            if (!isRecordType()) throw new IllegalStateException("not a record type");
-            java.util.LinkedHashMap<String, TypeRef> members = new java.util.LinkedHashMap<>();
-            for (TypeRef field : arguments) {
-                if (!field.name().startsWith("$field$") || field.arguments().size() != 1 || field.inferArguments()) {
-                    throw new IllegalStateException("malformed record type field");
-                }
-                String fieldName = field.name().substring("$field$".length());
-                if (members.putIfAbsent(fieldName, field.arguments().getFirst()) != null) {
-                    throw new IllegalStateException("duplicate record type field " + fieldName);
-                }
-            }
-            return java.util.Collections.unmodifiableMap(members);
-        }
     }
 
     public record Param(TypeRef type, String name, boolean structural, boolean mutable) {
         public Param(TypeRef type, String name) { this(type, name, false, false); }
         public Param(TypeRef type, String name, boolean structural) { this(type, name, structural, false); }
+    }
+
+    /** Lifecycle routine. Scope is derived from its containing module:
+     * root/ordinary module => actor-local; singleton module => process-local. */
+    public record InitDecl(List<Stmt> body) implements Decl {
+        public InitDecl { body = List.copyOf(body); }
     }
 
     public record FunctionDecl(
@@ -141,22 +106,62 @@ public final class Ast {
 
     public record ClassDecl(
             String name,
+            AggregateKind kind,
             boolean isAbstract,
             List<String> genericParameters,
             List<TypeRef> parents,
             List<TypeRef> interfaces,
+            List<TypeRef> traits,
             List<FieldDecl> fields,
             List<MethodDecl> methods) implements Decl {
         public ClassDecl {
             genericParameters = List.copyOf(genericParameters);
             parents = List.copyOf(parents);
             interfaces = List.copyOf(interfaces);
+            traits = List.copyOf(traits);
             fields = List.copyOf(fields);
             methods = List.copyOf(methods);
+            if (kind == AggregateKind.STRUCT && isAbstract) {
+                throw new IllegalArgumentException("structs cannot be abstract");
+            }
+            if (kind == AggregateKind.STRUCT && !parents.isEmpty()) {
+                throw new IllegalArgumentException("structs cannot extend classes");
+            }
+        }
+        public ClassDecl(String name, boolean isAbstract, List<String> genericParameters,
+                         List<TypeRef> parents, List<TypeRef> interfaces, List<TypeRef> traits,
+                         List<FieldDecl> fields, List<MethodDecl> methods) {
+            this(name, AggregateKind.CLASS, isAbstract, genericParameters, parents, interfaces, traits, fields, methods);
+        }
+        public ClassDecl(String name, boolean isAbstract, List<String> genericParameters,
+                         List<TypeRef> parents, List<TypeRef> interfaces,
+                         List<FieldDecl> fields, List<MethodDecl> methods) {
+            this(name, AggregateKind.CLASS, isAbstract, genericParameters, parents, interfaces, List.of(), fields, methods);
         }
         public ClassDecl(String name, boolean isAbstract, List<String> genericParameters,
                          List<FieldDecl> fields, List<MethodDecl> methods) {
-            this(name, isAbstract, genericParameters, List.of(), List.of(), fields, methods);
+            this(name, AggregateKind.CLASS, isAbstract, genericParameters, List.of(), List.of(), List.of(), fields, methods);
+        }
+        public boolean isStruct() { return kind == AggregateKind.STRUCT; }
+    }
+
+    /**
+     * Compile-time composition unit. Traits have reusable instance state and
+     * behavior but no independent object identity and cannot be instantiated.
+     */
+    public record TraitDecl(
+            String name,
+            List<String> genericParameters,
+            List<TypeRef> interfaces,
+            List<TypeRef> traits,
+            List<FieldDecl> fields,
+            List<MethodDecl> methods) implements Decl {
+        public TraitDecl {
+            genericParameters = List.copyOf(genericParameters);
+            interfaces = List.copyOf(interfaces);
+            traits = List.copyOf(traits);
+            fields = List.copyOf(fields);
+            methods = List.copyOf(methods);
         }
     }
 
@@ -173,7 +178,9 @@ public final class Ast {
         }
     }
 
+    /** Compatibility-only node; InterfaceDecl rejects data members. */
     public record InterfaceFieldDecl(String name, TypeRef type) implements InterfaceMember { }
+
 
     public record InterfaceDecl(
             String name,
@@ -185,6 +192,9 @@ public final class Ast {
             genericParameters = List.copyOf(genericParameters);
             parents = List.copyOf(parents);
             members = List.copyOf(members);
+            if (members.stream().anyMatch(member -> !(member instanceof InterfaceFunctionDecl))) {
+                throw new IllegalArgumentException("interfaces are storage-free method contracts; data members are not allowed");
+            }
         }
         public InterfaceDecl(String name, List<String> genericParameters, List<InterfaceMember> members) {
             this(name, Visibility.PRIVATE, genericParameters, List.of(), members);
@@ -196,7 +206,13 @@ public final class Ast {
             Visibility visibility,
             BindingKind bindingKind,
             TypeRef type,
-            Expr initializer) implements Decl { }
+            Expr initializer,
+            String compositionOwner) implements Decl {
+        public FieldDecl(String name, Visibility visibility, BindingKind bindingKind, TypeRef type, Expr initializer) {
+            this(name, visibility, bindingKind, type, initializer, null);
+        }
+        public boolean composed() { return compositionOwner != null; }
+    }
 
     public record MethodDecl(
             String name,
@@ -209,14 +225,31 @@ public final class Ast {
             List<Param> parameters,
             TypeRef returnType,
             List<Annotation> annotations,
-            List<Stmt> body) {
+            List<Stmt> body,
+            String compositionOwner) {
         public MethodDecl {
             genericParameters = List.copyOf(genericParameters);
             parameters = List.copyOf(parameters);
             annotations = List.copyOf(annotations);
             body = List.copyOf(body);
         }
+        public MethodDecl(
+                String name,
+                Visibility visibility,
+                boolean isStatic,
+                boolean isAbstract,
+                boolean async,
+                TypeRef explicitReceiverType,
+                List<String> genericParameters,
+                List<Param> parameters,
+                TypeRef returnType,
+                List<Annotation> annotations,
+                List<Stmt> body) {
+            this(name, visibility, isStatic, isAbstract, async, explicitReceiverType,
+                    genericParameters, parameters, returnType, annotations, body, null);
+        }
         public int arity() { return parameters.size(); }
+        public boolean composed() { return compositionOwner != null; }
     }
 
     public record TypeAliasDecl(String name, List<String> genericParameters, TypeRef target) implements Decl {
@@ -225,33 +258,26 @@ public final class Ast {
 
     public enum BindingKind { CONST, VAL, LET }
 
-    public sealed interface Stmt permits BindingStmt, DestructureStmt, ReturnStmt, ExprStmt, DeferStmt,
+    public sealed interface Stmt permits TypeDeclStmt, BindingStmt, DestructureStmt, ReturnStmt, ExprStmt, DeferStmt,
             IfStmt, TryStmt, ForOfStmt, ForStmt { }
 
-    public record BindingStmt(BindingKind kind, TypeRef declaredType, String name, Expr initializer) implements Stmt { }
-    public record DestructureBinding(BindingKind kind, String name) {
-        public DestructureBinding {
-            if (name == null || name.isBlank()) {
-                throw new IllegalArgumentException("destructure binding name cannot be blank");
+    /** Lexically scoped compile-time type declaration inside a callable/block. */
+    public record TypeDeclStmt(Decl declaration) implements Stmt {
+        public TypeDeclStmt {
+            if (!(declaration instanceof ClassDecl klass && klass.isStruct())
+                    && !(declaration instanceof InterfaceDecl)
+                    && !(declaration instanceof TraitDecl)
+                    && !(declaration instanceof TypeAliasDecl)) {
+                throw new IllegalArgumentException("callable-local type declarations are limited to struct/interface/trait/type");
             }
-        }
-
-        public static DestructureBinding discard() {
-            return new DestructureBinding(BindingKind.VAL, "_");
-        }
-
-        public boolean isDiscard() {
-            return "_".equals(name);
         }
     }
 
-    public enum DestructureKind { SEQUENCE, OBJECT }
+    public record BindingStmt(BindingKind kind, TypeRef declaredType, String name, Expr initializer) implements Stmt { }
+    public record DestructureBinding(BindingKind kind, String name) { }
 
-    public record DestructureStmt(DestructureKind kind, List<DestructureBinding> bindings, Expr initializer) implements Stmt {
+    public record DestructureStmt(List<DestructureBinding> bindings, Expr initializer) implements Stmt {
         public DestructureStmt { bindings = List.copyOf(bindings); }
-        public DestructureStmt(List<DestructureBinding> bindings, Expr initializer) {
-            this(DestructureKind.SEQUENCE, bindings, initializer);
-        }
     }
 
     public record ReturnStmt(Expr value) implements Stmt { }
@@ -286,7 +312,7 @@ public final class Ast {
     }
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
-            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
+            CallExpr, MemberExpr, IndexExpr, NewExpr, StructInitExpr, AwaitExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
     public record LiteralExpr(Object value) implements Expr { }
     public record Imaginary(double coefficient) { }
@@ -296,24 +322,8 @@ public final class Ast {
     public record AssignExpr(Expr target, Expr value) implements Expr { }
     public record ConditionalExpr(Expr condition, Expr whenTrue, Expr whenFalse) implements Expr { }
 
-    public record CallExpr(
-            Expr callee,
-            List<TypeRef> typeArguments,
-            boolean typeArgumentsPresent,
-            List<Expr> arguments) implements Expr {
-        public CallExpr {
-            typeArguments = List.copyOf(typeArguments);
-            arguments = List.copyOf(arguments);
-            if (!typeArgumentsPresent && !typeArguments.isEmpty()) {
-                throw new IllegalArgumentException("call type arguments require an explicit <...> marker");
-            }
-        }
-        public CallExpr(Expr callee, List<Expr> arguments) {
-            this(callee, List.of(), false, arguments);
-        }
-        public CallExpr(Expr callee, List<TypeRef> typeArguments, List<Expr> arguments) {
-            this(callee, typeArguments, true, arguments);
-        }
+    public record CallExpr(Expr callee, List<Expr> arguments) implements Expr {
+        public CallExpr { arguments = List.copyOf(arguments); }
     }
 
     public record MemberExpr(Expr receiver, String member) implements Expr { }
@@ -321,6 +331,11 @@ public final class Ast {
 
     public record NewExpr(TypeRef type, List<Expr> arguments) implements Expr {
         public NewExpr { arguments = List.copyOf(arguments); }
+    }
+
+    public record StructInitExpr(TypeRef type, List<ObjectField> fields) implements Expr {
+        public StructInitExpr { fields = List.copyOf(fields); }
+        public boolean anonymous() { return type == null; }
     }
 
     public record AwaitExpr(Expr expression) implements Expr { }

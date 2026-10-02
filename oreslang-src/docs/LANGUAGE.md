@@ -4,16 +4,20 @@ Oreslang is a statically typed guest language for GraalVM/Truffle. Named types a
 
 ## Files, modules, and imports
 
-A source file may contain multiple named modules. A module is a namespace: exported members are accessed through the module name, such as `math.add(1, 2)`.
+A source file may contain multiple named modules. A normal module is a namespace: exported members are accessed through the module name, such as `math.add(1, 2)`.
+
+A process-wide singleton module is declared with `define singleton module NAME as`. Its language-level contract is exactly one runtime state cell per canonical module identity per OS process, owned by a hidden serial actor/service. Every caller receives only a proxy/handle; importing or referencing the module never copies its mutable state. Canonical identity includes the defining source code-unit identity, namespace, and module name. Process-singleton access requires the `PROCESS_SINGLETON` capability.
+
+The local JVM backend satisfies this contract only when callers share the host runtime heap. A spawned Graal isolate has a separate heap, so the current adversarial isolate profile refuses `PROCESS_SINGLETON`. A future/embedding-specific trusted supervisor coordinator must route those requests outside tenant heaps; Oreslang does not silently degrade `singleton` to one instance per isolate.
 
 ```ores
-define module math
+define module math as
   pub fnc add(int a, int b) => int {
     return a + b;
   }
 end
 
-define module app
+define module app as
   pub fnc main() => void {
     val answer = math.add(40, 2);
     stdio.println(answer);
@@ -21,6 +25,86 @@ define module app
   }
 end
 ```
+
+Singleton state is actor-private. Public functions are asynchronous request/reply boundaries. In addition, a singleton module may export an immutable `val`/`const` class instance as a typed process-object proxy; the raw class instance never leaves the owner actor:
+
+```ores
+define singleton module counter as
+  let int count = 0;
+
+  pub fnc next() => int {
+    count = count + 1;
+    return count;
+  }
+end
+
+define module app as
+  pub fnc main() => void {
+    val int n = await counter.next();
+    stdio.println(n);
+    return;
+  }
+end
+```
+
+```ores
+define class Foo as
+  val int value = 42;
+
+  pub read() => int {
+    return self.value;
+  }
+end
+
+define singleton module X as
+  pub val Foo f = new Foo();
+end
+
+define module app as
+  pub routine main() => void {
+    val int value = await X.f.read();
+    stdio.println(value);
+    return;
+  }
+end
+```
+
+Outside `X`, `X.f` is not an ordinary local `Foo`: it is a capability proxy. Its public method calls execute in the singleton owner actor and must be immediately awaited. Object fields, raw references, method extraction, and rebinding the proxy into an ordinary local are rejected. Other public singleton fields remain illegal.
+
+Singleton state fields require explicit process-stable types because they form a process-lifetime hot-reload schema. Ordinary state initializers must be context-free: literals and pure expressions over already initialized stable singleton fields are allowed, while capability access, arbitrary function calls, `await`, mutation, and closures are not. The narrow exception is an exported immutable class-instance proxy initialized directly with a context-free `new Class(...)`. Type aliases are currently excluded from process state so redefining an alias cannot silently reinterpret an existing layout.
+
+The exported transport surface is intentionally strict. Public singleton functions may use sendable scalar values, `Option<T>`, and `Array/List<T>` of sendable values. Until explicit `Send` constraints are part of the type system, exported singleton functions cannot be generic or `async`, cannot accept `mut` or structural parameters, and cannot transport borrows, class instances, functions/closures, or unresolved actor-local values. Classes declared inside a singleton module are actor-private helpers and cannot be accessed through the external module/class namespace.
+
+Process-owned code also has a stricter effect boundary. Singleton functions and process-owned object methods may use their own singleton state, helper functions/classes declared in the same singleton module, and explicit calls to other singleton services. They may not depend on caller/context-local modules, ordinary helper functions, imports, `process`, `stdio`, or `print`. Exported process-object classes declared outside the singleton module are checked under the same rule. This avoids making process state or behavior depend on whichever actor/context invoked it. A future explicit `process-safe`/effect declaration can widen this surface deliberately.
+
+Every external singleton call must be immediately awaited. Calls from one singleton function to another function in the same singleton are direct and keep the same actor-owned state, including helper method/static-function dispatch. Calls between different singleton actors use request/reply mailboxes. The runtime detects wait cycles before they can deadlock, applies caller mailbox/backpressure limits, and treats queueing time as part of the caller's wall-time budget.
+
+A hot-reloaded generation with the same singleton field schema reuses the existing actor state while executing the new function bodies. Incompatible singleton field-schema changes are rejected until an explicit migration mechanism is provided; the runtime never silently treats old process state as a new layout. Replacing singleton code against live state requires `HOT_CODE_LOAD`; managed generations are process-monotonic and stale code cannot roll active singleton behavior backward.
+
+## Initialization lifecycle
+
+Oreslang has one explicit lifecycle declaration:
+
+```ores
+init routine() => void {
+  // initialization work
+  return;
+}
+```
+
+Its scope determines its lifetime:
+
+- **file/root scope:** once per executing actor when reached from an actor; otherwise once for the owning Graal context;
+- **ordinary module:** once per executing actor when first activated by that actor; otherwise once for the owning Graal context;
+- **singleton module:** once when the OS-process singleton state cell is first created.
+
+Actor-local module state is stored on the actor cell itself and disappears when that actor dies. Non-actor/main execution uses context-lifetime storage, so repeatedly invoking the same checked source in one Graal context does not rerun ordinary init. Ordinary module state is keyed by the checked code digest; changed code gets fresh ordinary state rather than silently reinterpreting an old layout.
+
+Module/file field initializers run first, in declaration order, and the `init routine` runs afterward. A scope may declare at most one init routine. It has no parameters, must explicitly declare `=> void`, cannot be public/async, and classes cannot declare it. Process-global initialization is intentionally not available as a free-floating file hook: it belongs inside a `singleton module`, where ownership and serialization are explicit.
+
+Singleton-module init is deliberately deterministic and context-free: it may derive and assign singleton state from already-declared singleton values, but it cannot use ambient capabilities, arbitrary calls, `await`, object creation, or caller-local state. This prevents whichever tenant first touches the singleton from defining process-global state accidentally.
+
+Hot reload does not rerun an already-created singleton module's process init. Compatible process state is retained; incompatible schema changes require an explicit migration.
 
 Imports are explicit about what kind of symbol is entering the compilation unit:
 
@@ -36,24 +120,22 @@ Wildcard imports always require a namespace alias. This avoids silently injectin
 
 ## Module interfaces / OCaml-style module signatures
 
-Interfaces can describe the structural public shape required of a module. A module opts into checking with `@AdheresTo(...)`:
+Interfaces are storage-free function contracts and can also describe the callable public shape required of a module. A module opts into checking with `@AdheresTo(...)`:
 
 ```ores
-define module contracts
-  define interface MathApi
+define module contracts as
+  define interface MathApi as
     fnc add(int a, int b) => int;
-    String name;
   end
 end
 
 @AdheresTo(contracts.MathApi)
-define module math
+define module math as
   pub fnc add(int a, int b) => int { return a + b; }
-  pub val String name = "math";
 end
 ```
 
-Only exported (`pub`) module members satisfy an adherence contract. `@AdheresTo(A, B)` may name more than one interface.
+Only exported (`pub`) callable members satisfy an interface contract. `@AdheresTo(A, B)` may name more than one interface. Data layout is intentionally not part of an interface; reusable stored state belongs in a trait or class.
 
 ## Functions and returns
 
@@ -72,25 +154,92 @@ fnc answer() {
 
 `@Ret<T>` and `=> T` are equivalent. If both are present they must agree. A function returns exactly one value; multiple logical values are represented by a tuple, array, object, class value, or another aggregate.
 
-Return types may be unions, homogeneous arrays, finite tuple types, or structural record types:
+
+## Callable-local type declarations
+
+`struct` and `interface` declarations may appear inside callable and method blocks. They live in a lexical **type namespace**, separate from value bindings. Direct declarations in a callable body are type-hoisted across that callable so its signature can name a type declared textually inside the body without publishing that name into module/file scope.
 
 ```ores
-type intOrBoolOrString = bool | int | string;
+pub fnc getat() => T {
+  struct T {
+    foo: string
+  }
 
-fnc mixed() => Array<type intOrBoolOrString> {
-  return [3, true, "yes"];
+  return obj{
+    foo: "hello"
+  };
 }
 
-fnc fixed() => [int, bool, string] {
-  return [3, true, "yes"];
-}
-
-fnc named() => {foo: int, bar: string} {
-  return obj{foo: 5, bar: "x"};
+pub fnc use_it() => void {
+  val result = getat();
+  stdio.println(result.foo);
+  return;
 }
 ```
 
-The `type` marker inside `Array<type intOrBoolOrString>` is accepted as an explicit alias marker; `Array<intOrBoolOrString>` is equivalent. A finite tuple type records exact arity and the type of each position even though the interpreter represents the value with a JVM `List`. A record type names required members; extra members remain compatible with the structural type system.
+The name `T` is not visible in `use_it`. The compiler gives the escaped local struct an internal nominal identity and carries its shape through the return type, so callers may infer the result and use its fields/methods without adding `T` to shared file/module scope. Two unrelated callables may each declare a different local `T` without collision.
+
+Nested block type declarations remain block-scoped. Local interfaces are still storage-free method contracts. Local traits are compile-time-only composition units: they may contribute initialized state and behavior to local structs, are flattened before later compiler/runtime passes, and cannot be used as runtime value types. Generic local structs, traits, and interfaces use the same explicit generic rules as their module-level equivalents. Callable-local `type` aliases are also supported; aliases erase to their resolved type when they escape, so the alias name itself never enters module/file scope.
+
+Both compact and long forms are accepted:
+
+```ores
+struct Point {
+  x: int
+  y: int
+}
+
+define struct Point as
+  x: int
+  y: int
+end
+
+trait Printable {
+  pub print() => void {
+    stdio.println("value");
+    return;
+  }
+}
+
+interface Readable {
+  fnc read() => string;
+}
+
+define interface Readable as
+  fnc read() => string;
+end
+```
+
+
+Local aliases use the normal alias syntax and are hoisted within their lexical block:
+
+```ores
+pub fnc answer() => Answer {
+  type Answer = int;
+  return 42;
+}
+
+pub fnc boxed() => View<int> {
+  interface View<T> {
+    fnc get() => T;
+  }
+
+  struct Box is View<int> {
+    value: int;
+
+    pub get() => int {
+      return self.value;
+    }
+  }
+
+  return Box { value = 7 };
+}
+```
+
+Callers may infer and use the resolved return shapes, but names such as `Answer`, `View`, and `Box` are not visible outside the declaring callable. A nested block may shadow an outer local type name; the shadow ends with that block.
+
+The type namespace is separate from the value namespace, so a block may contain both a local type `T` and a value binding named `T`. Generic type parameters are part of the type namespace, however, so a callable-local `struct T`, `trait T`, `interface T`, or `type T = ...` may not reuse an in-scope generic parameter named `T`. This is rejected instead of relying on name-resolution order.
+
 
 ## Bindings
 
@@ -107,36 +256,29 @@ let retries = 0;
 retries = retries + 1;
 ```
 
-Destructuring carries mutability per element. A binding kind propagates through later unqualified names until another explicit binding kind appears. A binding kind may also prefix the whole pattern.
+Destructuring carries mutability per element:
 
 ```ores
-[const number, flag, answer] = fixed();   // all const
-const [x, y, z] = fixed();               // all const
-[const head, let middle, tail] = fixed(); // head const; middle/tail let
-
-const {foo, bar} = named();
-// Equivalent per-item spelling, shown in a separate scope:
-// {const foo, const bar} = named();
+[const code, let body] = (200, "ok");
 ```
 
-A bare `_` is a discard pattern: it consumes that position without declaring a variable, so it can be repeated in the same pattern or reused by later destructures.
+## Interface, trait, struct, and class
 
-```ores
-[const code, _, let body] = (200, "ignored", "ok");
-[const next, _, let tail] = (201, "ignored again", "done");
-[_, _, const final] = (1, 2, 3);
-```
+Oreslang keeps four distinct concepts instead of blending them:
 
-`_` is not readable after the destructure because no lexical binding is created for it. A destructured `const` is an immutable runtime binding; unlike a standalone `const x = ...` declaration, the aggregate being destructured does not need to be a compile-time constant.
+- `interface` — storage-free method contract only.
+- `trait` — non-instantiable compile-time composition of reusable instance state and behavior.
+- `struct` — concrete value-semantic aggregate with nominal named identity.
+- `class` — concrete reference/identity type with lifecycle/allocation semantics.
 
-Sequence destructuring requires a returned tuple or array/list. Finite tuples are checked for exact arity and per-position type. Object destructuring requires a record/map-like value and every requested key must exist. Function-parameter destructuring is intentionally not part of this syntax yet.
+`is` is the canonical interface-conformance spelling. `with` composes traits. Legacy `implements` / `impl` remain accepted during migration.
 
-## Classes, receivers, multiple inheritance, and interfaces
+## Classes and receivers
 
 Methods omit `fnc`. Instance methods always have an implicit receiver named `self`.
 
 ```ores
-define class Box<T>
+define class Box<T> as
   val T value;
 
   @Ret<self>
@@ -152,30 +294,94 @@ The explicit receiver form remains available:
 find(self Box)(int key) => self {
   return self;
 }
+
+bump(self &mut self)() => int {
+  self.count = self.count + 1;
+  return self.count;
+}
 ```
 
-The receiver variable name is always `self`.
+The receiver variable name is always `self`. Mutating instance/trait state requires an explicit mutable receiver such as `self &mut self`; ownership analysis treats ordinary implicit `self` as immutable.
 
-A class may list multiple parent classes and multiple interfaces:
+A class may list multiple parent classes, satisfy interfaces with `is`, and compose reusable state/behavior with `with`:
 
 ```ores
-define class Combined extends Cacheable, Serializable implements HasId, Named
+define class Combined
+    extends Cacheable, Serializable
+    is HasId, Named
+    with Metrics, RetryState
+as
 end
 ```
+
+`implements` and `impl` remain accepted as migration aliases for `is`; new source should use `is`.
 
 Parent order is significant and is the deterministic v0.2 method-resolution order after child methods: the first declared parent is searched before the next parent. The static checker rejects inheritance cycles and incompatible inherited member shapes. Child members may override inherited members only with compatible types.
 
 `Object` and `List` are extensible base classes:
 
 ```ores
-define class RecordBag extends Object
+define class RecordBag extends Object as
 end
 
-define class Names extends List
+define class Names extends List as
 end
 ```
 
 Inline object and array literals are values, not classes, and cannot be inherited from.
+
+
+## Structs
+
+Named structs are value types: they have fields and may have methods, but they do not have class identity and are not allocated with `new`. They cannot extend classes. Named structs remain nominal even when two structs have identical fields.
+
+```ores
+struct Point {
+  x: f64
+  y: f64
+
+  pub length_squared() => f64 {
+    return self.x * self.x + self.y * self.y;
+  }
+}
+
+val p = Point { x = 3.0, y = 4.0 };
+```
+
+The long spelling is equivalent:
+
+```ores
+define struct Point as
+  x: f64
+  y: f64
+end
+```
+
+Struct fields support both type-first and name-first forms. Binding kinds may be written in either form, and all equivalent spellings normalize to the same field AST:
+
+```ores
+let f64 x;
+let x: f64;
+
+val String name;
+val name: String;
+
+const int limit = 10;
+const limit: int = 10;
+```
+
+A bare field such as `x: f64` or `f64 x` defaults to immutable `val`. Use `let` explicitly for mutable aggregate state.
+
+Anonymous struct values are structural:
+
+```ores
+val p = struct { x = 3, y = 4 };
+```
+
+An `obj{...}` literal may be contextually promoted to an expected named struct at an explicit typed boundary such as a typed binding or return. Every caller-supplied field must be declared by the struct and type-compatible; required host fields must be present, defaulted host fields may be omitted, and trait-owned composed state is never caller-supplied. Arbitrary already-typed records do not silently become a nominal struct merely because they have the same shape.
+
+Struct equality is value equality within the same named struct identity. Copy semantics are derived structurally: a struct is Copy when all of its fields are Copy (including composed trait state); otherwise it is move-only. This keeps small data structs inexpensive while resource-owning structs retain move safety.
+
 
 ## Inline values
 
@@ -195,34 +401,83 @@ val first = values[0];
 
 `arr[...]` is the canonical inline-array spelling. The original bare `[...]` literal remains accepted for source compatibility and destructuring migration.
 
-Tuples preserve per-position static types. Parenthesized tuple literals and list-backed values returned against a finite tuple type both retain the declared positional types:
+Tuples preserve per-position static types:
 
 ```ores
 val pair = (1, "one");
 [const number, let label] = pair;
-
-fnc result() => [int, bool, string] {
-  return [3, true, "yes"];
-}
-
-const [num, ok, answer] = result();
 ```
 
-## Structural typing and interfaces
+## Interfaces and stateful traits
 
-Interfaces are structural contracts. Explicit `implements` asks the compiler to prove conformance and documents intent; structural compatibility does not require nominal ancestry in every context.
+Interfaces are storage-free method contracts. They contain function signatures only: no instance fields, no backing storage, and no object identity. A class uses `is` to ask the compiler to prove conformance.
 
 ```ores
-define interface Named
-  String name;
+define interface Named as
+  fnc name() => String;
 end
 
-define class User implements Named
-  pub val String name;
+define class User is Named as
+  private val String first = "Ada";
+  private val String last = "Lovelace";
+
+  pub name() => String {
+    return self.first + " " + self.last;
+  }
 end
 ```
 
-Class interface satisfaction uses public members, including inherited public members.
+Stateful reuse is a distinct construct: `trait`. A trait may contain initialized fields, concrete methods, abstract method requirements, and interface obligations. It cannot be instantiated and contributes no separate runtime object identity. Traits are not nominal runtime types: they cannot be used as parameter, field, return, alias, or generic argument types. Use an interface for a contract and a class for a value type.
+
+```ores
+define interface CounterApi as
+  fnc bump() => int;
+end
+
+define trait Counter is CounterApi as
+  private let int count = 0;
+
+  pub bump(self &mut self)() => int {
+    self.count = self.count + 1;
+    return self.count;
+  }
+end
+
+define class Worker with Counter as
+end
+```
+
+The compiler flattens trait storage and behavior into the host class before ownership/capability/runtime lowering. Trait fields require initializers and are not positional constructor parameters. Private trait state remains lexical to the defining trait; host classes cannot reach it directly. A trait method may depend on another host method only when that dependency is declared as an abstract trait method requirement.
+
+Traits must declare their dependencies. If a trait method needs host behavior, it declares an abstract method requirement instead of silently reaching into the host class:
+
+```ores
+define trait Loads as
+  pub abstract load() => int;
+
+  pub read() => int {
+    return self.load();
+  }
+end
+
+define class Store with Loads as
+  pub load() => int {
+    return 42;
+  }
+end
+```
+
+Trait composition is intentionally strict:
+
+- two traits contributing the same field are rejected;
+- two concrete trait methods with the same name and arity are rejected unless the class declares a compatible resolving method;
+- there is no declaration-order or “last wins” rule;
+- concrete classes must implement abstract trait requirements;
+- unused traits are still statically validated.
+
+For v0, trait composition is module-local. This preserves lexical module lookup while flattening is the implementation strategy. Cross-module traits can be added later with an explicit lexical-environment/import contract.
+
+Class interface satisfaction uses public members, including inherited and composed public members.
 
 ## Option and null
 
@@ -251,38 +506,6 @@ const complex z = 3 + 4i;
 ```
 
 Numeric widening is loss-aware; real values can widen toward complex values, but silent lossy narrowing is not performed.
-
-## Generics and operators
-
-Generic declarations and type applications use angle brackets:
-
-```ores
-define class Box<T>
-  val T value;
-end
-
-fnc identity<T>(T value) => T {
-  return value;
-}
-
-fnc use(Box<int> box) => int {
-  return identity(box.value);
-}
-```
-
-Known classes, interfaces, aliases, and built-ins enforce generic arity. Generic parameters are opaque types, not an implicit `any`: a concrete value is not assignable to an unconstrained `T` unless inference has bound that `T`. Generic function and method calls infer type arguments from value arguments. Calls may also state type arguments explicitly with `identity<int>(42)`; `identity<>(42)` explicitly requests inference. Constructors support the same inference marker: `new Box<>(7)` infers `Box<int>` from positional fields, including inherited generic fields. Every class generic must be inferable and repeated occurrences must infer compatibly; otherwise explicit type arguments are required. The `<` opening a call-site generic list must be adjacent to the callable name/member, which keeps ordinary spaced comparisons such as `a < b` unambiguous. Nested generic closers such as `Option<Array<int>>` remain valid.
-
-Generic inference works for both unqualified and module-qualified calls, such as `identity<>(42)` and `util.identity<>(42)`. Generic declarations must currently be specialized by a direct call. Unspecialized polymorphic function or bound-method values such as `val f = identity` or `val f = box.map` are rejected until Oreslang has a first-class universal/polytype representation; non-generic function values remain supported.
-
-Generic bindings are substituted through inherited class fields/methods, constructors, inherited interfaces, structural-typing views, and nominal subtype checks, so `Child<U> extends Parent<U>` preserves the concrete `U` all the way through member access and assignment. Generic class and interface arguments are invariant by default: `Child<int>` may satisfy `Parent<int>`, but never `Parent<String>`; likewise an implementation of `HasValue<int>` does not satisfy `HasValue<String>`.
-
-Generic callable contracts compare type parameters by position rather than spelling, so an interface method `map<T>` can be implemented as `map<U>` when their signatures are otherwise equivalent. The number of callable generic parameters is part of the contract; adding an unused extra generic parameter does not silently satisfy the interface.
-
-`Type<>` is reserved for inferred type arguments in type contexts that explicitly support inference; it is **not** an expression operator. Oreslang uses `^^` for logical XOR and `^` for bitwise XOR.
-
-Logical operators are `!`, `&&`, `^^`, and `||`. `&&` and `||` short-circuit; `^^` evaluates both boolean operands. Bitwise operators are integer-only: unary `~`, binary `&`, `^`, `|`, and shifts `<<`, `>>`, `>>>`. In the current runtime all integral spellings share one signed 64-bit bitwise lane: `~` flips all 64 bits, `<<` shifts left, `>>` is arithmetic/sign-extending right shift, and `>>>` is logical/zero-filling right shift. Shift distances must be in the range 0 through 63. Width-specific masking/sign behavior can be introduced later when the runtime preserves distinct i8/i16/i32/i64/u* representations instead of collapsing them to the current integral type.
-
-From tighter to looser binding, the relevant binary precedence is: multiplicative, additive, shifts, comparisons, equality, bitwise AND, bitwise XOR, bitwise OR, logical AND, logical XOR, logical OR, ternary, assignment. Prefix borrow `&value` / `&mut value` remains unambiguous because bitwise `&` is infix.
 
 ## Lambdas
 
@@ -332,6 +555,8 @@ try {
 
 Actors own their mutable heaps. Cross-actor communication occurs through mailboxes, and message values are frozen/copied/serialized at the runtime boundary. Arbitrary mutable host objects are rejected as messages. Deeply immutable values may use read-only sharing.
 
+A `singleton module` is a language-level process service built on the same ownership rule: one actor owns the module bindings for the entire OS process, while all other actors/isolates communicate with it through generated/runtime proxies. It is not one singleton per isolate or per Graal context.
+
 ## Isolates
 
 An isolate is stricter than an actor and is intended as a FaaS/tenant security boundary. Strict isolate contexts deny host reflection, native access, arbitrary filesystem/IO, child-process creation, guest-created threads, environment access, and unrestricted polyglot access unless an explicit capability is granted by the host.
@@ -359,8 +584,8 @@ The parser and static checker execute no user code.
 Named modules remain the normal namespace unit, but a source file may also contain file-level callables such as an entrypoint. The compiler places those declarations in an internal file-root namespace; that namespace is not written by user code.
 
 ```ores
-define module x
-  define class y
+define module x as
+  define class y as
   end
 end
 
@@ -440,7 +665,7 @@ Explicit `implements` and module `@AdheresTo(...)` checks remain structural conf
 Only methods overload, and only by arity:
 
 ```ores
-define class Lookup
+define class Lookup as
   find() => Option<int> {
     return None;
   }
@@ -484,7 +709,7 @@ for (val item of values) {
 Classes can expose a JavaScript-like iterator symbol:
 
 ```ores
-define class Bag
+define class Bag as
   [Symbol.iterator]() => Array<int> {
     return arr[1, 2, 3];
   }
@@ -669,7 +894,7 @@ A deployment may still aggregate many code units into one Native Image for start
 Instance methods continue to omit `fnc`:
 
 ```ores
-define class Counter
+define class Counter as
   read() => int {
     return self.value;
   }
@@ -679,7 +904,7 @@ end
 Class-level functions are not methods. They are declared with the explicit `static fnc` form:
 
 ```ores
-define class Counter
+define class Counter as
   pub static fnc twice(int value) => int {
     return value * 2;
   }
@@ -694,8 +919,7 @@ A static class function:
 - has no implicit or explicit `self`;
 - cannot be invoked through an instance;
 - may be extracted as a function value from the class namespace;
-- has one shared definition, just like any other named function;
-- does not capture enclosing class generics. In `class Box<T>`, a static function cannot use that `T`; declare its own `static fnc identity<U>(U value) => U` instead. Static-function generics support the same explicit and inferred call syntax as top-level functions.
+- has one shared definition, just like any other named function.
 
 Static data fields are intentionally not part of v0.5 yet; `static` on a class binding is rejected rather than silently acquiring Java-like global mutable state semantics.
 

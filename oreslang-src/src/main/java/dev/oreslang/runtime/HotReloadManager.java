@@ -26,9 +26,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * No JNI/FFI or OS dynamic-library loading is required.
  */
 public final class HotReloadManager implements AutoCloseable {
+    private static final AtomicLong PROCESS_GENERATION_SEQUENCE = new AtomicLong();
+
     private final IsolatePolicy policy;
     private final ExecutionProfile executionProfile;
-    private final AtomicLong sequence = new AtomicLong();
     private final AtomicReference<Generation> active = new AtomicReference<>();
     private final Map<String, Generation> activeByCodeUnit = new LinkedHashMap<>();
     private final Map<Long, Generation> generations = new LinkedHashMap<>();
@@ -60,8 +61,10 @@ public final class HotReloadManager implements AutoCloseable {
     }
 
     private Generation stage(String codeUnitId, String sourceDigest, String sourceText) {
-        long id = sequence.incrementAndGet();
-        Context context = policy.restrictedContextBuilder(executionProfile).build();
+        long id = PROCESS_GENERATION_SEQUENCE.incrementAndGet();
+        Context context = policy.restrictedContextBuilder(
+                executionProfile,
+                "--ores-code-generation=" + id).build();
         try {
             Source source = Source.newBuilder(OresLanguage.ID, sourceText, codeUnitId)
                     .mimeType(OresLanguage.MIME_TYPE)

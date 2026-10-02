@@ -38,7 +38,7 @@ final class OwnershipAndClosureTest {
     void ordinaryParametersAreImmutableForFieldMutation() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -53,7 +53,7 @@ final class OwnershipAndClosureTest {
     @Test
     void ownedMutParameterMayMutateAndReturnOwnership() throws Exception {
         String output = run("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -75,7 +75,7 @@ final class OwnershipAndClosureTest {
     @Test
     void mutableBorrowAllowsMutationWithoutMovingOwner() throws Exception {
         String output = run("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -98,7 +98,7 @@ final class OwnershipAndClosureTest {
     void immutableBorrowBlocksOverlappingMutableBorrow() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -122,7 +122,7 @@ final class OwnershipAndClosureTest {
     void useAfterMoveIsRejected() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -144,7 +144,7 @@ final class OwnershipAndClosureTest {
     void borrowOfLocalCannotEscapeFunction() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -159,7 +159,7 @@ final class OwnershipAndClosureTest {
     @Test
     void borrowedParameterCanBeReturned() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -173,7 +173,7 @@ final class OwnershipAndClosureTest {
     @Test
     void multipleImmutableBorrowsMayCoexist() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -192,7 +192,7 @@ final class OwnershipAndClosureTest {
     void secondMutableBorrowIsRejected() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -212,7 +212,7 @@ final class OwnershipAndClosureTest {
     void moveWhileBorrowedIsRejected() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -232,7 +232,7 @@ final class OwnershipAndClosureTest {
     @Test
     void lexicalScopeEndsStoredBorrow() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -257,7 +257,7 @@ final class OwnershipAndClosureTest {
     @Test
     void moveInBothIfBranchesIsAllowedButValueIsMovedAfterJoin() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -276,7 +276,7 @@ final class OwnershipAndClosureTest {
 
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -300,7 +300,7 @@ final class OwnershipAndClosureTest {
     void immutableFieldStaysImmutableEvenThroughMutOwner() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub val String foo = "start";
                         end
 
@@ -316,7 +316,7 @@ final class OwnershipAndClosureTest {
     void moveOnlyCaptureTransfersIntoClosure() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Box
+                        define class Box as
                           pub val int value = 7;
                         end
 
@@ -332,6 +332,107 @@ final class OwnershipAndClosureTest {
         assertTrue(error.getMessage().contains("use of moved value 'box'"));
     }
 
+    @Test
+    void callableLocalStructMutableReceiverUsesLexicalOwnershipMetadata() {
+        IllegalArgumentException immutableOwner = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          struct Local {
+                            pub let value: int;
+
+                            pub bump(self &mut self)() => void {
+                              self.value = self.value + 1;
+                              return;
+                            }
+                          }
+
+                          val Local item = Local { value = 0 };
+                          item.bump();
+                          return;
+                        }
+                        """)));
+        assertTrue(immutableOwner.getMessage().contains("cannot mutate method 'bump' receiver")
+                || immutableOwner.getMessage().contains("immutable parameter/binding 'item'"));
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc ok() => void {
+                  struct Local {
+                    pub let value: int;
+
+                    pub bump(self &mut self)() => void {
+                      self.value = self.value + 1;
+                      return;
+                    }
+                  }
+
+                  let Local item = Local { value = 0 };
+                  item.bump();
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void callableLocalStructFieldMutabilityIsResolvedLexically() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          struct Local {
+                            pub val value: int;
+                          }
+
+                          let Local item = Local { value = 0 };
+                          item.value = 1;
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("field 'Local.value' is immutable"));
+    }
+
+    @Test
+    void aliasesPreserveOwnershipCategoryAndLocalStructReceiverRules() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                type Count = int;
+
+                fnc consume(Count value) => void {
+                  return;
+                }
+
+                fnc ok() => void {
+                  val Count value = 7;
+                  consume(value);
+                  stdio.println(value);
+                  return;
+                }
+                """)));
+
+        IllegalArgumentException immutableAliasOwner = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          struct Local {
+                            pub let value: int;
+
+                            pub bump(self &mut self)() => void {
+                              self.value = self.value + 1;
+                              return;
+                            }
+                          }
+
+                          type Alias = Local;
+                          val Alias item = Local { value = 0 };
+                          item.bump();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(immutableAliasOwner.getMessage().contains("cannot mutate method 'bump' receiver")
+                || immutableAliasOwner.getMessage().contains("immutable parameter/binding 'item'"));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "ownership.ores")
@@ -344,5 +445,22 @@ final class OwnershipAndClosureTest {
             context.eval(source);
         }
         return output.toString(StandardCharsets.UTF_8);
+    }
+    @Test
+    void ownershipCheckerInspectsMethodsInsideCallableLocalStructs() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc make() => T {
+                          struct T {
+                            pub bad() => &int {
+                              let int local = 7;
+                              return &local;
+                            }
+                          }
+                          return T {};
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("outlive its owner"));
     }
 }
