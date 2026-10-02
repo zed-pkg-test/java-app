@@ -1,0 +1,21 @@
+namespace logical_operators_demo;
+
+fnc combined(bool a, bool b) => bool {
+  return a && b || a ^^ b;
+}
+
+pub routine main() => void {
+  stdio.println(true && true);
+  stdio.println(true && false);
+
+  stdio.println(true ^^ false);
+  stdio.println(true ^^ true);
+
+  stdio.println(false || true);
+  stdio.println(combined(true, false));
+
+  stdio.println(false && [true][99]);
+  stdio.println(true || [false][99]);
+
+  return;
+}
