@@ -615,7 +615,7 @@ public final class TypeChecker {
             if (locals.contains(name.name()) || name.name().equals("self")
                     || name.name().equals("Some") || name.name().equals("None")) return;
             if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("print")) {
-                throw processEffectError(where, "ambient caller capability '" + name.name() + "'");
+                throw processEffectError(where, "ambient caller capability '" + name.name() + "' (ambient capability)");
             }
             if (importedNames.contains(name.name())) {
                 throw processEffectError(where, "imported dependency '" + name.name() + "'");
@@ -656,7 +656,7 @@ public final class TypeChecker {
                     String targetOwnerName = functionOwners.get(target);
                     Ast.ModuleDecl targetOwner = targetOwnerName == null ? null : modules.get(targetOwnerName);
                     if (targetOwner == null || !targetOwner.singleton()) {
-                        throw processEffectError(where, "actor/context-local function '" + name.name() + "'");
+                        throw processEffectError(where, "actor/context-local function '" + name.name() + "' (ordinary helper function)");
                     }
                 }
             }
@@ -1346,19 +1346,27 @@ public final class TypeChecker {
                             .filter(Ast.FunctionDecl.class::isInstance)
                             .map(Ast.FunctionDecl.class::cast)
                             .filter(fn -> fn.visibility() == Ast.Visibility.PUBLIC
-                                    && fn.name().equals(member.member()))
+                                    && fn.name().equals(member.member())
+                                    && fn.parameters().size() == call.arguments().size())
                             .findFirst().orElse(null);
-                    if (target != null && !target.genericParameters().isEmpty()) {
+                    if (target != null) {
                         List<Type> actualTypes = call.arguments().stream()
                                 .map(argument -> typeOf(argument, env, generics, self))
                                 .toList();
-                        Function signature = instantiateCallableGenerics(
-                                declaredFunctionType(target),
-                                target.genericParameters(),
-                                actualTypes,
-                                "call to " + module.name() + "." + target.name());
+                        Function signature = target.genericParameters().isEmpty()
+                                ? declaredFunctionType(target)
+                                : instantiateCallableGenerics(
+                                        declaredFunctionType(target),
+                                        target.genericParameters(),
+                                        actualTypes,
+                                        "call to " + module.name() + "." + target.name());
                         validateCallArguments(call.arguments(), actualTypes, signature, env, generics, self, "argument");
-                        return signature.result();
+
+                        Type result = signature.result();
+                        if (module.singleton() && !module.name().equals(env.moduleName)) {
+                            return new Named("Future", List.of(result));
+                        }
+                        return result;
                     }
                 }
 
