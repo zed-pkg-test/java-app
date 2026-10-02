@@ -461,9 +461,9 @@ public final class TypeChecker {
             Function signature = methodFunctionType(method, klass, nominalClassType(klass));
             for (int i = 0; i < method.parameters().size(); i++) {
                 Ast.Param param = method.parameters().get(i);
-                if (param.mutable() || param.structural()) {
+                if (param.structural()) {
                     throw new IllegalArgumentException("singleton proxy method '" + klass.name() + "." + method.name()
-                            + "' cannot use mut or structural transported parameters");
+                            + "' cannot use structural transported parameters");
                 }
                 Type parameter = signature.parameters().get(i);
                 if (!isActorSendableType(parameter, false)) {
@@ -623,6 +623,28 @@ public final class TypeChecker {
             Ast.ModuleDecl referencedModule = modules.get(name.name());
             if (referencedModule != null && !referencedModule.singleton()) {
                 throw processEffectError(where, "actor/context-local module '" + referencedModule.name() + "'");
+            }
+
+            Ast.FunctionDecl referencedFunction = findFunction(name.name());
+            if (referencedFunction != null) {
+                String ownerName = functionOwners.get(referencedFunction);
+                Ast.ModuleDecl functionOwner = ownerName == null ? null : modules.get(ownerName);
+                if (functionOwner == null || !functionOwner.singleton()
+                        || !functionOwner.name().equals(processOwner.name())) {
+                    throw processEffectError(where,
+                            "ordinary/foreign function value '" + name.name() + "'");
+                }
+            }
+
+            Ast.ClassDecl referencedClass = findClass(name.name());
+            if (referencedClass != null && referencedClass != processClass) {
+                String ownerName = classOwners.get(referencedClass);
+                Ast.ModuleDecl classOwner = ownerName == null ? null : modules.get(ownerName);
+                if (classOwner == null || !classOwner.singleton()
+                        || !classOwner.name().equals(processOwner.name())) {
+                    throw processEffectError(where,
+                            "ordinary/foreign class namespace '" + name.name() + "'");
+                }
             }
             return;
         }
