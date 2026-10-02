@@ -1,0 +1,78 @@
+name: Oreslang PR76 untrusted actor matrix
+on:
+  push:
+    branches:
+      - "feat/oreslang-mirror-pr76-*"
+permissions:
+  contents: read
+jobs:
+  jit-sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Verify exact source tree
+        run: |
+          expected="$(cat ../SOURCE_TREE.txt)"
+          actual="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)"
+          printf 'expected-tree: %s actual-tree: %s\n' "$expected" "$actual"
+          test "$actual" = "$expected"
+          printf 'source-head: '; cat ../SOURCE_HEAD.txt
+      - name: Full JVM verification
+        run: mvn -B -ntp verify
+      - name: Untrusted actor hardening suite
+        run: mvn -B -ntp -Dtest=UntrustedActorRuntimeTest,UntrustedActorSandboxTest,UntrustedActorSyntaxTest,PrivateActorIsolationTest,SharedPrivateActorIsolationProofTest,IsolationHotReloadTest test
+
+  native-aot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Verify exact source tree
+        run: test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+      - name: Build and run AOT
+        run: |
+          mvn -B -ntp -Pnative-aot -DskipTests package
+          ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+
+  native-hybrid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Verify exact source tree
+        run: test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+      - name: Build and run hybrid
+        run: |
+          mvn -B -ntp -Pnative-hybrid -DskipTests package
+          ./target/ores-hybrid --mode=hybrid --platform=linux examples/together.ores
