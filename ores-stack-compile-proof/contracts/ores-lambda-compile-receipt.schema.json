@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oresoftware.dev/schemas/ores-lambda-compile-receipt-v1.schema.json",
+  "$comment": "Authored independently from TypeSpec. Tooling additionally binds this receipt to the exact validated compile-unit bytes, exact Cargo.lock bytes, exact executable bytes, and a no-package/no-deploy execution phase.",
+  "$defs": {
+    "sha256_hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "lambda_build_provider": { "enum": ["aws", "gcp"] },
+    "lambda_function_kind": { "enum": ["web", "api"] },
+    "lambda_carrier": { "enum": ["http_ingress", "direct_invoke"] },
+    "lambda_build_architecture": { "enum": ["x86_64", "arm64"] },
+    "lambda_compile_target": { "enum": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] },
+    "receipt": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": [
+        "schema_version", "generated_by", "compile_unit_sha256", "build_unit_sha256",
+        "provider", "kind", "carrier", "architecture", "target_triple", "rustc_version",
+        "cargo_version", "cargo_lock_sha256", "executable_sha256", "executable_path",
+        "deploy_mutation_performed"
+      ],
+      "properties": {
+        "schema_version": { "const": "ores.lambda.compile.receipt.v1" },
+        "generated_by": { "const": "ores-stack" },
+        "compile_unit_sha256": { "$ref": "#/$defs/sha256_hex" },
+        "build_unit_sha256": { "$ref": "#/$defs/sha256_hex" },
+        "provider": { "$ref": "#/$defs/lambda_build_provider" },
+        "kind": { "$ref": "#/$defs/lambda_function_kind" },
+        "carrier": { "$ref": "#/$defs/lambda_carrier" },
+        "architecture": { "$ref": "#/$defs/lambda_build_architecture" },
+        "target_triple": { "$ref": "#/$defs/lambda_compile_target" },
+        "rustc_version": { "type": "string", "minLength": 1 },
+        "cargo_version": { "type": "string", "minLength": 1 },
+        "cargo_lock_sha256": { "$ref": "#/$defs/sha256_hex" },
+        "executable_sha256": { "$ref": "#/$defs/sha256_hex" },
+        "executable_path": { "type": "string", "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/compiled/(x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)/release/ores-lambda-function$" },
+        "deploy_mutation_performed": { "const": false }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "provider": { "const": "gcp" } }, "required": ["provider"] },
+          "then": { "properties": { "architecture": { "const": "x86_64" } } }
+        }
+      ]
+    }
+  },
+  "$ref": "#/$defs/receipt"
+}
