@@ -382,12 +382,19 @@ public final class OresEvalRootNode extends RootNode {
                 SingletonWork work) {
             SingletonState working = canonical.transactionalCopy();
             Object result = work.apply(working);
-            // The commit itself is the linearization point. If the caller's
-            // deadline elapsed while executing, discard the working state.
+
+            // Nothing becomes process-visible until every fallible boundary
+            // has succeeded. A non-Sendable/oversized result, invalid state
+            // graph, or expired deadline discards the working copy.
+            ProcessSingletonRegistry.checkExecutionBudget();
+            Object frozenResult = ActorRuntime.freeze(result);
             ProcessSingletonRegistry.checkExecutionBudget();
             working.validateStorageGraph();
-            canonical.commitFrom(working);
-            return result;
+            ProcessSingletonRegistry.checkExecutionBudget();
+
+            // Cancellation and commit share the registry commit gate.
+            ProcessSingletonRegistry.commitIfActive(() -> canonical.commitFrom(working));
+            return frozenResult;
         }
 
         private ProcessSingletonRegistry.Handle<SingletonState> singletonHandle(Ast.ModuleDecl module) {
@@ -502,12 +509,17 @@ public final class OresEvalRootNode extends RootNode {
             return owner == null ? null : modules.get(owner);
         }
 
-        private String runtimeClassId(Ast.ClassDecl klass) {
+        private String objectClassId(Ast.ClassDecl klass) {
             String owner = classOwners.get(klass);
-            if (owner == null) {
+            return owner == null ? null : owner + "." + klass.name();
+        }
+
+        private String runtimeClassId(Ast.ClassDecl klass) {
+            String id = objectClassId(klass);
+            if (id == null) {
                 throw new IllegalStateException("class has no indexed module owner: " + klass.name());
             }
-            return owner + "." + klass.name();
+            return id;
         }
 
         private Object callMethod(
@@ -525,7 +537,7 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.Param param = method.parameters().get(i);
                 env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
-            Ast.ModuleDecl owner = ownerModule(receiver.klass);
+            Ast.ModuleDecl owner = ownerModule(dispatchClass);
             predeclareLocalTypes(method.body(), env, owner == null ? null : owner.name());
             try {
                 executeBlock(method.body(), env);
@@ -539,11 +551,42 @@ public final class OresEvalRootNode extends RootNode {
             Env env = new Env(parent);
             predeclareLocalTypes(statements, env, null);
             ArrayDeque<Ast.Expr> deferred = new ArrayDeque<>();
+            Throwable pending = null;
             try {
                 for (Ast.Stmt stmt : statements) executeStatement(stmt, env, deferred);
-            } finally {
-                while (!deferred.isEmpty()) eval(deferred.pop(), env);
+            } catch (Throwable failure) {
+                pending = failure;
             }
+
+            Throwable cleanupFailure = null;
+            while (!deferred.isEmpty()) {
+                try {
+                    eval(deferred.pop(), env);
+                } catch (VirtualMachineError fatalCleanupFailure) {
+                    if (pending != null) fatalCleanupFailure.addSuppressed(pending);
+                    if (cleanupFailure != null) fatalCleanupFailure.addSuppressed(cleanupFailure);
+                    throw fatalCleanupFailure;
+                } catch (Throwable failure) {
+                    if (failure instanceof ExecutionTerminated || failure instanceof Error) {
+                        if (cleanupFailure != null) failure.addSuppressed(cleanupFailure);
+                        cleanupFailure = failure;
+                    } else if (cleanupFailure == null) {
+                        cleanupFailure = failure;
+                    } else {
+                        cleanupFailure.addSuppressed(failure);
+                    }
+                }
+            }
+
+            if (pending instanceof ExecutionTerminated || pending instanceof Error) {
+                if (cleanupFailure != null) pending.addSuppressed(cleanupFailure);
+                throwUnchecked(pending);
+            }
+            if (cleanupFailure != null) {
+                if (pending != null) cleanupFailure.addSuppressed(pending);
+                throwUnchecked(cleanupFailure);
+            }
+            if (pending != null) throwUnchecked(pending);
         }
 
         private void executeStatement(Ast.Stmt stmt, Env env, ArrayDeque<Ast.Expr> deferred) {
@@ -849,7 +892,7 @@ public final class OresEvalRootNode extends RootNode {
                     else throw new IllegalArgumentException("missing constructor field " + klass.name() + "." + field.name());
                     fields.put(field.name(), value);
                 }
-                return new OresObject(klass, fields);
+                return new OresObject(klass, objectClassId(klass), fields);
             }
             if (expr instanceof Ast.StructInitExpr created) {
                 if (created.anonymous()) {
@@ -895,10 +938,14 @@ public final class OresEvalRootNode extends RootNode {
                     else if (field.initializer() != null) fields.put(field.name(), eval(field.initializer(), env));
                     else throw new IllegalArgumentException("missing struct field " + struct.name() + "." + field.name());
                 }
-                return new OresObject(struct, fields);
+                return new OresObject(struct, objectClassId(struct), fields);
             }
             if (expr instanceof Ast.AwaitExpr awaited) {
                 Object value = eval(awaited.expression(), env);
+                if (value instanceof SingletonReply singletonReply) {
+                    Object frozen = singletonReply.stage().toCompletableFuture().join();
+                    return ActorRuntime.materializeOwned(frozen);
+                }
                 if (value instanceof CompletionStage<?> stage) return stage.toCompletableFuture().join();
                 return value;
             }
@@ -1036,7 +1083,7 @@ public final class OresEvalRootNode extends RootNode {
                             + struct.name() + "." + field.name());
                 }
             }
-            return new OresObject(struct, fields);
+            return new OresObject(struct, objectClassId(struct), fields);
         }
 
         private Object member(Object receiver, String name, SingletonState singletonState) {
@@ -1096,24 +1143,29 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Ast.ClassDecl runtimeDispatchClass(OresObject receiver, SingletonState singletonState) {
-            if (singletonState == null) return receiver.klass;
-
-            // Callable-local structs are lexically scoped declarations, not
-            // global class-table entries. During the currently authorized code
-            // generation their AST identity is the dispatch identity.
-            String localOwner = localClassOwners.get(receiver.klass);
-            if (localOwner != null) {
-                Ast.ModuleDecl owner = modules.get(localOwner);
-                if (owner == null || !owner.singleton()) {
-                    throw new IllegalStateException("local singleton dispatch owner disappeared for " + receiver.klass.name());
+            Ast.ClassDecl lexicalClass = receiver.klass;
+            if (lexicalClass != null) {
+                String localOwner = localClassOwners.get(lexicalClass);
+                if (localOwner != null) {
+                    if (singletonState != null) {
+                        Ast.ModuleDecl owner = modules.get(localOwner);
+                        if (owner == null || !owner.singleton()) {
+                            throw new IllegalStateException("local singleton dispatch owner disappeared for " + lexicalClass.name());
+                        }
+                        authorizeSingletonCodeGeneration(singletonState, owner);
+                    }
+                    return lexicalClass;
                 }
-                authorizeSingletonCodeGeneration(singletonState, owner);
-                return receiver.klass;
+                if (singletonState == null) return lexicalClass;
             }
 
-            Ast.ClassDecl current = findClass(receiver.klass.name());
+            if (receiver.classId == null) {
+                throw new IllegalStateException("runtime object lost its class identity");
+            }
+            Ast.ClassDecl current = findClass(receiver.classId);
             if (current == null) {
-                throw new IllegalStateException("singleton-owned class '" + receiver.klass.name()
+                String kind = singletonState == null ? "runtime" : "singleton-owned";
+                throw new IllegalStateException(kind + " class '" + receiver.classId
                         + "' no longer exists in the active code generation");
             }
             return current;
@@ -1745,17 +1797,41 @@ public final class OresEvalRootNode extends RootNode {
     }
 
     private static final class OresObject {
-        private final Ast.ClassDecl klass; private final Map<String,Object> fields;
-        private OresObject(Ast.ClassDecl klass, Map<String,Object> fields){this.klass=klass;this.fields=fields;}
+        private final Ast.ClassDecl klass;
+        private final String classId;
+        private final Map<String,Object> fields;
+
+        private OresObject(Ast.ClassDecl klass, String classId, Map<String,Object> fields) {
+            this.klass = klass;
+            this.classId = classId;
+            this.fields = fields;
+        }
+
+        private OresObject(String classId, Map<String,Object> fields) {
+            this(null, classId, fields);
+        }
+
         @Override public boolean equals(Object other) {
             if (this == other) return true;
-            if (!klass.isStruct() || !(other instanceof OresObject value) || !value.klass.isStruct()) return false;
-            return klass == value.klass && fields.equals(value.fields);
+            if (!(other instanceof OresObject value)) return false;
+            boolean thisStruct = klass != null && klass.isStruct();
+            boolean otherStruct = value.klass != null && value.klass.isStruct();
+            if (!thisStruct || !otherStruct) return false;
+            boolean sameNominalType = classId != null && value.classId != null
+                    ? classId.equals(value.classId)
+                    : klass == value.klass;
+            return sameNominalType && fields.equals(value.fields);
         }
+
         @Override public int hashCode() {
-            return klass.isStruct() ? 31 * System.identityHashCode(klass) + fields.hashCode() : System.identityHashCode(this);
+            if (klass == null || !klass.isStruct()) return System.identityHashCode(this);
+            int typeHash = classId == null ? System.identityHashCode(klass) : classId.hashCode();
+            return 31 * typeHash + fields.hashCode();
         }
-        @Override public String toString(){return klass.name()+fields;}
+
+        @Override public String toString(){
+            return (classId != null ? classId : klass == null ? "<object>" : klass.name()) + fields;
+        }
     }
 
     private record ActorModuleStateKey(
