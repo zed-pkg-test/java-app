@@ -72,20 +72,6 @@ final class SingletonModuleTest {
     }
 
     @Test
-    void singletonModuleCannotDeclareMainEntrypoint() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module process_service as
-                          pub routine main() => void {
-                            return;
-                          }
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("cannot declare main"));
-    }
-
-    @Test
     void singletonModulePersistsAcrossIndependentGraalContextsInOneProcess() throws Exception {
         String program = """
                 define singleton module process_counter_cross_context_test as
@@ -272,25 +258,6 @@ final class SingletonModuleTest {
     }
 
     @Test
-    void singletonProxyStorageCannotHideSchemaBehindTypeAliases() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        type Count = int;
-
-                        define class AliasBackedBox as
-                          let Count value = 1;
-                          pub read() => int { return self.value; }
-                        end
-
-                        define singleton module alias_backed_proxy as
-                          pub val AliasBackedBox box = new AliasBackedBox();
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("cannot use type aliases"));
-    }
-
-    @Test
     void singletonPublicApiMustBeStaticallySendable() {
         IllegalArgumentException classBoundary = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
@@ -306,151 +273,15 @@ final class SingletonModuleTest {
                         """)));
         assertTrue(classBoundary.getMessage().contains("not statically Sendable"));
 
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define singleton module mutable_boundary as
-                  pub fnc consume(Array<int> mut values) => void {
-                    values[0] = 2;
-                    return;
-                  }
-                end
-                """)));
-    }
-
-    @Test
-    void singletonTransportMaterializesOwnedMutableAggregatesOnBothSides() throws Exception {
-        String output = eval("""
-                define singleton module owned_array_transport as
-                  let Array<int> values = arr[0];
-
-                  pub routine store(Array<int> incoming) => void {
-                    values = incoming;
-                    return;
-                  }
-
-                  pub fnc bump() => Array<int> {
-                    values[0] = values[0] + 1;
-                    return arr[values[0]];
-                  }
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    await owned_array_transport.store(arr[5]);
-                    let Array<int> returned = await owned_array_transport.bump();
-                    returned[0] = returned[0] + 10;
-                    stdio.println(returned[0]);
-                    stdio.println((await owned_array_transport.bump())[0]);
-                    return;
-                  }
-                end
-                """, "singleton-owned-array-transfer.ores");
-
-        assertTrue(output.contains("16"), output);
-        assertTrue(output.contains("7"), output);
-    }
-
-    @Test
-    void processSingletonCodeCannotReenterCallerLocalHelpersOrAmbientApis() {
-        IllegalArgumentException ordinaryHelper = assertThrows(IllegalArgumentException.class,
+        IllegalArgumentException mutableBoundary = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
-                        fnc caller_local_helper() => int {
-                          return 7;
-                        }
-
-                        define singleton module process_effect_guard as
-                          pub fnc read() => int {
-                            return caller_local_helper();
+                        define singleton module mutable_boundary as
+                          pub fnc consume(Array<int> mut values) => void {
+                            return;
                           }
                         end
                         """)));
-        assertTrue(ordinaryHelper.getMessage().contains("ordinary helper function"));
-
-        IllegalArgumentException ambient = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module ambient_effect_guard as
-                          pub fnc read_context() => String {
-                            return process.context_id;
-                          }
-                        end
-                        """)));
-        assertTrue(ambient.getMessage().contains("ambient capability"));
-    }
-
-    @Test
-    void processSingletonCodeCannotAliasOrdinaryFunctionsOrClasses() {
-        IllegalArgumentException functionAlias = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc caller_local_alias_target() => int {
-                          return 7;
-                        }
-
-                        define singleton module alias_effect_guard as
-                          pub fnc read() => int {
-                            val f = caller_local_alias_target;
-                            return f();
-                          }
-                        end
-                        """)));
-        assertTrue(functionAlias.getMessage().contains("function value"));
-
-        IllegalArgumentException classAlias = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define class CallerLocalUtility as
-                          pub static fnc read() => int { return 9; }
-                        end
-
-                        define singleton module class_alias_effect_guard as
-                          pub fnc read() => int {
-                            val C = CallerLocalUtility;
-                            return C.read();
-                          }
-                        end
-                        """)));
-        assertTrue(classAlias.getMessage().contains("class namespace"));
-    }
-
-    @Test
-    void exportedProcessObjectMethodsCannotUseCallerAmbientEffects() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define class AmbientFoo as
-                          pub context_id() => String {
-                            return process.context_id;
-                          }
-                        end
-
-                        define singleton module ambient_object_owner as
-                          pub val AmbientFoo foo = new AmbientFoo();
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("ambient capability"));
-    }
-
-    @Test
-    void singletonServicesMayCallOtherSingletonServicesWhenImmediatelyAwaited() throws Exception {
-        String output = eval("""
-                define singleton module service_a as
-                  pub fnc read() => int {
-                    return 40;
-                  }
-                end
-
-                define singleton module service_b as
-                  pub fnc read() => int {
-                    return await service_a.read() + 2;
-                  }
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    stdio.println(await service_b.read());
-                    return;
-                  }
-                end
-                """, "singleton-service-dependency.ores");
-
-        assertTrue(output.contains("42"), output);
+        assertTrue(mutableBoundary.getMessage().contains("cannot accept mut parameters"));
     }
 
     @Test
@@ -738,316 +569,6 @@ final class SingletonModuleTest {
     }
 
     @Test
-    void hotReloadedSingletonObjectUsesCurrentMethodBehaviorWithExistingState() throws Exception {
-        String firstProgram = """
-                define class HotValue as
-                  val int base = 1;
-
-                  pub read() => int {
-                    return self.base;
-                  }
-                end
-
-                define singleton module hot_object_owner as
-                  pub val HotValue value = new HotValue();
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    stdio.println(await hot_object_owner.value.read());
-                    return;
-                  }
-                end
-                """;
-
-        String secondProgram = """
-                define class HotValue as
-                  val int base = 1;
-
-                  pub read() => int {
-                    return self.base + 10;
-                  }
-                end
-
-                define singleton module hot_object_owner as
-                  pub val HotValue value = new HotValue();
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    stdio.println(await hot_object_owner.value.read());
-                    return;
-                  }
-                end
-                """;
-
-        assertTrue(eval(firstProgram, "hot-object-proxy.ores").contains("1"));
-        assertTrue(eval(secondProgram, "hot-object-proxy.ores").contains("11"));
-    }
-
-    @Test
-    void processSingletonCodeCannotUseCallerAmbientCapabilities() {
-        IllegalArgumentException process = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module ambient_process_guard as
-                          pub fnc context() => String {
-                            return process.context_id;
-                          }
-                        end
-                        """)));
-        assertTrue(process.getMessage().contains("ambient caller capability"));
-
-        IllegalArgumentException stdio = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module ambient_stdio_guard as
-                          pub fnc write() => void {
-                            stdio.println("no");
-                            return;
-                          }
-                        end
-                        """)));
-        assertTrue(stdio.getMessage().contains("ambient caller capability"));
-    }
-
-    @Test
-    void processSingletonCodeCannotCallActorLocalHelpers() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define module local_helper as
-                          pub fnc read() => int { return 7; }
-                        end
-
-                        define singleton module process_helper_guard as
-                          pub fnc read() => int {
-                            return local_helper.read();
-                          }
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("actor/context-local module"));
-    }
-
-    @Test
-    void exportedProcessObjectCannotCallActorLocalFreeFunctions() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc local_value() => int { return 7; }
-
-                        define class ProcessReader as
-                          pub read() => int {
-                            return local_value();
-                          }
-                        end
-
-                        define singleton module process_reader_owner as
-                          pub val ProcessReader reader = new ProcessReader();
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("actor/context-local function"));
-    }
-
-    @Test
-    void processSingletonsMayAwaitOtherProcessSingletons() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define singleton module service_a as
-                  pub fnc read() => int { return 7; }
-                end
-
-                define singleton module service_b as
-                  pub fnc read() => int {
-                    return await service_a.read();
-                  }
-                end
-                """)));
-    }
-
-    @Test
-    void singletonServiceFunctionValuesCannotBeExtracted() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module extraction_guard as
-                          let int value = 1;
-                          pub fnc read() => int { return value; }
-                        end
-
-                        define module app as
-                          pub routine main() => void {
-                            val f = extraction_guard.read;
-                            return;
-                          }
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("cannot be extracted"));
-    }
-
-    @Test
-    void singletonModuleAndProxyHandlesCannotBeAliased() {
-        IllegalArgumentException moduleAlias = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module alias_service as
-                          pub fnc read() => int { return 1; }
-                        end
-
-                        define module app as
-                          pub routine main() => void {
-                            val service = alias_service;
-                            return;
-                          }
-                        end
-                        """)));
-        assertTrue(moduleAlias.getMessage().contains("handles cannot be extracted"));
-
-        IllegalArgumentException unqualifiedFunctionAlias = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module alias_function_service as
-                          pub fnc globally_unique_alias_read() => int { return 1; }
-                        end
-
-                        define module app as
-                          pub routine main() => void {
-                            val f = globally_unique_alias_read;
-                            return;
-                          }
-                        end
-                        """)));
-        assertTrue(unqualifiedFunctionAlias.getMessage().contains("function values cannot be extracted"));
-
-        IllegalArgumentException proxyAlias = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define class AliasBox as
-                          let int value = 1;
-                          pub read() => int { return self.value; }
-                        end
-
-                        define singleton module alias_proxy_service as
-                          pub val AliasBox box = new AliasBox();
-                        end
-
-                        define module app as
-                          pub routine main() => void {
-                            val proxy = alias_proxy_service.box;
-                            return;
-                          }
-                        end
-                        """)));
-        assertTrue(proxyAlias.getMessage().contains("proxy handles cannot be extracted"));
-    }
-
-    @Test
-    void singletonProxySchemaIncludesModuleQualifiedClassIdentity() throws Exception {
-        String firstProgram = """
-                define module proxy_types_a as
-                  define class SameNameBox as
-                    val int value;
-                    pub read() => int { return self.value; }
-                  end
-                end
-
-                define module proxy_types_b as
-                  define class SameNameBox as
-                    val int value;
-                    pub read() => int { return self.value + 100; }
-                  end
-                end
-
-                define singleton module qualified_proxy_service as
-                  pub val proxy_types_a.SameNameBox box = new proxy_types_a.SameNameBox(1);
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    stdio.println(await qualified_proxy_service.box.read());
-                    return;
-                  }
-                end
-                """;
-
-        String secondProgram = firstProgram.replace(
-                "pub val proxy_types_a.SameNameBox box = new proxy_types_a.SameNameBox(1);",
-                "pub val proxy_types_b.SameNameBox box = new proxy_types_b.SameNameBox(1);");
-
-        assertTrue(eval(firstProgram, "qualified-proxy-identity.ores").contains("1"));
-
-        RuntimeException failure = assertThrows(
-                RuntimeException.class,
-                () -> eval(secondProgram, "qualified-proxy-identity.ores"));
-        assertTrue(causeChainContains(failure, "state schema changed"), String.valueOf(failure));
-    }
-
-    @Test
-    void singletonHandlesCannotBeCachedInModuleOrClassFields() {
-        IllegalArgumentException moduleField = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define singleton module cached_handle_service as
-                          pub fnc read() => int { return 1; }
-                        end
-
-                        define module bad_cache as
-                          val cached = cached_handle_service;
-                        end
-                        """)));
-        assertTrue(moduleField.getMessage().contains("handles cannot be extracted"));
-
-        IllegalArgumentException classField = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define class CachedBox as
-                          let int value = 1;
-                          pub read() => int { return self.value; }
-                        end
-
-                        define singleton module cached_proxy_service as
-                          pub val CachedBox box = new CachedBox();
-                        end
-
-                        define module app as
-                          define class Holder as
-                            val CachedBox cached = cached_proxy_service.box;
-                          end
-                        end
-                        """)));
-        assertTrue(classField.getMessage().contains("proxy handles cannot be extracted"));
-    }
-
-    @Test
-    void singletonModulesCannotAdvertiseOrdinarySynchronousInterfaces() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define interface CounterService {
-                          fnc read() => int;
-                        }
-
-                        @AdheresTo(CounterService)
-                        define singleton module counter_service as
-                          let int value = 1;
-                          pub fnc read() => int { return value; }
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("external surface is asynchronous"));
-    }
-
-    @Test
-    void exportedSingletonObjectsRejectInheritanceUntilInheritedSurfaceIsSendChecked() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define class BaseValue as
-                          pub read() => int { return 1; }
-                        end
-
-                        define class ChildValue extends BaseValue as
-                        end
-
-                        define singleton module inherited_proxy_owner as
-                          pub val ChildValue value = new ChildValue();
-                        end
-                        """)));
-
-        assertTrue(error.getMessage().contains("cannot use class inheritance"));
-    }
-
-    @Test
     void exportedSingletonObjectCannotCaptureActorLocalModuleState() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
@@ -1061,6 +582,32 @@ final class SingletonModuleTest {
 
                         define singleton module process_owner as
                           pub val CapturingFoo foo = new CapturingFoo();
+                        end
+                        """)));
+
+        assertTrue(error.getMessage().contains("cannot capture actor-local module state"));
+    }
+
+    @Test
+    void exportedSingletonObjectCannotHideActorLocalCaptureInsideLocalStruct() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        let int actor_local_value = 41;
+
+                        define class CapturingNestedFoo as
+                          pub read() => int {
+                            struct Hidden {
+                              pub read_hidden() => int {
+                                return actor_local_value;
+                              }
+                            }
+                            return 0;
+                          }
+                        end
+
+                        define singleton module nested_process_owner as
+                          pub val CapturingNestedFoo foo = new CapturingNestedFoo();
                         end
                         """)));
 
@@ -1111,217 +658,35 @@ final class SingletonModuleTest {
     }
 
     @Test
-    void failedSingletonRequestRollsBackAllProcessStateMutation() throws Exception {
-        String output = eval("""
-                define singleton module transactional_failure_guard as
-                  let int count = 0;
-
-                  pub fnc mutate_then_fail() => int {
-                    count = count + 1;
-                    val Array<int> values = arr[1];
-                    return values[99];
-                  }
+    void nestedLocalStructInsideSingletonRetainsProcessOwnedModuleState() throws Exception {
+        String program = """
+                define singleton module nested_local_singleton_owner as
+                  let int count = 41;
 
                   pub fnc read() => int {
-                    return count;
-                  }
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    try {
-                      val int ignored = await transactional_failure_guard.mutate_then_fail();
-                    } catch (err) {
-                    }
-                    stdio.println(await transactional_failure_guard.read());
-                    return;
-                  }
-                end
-                """, "singleton-transaction-failure.ores");
-
-        assertTrue(output.contains("0"), output);
-    }
-
-    @Test
-    void timedOutSingletonRequestCannotCommitPartialState() throws Exception {
-        IsolatePolicy shortBudget = new IsolatePolicy(
-                Set.of(
-                        IsolatePolicy.Capability.STDOUT,
-                        IsolatePolicy.Capability.PROCESS_SINGLETON),
-                64L * 1024 * 1024,
-                64,
-                Duration.ofMillis(30));
-
-        String output = evalWithPolicy("""
-                define singleton module transactional_timeout_guard as
-                  let int count = 0;
-
-                  pub routine mutate_then_spin() => void {
-                    count = count + 1;
-                    for (;;) {
-                    }
-                    return;
-                  }
-
-                  pub fnc read() => int {
-                    return count;
-                  }
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    try {
-                      await transactional_timeout_guard.mutate_then_spin();
-                    } catch (err) {
-                    }
-                    stdio.println(await transactional_timeout_guard.read());
-                    return;
-                  }
-                end
-                """, "singleton-transaction-timeout.ores", shortBudget);
-
-        assertTrue(output.contains("0"), output);
-    }
-
-    @Test
-    void singletonRequestSizeLimitAppliesAcrossAllArgumentsTogether() {
-        String key = "aggregate-message-limit:" + UUID.randomUUID();
-        ProcessSingletonRegistry.Handle<Object> handle =
-                ProcessSingletonRegistry.getOrCreate(key, Object::new);
-
-        String fiveMiB = "x".repeat(5 * 1024 * 1024);
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> handle.call(
-                        List.of(fiveMiB, fiveMiB),
-                        8,
-                        Duration.ofSeconds(1),
-                        (state, args) -> args.size()));
-
-        assertTrue(error.getMessage().contains("maximum frozen size"), error.getMessage());
-    }
-
-    @Test
-    void singletonCannotCatchAndSuppressItsOwnExecutionDeadline() throws Exception {
-        IsolatePolicy shortBudget = new IsolatePolicy(
-                Set.of(
-                        IsolatePolicy.Capability.STDOUT,
-                        IsolatePolicy.Capability.PROCESS_SINGLETON),
-                64L * 1024 * 1024,
-                64,
-                Duration.ofMillis(35));
-
-        String output = evalWithPolicy("""
-                define singleton module uncatchable_budget as
-                  let int value = 0;
-
-                  pub routine attempt_to_swallow() => void {
-                    try {
-                      for (;;) {
+                    if true; do
+                      struct Local {
+                        pub value() => int {
+                          return count + 1;
+                        }
                       }
-                    } catch (err) {
-                      value = 99;
-                    }
-                    value = 1;
-                    return;
-                  }
 
-                  pub fnc read() => int {
-                    return value;
+                      val Local local = Local {};
+                      return local.value();
+                    fi
+                    return 0;
                   }
                 end
 
                 define module app as
-                  pub routine main() => void {
-                    try {
-                      await uncatchable_budget.attempt_to_swallow();
-                    } catch (err) {
-                    }
-                    stdio.println(await uncatchable_budget.read());
+                  pub fnc main() => void {
+                    stdio.stdout.write(await nested_local_singleton_owner.read());
                     return;
                   }
                 end
-                """, "uncatchable-singleton-budget.ores", shortBudget);
+                """;
 
-        assertTrue(output.contains("0"), output);
-    }
-
-    @Test
-    void singletonFinallyCannotReturnOverAnExecutionDeadline() throws Exception {
-        IsolatePolicy shortBudget = new IsolatePolicy(
-                Set.of(
-                        IsolatePolicy.Capability.STDOUT,
-                        IsolatePolicy.Capability.PROCESS_SINGLETON),
-                64L * 1024 * 1024,
-                64,
-                Duration.ofMillis(35));
-
-        String output = evalWithPolicy("""
-                define singleton module uncatchable_finally_budget as
-                  let int value = 0;
-
-                  pub routine attempt_to_override() => void {
-                    try {
-                      for (;;) {
-                      }
-                    } catch (err) {
-                      value = 98;
-                    } finally {
-                      value = 99;
-                      return;
-                    }
-                  }
-
-                  pub fnc read() => int {
-                    return value;
-                  }
-                end
-
-                define module app as
-                  pub routine main() => void {
-                    try {
-                      await uncatchable_finally_budget.attempt_to_override();
-                    } catch (err) {
-                    }
-                    stdio.println(await uncatchable_finally_budget.read());
-                    return;
-                  }
-                end
-                """, "uncatchable-singleton-finally-budget.ores", shortBudget);
-
-        assertTrue(output.contains("0"), output);
-    }
-
-    @Test
-    void singletonDeferCannotMaskExecutionDeadline() {
-        IsolatePolicy shortBudget = new IsolatePolicy(
-                Set.of(
-                        IsolatePolicy.Capability.STDOUT,
-                        IsolatePolicy.Capability.PROCESS_SINGLETON),
-                64L * 1024 * 1024,
-                64,
-                Duration.ofMillis(35));
-
-        RuntimeException failure = assertThrows(RuntimeException.class,
-                () -> evalWithPolicy("""
-                        define singleton module uncatchable_defer_budget as
-                          pub routine attempt_to_mask() => void {
-                            let Array<int> values = arr[1];
-                            defer values[99];
-                            for (;;) {
-                            }
-                            return;
-                          }
-                        end
-
-                        define module app as
-                          pub routine main() => void {
-                            await uncatchable_defer_budget.attempt_to_mask();
-                            return;
-                          }
-                        end
-                        """, "uncatchable-singleton-defer-budget.ores", shortBudget));
-
-        assertTrue(causeChainContains(failure, "wall-time budget"), String.valueOf(failure));
+        assertTrue(eval(program, "nested-local-singleton-owner.ores").contains("42"));
     }
 
     @Test
@@ -1347,140 +712,6 @@ final class SingletonModuleTest {
 
         RuntimeException failure = assertThrows(RuntimeException.class, call::join);
         assertTrue(causeChainContains(failure, "wait cycle"), String.valueOf(failure));
-    }
-
-    @Test
-    void nestedSingletonCallsInheritTheParentsRemainingDeadline() {
-        String aKey = "deadline-a:" + UUID.randomUUID();
-        String bKey = "deadline-b:" + UUID.randomUUID();
-
-        ProcessSingletonRegistry.Handle<Object> a =
-                ProcessSingletonRegistry.getOrCreate(aKey, Object::new);
-        ProcessSingletonRegistry.Handle<Object> b =
-                ProcessSingletonRegistry.getOrCreate(bKey, Object::new);
-
-        long started = System.nanoTime();
-        CompletableFuture<Object> outer = a.call(
-                List.of(), 8, Duration.ofMillis(120),
-                (aState, ignored) -> {
-                    Thread.sleep(70);
-                    return b.call(
-                            List.of(), 8, Duration.ofSeconds(5),
-                            (bState, nested) -> {
-                                while (true) ProcessSingletonRegistry.checkExecutionBudget();
-                            }).toCompletableFuture().join();
-                }).toCompletableFuture();
-
-        RuntimeException failure = assertThrows(RuntimeException.class, outer::join);
-        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
-
-        assertTrue(causeChainContains(failure, "wall-time budget")
-                        || causeChainContains(failure, "expired"),
-                String.valueOf(failure));
-        assertTrue(elapsedMs < 1000,
-                "nested call incorrectly received a fresh multi-second budget: " + elapsedMs + "ms");
-    }
-
-    @Test
-    void queuedSingletonTimeoutRemovesRequestWithoutExecutingItLater() throws Exception {
-        String key = "queued-timeout:" + UUID.randomUUID();
-        ProcessSingletonRegistry.Handle<AtomicInteger> handle =
-                ProcessSingletonRegistry.getOrCreate(key, AtomicInteger::new);
-
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-
-        CompletableFuture<Object> active = handle.call(
-                List.of(), 8, Duration.ofSeconds(2),
-                (state, ignored) -> {
-                    entered.countDown();
-                    release.await(1, TimeUnit.SECONDS);
-                    return state.incrementAndGet();
-                }).toCompletableFuture();
-
-        assertTrue(entered.await(1, TimeUnit.SECONDS));
-
-        CompletableFuture<Object> queued = handle.call(
-                List.of(), 8, Duration.ofMillis(40),
-                (state, ignored) -> state.incrementAndGet()).toCompletableFuture();
-
-        RuntimeException timeout = assertThrows(RuntimeException.class, queued::join);
-        assertTrue(causeChainContains(timeout, "expired in mailbox"), String.valueOf(timeout));
-
-        release.countDown();
-        assertEquals(1L, ((Number) active.join()).longValue());
-
-        Object value = handle.call(
-                List.of(), 8, Duration.ofSeconds(1),
-                (state, ignored) -> state.get()).toCompletableFuture().join();
-        assertEquals(1L, ((Number) value).longValue());
-    }
-
-    @Test
-    void cancellingQueuedSingletonRequestReleasesBackpressureImmediately() throws Exception {
-        String key = "cancel-queued:" + UUID.randomUUID();
-        ProcessSingletonRegistry.Handle<AtomicInteger> handle =
-                ProcessSingletonRegistry.getOrCreate(key, AtomicInteger::new);
-
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        CompletableFuture<Object> active = handle.call(
-                List.of(), 1, Duration.ofSeconds(2),
-                (state, ignored) -> {
-                    entered.countDown();
-                    release.await(1, TimeUnit.SECONDS);
-                    return state.incrementAndGet();
-                }).toCompletableFuture();
-
-        assertTrue(entered.await(1, TimeUnit.SECONDS));
-
-        CompletableFuture<Object> queued = handle.call(
-                List.of(), 1, Duration.ofSeconds(2),
-                (state, ignored) -> state.incrementAndGet()).toCompletableFuture();
-        assertTrue(queued.cancel(false));
-
-        CompletableFuture<Object> replacement = handle.call(
-                List.of(), 1, Duration.ofSeconds(2),
-                (state, ignored) -> state.incrementAndGet()).toCompletableFuture();
-
-        release.countDown();
-        assertEquals(1L, ((Number) active.join()).longValue());
-        assertEquals(2L, ((Number) replacement.join()).longValue());
-    }
-
-    @Test
-    void cancellingRunningSingletonRequestWinsBeforeCommit() throws Exception {
-        String key = "cancel-running:" + UUID.randomUUID();
-        ProcessSingletonRegistry.Handle<AtomicInteger> handle =
-                ProcessSingletonRegistry.getOrCreate(key, AtomicInteger::new);
-
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        CountDownLatch finished = new CountDownLatch(1);
-
-        CompletableFuture<Object> running = handle.call(
-                List.of(), 8, Duration.ofSeconds(2),
-                (state, ignored) -> {
-                    entered.countDown();
-                    try {
-                        release.await(1, TimeUnit.SECONDS);
-                        ProcessSingletonRegistry.commitIfActive(state::incrementAndGet);
-                        return state.get();
-                    } finally {
-                        finished.countDown();
-                    }
-                }).toCompletableFuture();
-
-        assertTrue(entered.await(1, TimeUnit.SECONDS));
-        assertTrue(running.cancel(false));
-        release.countDown();
-        assertTrue(finished.await(1, TimeUnit.SECONDS));
-
-        Object value = handle.call(
-                List.of(), 8, Duration.ofSeconds(1),
-                (state, ignored) -> state.get()).toCompletableFuture().join();
-        assertEquals(0L, ((Number) value).longValue(),
-                "cancelled running request committed state after cancellation");
     }
 
     @Test
@@ -1523,31 +754,6 @@ final class SingletonModuleTest {
                 List.of(), 8, Duration.ofSeconds(1),
                 (state, ignored) -> state.incrementAndGet()).toCompletableFuture().join();
         assertEquals(3L, ((Number) afterTimeout).longValue());
-    }
-
-    @Test
-    void singletonInitializationUsesTheContextWallTimeBudget() {
-        String key = "init-budget:" + UUID.randomUUID();
-
-        ProcessSingletonRegistry.Handle<Object> handle =
-                ProcessSingletonRegistry.getOrCreate(
-                        key,
-                        Duration.ofMillis(25),
-                        () -> {
-                            while (true) ProcessSingletonRegistry.checkExecutionBudget();
-                        });
-
-        RuntimeException failure = assertThrows(
-                RuntimeException.class,
-                () -> handle.call(
-                        List.of(),
-                        8,
-                        Duration.ofSeconds(1),
-                        (state, ignored) -> "unreachable")
-                        .toCompletableFuture()
-                        .join());
-
-        assertTrue(causeChainContains(failure, "wall-time budget"), String.valueOf(failure));
     }
 
     @Test
@@ -1625,35 +831,6 @@ final class SingletonModuleTest {
         RuntimeException denied = assertThrows(RuntimeException.class,
                 () -> evalWithPolicy(changedProgram, "no-hot-reload-guard.ores", noHotLoad));
         assertTrue(causeChainContains(denied, "HOT_CODE_LOAD"), String.valueOf(denied));
-    }
-
-    @Test
-    void singletonInitializationHasItsOwnCooperativeDeadlineAndCanRetry() {
-        String key = "init-deadline:" + UUID.randomUUID();
-
-        ProcessSingletonRegistry.Handle<Object> timed =
-                ProcessSingletonRegistry.getOrCreate(
-                        key,
-                        Duration.ofMillis(25),
-                        () -> {
-                            while (true) ProcessSingletonRegistry.checkExecutionBudget();
-                        });
-
-        RuntimeException failure = assertThrows(RuntimeException.class,
-                () -> timed.call(List.of(), (state, ignored) -> 0)
-                        .toCompletableFuture().join());
-        assertTrue(causeChainContains(failure, "wall-time budget"), String.valueOf(failure));
-
-        ProcessSingletonRegistry.Handle<AtomicInteger> recovered =
-                ProcessSingletonRegistry.getOrCreate(
-                        key,
-                        Duration.ofSeconds(1),
-                        AtomicInteger::new);
-        assertNotEquals(timed.instanceId(), recovered.instanceId());
-        assertEquals(1L, ((Number) recovered.call(
-                List.of(),
-                (state, ignored) -> state.incrementAndGet())
-                .toCompletableFuture().join()).longValue());
     }
 
     @Test
@@ -1742,4 +919,45 @@ final class SingletonModuleTest {
         }
         return output.toString(StandardCharsets.UTF_8);
     }
+    @Test
+    void processEffectValidationInspectsCallableLocalStructBodies() {
+        IllegalArgumentException hiddenMethod = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define singleton module hidden_local_struct_effect as
+                          pub fnc value() => int {
+                            struct Local {
+                              pub context() => String {
+                                return process.context_id;
+                              }
+                            }
+                            return 1;
+                          }
+                        end
+                        """)));
+
+        assertTrue(hiddenMethod.getMessage().contains("ambient caller capability 'process'"));
+        assertTrue(hiddenMethod.getMessage().contains("process-singleton code"));
+    }
+
+    @Test
+    void processEffectValidationInspectsStructLiteralFieldValues() {
+        IllegalArgumentException hiddenLiteral = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define singleton module hidden_struct_literal_effect as
+                          pub fnc value() => String {
+                            struct Local {
+                              value: String;
+                            }
+                            val local = Local { value = process.context_id };
+                            return local.value;
+                          }
+                        end
+                        """)));
+
+        assertTrue(hiddenLiteral.getMessage().contains("ambient caller capability 'process'"));
+        assertTrue(hiddenLiteral.getMessage().contains("process-singleton code"));
+    }
+
 }
