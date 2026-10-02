@@ -11,13 +11,12 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oreslang-src
     steps:
-      - name: Check out exact Oreslang PR head
+      - name: Check out mirrored Oreslang snapshot
         uses: actions/checkout@v4
-        with:
-          repository: ores-truffle-oreslang/oreslang-source.java
-          ref: ec30306dc9709a997ba3e3f74e3f643cae87a294
-          fetch-depth: 1
 
       - name: Set up GraalVM
         uses: graalvm/setup-graalvm@v1
@@ -25,14 +24,17 @@ jobs:
           version: '25.3'
           java-version: '25'
           distribution: 'graalvm'
-          cache: maven
 
       - name: Diagnostics
         run: |
+          echo "Pinned source: ec30306dc9709a997ba3e3f74e3f643cae87a294"
           java --version
           mvn --version
 
-      - name: Verify compiler and runtime tests
+      - name: Focused generics and operators tests
+        run: mvn -B -ntp -Dtest=GenericsAndOperatorsHardeningTest test
+
+      - name: Full compiler and runtime verification
         run: mvn -B -ntp verify
 
       - name: Run showcase

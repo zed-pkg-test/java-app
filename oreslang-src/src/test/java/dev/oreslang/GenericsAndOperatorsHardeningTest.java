@@ -1,0 +1,257 @@
+package dev.oreslang;
+
+import dev.oreslang.parser.Parser;
+import dev.oreslang.types.TypeChecker;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Source;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+final class GenericsAndOperatorsHardeningTest {
+    @Test
+    void infersGenericFunctionArgumentsWithoutTreatingTAsAny() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc identity<T>(T value) => T {
+                    return value;
+                  }
+
+                  fnc use() => void {
+                    val int number = identity(42);
+                    val String label = identity("ores");
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc unsound<T>() => T {
+                    return 42;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void enforcesKnownGenericArityAndSubstitutesClassMembers() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class Box<T>
+                    pub val T value;
+
+                    pub get() => T {
+                      return self.value;
+                    }
+                  end
+
+                  fnc read(Box<int> box) => int {
+                    return box.get();
+                  }
+
+                  fnc make() => Box<int> {
+                    return new Box<int>(7);
+                  }
+                end
+                """)));
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class Pair<A, B>
+                    val A left;
+                    val B right;
+                  end
+
+                  fnc bad(Pair<int> pair) => void {
+                    return;
+                  }
+                end
+                """)));
+        assertTrue(error.getMessage().contains("expects 2 type argument"));
+    }
+
+    @Test
+    void explicitGenericCallsAndInferenceMarkersAreChecked() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc identity<T>(T value) => T {
+                    return value;
+                  }
+
+                  fnc use() => void {
+                    val explicit = identity<int>(42);
+                    val inferred = identity<>(42);
+                    stdio.println(explicit);
+                    stdio.println(explicit);
+                    stdio.println(inferred);
+                    stdio.println(inferred);
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc identity<T>(T value) => T { return value; }
+                  fnc bad() => void {
+                    val int value = identity<int>("wrong");
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc plain(int value) => int { return value; }
+                  fnc bad() => int { return plain<>(1); }
+                end
+                """)));
+    }
+
+    @Test
+    void genericInheritanceSubstitutesFieldsMethodsConstructorsAndInterfaces() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define interface HasValue<T>
+                    value: T;
+                  end
+
+                  define class Parent<T>
+                    pub val T value;
+
+                    pub get() => T {
+                      return self.value;
+                    }
+                  end
+
+                  define class Child<U> extends Parent<U> implements HasValue<U>
+                  end
+
+                  define class IntChild extends Parent<int>
+                  end
+
+                  fnc read(Child<int> child) => int {
+                    return child.get();
+                  }
+
+                  fnc reuseInheritedGenericResult(Child<int> child) => void {
+                    val value = child.get();
+                    stdio.println(value);
+                    stdio.println(value);
+                    return;
+                  }
+
+                  fnc readField(IntChild child) => int {
+                    return child.value;
+                  }
+
+                  fnc reuseInheritedGenericField(IntChild child) => void {
+                    val value = child.value;
+                    stdio.println(value);
+                    stdio.println(value);
+                    return;
+                  }
+
+                  fnc make() => Child<int> {
+                    return new Child<int>(7);
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void spacedComparisonsAreNotMistakenForGenericCalls() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc between(int a, int b, int c) => bool {
+                    return a < b && b > (c);
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void nestedGenericClosersDoNotBecomeShiftOperators() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc keep(Option<Array<int>> value) => Option<Array<int>> {
+                    return value;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void logicalAndBitwiseFamiliesHaveDistinctTypesAndPrecedence() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc bits(int a, int b) => int {
+                    return ((~a & b) | (a ^ b)) << 1 >> 1 >>> 1;
+                  }
+
+                  fnc logic(bool a, bool b) => bool {
+                    return a && b || a ^^ b;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc bad(bool a, bool b) => bool {
+                    return a | b;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc bad(float a, int b) => int {
+                    return a & b;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void zeroArgumentLambdaStillUsesDoublePipeAndRuntimeExecutesBitwiseOps() throws Exception {
+        String program = """
+                define module app
+                  fnc callback() => (() -> int) {
+                    return || -> {
+                      return 7;
+                    };
+                  }
+
+                  pub fnc main() => void {
+                    stdio.println((5 & 3) | (8 >> 2));
+                    stdio.println(true ^^ false);
+                    stdio.println(false && [true][99]);
+                    stdio.println(true || [false][99]);
+                    stdio.println(~0);
+                    return;
+                  }
+                end
+                """;
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "operators.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        String text = output.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("3"));
+        assertTrue(text.contains("true"));
+        assertTrue(text.contains("-1"));
+    }
+}
