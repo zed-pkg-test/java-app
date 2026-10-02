@@ -1,0 +1,42 @@
+name: oreslang pr45 generics verify
+
+on:
+  push:
+    branches:
+      - "ci/oreslang-pr45-generics-20261002"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact Oreslang PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ores-truffle-oreslang/oreslang-source.java
+          ref: ec30306dc9709a997ba3e3f74e3f643cae87a294
+          fetch-depth: 1
+
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          cache: maven
+
+      - name: Diagnostics
+        run: |
+          java --version
+          mvn --version
+
+      - name: Verify compiler and runtime tests
+        run: mvn -B -ntp verify
+
+      - name: Run showcase
+        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
+
+      - name: Run together example
+        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
