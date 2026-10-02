@@ -1,0 +1,26 @@
+{
+  "schema": "ores.typespec-json-schema-validator.mapping/v1",
+  "declarations": [
+    { "typespec": "OresLambdaCompileUnit.Sha256Hex", "generated": "Sha256Hex", "authored": "sha256_hex" },
+    { "typespec": "OresLambdaCompileUnit.GitSha", "generated": "GitSha", "authored": "git_sha" },
+    { "typespec": "OresLambdaCompileUnit.RepositoryIdentity", "generated": "RepositoryIdentity", "authored": "repository_identity" },
+    { "typespec": "OresLambdaCompileUnit.CargoAlias", "generated": "CargoAlias", "authored": "cargo_alias" },
+    { "typespec": "OresLambdaCompileUnit.CargoPackage", "generated": "CargoPackage", "authored": "cargo_package" },
+    { "typespec": "OresLambdaCompileUnit.CargoFeature", "generated": "CargoFeature", "authored": "cargo_feature" },
+    { "typespec": "OresLambdaCompileUnit.CargoRegistry", "generated": "CargoRegistry", "authored": "cargo_registry" },
+    { "typespec": "OresLambdaCompileUnit.ExactCargoVersion", "generated": "ExactCargoVersion", "authored": "exact_cargo_version" },
+    { "typespec": "OresLambdaCompileUnit.LambdaBuildProvider", "generated": "LambdaBuildProvider", "authored": "lambda_build_provider" },
+    { "typespec": "OresLambdaCompileUnit.LambdaFunctionKind", "generated": "LambdaFunctionKind", "authored": "lambda_function_kind" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCarrier", "generated": "LambdaCarrier", "authored": "lambda_carrier" },
+    { "typespec": "OresLambdaCompileUnit.LambdaBuildArchitecture", "generated": "LambdaBuildArchitecture", "authored": "lambda_build_architecture" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCompileDependencyKind", "generated": "LambdaCompileDependencyKind", "authored": "lambda_compile_dependency_kind" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCompileResolver", "generated": "LambdaCompileResolver", "authored": "lambda_compile_resolver" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCargoPolicy", "generated": "LambdaCargoPolicy", "authored": "lambda_cargo_policy" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCompileProfile", "generated": "LambdaCompileProfile", "authored": "lambda_compile_profile" },
+    { "typespec": "OresLambdaCompileUnit.LambdaRuntimeProfile", "generated": "LambdaRuntimeProfile", "authored": "lambda_runtime_profile" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCompileTarget", "generated": "LambdaCompileTarget", "authored": "lambda_compile_target" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCompileDependencyV1", "generated": "LambdaCompileDependencyV1", "authored": "dependency" },
+    { "typespec": "OresLambdaCompileUnit.LambdaCompileUnitV1", "generated": "LambdaCompileUnitV1", "authored": "compile_unit" }
+  ],
+  "ignore": { "typespec": [], "generated": [], "authored": [] }
+}
