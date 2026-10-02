@@ -1,0 +1,33 @@
+name: oreslang pr30 latest singleton regressions
+
+on:
+  push:
+    branches:
+      - "ci/oreslang-pr30-latest-singleton-regressions-20261002"
+
+permissions:
+  contents: read
+
+jobs:
+  singleton-regressions:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+      - name: Provenance
+        run: |
+          echo "PR30/#34 code tree: 6401b08ba12042d9f5b49b3dcdc5bfa074ae8604"
+          echo "Latest #10 hardening head: bd0e7fcedf37828d70d20dcf429303bc53c55971"
+          java --version
+          mvn --version
+      - name: Latest singleton and actor regression gate
+        run: mvn -B -ntp -Dtest=SingletonModuleTest,ActorRuntimeTest,IsolationHotReloadTest test
+      - name: Full JVM verification
+        run: mvn -B -ntp verify
