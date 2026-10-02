@@ -25,8 +25,8 @@ jobs:
       - name: Verify exact source tree
         run: |
           expected="$(cat ../SOURCE_TREE.txt)"
-          actual="$(git -C .. rev-parse HEAD:oreslang-src)"
-          test "$actual" = "$expected"
+          actual="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)"
+          printf 'expected-tree: %s\nactual-tree: %s\n' "$expected" "$actual"\n          test "$actual" = "$expected"
           printf 'source-head: '; cat ../SOURCE_HEAD.txt
           printf 'source-tree: %s\n' "$actual"
           java --version
@@ -56,7 +56,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: maven
       - name: Verify exact source tree
-        run: test "$(git -C .. rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+        run: actual="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)"; expected="$(cat ../SOURCE_TREE.txt)"; printf 'expected-tree: %s actual-tree: %s\n' "$expected" "$actual"; test "$actual" = "$expected"
       - name: Build interpreter-only AOT image
         run: mvn -B -ntp -Pnative-aot -DskipTests package
       - name: Execute AOT guest
@@ -78,7 +78,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: maven
       - name: Verify exact source tree
-        run: test "$(git -C .. rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+        run: actual="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)"; expected="$(cat ../SOURCE_TREE.txt)"; printf 'expected-tree: %s actual-tree: %s\n' "$expected" "$actual"; test "$actual" = "$expected"
       - name: Build AOT host with guest JIT
         run: mvn -B -ntp -Pnative-hybrid -DskipTests package
       - name: Execute hybrid guest
@@ -100,7 +100,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: maven
       - name: Verify exact source tree
-        run: test "$(git -C .. rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+        run: actual="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)"; expected="$(cat ../SOURCE_TREE.txt)"; printf 'expected-tree: %s actual-tree: %s\n' "$expected" "$actual"; test "$actual" = "$expected"
       - name: Build polyglot isolate library
         run: mvn -B -ntp -Pnative-isolate -DskipTests package
       - name: Locate isolate library
