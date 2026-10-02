@@ -849,8 +849,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (option.present()) releaseMutexGuardsInValue(option.value(), failed, seen);
                 return;
             }
-            if (value instanceof CompletionStage<?> stage) {
-                var future = stage.toCompletableFuture();
+            if (value instanceof OresMutex.GuardFuture<?> future) {
                 if (!future.isDone()) {
                     future.cancel(true);
                     return;
@@ -860,8 +859,18 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 return;
             }
+            if (value instanceof OresObject object) {
+                for (Object field : object.fields.values()) {
+                    releaseMutexGuardsInValue(field, failed, seen);
+                }
+                return;
+            }
             if (value instanceof List<?> list) {
                 for (Object item : list) releaseMutexGuardsInValue(item, failed, seen);
+                return;
+            }
+            if (value instanceof Set<?> set) {
+                for (Object item : set) releaseMutexGuardsInValue(item, failed, seen);
                 return;
             }
             if (value instanceof Map<?, ?> map) {

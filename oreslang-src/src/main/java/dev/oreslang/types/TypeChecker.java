@@ -529,6 +529,10 @@ public final class TypeChecker {
                 if (call.typeArgumentsPresent()) throw new IllegalArgumentException(factory.name() + ".new does not accept call-site type arguments");
                 if (call.arguments().size() != 1) throw new IllegalArgumentException(factory.name() + ".new expects exactly one value");
                 Type element = typeOf(call.arguments().getFirst(), env, generics, self);
+                if (element instanceof Borrow) {
+                    throw new IllegalArgumentException(
+                            factory.name() + "<T> requires owned data; borrowed values cannot become mutex state");
+                }
                 if (factory.name().equals("SharedMutex") && !isSharedSafe(element, new LinkedHashSet<>(), Map.of())) {
                     throw new IllegalArgumentException(
                             "SharedMutex<T> requires shared-safe owned data; borrows, Mutex, MutexGuard, Future, closures, and unresolved generic/dynamic values are not shareable");
@@ -837,6 +841,10 @@ public final class TypeChecker {
             return bound != null && bound != type && isSharedSafe(bound, seen, genericBindings);
         }
         if (type instanceof ListType list) return isSharedSafe(list.element(), seen, genericBindings);
+        if (type instanceof Union union) {
+            for (Type option : union.options()) if (!isSharedSafe(option, seen, genericBindings)) return false;
+            return true;
+        }
         if (type instanceof Tuple tuple) {
             for (Type element : tuple.elements()) if (!isSharedSafe(element, seen, genericBindings)) return false;
             return true;
@@ -907,6 +915,18 @@ public final class TypeChecker {
         if (type instanceof ListType list) return new ListType(resolveSharedGeneric(list.element(), bindings));
         if (type instanceof Tuple tuple) {
             return new Tuple(tuple.elements().stream().map(element -> resolveSharedGeneric(element, bindings)).toList());
+        }
+        if (type instanceof Union union) {
+            return Types.unionOf(union.options().stream()
+                    .map(option -> resolveSharedGeneric(option, bindings))
+                    .toList());
+        }
+        if (type instanceof Record record) {
+            Map<String, Type> members = new LinkedHashMap<>();
+            for (Map.Entry<String, Type> entry : record.members().entrySet()) {
+                members.put(entry.getKey(), resolveSharedGeneric(entry.getValue(), bindings));
+            }
+            return new Record(members);
         }
         return type;
     }
@@ -1480,11 +1500,20 @@ public final class TypeChecker {
             }
             case "MutexGuard" -> throw new IllegalArgumentException(
                     "MutexGuard<T> is compiler-managed and cannot be named in source declarations; acquire it from lock()/try_lock()/lock_async()");
-            case "Mutex", "Future" -> {
-                if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException(ref.name() + " requires exactly one explicit type argument");
+            case "Mutex" -> {
+                if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Mutex requires exactly one explicit type argument");
                 Type element = resolve(ref.arguments().getFirst(), generics, self);
-                if (element == Primitive.VOID) throw new IllegalArgumentException(ref.name() + "<void> is invalid");
-                yield new Named(ref.name(), List.of(element));
+                if (element == Primitive.VOID) throw new IllegalArgumentException("Mutex<void> is invalid");
+                if (element instanceof Borrow) {
+                    throw new IllegalArgumentException("Mutex<T> requires an owned value type; borrowed payload types are invalid");
+                }
+                yield new Named("Mutex", List.of(element));
+            }
+            case "Future" -> {
+                if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Future requires exactly one explicit type argument");
+                Type element = resolve(ref.arguments().getFirst(), generics, self);
+                if (element == Primitive.VOID) throw new IllegalArgumentException("Future<void> is invalid");
+                yield new Named("Future", List.of(element));
             }
             case "SharedMutex" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("SharedMutex requires exactly one explicit type argument");
