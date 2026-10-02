@@ -277,8 +277,10 @@ public final class ActorRuntime implements AutoCloseable {
                 bindSharedMutexes(frozen);
             }
             if (!cell.enqueueReserved(frozen)) {
-                throw new IllegalStateException(
-                        "actor terminated before message admission for " + ref.id());
+                // The cell can terminate after the registry lookup but before
+                // admission. Preserve one stable dead-ref contract across that
+                // race instead of exposing an implementation-timing error.
+                throw new IllegalStateException("unknown actor " + ref.id());
             }
             enqueued = true;
         } finally {

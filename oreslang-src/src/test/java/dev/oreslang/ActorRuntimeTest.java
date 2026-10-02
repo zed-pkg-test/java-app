@@ -395,7 +395,8 @@ final class ActorRuntimeTest {
             sender.join();
 
             assertInstanceOf(IllegalStateException.class, senderFailure.get());
-            assertTrue(senderFailure.get().getMessage().contains("terminated before message admission"));
+            assertTrue(senderFailure.get().getMessage().contains("unknown actor"),
+                    "a send racing actor termination should expose the same stable dead-ref contract");
         }
     }
 

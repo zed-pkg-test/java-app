@@ -23,7 +23,7 @@ jobs:
           distribution: 'graalvm'
       - name: Diagnostics
         run: |
-          echo "Pinned source: ec30306dc9709a997ba3e3f74e3f643cae87a294"
+          echo "Pinned source: 812f98c25050cb85b54ad7142b496eb5de1c2a6d"
           java --version
           mvn --version
       - name: Focused generics and operators tests
