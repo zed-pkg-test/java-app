@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -95,6 +96,15 @@ public final class ActorRuntime implements AutoCloseable {
     public static Object currentExecutionDomain() {
         ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
         return current == null ? Thread.currentThread() : current.executionDomain();
+    }
+
+    /**
+     * Stable actor execution domain for actor-local runtime services, or null
+     * when the caller is not currently inside an actor mailbox turn.
+     */
+    public static Object currentActorExecutionDomain() {
+        ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
+        return current == null ? null : current.executionDomain();
     }
 
     public enum ActorKind { PRIVATE, SHARED }
@@ -186,6 +196,7 @@ public final class ActorRuntime implements AutoCloseable {
     private final IsolatePolicy policyCeiling;
     private final DispatcherConfig dispatcherConfig;
     private final TurnExecutor turnExecutor;
+    private volatile Consumer<Object> actorExitHook = ignored -> { };
     private final ExecutorService privateDispatcher;
     private final ExecutorService sharedDispatcher;
     private final ThreadLocal<ActorCell<?>> currentActor = new ThreadLocal<>();
@@ -234,6 +245,15 @@ public final class ActorRuntime implements AutoCloseable {
     public IsolatePolicy policyCeiling() { return policyCeiling; }
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
     public int maxActors() { return dispatcherConfig.maxActors(); }
+
+    /**
+     * Installs a host-owned hook invoked exactly once when an actor execution
+     * domain is retired. Guest code cannot mutate this hook.
+     */
+    public void setActorExitHook(Consumer<Object> actorExitHook) {
+        if (closed.get()) throw new IllegalStateException("actor runtime is closed");
+        this.actorExitHook = Objects.requireNonNull(actorExitHook, "actorExitHook");
+    }
     public int actorCount() { return actorCount.get(); }
     public long privateMemoryBytes() { return privateMemoryBytes.get(); }
     public long sharedMemoryBytes() { return sharedMemoryBytes.get(); }
@@ -1418,7 +1438,10 @@ public final class ActorRuntime implements AutoCloseable {
                 policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex host send");
             }
             target.policy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex actor receive");
-            requireOwnedActorRefs(sharedMutex.transportValue(), new IdentityHashMap<>(), depth + 1);
+            requireSharedMutexPayloadSafe(
+                    sharedMutex.transportValue(),
+                    new IdentityHashMap<>(),
+                    depth + 1);
             return;
         }
         if (value instanceof Shared<?> shared) {
@@ -1445,6 +1468,92 @@ public final class ActorRuntime implements AutoCloseable {
                     requireMutexTransport(target, Array.get(value, i), visiting, depth + 1);
                 }
             }
+        } finally {
+            visiting.remove(value);
+        }
+    }
+
+    private void requireSharedMutexPayloadSafe(
+            Object value,
+            IdentityHashMap<Object, Boolean> visiting,
+            int depth) {
+        requireGraphDepth(depth);
+        if (value == null || isScalar(value)) return;
+
+        if (value instanceof ActorRuntime.ActorRef<?> ref) {
+            if (!ref.ownedBy(this)) {
+                throw new IllegalArgumentException(
+                        "SharedMutex payload contains ActorRef from another ActorRuntime");
+            }
+            return;
+        }
+        if (value instanceof Shared<?> shared) {
+            if (!shared.ownedBy(this)) {
+                throw new IllegalArgumentException(
+                        "SharedMutex payload contains Shared value from another ActorRuntime");
+            }
+            requireSharedMutexPayloadSafe(shared.value(), visiting, depth + 1);
+            return;
+        }
+        if (value instanceof OresMutex.Shared<?> nested) {
+            if (visiting.put(value, Boolean.TRUE) != null) {
+                throw new IllegalArgumentException("cyclic SharedMutex payload is not runtime-shared-safe");
+            }
+            try {
+                requireSharedMutexPayloadSafe(nested.transportValue(), visiting, depth + 1);
+            } finally {
+                visiting.remove(value);
+            }
+            return;
+        }
+        if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
+            throw new IllegalArgumentException(
+                    "SharedMutex payload cannot contain actor-local mutex state");
+        }
+        if (value instanceof SyncCell<?>) {
+            throw new IllegalArgumentException(
+                    "SharedMutex payload cannot contain SyncCell writable shared state");
+        }
+        if (value instanceof java.util.concurrent.CompletionStage<?>) {
+            throw new IllegalArgumentException(
+                    "SharedMutex payload cannot contain pending/asynchronous computation state");
+        }
+
+        if (visiting.put(value, Boolean.TRUE) != null) {
+            throw new IllegalArgumentException("cyclic SharedMutex payload is not runtime-shared-safe");
+        }
+        try {
+            if (value instanceof OresMutex.SharedState aggregate) {
+                for (Object child : aggregate.sharedStateChildren()) {
+                    requireSharedMutexPayloadSafe(child, visiting, depth + 1);
+                }
+                return;
+            }
+            if (value instanceof List<?> list) {
+                for (Object item : list) requireSharedMutexPayloadSafe(item, visiting, depth + 1);
+                return;
+            }
+            if (value instanceof Set<?> set) {
+                for (Object item : set) requireSharedMutexPayloadSafe(item, visiting, depth + 1);
+                return;
+            }
+            if (value instanceof Map<?, ?> map) {
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    requireSharedMutexPayloadSafe(entry.getKey(), visiting, depth + 1);
+                    requireSharedMutexPayloadSafe(entry.getValue(), visiting, depth + 1);
+                }
+                return;
+            }
+            if (value.getClass().isArray()) {
+                int length = Array.getLength(value);
+                for (int i = 0; i < length; i++) {
+                    requireSharedMutexPayloadSafe(Array.get(value, i), visiting, depth + 1);
+                }
+                return;
+            }
+            throw new IllegalArgumentException(
+                    "SharedMutex payload contains opaque host value of type "
+                            + value.getClass().getName());
         } finally {
             visiting.remove(value);
         }
@@ -1589,7 +1698,17 @@ public final class ActorRuntime implements AutoCloseable {
                 || value instanceof ActorRuntime.ActorRef<?>
                 || value instanceof SyncCell<?>) return;
         if (value instanceof OresMutex.Shared<?> sharedMutex) {
-            out.add(sharedMutex);
+            if (!out.add(sharedMutex)) return;
+            if (visiting.put(value, Boolean.TRUE) != null) return;
+            try {
+                collectSharedMutexes(
+                        sharedMutex.transportValue(),
+                        out,
+                        visiting,
+                        depth + 1);
+            } finally {
+                visiting.remove(value);
+            }
             return;
         }
         if (value instanceof Shared<?> shared) {
@@ -2374,6 +2493,14 @@ public final class ActorRuntime implements AutoCloseable {
             finalized = true;
             drainMailboxReservations();
             if (memorySlice != null) memorySlice.close();
+            try {
+                actorExitHook.accept(executionDomain);
+            } catch (VirtualMachineError | ThreadDeath fatal) {
+                throw fatal;
+            } catch (Throwable ignored) {
+                // Actor termination must still complete. Runtime cleanup hooks
+                // are best-effort and retryable by the process collector.
+            }
             unregisterActor(this);
             lifecycleLock.notifyAll();
         }

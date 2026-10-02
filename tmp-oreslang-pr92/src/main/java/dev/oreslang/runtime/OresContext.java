@@ -23,6 +23,7 @@ public final class OresContext implements AutoCloseable {
     private final BufferedReader input;
     private final PrintWriter output;
     private final ActorRuntime actors;
+    private final RuntimeGarbageCollector garbageCollector;
     private final UUID contextId = UUID.randomUUID();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
     private final IsolatePolicy isolatePolicy;
@@ -41,6 +42,8 @@ public final class OresContext implements AutoCloseable {
                 isolatePolicy,
                 ActorRuntime.DispatcherConfig.defaults(),
                 this::executeActorTurn);
+        this.garbageCollector = new RuntimeGarbageCollector();
+        this.actors.setActorExitHook(garbageCollector::retireActorDomain);
     }
 
     public static OresContext get(Node node) {
@@ -52,11 +55,17 @@ public final class OresContext implements AutoCloseable {
     public BufferedReader input() { return input; }
     public PrintWriter output() { return output; }
     public ActorRuntime actors() { return actors; }
+    public RuntimeGarbageCollector garbageCollector() { return garbageCollector; }
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
     public ExecutionProfile executionProfile() { return executionProfile; }
 
     public void requireCapability(IsolatePolicy.Capability capability, String api) {
+        IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
+        if (actorPolicy != null && ActorRuntime.currentActorRuntime() != actors) {
+            throw new SecurityException(
+                    "actor capability check crossed ActorRuntime boundary for " + api);
+        }
         requireEffectiveCapability(isolatePolicy, capability, api);
     }
 
@@ -138,10 +147,14 @@ public final class OresContext implements AutoCloseable {
 
     @Override
     public void close() {
-        actors.close();
-        synchronized (this) {
-            linkedCodeUnits.clear();
+        try {
+            actors.close();
+        } finally {
+            synchronized (this) {
+                linkedCodeUnits.clear();
+            }
+            garbageCollector.close();
+            output.flush();
         }
-        output.flush();
     }
 }
