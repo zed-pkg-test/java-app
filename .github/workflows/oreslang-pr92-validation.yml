@@ -1,0 +1,30 @@
+name: oreslang PR92 validation
+
+on:
+  push:
+    branches:
+      - test/oreslang-pr92-circular-imports
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: tmp-oreslang-pr92/pom.xml
+      - name: Circular import focused test
+        run: mvn --batch-mode --no-transfer-progress -f tmp-oreslang-pr92/pom.xml -Dtest=CircularImportInitializationTest test
+      - name: Execute circular import demo
+        run: |
+          out="$(mvn -q -f tmp-oreslang-pr92/pom.xml -DskipTests exec:java -Dexec.args="tmp-oreslang-pr92/examples/circular_imports/a.ores")"
+          test "$out" = "init-a:B|init-b:A|main:AB"
