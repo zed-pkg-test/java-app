@@ -34,6 +34,18 @@ jobs:
         run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
       - name: Run together example
         run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
+      - name: Run demo generics and operator examples
+        shell: bash
+        run: |
+          for example in \
+            ../demo-examples/11_generics_and_inference.ores \
+            ../demo-examples/12_generic_inheritance.ores \
+            ../demo-examples/13_logical_operators.ores \
+            ../demo-examples/14_bitwise_operators.ores
+          do
+            echo "==> $example"
+            mvn -B -ntp -DskipTests exec:java -Dexec.args="$example"
+          done
 
   native-aot:
     runs-on: ubuntu-latest
