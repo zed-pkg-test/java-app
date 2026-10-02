@@ -1,0 +1,16 @@
+namespace bitwise_operators_demo;
+
+pub routine main() => void {
+  stdio.println(5 & 3);
+  stdio.println(5 | 2);
+  stdio.println(5 ^ 3);
+  stdio.println(~0);
+
+  stdio.println(1 << 4);
+  stdio.println(-8 >> 2);
+  stdio.println(-1 >>> 1);
+
+  stdio.println(1 | 2 & 4);
+
+  return;
+}
