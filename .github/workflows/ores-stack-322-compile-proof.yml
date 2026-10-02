@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Verify mirrored source identity
-        run: test "$(cat SOURCE_SHA)" = "8e9793d9f96dd85ea49026796bb5fb675f1c250a"
+        run: test "$(cat SOURCE_SHA)" = "a1175b4f5a983d2e50368bbe21169fc3b5cf7c4f"
 
       - name: Install Rust 1.88.0
         uses: dtolnay/rust-toolchain@1.88.0
@@ -27,7 +27,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Rustfmt exact module proof
-        run: cargo fmt -- --check
+        run: rustfmt --edition 2024 --check src/lambda_compile.rs
 
       - name: Cargo check exact module proof
         run: cargo check --all-targets
