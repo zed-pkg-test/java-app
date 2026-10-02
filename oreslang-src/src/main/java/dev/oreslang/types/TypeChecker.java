@@ -258,6 +258,12 @@ public final class TypeChecker {
                     rejectStaticClassGenericReference(param.type(), classGenerics, klass, method);
                 }
                 rejectStaticClassGenericReference(method.returnType(), classGenerics, klass, method);
+                for (Ast.Annotation annotation : method.annotations()) {
+                    for (Ast.TypeRef argument : annotation.arguments()) {
+                        rejectStaticClassGenericReference(argument, classGenerics, klass, method);
+                    }
+                }
+                rejectStaticClassGenericReferences(method.body(), classGenerics, klass, method);
             }
 
             if (method.explicitReceiverType() != null) {
@@ -1416,6 +1422,108 @@ public final class TypeChecker {
             return substituteGenerics(shape, classGenericBindings(klass, named));
         }
         throw new IllegalArgumentException("@Structural requires a known class or interface type, got '" + param.type().name() + "'");
+    }
+
+    private void rejectStaticClassGenericReferences(
+            List<Ast.Stmt> statements,
+            Set<String> classGenerics,
+            Ast.ClassDecl klass,
+            Ast.MethodDecl method) {
+        for (Ast.Stmt statement : statements) {
+            if (statement instanceof Ast.BindingStmt binding) {
+                rejectStaticClassGenericReference(binding.declaredType(), classGenerics, klass, method);
+                rejectStaticClassGenericReferences(binding.initializer(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.DestructureStmt destructure) {
+                rejectStaticClassGenericReferences(destructure.initializer(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.ReturnStmt returned) {
+                rejectStaticClassGenericReferences(returned.value(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.ExprStmt expression) {
+                rejectStaticClassGenericReferences(expression.expression(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.DeferStmt defer) {
+                rejectStaticClassGenericReferences(defer.expression(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.IfStmt conditional) {
+                for (Ast.IfBranch branch : conditional.branches()) {
+                    rejectStaticClassGenericReferences(branch.condition(), classGenerics, klass, method);
+                    rejectStaticClassGenericReferences(branch.body(), classGenerics, klass, method);
+                }
+                rejectStaticClassGenericReferences(conditional.elseBody(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.TryStmt attempted) {
+                rejectStaticClassGenericReferences(attempted.body(), classGenerics, klass, method);
+                rejectStaticClassGenericReferences(attempted.catchBody(), classGenerics, klass, method);
+                rejectStaticClassGenericReferences(attempted.finallyBody(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.ForOfStmt loop) {
+                rejectStaticClassGenericReferences(loop.iterable(), classGenerics, klass, method);
+                rejectStaticClassGenericReferences(loop.body(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.ForStmt loop) {
+                if (loop.initializer() != null) {
+                    rejectStaticClassGenericReferences(List.of(loop.initializer()), classGenerics, klass, method);
+                }
+                rejectStaticClassGenericReferences(loop.condition(), classGenerics, klass, method);
+                rejectStaticClassGenericReferences(loop.update(), classGenerics, klass, method);
+                rejectStaticClassGenericReferences(loop.body(), classGenerics, klass, method);
+            }
+        }
+    }
+
+    private void rejectStaticClassGenericReferences(
+            Ast.Expr expression,
+            Set<String> classGenerics,
+            Ast.ClassDecl klass,
+            Ast.MethodDecl method) {
+        if (expression == null) return;
+        if (expression instanceof Ast.AssignExpr assignment) {
+            rejectStaticClassGenericReferences(assignment.target(), classGenerics, klass, method);
+            rejectStaticClassGenericReferences(assignment.value(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.BinaryExpr binary) {
+            rejectStaticClassGenericReferences(binary.left(), classGenerics, klass, method);
+            rejectStaticClassGenericReferences(binary.right(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.UnaryExpr unary) {
+            rejectStaticClassGenericReferences(unary.operand(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.ConditionalExpr conditional) {
+            rejectStaticClassGenericReferences(conditional.condition(), classGenerics, klass, method);
+            rejectStaticClassGenericReferences(conditional.whenTrue(), classGenerics, klass, method);
+            rejectStaticClassGenericReferences(conditional.whenFalse(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.CallExpr call) {
+            for (Ast.TypeRef argument : call.typeArguments()) {
+                rejectStaticClassGenericReference(argument, classGenerics, klass, method);
+            }
+            rejectStaticClassGenericReferences(call.callee(), classGenerics, klass, method);
+            for (Ast.Expr argument : call.arguments()) {
+                rejectStaticClassGenericReferences(argument, classGenerics, klass, method);
+            }
+        } else if (expression instanceof Ast.MemberExpr member) {
+            rejectStaticClassGenericReferences(member.receiver(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.IndexExpr indexed) {
+            rejectStaticClassGenericReferences(indexed.receiver(), classGenerics, klass, method);
+            rejectStaticClassGenericReferences(indexed.index(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.NewExpr created) {
+            rejectStaticClassGenericReference(created.type(), classGenerics, klass, method);
+            for (Ast.Expr argument : created.arguments()) {
+                rejectStaticClassGenericReferences(argument, classGenerics, klass, method);
+            }
+        } else if (expression instanceof Ast.AwaitExpr awaited) {
+            rejectStaticClassGenericReferences(awaited.expression(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.ListExpr list) {
+            for (Ast.Expr item : list.elements()) {
+                rejectStaticClassGenericReferences(item, classGenerics, klass, method);
+            }
+        } else if (expression instanceof Ast.TupleExpr tuple) {
+            for (Ast.Expr item : tuple.elements()) {
+                rejectStaticClassGenericReferences(item, classGenerics, klass, method);
+            }
+        } else if (expression instanceof Ast.ObjectExpr object) {
+            for (Ast.ObjectField field : object.fields()) {
+                rejectStaticClassGenericReferences(field.value(), classGenerics, klass, method);
+            }
+        } else if (expression instanceof Ast.LambdaExpr lambda) {
+            for (Ast.Param param : lambda.parameters()) {
+                rejectStaticClassGenericReference(param.type(), classGenerics, klass, method);
+            }
+            rejectStaticClassGenericReferences(lambda.expressionBody(), classGenerics, klass, method);
+            if (lambda.blockBody() != null) {
+                rejectStaticClassGenericReferences(lambda.blockBody(), classGenerics, klass, method);
+            }
+        }
     }
 
     private void rejectStaticClassGenericReference(

@@ -389,6 +389,19 @@ final class GenericsAndOperatorsHardeningTest {
                         end
                         """)));
         assertTrue(captured.getMessage().contains("cannot reference enclosing class generic"));
+
+        IllegalArgumentException bodyCapture = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          define class Bad<T>
+                            pub static fnc leakInside() => void {
+                              val T value = process.dynamic;
+                              return;
+                            }
+                          end
+                        end
+                        """)));
+        assertTrue(bodyCapture.getMessage().contains("cannot reference enclosing class generic"));
     }
 
     @Test
