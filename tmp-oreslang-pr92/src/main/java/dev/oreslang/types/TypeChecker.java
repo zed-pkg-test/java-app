@@ -47,6 +47,7 @@ public final class TypeChecker {
     private final Set<String> ambiguousTypeAliases = new HashSet<>();
     private final Set<String> importedValues = new HashSet<>();
     private final Set<Ast.TypeAliasDecl> resolvingAliases = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
 
     public static Ast.Program check(Ast.Program program) {
         TypeChecker checker = new TypeChecker();
@@ -193,10 +194,9 @@ public final class TypeChecker {
     }
 
     private void checkFunction(String module, Ast.FunctionDecl fn) {
-        if (module.equals(Parser.ROOT_MODULE) && fn.name().equals("init")) {
+        if (fn.name().equals("init")) {
             Ast.TypeRef initReturn = fn.returnType();
-            if (fn.kind() != Ast.CallableKind.FNC
-                    || fn.visibility() != Ast.Visibility.PRIVATE
+            if (fn.visibility() != Ast.Visibility.PRIVATE
                     || fn.async()
                     || fn.nonLexical()
                     || fn.actorKind() != Ast.ActorKind.NONE
@@ -207,7 +207,8 @@ public final class TypeChecker {
                     || !initReturn.arguments().isEmpty()
                     || initReturn.inferArguments()) {
                 throw new IllegalArgumentException(
-                        "file init hook must be exactly 'fnc init() => void' (private, synchronous, non-actor, non-generic)");
+                        "init hook must be a private synchronous non-actor non-generic zero-arity "
+                                + "fnc/routine returning void");
             }
         }
         if (fn.name().equals("main") && fn.actorKind() != Ast.ActorKind.NONE) {
@@ -218,7 +219,13 @@ public final class TypeChecker {
         Env env = new Env(null, fn.nonLexical());
         for (Ast.Param param : fn.parameters()) env.define(param.name(), resolveParam(param, generics, null), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
         Type returns = resolve(fn.returnType(), generics, null);
-        checkBlock(fn.body(), env, generics, returns, null);
+        Ast.ActorKind previousActorKind = currentActorKind;
+        currentActorKind = fn.actorKind();
+        try {
+            checkBlock(fn.body(), env, generics, returns, null);
+        } finally {
+            currentActorKind = previousActorKind;
+        }
         if (returns != Primitive.VOID && !definitelyReturns(fn.body())) {
             throw new IllegalArgumentException("non-void " + fn.kind().name().toLowerCase() + " '" + module + "." + fn.name() + "' must explicitly return on every path");
         }
@@ -317,7 +324,13 @@ public final class TypeChecker {
             if (!method.isStatic()) env.define("self", self, Ast.BindingKind.VAL);
             for (Ast.Param param : method.parameters()) env.define(param.name(), resolveParam(param, generics, callableSelf), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             Type returns = resolve(method.returnType(), generics, callableSelf);
-            checkBlock(method.body(), env, generics, returns, callableSelf);
+            Ast.ActorKind previousActorKind = currentActorKind;
+            currentActorKind = method.isStatic() ? Ast.ActorKind.NONE : klass.actorKind();
+            try {
+                checkBlock(method.body(), env, generics, returns, callableSelf);
+            } finally {
+                currentActorKind = previousActorKind;
+            }
             if (!method.isAbstract() && returns != Primitive.VOID && !definitelyReturns(method.body())) {
                 String label = method.isStatic() ? "static function" : "method";
                 throw new IllegalArgumentException("non-void " + label + " '" + module + "." + klass.name() + "." + method.name() + "' must explicitly return on every path");
@@ -449,7 +462,7 @@ public final class TypeChecker {
         if (expr instanceof Ast.NameExpr name) {
             Env.Binding local = env.lookup(name.name());
             if (local != null) return local.type();
-            if (name.name().equals("stdio") || name.name().equals("process")) return new Named(name.name(), List.of());
+            if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("actor")) return new Named(name.name(), List.of());
             if (name.name().equals("Mutex") || name.name().equals("SharedMutex")) return new Named("$" + name.name() + "Factory", List.of());
             if (name.name().equals("print")) return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             if (name.name().equals("None")) return new Named("Option", List.of(Unknown.INSTANCE));
@@ -546,6 +559,20 @@ public final class TypeChecker {
             };
         }
         if (expr instanceof Ast.CallExpr call) {
+            if (call.callee() instanceof Ast.NameExpr name
+                    && name.name().equals("init")
+                    && env.lookup("init") == null
+                    && functionOwners.keySet().stream().anyMatch(fn -> fn.name().equals("init"))) {
+                throw new IllegalArgumentException(
+                        "init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
+            }
+            if (call.callee() instanceof Ast.MemberExpr member
+                    && member.member().equals("init")
+                    && member.receiver() instanceof Ast.NameExpr namespace
+                    && modules.containsKey(namespace.name())) {
+                throw new IllegalArgumentException(
+                        "module init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
+            }
             if (call.callee() instanceof Ast.NameExpr functionName) {
                 Ast.FunctionDecl target = findFunction(functionName.name());
                 if (target != null) {
@@ -642,6 +669,12 @@ public final class TypeChecker {
                             label);
                 }
                 if (receiver instanceof Named named) {
+                    if (named.name().equals("SharedMutex")
+                            && currentActorKind != Ast.ActorKind.NONE
+                            && member.member().equals("with_lock")) {
+                        throw new IllegalArgumentException(
+                                "actor code cannot use blocking SharedMutex.with_lock(); use try_lock() or await lock_async()");
+                    }
                     if ((named.name().equals("Mutex") || named.name().equals("SharedMutex"))
                             && named.arguments().size() == 1
                             && (member.member().equals("with_lock") || member.member().equals("recover"))) {
@@ -729,7 +762,8 @@ public final class TypeChecker {
             if (receiver instanceof Named named && named.name().equals("stdio.stdout") && member.member().equals("write")) {
                 return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             }
-            if (member.receiver() instanceof Ast.NameExpr name && name.name().equals("process")) return Unknown.INSTANCE;
+            if (member.receiver() instanceof Ast.NameExpr name
+                    && (name.name().equals("process") || name.name().equals("actor"))) return Unknown.INSTANCE;
             if (member.receiver() instanceof Ast.NameExpr name && importedValues.contains(name.name())) return Unknown.INSTANCE;
 
             if (receiver instanceof ClassNamespace classNamespace) {
@@ -1154,6 +1188,13 @@ public final class TypeChecker {
         if (!(receiver instanceof Named named) || named.arguments().size() != 1) return null;
         Type element = named.arguments().getFirst();
         if (named.name().equals("Mutex") || named.name().equals("SharedMutex")) {
+            if (named.name().equals("SharedMutex")
+                    && currentActorKind != Ast.ActorKind.NONE
+                    && (member.equals("lock") || member.equals("with_lock"))) {
+                throw new IllegalArgumentException(
+                        "actor code cannot use blocking SharedMutex." + member
+                                + "(); use try_lock() or await lock_async()");
+            }
             Type guard = new Named("MutexGuard", List.of(element));
             return switch (member) {
                 case "lock" -> new Function(List.of(), guard);
