@@ -1,0 +1,33 @@
+name: oreslang PR97 exact validation
+
+on:
+  push:
+    branches:
+      - test/oreslang-pr97-load-init
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Runtime diagnostics
+        run: |
+          java --version
+          mvn --version
+      - name: Exact full suite
+        run: mvn --batch-mode --no-transfer-progress -f tmp-oreslang-pr92/pom.xml verify
+      - name: Lifecycle focused tests
+        run: mvn --batch-mode --no-transfer-progress -f tmp-oreslang-pr92/pom.xml -Dtest=InitializationBarrierTest,CircularImportInitializationTest test
