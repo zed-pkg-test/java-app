@@ -13,6 +13,7 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -25,6 +26,7 @@ public final class OresContext implements AutoCloseable {
     private final PrintWriter output;
     private final ActorRuntime actors;
     private final UUID contextId = UUID.randomUUID();
+    private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
     private final Map<Object, Object> contextLocals = new LinkedHashMap<>();
     private final Set<Object> contextLocalInitializing = new LinkedHashSet<>();
@@ -67,6 +69,7 @@ public final class OresContext implements AutoCloseable {
      */
     @SuppressWarnings("unchecked")
     public synchronized <T> T contextLocal(Object key, Supplier<? extends T> initializer) {
+        requireOpen();
         java.util.Objects.requireNonNull(key, "context-local key");
         java.util.Objects.requireNonNull(initializer, "context-local initializer");
         if (contextLocals.containsKey(key)) return (T) contextLocals.get(key);
@@ -83,7 +86,12 @@ public final class OresContext implements AutoCloseable {
     }
 
     public void requireCapability(IsolatePolicy.Capability capability, String api) {
+        requireOpen();
         isolatePolicy.require(capability, api);
+    }
+
+    private void requireOpen() {
+        if (closed.get()) throw new ExecutionTerminated("Oreslang context is closing");
     }
 
     /**
@@ -122,6 +130,7 @@ public final class OresContext implements AutoCloseable {
 
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) return;
         actors.close();
         synchronized (this) {
             contextLocals.clear();
