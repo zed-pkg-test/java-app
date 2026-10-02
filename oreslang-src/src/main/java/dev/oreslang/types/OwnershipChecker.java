@@ -351,8 +351,8 @@ public final class OwnershipChecker {
                     if (klass != null) {
                         ResolvedField target = findFieldTarget(klass, concreteReceiver, member.member(), new LinkedHashSet<>());
                         if (target != null) {
-                            Ast.TypeRef fieldType = substituteType(
-                                    target.field().type(),
+                            Ast.TypeRef fieldType = resolvedFieldType(
+                                    target.field(),
                                     genericBindings(target.owner().genericParameters(), target.ownerType().arguments()));
                             if (!isCopyType(fieldType)) {
                                 throw error("cannot extract move-only field '" + target.owner().name() + "." + member.member()
@@ -375,8 +375,8 @@ public final class OwnershipChecker {
             if (klass != null) {
                 ResolvedField target = findFieldTarget(klass, concreteReceiver, member.member(), new LinkedHashSet<>());
                 if (target != null) {
-                    Ast.TypeRef fieldType = substituteType(
-                            target.field().type(),
+                    Ast.TypeRef fieldType = resolvedFieldType(
+                            target.field(),
                             genericBindings(target.owner().genericParameters(), target.ownerType().arguments()));
                     ValueKind fieldKind = kindOfType(fieldType);
                     if (consuming && isRootedAtActorSelf(member.receiver(), scope) && fieldKind != ValueKind.COPY) {
@@ -898,6 +898,18 @@ public final class OwnershipChecker {
         if (names.size() != arguments.size()) return result;
         for (int i = 0; i < names.size(); i++) result.put(names.get(i), arguments.get(i));
         return result;
+    }
+
+    private Ast.TypeRef resolvedFieldType(Ast.FieldDecl field, Map<String, Ast.TypeRef> bindings) {
+        Ast.TypeRef declared = field.type();
+        if (declared == null || declared.name().equals("$infer$")) {
+            if (field.initializer() instanceof Ast.LiteralExpr literal) {
+                declared = inferLiteralType(literal.value());
+            } else {
+                declared = Ast.TypeRef.inferred();
+            }
+        }
+        return substituteType(declared, bindings);
     }
 
     private Ast.TypeRef substituteType(Ast.TypeRef type, Map<String, Ast.TypeRef> bindings) {

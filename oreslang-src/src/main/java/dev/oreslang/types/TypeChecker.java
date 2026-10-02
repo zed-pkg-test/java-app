@@ -554,7 +554,13 @@ public final class TypeChecker {
                     requireAssignable(right, Primitive.BOOL, "logical operand");
                     yield Primitive.BOOL;
                 }
-                case "&", "|", "^", "<<", ">>", ">>>" -> {
+                case "|" -> {
+                    if (left == Primitive.BOOL && right == Primitive.BOOL) yield Primitive.BOOL;
+                    requireInteger(left, "bitwise left operand");
+                    requireInteger(right, "bitwise right operand");
+                    yield Primitive.INT;
+                }
+                case "&", "^", "<<", ">>", ">>>" -> {
                     requireInteger(left, "bitwise left operand");
                     requireInteger(right, "bitwise right operand");
                     yield Primitive.INT;

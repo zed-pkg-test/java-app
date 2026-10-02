@@ -319,13 +319,25 @@ public final class OresEvalRootNode extends RootNode {
                 Object value = eval(unary.operand(), env);
                 return switch (unary.operator()) {
                     case "&", "&mut" -> value;
-                    case "!" -> !truth(value); case "+" -> value; case "-" -> negate(value);
+                    case "!" -> !truth(value);
+                    case "+" -> value;
+                    case "-" -> negate(value);
+                    case "~" -> ~integral(value, "unary ~");
                     default -> throw new IllegalArgumentException("unsupported unary operator " + unary.operator());
                 };
             }
             if (expr instanceof Ast.BinaryExpr binary) {
-                if (binary.operator().equals(",")) return truth(eval(binary.left(), env)) && truth(eval(binary.right(), env));
-                if (binary.operator().equals("|")) return truth(eval(binary.left(), env)) || truth(eval(binary.right(), env));
+                if (binary.operator().equals("&&")) {
+                    Object left = eval(binary.left(), env);
+                    return truth(left) && truth(eval(binary.right(), env));
+                }
+                if (binary.operator().equals("||")) {
+                    Object left = eval(binary.left(), env);
+                    return truth(left) || truth(eval(binary.right(), env));
+                }
+                if (binary.operator().equals("^^")) {
+                    return truth(eval(binary.left(), env)) ^ truth(eval(binary.right(), env));
+                }
                 return binary(binary.operator(), eval(binary.left(), env), eval(binary.right(), env));
             }
             if (expr instanceof Ast.CallExpr call) {
@@ -686,6 +698,15 @@ public final class OresEvalRootNode extends RootNode {
                 case "==" -> Objects.equals(left, right); case "!=" -> !Objects.equals(left, right);
                 case "<" -> compare(left, right) < 0; case "<=" -> compare(left, right) <= 0;
                 case ">" -> compare(left, right) > 0; case ">=" -> compare(left, right) >= 0;
+                case "|" -> {
+                    if (left instanceof Boolean a && right instanceof Boolean b) yield a || b;
+                    yield integral(left, "bitwise |") | integral(right, "bitwise |");
+                }
+                case "&" -> integral(left, "bitwise &") & integral(right, "bitwise &");
+                case "^" -> integral(left, "bitwise ^") ^ integral(right, "bitwise ^");
+                case "<<" -> integral(left, "bitwise <<") << integral(right, "bitwise <<");
+                case ">>" -> integral(left, "bitwise >>") >> integral(right, "bitwise >>");
+                case ">>>" -> integral(left, "bitwise >>>") >>> integral(right, "bitwise >>>");
                 default -> throw new IllegalArgumentException("unsupported operator " + op);
             };
         }
@@ -724,6 +745,13 @@ public final class OresEvalRootNode extends RootNode {
             if (left instanceof Number a && right instanceof Number b) return Double.compare(a.doubleValue(), b.doubleValue());
             if (left instanceof String a && right instanceof String b) return a.compareTo(b);
             throw new IllegalArgumentException("values are not comparable");
+        }
+
+        private long integral(Object value, String operator) {
+            if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long) {
+                return ((Number) value).longValue();
+            }
+            throw new IllegalArgumentException(operator + " requires integer operands");
         }
 
         private boolean truth(Object value) { if (value instanceof Boolean b) return b; throw new IllegalArgumentException("condition must be bool"); }
