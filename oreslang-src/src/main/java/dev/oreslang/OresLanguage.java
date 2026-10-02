@@ -39,7 +39,20 @@ public final class OresLanguage extends TruffleLanguage<OresContext> {
         String text = source.getCharacters().toString();
         Ast.Program program = OresCompiler.parseAndTypeCheck(text);
         String codeUnitId = source.getPath();
-        if (codeUnitId == null || codeUnitId.isBlank()) codeUnitId = source.getName();
+        if (codeUnitId == null || codeUnitId.isBlank()) {
+            codeUnitId = source.getName();
+        } else {
+            try {
+                codeUnitId = Path.of(codeUnitId)
+                        .toAbsolutePath()
+                        .normalize()
+                        .toString()
+                        .replace('\\', '/');
+            } catch (InvalidPathException invalidPath) {
+                throw new IllegalArgumentException("invalid Oreslang source path identity", invalidPath);
+            }
+        }
+        if (codeUnitId == null || codeUnitId.isBlank()) codeUnitId = "<anonymous>";
         RootCallTarget evaluator = new OresEvalRootNode(this, program, codeUnitId).getCallTarget();
         return new OresInteropRootNode(this, evaluator).getCallTarget();
     }
