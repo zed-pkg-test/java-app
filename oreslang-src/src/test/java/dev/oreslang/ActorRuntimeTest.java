@@ -1,20 +1,58 @@
 package dev.oreslang;
 
 import dev.oreslang.runtime.ActorRuntime;
+import dev.oreslang.runtime.ExecutionTerminated;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresValues;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ActorRuntimeTest {
+    @Test
+    void actorLocalRuntimeStatePersistsPerActorAndNeverAliasesAcrossActors() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            AtomicInteger initializations = new AtomicInteger();
+            Map<ActorRuntime.ActorId, Integer> lastValue = new ConcurrentHashMap<>();
+            CountDownLatch delivered = new CountDownLatch(3);
+
+            java.util.function.Supplier<ActorRuntime.Behavior<String>> factory = () -> (message, context) -> {
+                assertEquals(context.self().id(), context.runtime().currentActorId());
+                AtomicInteger local = context.runtime().currentActorLocal(
+                        "module:test",
+                        () -> {
+                            initializations.incrementAndGet();
+                            return new AtomicInteger();
+                        });
+                lastValue.put(context.self().id(), local.incrementAndGet());
+                delivered.countDown();
+            };
+
+            var first = runtime.<String>spawn(factory);
+            var second = runtime.<String>spawn(factory);
+
+            first.send("one");
+            first.send("two");
+            second.send("one");
+
+            assertTrue(delivered.await(2, TimeUnit.SECONDS));
+            assertEquals(2, initializations.get());
+            assertEquals(2, lastValue.get(first.id()));
+            assertEquals(1, lastValue.get(second.id()));
+        }
+    }
+
     @Test
     void freezesMessagesBeforeDelivery() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
@@ -120,6 +158,74 @@ final class ActorRuntimeTest {
         assertEquals(List.of(1, 2), frozen.value());
         assertThrows(UnsupportedOperationException.class,
                 () -> ((List<Object>) frozen.value()).add(9));
+    }
+
+    @Test
+    void directSendRejectsForeignRuntimeActorRefs() {
+        try (ActorRuntime source = new ActorRuntime();
+             ActorRuntime destination = new ActorRuntime()) {
+            var sourceRef = source.<String>spawn(() -> (message, context) -> { });
+
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> destination.send(sourceRef, "nope"));
+            assertTrue(error.getMessage().contains("different ActorRuntime"));
+        }
+    }
+
+    @Test
+    void actorMessageWallTimeIsEnforcedAtSchedulerSafepoints() throws Exception {
+        IsolatePolicy shortPolicy = new IsolatePolicy(
+                Set.of(),
+                32L * 1024 * 1024,
+                8,
+                Duration.ofMillis(40));
+        try (ActorRuntime runtime = new ActorRuntime(shortPolicy)) {
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch stopped = new CountDownLatch(1);
+
+            var ref = runtime.<String>spawn(shortPolicy, () -> (message, context) -> {
+                started.countDown();
+                try {
+                    while (true) context.runtime().schedulerSafepoint();
+                } finally {
+                    stopped.countDown();
+                }
+            });
+
+            ref.send("run");
+            assertTrue(started.await(1, TimeUnit.SECONDS));
+            assertTrue(stopped.await(1, TimeUnit.SECONDS),
+                    "actor ignored its maxWallTime scheduler deadline");
+        }
+    }
+
+    @Test
+    void runtimeCloseInterruptsAndDrainsCooperativeActors() throws Exception {
+        ActorRuntime runtime = new ActorRuntime(new IsolatePolicy(
+                Set.of(),
+                32L * 1024 * 1024,
+                8,
+                Duration.ofSeconds(1)));
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch stopped = new CountDownLatch(1);
+
+        var ref = runtime.<String>spawn(() -> (message, context) -> {
+            started.countDown();
+            try {
+                while (true) context.runtime().schedulerSafepoint();
+            } finally {
+                stopped.countDown();
+            }
+        });
+        ref.send("run");
+        assertTrue(started.await(1, TimeUnit.SECONDS));
+
+        runtime.close();
+
+        assertTrue(stopped.await(1, TimeUnit.SECONDS));
+        assertThrows(ExecutionTerminated.class,
+                () -> runtime.shareReadonly(List.of(1)));
+        assertThrows(IllegalStateException.class, () -> ref.send("after-close"));
     }
 
     @Test
