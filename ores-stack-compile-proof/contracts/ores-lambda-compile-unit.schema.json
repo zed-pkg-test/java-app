@@ -3,55 +3,218 @@
   "$id": "https://oresoftware.dev/schemas/ores-lambda-compile-unit-v1.schema.json",
   "$comment": "Authored independently from TypeSpec. Rust additionally enforces the exact direct dependency alias set, zed-pkg ownership of immutable Git dependencies, deterministic provider runtime features, target/path derivation, and the absence of local-path dependencies in release v1.",
   "$defs": {
-    "sha256_hex": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "git_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "repository_identity": { "type": "string", "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$" },
-    "cargo_alias": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
-    "cargo_package": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
-    "cargo_feature": { "type": "string", "pattern": "^[A-Za-z0-9_.:/+-]+$" },
-    "cargo_registry": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
-    "exact_cargo_version": { "type": "string", "pattern": "^[0-9][A-Za-z0-9.+-]*\\.[A-Za-z0-9.+-]+(\\.[A-Za-z0-9.+-]+)*$" },
-    "lambda_build_provider": { "enum": ["aws", "gcp"] },
-    "lambda_function_kind": { "enum": ["web", "api"] },
-    "lambda_carrier": { "enum": ["http_ingress", "direct_invoke"] },
-    "lambda_build_architecture": { "enum": ["x86_64", "arm64"] },
-    "lambda_compile_dependency_kind": { "enum": ["git", "registry"] },
-    "lambda_compile_resolver": { "enum": ["zed_pkg", "cargo_registry"] },
-    "lambda_cargo_policy": { "enum": ["locked", "frozen"] },
-    "lambda_compile_profile": { "enum": ["release"] },
-    "lambda_runtime_profile": { "enum": ["aws_web_http", "gcp_web_http", "aws_api_http", "gcp_api_http", "aws_api_direct"] },
-    "lambda_compile_target": { "enum": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] },
+    "sha256_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "repository_identity": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"
+    },
+    "cargo_alias": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*$"
+    },
+    "cargo_package": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "cargo_feature": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:/+-]+$"
+    },
+    "cargo_registry": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "exact_cargo_version": {
+      "type": "string",
+      "pattern": "^[0-9][A-Za-z0-9.+-]*\\.[A-Za-z0-9.+-]+(\\.[A-Za-z0-9.+-]+)*$"
+    },
+    "lambda_build_provider": {
+      "enum": [
+        "aws",
+        "gcp"
+      ]
+    },
+    "lambda_function_kind": {
+      "enum": [
+        "web",
+        "api"
+      ]
+    },
+    "lambda_carrier": {
+      "enum": [
+        "http_ingress",
+        "direct_invoke"
+      ]
+    },
+    "lambda_build_architecture": {
+      "enum": [
+        "x86_64",
+        "arm64"
+      ]
+    },
+    "lambda_compile_dependency_kind": {
+      "enum": [
+        "git",
+        "registry"
+      ]
+    },
+    "lambda_compile_resolver": {
+      "enum": [
+        "zed_pkg",
+        "cargo_registry"
+      ]
+    },
+    "lambda_cargo_policy": {
+      "enum": [
+        "locked",
+        "frozen"
+      ]
+    },
+    "lambda_compile_profile": {
+      "const": "release"
+    },
+    "lambda_runtime_profile": {
+      "enum": [
+        "aws_web_http",
+        "gcp_web_http",
+        "aws_api_http",
+        "gcp_api_http",
+        "aws_api_direct"
+      ]
+    },
+    "lambda_compile_target": {
+      "enum": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ]
+    },
     "dependency": {
       "type": "object",
       "unevaluatedProperties": false,
-      "required": ["alias", "package", "kind", "resolver", "default_features", "features"],
+      "required": [
+        "alias",
+        "package",
+        "kind",
+        "resolver",
+        "default_features",
+        "features"
+      ],
       "properties": {
-        "alias": { "$ref": "#/$defs/cargo_alias" },
-        "package": { "$ref": "#/$defs/cargo_package" },
-        "kind": { "$ref": "#/$defs/lambda_compile_dependency_kind" },
-        "resolver": { "$ref": "#/$defs/lambda_compile_resolver" },
-        "repository": { "$ref": "#/$defs/repository_identity" },
-        "rev": { "$ref": "#/$defs/git_sha" },
-        "registry": { "$ref": "#/$defs/cargo_registry" },
-        "version": { "$ref": "#/$defs/exact_cargo_version" },
-        "default_features": { "type": "boolean" },
-        "features": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/cargo_feature" } }
+        "alias": {
+          "$ref": "#/$defs/cargo_alias"
+        },
+        "package": {
+          "$ref": "#/$defs/cargo_package"
+        },
+        "kind": {
+          "$ref": "#/$defs/lambda_compile_dependency_kind"
+        },
+        "resolver": {
+          "$ref": "#/$defs/lambda_compile_resolver"
+        },
+        "repository": {
+          "$ref": "#/$defs/repository_identity"
+        },
+        "rev": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "registry": {
+          "$ref": "#/$defs/cargo_registry"
+        },
+        "version": {
+          "$ref": "#/$defs/exact_cargo_version"
+        },
+        "default_features": {
+          "type": "boolean"
+        },
+        "features": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cargo_feature"
+          }
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "kind": { "const": "git" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "git"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["repository", "rev"],
-            "properties": { "resolver": { "const": "zed_pkg" } },
-            "not": { "anyOf": [{ "required": ["registry"] }, { "required": ["version"] }] }
+            "required": [
+              "repository",
+              "rev"
+            ],
+            "properties": {
+              "resolver": {
+                "const": "zed_pkg"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "registry"
+                  ]
+                },
+                {
+                  "required": [
+                    "version"
+                  ]
+                }
+              ]
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "registry" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "registry"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["registry", "version"],
-            "properties": { "resolver": { "const": "cargo_registry" } },
-            "not": { "anyOf": [{ "required": ["repository"] }, { "required": ["rev"] }] }
+            "required": [
+              "registry",
+              "version"
+            ],
+            "properties": {
+              "resolver": {
+                "const": "cargo_registry"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "repository"
+                  ]
+                },
+                {
+                  "required": [
+                    "rev"
+                  ]
+                }
+              ]
+            }
           }
         }
       ]
@@ -60,56 +223,248 @@
       "type": "object",
       "unevaluatedProperties": false,
       "required": [
-        "schema_version", "generated_by", "build_schema_version", "build_unit_sha256",
-        "function_id", "provider", "kind", "carrier", "architecture", "runtime_profile",
-        "target_triple", "rust_version", "profile", "cargo_policy", "cargo_manifest",
-        "cargo_lock", "target_dir", "executable_path", "dependencies"
+        "schema_version",
+        "generated_by",
+        "build_schema_version",
+        "build_unit_sha256",
+        "function_id",
+        "provider",
+        "kind",
+        "carrier",
+        "architecture",
+        "runtime_profile",
+        "target_triple",
+        "rust_version",
+        "profile",
+        "cargo_policy",
+        "cargo_manifest",
+        "cargo_lock",
+        "target_dir",
+        "executable_path",
+        "dependencies"
       ],
       "properties": {
-        "schema_version": { "const": "ores.lambda.compile.unit.v1" },
-        "generated_by": { "const": "ores-stack" },
-        "build_schema_version": { "const": "ores.lambda.build.v2" },
-        "build_unit_sha256": { "$ref": "#/$defs/sha256_hex" },
-        "function_id": { "type": "string", "minLength": 1 },
-        "provider": { "$ref": "#/$defs/lambda_build_provider" },
-        "kind": { "$ref": "#/$defs/lambda_function_kind" },
-        "carrier": { "$ref": "#/$defs/lambda_carrier" },
-        "architecture": { "$ref": "#/$defs/lambda_build_architecture" },
-        "runtime_profile": { "$ref": "#/$defs/lambda_runtime_profile" },
-        "target_triple": { "$ref": "#/$defs/lambda_compile_target" },
-        "rust_version": { "const": "1.88" },
-        "profile": { "$ref": "#/$defs/lambda_compile_profile" },
-        "cargo_policy": { "$ref": "#/$defs/lambda_cargo_policy" },
-        "cargo_manifest": { "type": "string", "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/Cargo\\.toml$" },
-        "cargo_lock": { "type": "string", "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/Cargo\\.lock$" },
-        "target_dir": { "type": "string", "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/compiled$" },
-        "executable_path": { "type": "string", "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/compiled/(x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)/release/ores-lambda-function$" },
-        "dependencies": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/dependency" } }
+        "schema_version": {
+          "const": "ores.lambda.compile.unit.v1"
+        },
+        "generated_by": {
+          "const": "ores-stack"
+        },
+        "build_schema_version": {
+          "const": "ores.lambda.build.v2"
+        },
+        "build_unit_sha256": {
+          "$ref": "#/$defs/sha256_hex"
+        },
+        "function_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "$ref": "#/$defs/lambda_build_provider"
+        },
+        "kind": {
+          "$ref": "#/$defs/lambda_function_kind"
+        },
+        "carrier": {
+          "$ref": "#/$defs/lambda_carrier"
+        },
+        "architecture": {
+          "$ref": "#/$defs/lambda_build_architecture"
+        },
+        "runtime_profile": {
+          "$ref": "#/$defs/lambda_runtime_profile"
+        },
+        "target_triple": {
+          "$ref": "#/$defs/lambda_compile_target"
+        },
+        "rust_version": {
+          "const": "1.88"
+        },
+        "profile": {
+          "$ref": "#/$defs/lambda_compile_profile"
+        },
+        "cargo_policy": {
+          "$ref": "#/$defs/lambda_cargo_policy"
+        },
+        "cargo_manifest": {
+          "type": "string",
+          "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/Cargo\\.toml$"
+        },
+        "cargo_lock": {
+          "type": "string",
+          "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/Cargo\\.lock$"
+        },
+        "target_dir": {
+          "type": "string",
+          "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/compiled$"
+        },
+        "executable_path": {
+          "type": "string",
+          "pattern": "^build/lambda/(aws|gcp)/funcs/(web|api)/(http_ingress|direct_invoke)/.+/compiled/(x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)/release/ores-lambda-function$"
+        },
+        "dependencies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/dependency"
+          }
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "provider": { "const": "gcp" } }, "required": ["provider"] },
-          "then": { "properties": { "architecture": { "const": "x86_64" } } }
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "gcp"
+              }
+            },
+            "required": [
+              "provider"
+            ]
+          },
+          "then": {
+            "properties": {
+              "architecture": {
+                "const": "x86_64"
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "provider": { "const": "aws" }, "kind": { "const": "web" }, "carrier": { "const": "http_ingress" } }, "required": ["provider", "kind", "carrier"] },
-          "then": { "properties": { "runtime_profile": { "const": "aws_web_http" } } }
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "aws"
+              },
+              "kind": {
+                "const": "web"
+              },
+              "carrier": {
+                "const": "http_ingress"
+              }
+            },
+            "required": [
+              "provider",
+              "kind",
+              "carrier"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime_profile": {
+                "const": "aws_web_http"
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "provider": { "const": "gcp" }, "kind": { "const": "web" }, "carrier": { "const": "http_ingress" } }, "required": ["provider", "kind", "carrier"] },
-          "then": { "properties": { "runtime_profile": { "const": "gcp_web_http" } } }
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "gcp"
+              },
+              "kind": {
+                "const": "web"
+              },
+              "carrier": {
+                "const": "http_ingress"
+              }
+            },
+            "required": [
+              "provider",
+              "kind",
+              "carrier"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime_profile": {
+                "const": "gcp_web_http"
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "provider": { "const": "aws" }, "kind": { "const": "api" }, "carrier": { "const": "http_ingress" } }, "required": ["provider", "kind", "carrier"] },
-          "then": { "properties": { "runtime_profile": { "const": "aws_api_http" } } }
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "aws"
+              },
+              "kind": {
+                "const": "api"
+              },
+              "carrier": {
+                "const": "http_ingress"
+              }
+            },
+            "required": [
+              "provider",
+              "kind",
+              "carrier"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime_profile": {
+                "const": "aws_api_http"
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "provider": { "const": "gcp" }, "kind": { "const": "api" }, "carrier": { "const": "http_ingress" } }, "required": ["provider", "kind", "carrier"] },
-          "then": { "properties": { "runtime_profile": { "const": "gcp_api_http" } } }
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "gcp"
+              },
+              "kind": {
+                "const": "api"
+              },
+              "carrier": {
+                "const": "http_ingress"
+              }
+            },
+            "required": [
+              "provider",
+              "kind",
+              "carrier"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime_profile": {
+                "const": "gcp_api_http"
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "provider": { "const": "aws" }, "kind": { "const": "api" }, "carrier": { "const": "direct_invoke" } }, "required": ["provider", "kind", "carrier"] },
-          "then": { "properties": { "runtime_profile": { "const": "aws_api_direct" } } }
+          "if": {
+            "properties": {
+              "provider": {
+                "const": "aws"
+              },
+              "kind": {
+                "const": "api"
+              },
+              "carrier": {
+                "const": "direct_invoke"
+              }
+            },
+            "required": [
+              "provider",
+              "kind",
+              "carrier"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime_profile": {
+                "const": "aws_api_direct"
+              }
+            }
+          }
         }
       ]
     }
