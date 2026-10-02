@@ -48,26 +48,46 @@ The loader uses a staged lifecycle:
 5. run each member's optional file init hook;
 6. after initialization, invoke the entry unit's `main`.
 
-A file init hook has the exact shape:
+A file or module may declare one lifecycle init hook using either `fnc` or
+`routine`:
 
 ```ores
 fnc init() => void {
-  // side effects are allowed here
+  // file/root init
   return;
 }
+
+define module cache
+  routine init() => void {
+    // module init
+    return;
+  }
+end
 ```
 
-It is private, synchronous, non-actor, non-generic, takes no parameters, and
-returns `void`. The hook runs at most once for that loaded code-unit
-generation. Inside a cycle, init hooks execute in deterministic normalized
-code-unit-id order, but code must rely only on the stronger barrier guarantee:
-**every peer in the cycle is already linked before any peer's init begins**.
+Every init hook is private, synchronous, lexical, non-actor, non-generic,
+takes no parameters, and returns `void`. Startup owns these hooks: guest code
+cannot call `init()` or `module.init()` directly. Each hook runs exactly
+once for that loaded code-unit generation.
 
-This means an init hook may call exported declarations from a cyclic peer
-without observing an "unloaded module" state. If application state requires a
-specific sequencing relationship *between* two init hooks in the same cycle,
-that relationship should be made explicit in application code rather than
-inferred from the import edges.
+The full reachable graph is parsed and linked before initialization starts.
+Within one code unit, module init hooks execute in source/module declaration
+order and the synthetic file-root init runs with that same deterministic module
+order. Across files, SCCs execute dependency-first. Members inside one SCC are
+deterministically ordered by normalized code-unit id, but code should rely only
+on the stronger barrier guarantee: **every peer in the cycle is already linked
+before any peer's init begins**.
+
+Init code may call already-linked helper declarations, including exported
+helpers from a cyclic peer. Those helpers execute as part of initialization;
+what is forbidden is externally entering `main` or another program entry
+before the init barrier completes.
+
+If any init hook exits with an unrecovered failure, that code unit enters a
+terminal failed-startup state and `main` is not entered. If application state
+requires a specific sequencing relationship *between* two init hooks in the
+same cycle, make that relationship explicit rather than inferring it from the
+cycle's import edges.
 
 ## Module interfaces / OCaml-style module signatures
 
