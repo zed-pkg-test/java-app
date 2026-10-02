@@ -1,0 +1,101 @@
+name: Oreslang PR30 current-head validation
+on:
+  push:
+    branches:
+      - "feat/oreslang-mirror-pr30-*"
+permissions:
+  contents: read
+jobs:
+  jit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Verify exact source tree
+        run: |
+          expected="$(cat ../SOURCE_TREE.txt)"
+          actual="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)"
+          test "$actual" = "$expected"
+          printf 'source-head: '; cat ../SOURCE_HEAD.txt
+          printf 'source-tree: %s\n' "$actual"
+      - name: Full JVM verification
+        run: mvn -B -ntp verify
+      - name: Focus four-way type and hotload regressions
+        run: mvn -B -ntp -Dtest=CallableLocalTypeTest,TraitCompositionTest,LanguageHardeningTest,IsolationHotReloadTest,IncrementalFunctorStaticTest test
+      - name: Core examples
+        run: |
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
+
+  native-aot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - run: test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+      - run: mvn -B -ntp -Pnative-aot -DskipTests package
+      - run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+
+  native-hybrid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - run: test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+      - run: mvn -B -ntp -Pnative-hybrid -DskipTests package
+      - run: ./target/ores-hybrid --mode=hybrid --platform=linux examples/together.ores
+
+  native-isolate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - run: test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD:oreslang-src)" = "$(cat ../SOURCE_TREE.txt)"
+      - run: mvn -B -ntp -Pnative-isolate -DskipTests package
+      - id: isolate
+        shell: bash
+        run: |
+          lib="$(find target -maxdepth 1 -type f \( -name 'oresvm.so' -o -name 'liboresvm.so' -o -name 'oresvm.dylib' -o -name 'liboresvm.dylib' \) | head -n1)"
+          test -n "$lib"
+          echo "path=$PWD/$lib" >> "$GITHUB_OUTPUT"
+      - run: mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"
