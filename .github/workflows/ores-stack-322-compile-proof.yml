@@ -44,7 +44,7 @@ jobs:
           node-version: "22"
 
       - name: Install contract toolchain
-        run: npm install --ignore-scripts
+        run: npm install
 
       - name: Compile-unit peer parity
         run: npm run check:lambda-compile-unit
