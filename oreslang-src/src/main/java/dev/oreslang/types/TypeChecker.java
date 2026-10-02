@@ -241,9 +241,19 @@ public final class TypeChecker {
         }
 
         for (Ast.MethodDecl method : klass.methods()) {
-            Set<String> generics = new HashSet<>(classGenerics);
+            Set<String> generics = new HashSet<>();
+            if (!method.isStatic()) generics.addAll(classGenerics);
             for (String generic : method.genericParameters()) {
-                if (!generics.add(generic)) throw new IllegalArgumentException("duplicate/shadowed generic '" + generic + "' in " + klass.name() + "." + method.name());
+                if (classGenerics.contains(generic) || !generics.add(generic)) {
+                    throw new IllegalArgumentException("duplicate/shadowed generic '" + generic + "' in " + klass.name() + "." + method.name());
+                }
+            }
+
+            if (method.isStatic()) {
+                for (Ast.Param param : method.parameters()) {
+                    rejectStaticClassGenericReference(param.type(), classGenerics, klass, method);
+                }
+                rejectStaticClassGenericReference(method.returnType(), classGenerics, klass, method);
             }
 
             if (method.explicitReceiverType() != null) {
@@ -552,8 +562,7 @@ public final class TypeChecker {
                     Ast.MethodDecl fn = findStaticFunction(klass, member.member(), call.arguments().size(), new LinkedHashSet<>());
                     if (fn == null) throw new IllegalArgumentException("no static function '" + member.member() + "' with arity " + call.arguments().size() + " on " + klass.name());
                     validateCallTypeArgumentMarker(call, fn.genericParameters(), "static function " + klass.name() + "." + fn.name());
-                    List<String> callableGenerics = new ArrayList<>(klass.genericParameters());
-                    callableGenerics.addAll(fn.genericParameters());
+                    List<String> callableGenerics = new ArrayList<>(fn.genericParameters());
                     String label = "static function " + klass.name() + "." + fn.name();
                     return checkGenericCallable(
                             callableGenerics,
@@ -689,11 +698,22 @@ public final class TypeChecker {
         }
         if (expr instanceof Ast.NewExpr created) {
             Ast.ClassDecl klass = findClass(created.type().name());
-            Type resolvedCreated = resolve(created.type(), generics, self);
-            if (klass == null) return resolvedCreated;
-            if (!(resolvedCreated instanceof Named nominal)) {
-                throw new IllegalArgumentException("constructor target must resolve to a named class type");
+            if (klass == null) return resolve(created.type(), generics, self);
+
+            Named nominal;
+            if (created.type().inferArguments()) {
+                if (!created.type().arguments().isEmpty()) {
+                    throw new IllegalArgumentException("inferred constructor type arguments must use an empty <> marker");
+                }
+                nominal = inferConstructedClassType(klass, created.arguments(), env, generics, self);
+            } else {
+                Type resolvedCreated = resolve(created.type(), generics, self);
+                if (!(resolvedCreated instanceof Named named)) {
+                    throw new IllegalArgumentException("constructor target must resolve to a named class type");
+                }
+                nominal = named;
             }
+
             List<ResolvedField> fields = effectiveFieldTargets(klass, nominal, new LinkedHashSet<>());
             if (created.arguments().size() > fields.size()) throw new IllegalArgumentException("constructor for " + klass.name() + " received too many positional fields");
             for (int i = 0; i < fields.size(); i++) {
@@ -1111,6 +1131,55 @@ public final class TypeChecker {
         return new Record(members);
     }
 
+    private Named inferConstructedClassType(
+            Ast.ClassDecl klass,
+            List<Ast.Expr> arguments,
+            Env env,
+            Set<String> callerGenerics,
+            Type callerSelf) {
+        if (klass.genericParameters().isEmpty()) {
+            throw new IllegalArgumentException("class " + klass.name() + " is not generic; remove <>");
+        }
+
+        Named patternType = nominalClassType(klass);
+        List<ResolvedField> fields = effectiveFieldTargets(klass, patternType, new LinkedHashSet<>());
+        if (arguments.size() > fields.size()) {
+            throw new IllegalArgumentException("constructor for " + klass.name() + " received too many positional fields");
+        }
+
+        Map<String, Type> bindings = new HashMap<>();
+        Set<String> classGenericNames = Set.copyOf(klass.genericParameters());
+        for (int i = 0; i < arguments.size(); i++) {
+            ResolvedField resolvedField = fields.get(i);
+            Type fieldPattern = resolve(
+                    resolvedField.field().type(),
+                    Set.copyOf(resolvedField.owner().genericParameters()),
+                    resolvedField.ownerType());
+            fieldPattern = substituteGenerics(
+                    fieldPattern,
+                    classGenericBindings(resolvedField.owner(), resolvedField.ownerType()));
+            Type actual = typeOf(arguments.get(i), env, callerGenerics, callerSelf);
+            inferGenericBindings(
+                    fieldPattern,
+                    actual,
+                    bindings,
+                    Set.of(),
+                    "constructor " + klass.name());
+        }
+
+        List<Type> inferred = new ArrayList<>(klass.genericParameters().size());
+        for (String generic : klass.genericParameters()) {
+            Type bound = bindings.get(generic);
+            if (bound == null || containsGenericNamed(bound, classGenericNames)) {
+                throw new IllegalArgumentException(
+                        "cannot infer class generic '" + generic + "' for constructor "
+                                + klass.name() + "<>; provide explicit type arguments");
+            }
+            inferred.add(bound);
+        }
+        return new Named(qualifiedClassName(klass), inferred);
+    }
+
     private Map<String, Type> genericBindings(List<String> names, List<Type> arguments, String owner) {
         if (names.size() != arguments.size()) {
             throw new IllegalArgumentException(owner + " expects " + names.size() + " type argument(s), got " + arguments.size());
@@ -1275,6 +1344,27 @@ public final class TypeChecker {
             return substituteGenerics(shape, classGenericBindings(klass, named));
         }
         throw new IllegalArgumentException("@Structural requires a known class or interface type, got '" + param.type().name() + "'");
+    }
+
+    private void rejectStaticClassGenericReference(
+            Ast.TypeRef ref,
+            Set<String> classGenerics,
+            Ast.ClassDecl klass,
+            Ast.MethodDecl method) {
+        if (ref == null || classGenerics.isEmpty()) return;
+        if (ref.isBorrow()) {
+            rejectStaticClassGenericReference(ref.borrowedTarget(), classGenerics, klass, method);
+            return;
+        }
+        if (classGenerics.contains(ref.name())) {
+            throw new IllegalArgumentException(
+                    "static function " + klass.name() + "." + method.name()
+                            + " cannot reference enclosing class generic '" + ref.name()
+                            + "'; declare a static-function generic parameter instead");
+        }
+        for (Ast.TypeRef argument : ref.arguments()) {
+            rejectStaticClassGenericReference(argument, classGenerics, klass, method);
+        }
     }
 
     private void validateGenericArity(Ast.TypeRef ref, List<String> parameters, String owner) {

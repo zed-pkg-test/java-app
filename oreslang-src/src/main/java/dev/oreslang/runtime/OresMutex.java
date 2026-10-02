@@ -2,6 +2,7 @@ package dev.oreslang.runtime;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.HashSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -12,6 +13,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.Semaphore;
 import java.util.function.Function;
 
@@ -171,6 +173,12 @@ public final class OresMutex {
         }
     }
 
+    public static final class DeadlockDetectedException extends IllegalStateException {
+        public DeadlockDetectedException() {
+            super("SharedMutex wait would create a cross-mutex deadlock cycle");
+        }
+    }
+
     /**
      * Actor/private-domain mutex. There is no host lock and therefore no
      * blocking path. Ownership follows the actor execution domain, not the
@@ -290,6 +298,8 @@ public final class OresMutex {
         private static final int MAX_ASYNC_WAITERS = 8_192;
         private static final int MAX_GLOBAL_ASYNC_WAITERS = 32_768;
         private static final AtomicInteger GLOBAL_ASYNC_WAITERS = new AtomicInteger();
+        private static final ConcurrentHashMap<Object, Shared<?>> WAITING_ON =
+                new ConcurrentHashMap<>();
         private static final ScheduledExecutorService ASYNC_TIMEOUTS =
                 Executors.newSingleThreadScheduledExecutor(
                         Thread.ofPlatform()
@@ -301,6 +311,7 @@ public final class OresMutex {
         private final Semaphore permit = new Semaphore(1, true);
         private final AtomicBoolean poisoned = new AtomicBoolean();
         private final AtomicInteger asyncWaiters = new AtomicInteger();
+        private final AtomicReference<Object> currentOwnerDomain = new AtomicReference<>();
         private final Object asyncQueueLock = new Object();
         private final ArrayDeque<AsyncWaiter> asyncQueue = new ArrayDeque<>();
         private boolean preferAsyncHandoff = true;
@@ -402,6 +413,56 @@ public final class OresMutex {
             if (domain != null) activeDomains.remove(domain);
         }
 
+        private void beginWait(Object domain) {
+            Shared<?> existing = WAITING_ON.putIfAbsent(domain, this);
+            if (existing != null) {
+                if (existing == this) {
+                    throw new RecursiveLockException("SharedMutex<T>");
+                }
+                throw new IllegalStateException(
+                        "execution domain is already waiting on another SharedMutex");
+            }
+
+            if (wouldCreateDeadlock(domain)) {
+                WAITING_ON.remove(domain, this);
+                throw new DeadlockDetectedException();
+            }
+        }
+
+        private void endWait(Object domain) {
+            if (domain != null) WAITING_ON.remove(domain, this);
+        }
+
+        private boolean wouldCreateDeadlock(Object requesterDomain) {
+            Object owner = currentOwnerDomain.get();
+            Set<Object> seen = new HashSet<>();
+            while (owner != null) {
+                if (Objects.equals(owner, requesterDomain)) return true;
+                if (!seen.add(owner)) return false;
+                Shared<?> ownerWait = WAITING_ON.get(owner);
+                if (ownerWait == null) return false;
+                owner = ownerWait.currentOwnerDomain.get();
+            }
+            return false;
+        }
+
+        private void markOwner(Object domain) {
+            if (!currentOwnerDomain.compareAndSet(null, domain)) {
+                throw new IllegalStateException("SharedMutex permit acquired while another owner is recorded");
+            }
+        }
+
+        private void clearOwner(Object domain) {
+            if (domain == null) return;
+            if (!currentOwnerDomain.compareAndSet(domain, null)) {
+                Object recorded = currentOwnerDomain.get();
+                if (recorded != null) {
+                    throw new IllegalStateException(
+                            "SharedMutex owner-domain accounting mismatch");
+                }
+            }
+        }
+
         private int asyncWaiterLimit() {
             IsolatePolicy policy = ActorRuntime.currentActorPolicy();
             return policy == null
@@ -476,7 +537,8 @@ public final class OresMutex {
                             break;
                         }
                         // Cancellation/completion can race with dequeue. Once
-                        // removed from the queue, this path owns domain cleanup.
+                        // removed from the queue, this path owns wait/domain cleanup.
+                        endWait(candidate.ownerDomain);
                         releaseDomain(candidate.ownerDomain);
                     }
 
@@ -495,26 +557,38 @@ public final class OresMutex {
                 }
 
                 if (poisoned.get()) {
+                    endWait(waiter.ownerDomain);
                     releaseDomain(waiter.ownerDomain);
                     waiter.future.failFromRuntime(new PoisonedMutexException());
                     continue;
                 }
 
+                endWait(waiter.ownerDomain);
+                markOwner(waiter.ownerDomain);
                 SharedGuard guard = new SharedGuard(
                         waiter.ownerDomain,
                         waiter.enforceOwnerDomain);
                 if (waiter.future.completeFromRuntime(guard)) return;
 
                 // Cancellation won after dequeue but before completion.
+                clearOwner(waiter.ownerDomain);
                 releaseDomain(waiter.ownerDomain);
             }
         }
 
         private Guard<T> checkedGuardAfterAcquire(Object ownerDomain, boolean enforceOwnerDomain) {
+            endWait(ownerDomain);
             if (poisoned.get()) {
                 releaseDomain(ownerDomain);
                 releasePermitOrHandoff();
                 throw new PoisonedMutexException();
+            }
+            try {
+                markOwner(ownerDomain);
+            } catch (RuntimeException | Error failure) {
+                releaseDomain(ownerDomain);
+                releasePermitOrHandoff();
+                throw failure;
             }
             return new SharedGuard(ownerDomain, enforceOwnerDomain);
         }
@@ -524,11 +598,17 @@ public final class OresMutex {
             rejectBlockingActorAcquisition();
             Object ownerDomain = reserveDomain(false);
             try {
+                beginWait(ownerDomain);
                 permit.acquire();
             } catch (InterruptedException interrupted) {
+                endWait(ownerDomain);
                 releaseDomain(ownerDomain);
                 Thread.currentThread().interrupt();
                 throw new java.util.concurrent.CancellationException("SharedMutex lock wait interrupted");
+            } catch (RuntimeException | Error failure) {
+                endWait(ownerDomain);
+                releaseDomain(ownerDomain);
+                throw failure;
             }
             return checkedGuardAfterAcquire(ownerDomain, true);
         }
@@ -556,18 +636,26 @@ public final class OresMutex {
             Objects.requireNonNull(timeout, "timeout");
             if (timeout.isNegative()) throw new IllegalArgumentException("timeout must not be negative");
             rejectBlockingActorAcquisition();
+            if (timeout.isZero()) return tryLock();
             Object ownerDomain = reserveDomain(true);
             if (ownerDomain == null) return Optional.empty();
             try {
+                beginWait(ownerDomain);
                 if (!permit.tryAcquire(saturatedNanos(timeout), TimeUnit.NANOSECONDS)) {
+                    endWait(ownerDomain);
                     releaseDomain(ownerDomain);
                     return Optional.empty();
                 }
                 return Optional.of(checkedGuardAfterAcquire(ownerDomain, true));
             } catch (InterruptedException interrupted) {
+                endWait(ownerDomain);
                 releaseDomain(ownerDomain);
                 Thread.currentThread().interrupt();
                 throw new java.util.concurrent.CancellationException("SharedMutex lock wait interrupted");
+            } catch (RuntimeException | Error failure) {
+                endWait(ownerDomain);
+                releaseDomain(ownerDomain);
+                throw failure;
             }
         }
 
@@ -599,32 +687,54 @@ public final class OresMutex {
                 synchronized (asyncQueueLock) {
                     removed = asyncQueue.remove(waiter);
                 }
-                if (removed) releaseDomain(ownerDomain);
+                if (removed) {
+                    endWait(ownerDomain);
+                    releaseDomain(ownerDomain);
+                }
                 releaseAsyncWaiter();
                 releaseGlobalAsyncWaiter();
             });
 
             boolean acquired = false;
             boolean poisonedNow = false;
+            Throwable waitFailure = null;
             synchronized (asyncQueueLock) {
                 if (poisoned.get()) {
                     poisonedNow = true;
                 } else if (permit.tryAcquire()) {
                     acquired = true;
                 } else {
-                    asyncQueue.addLast(waiter);
+                    boolean waitRegistered = false;
+                    try {
+                        beginWait(ownerDomain);
+                        waitRegistered = true;
+                        asyncQueue.addLast(waiter);
+                    } catch (RuntimeException | Error failure) {
+                        if (waitRegistered) endWait(ownerDomain);
+                        waitFailure = failure;
+                    }
                 }
             }
 
-            if (poisonedNow) {
+            if (waitFailure != null) {
+                releaseDomain(ownerDomain);
+                future.failFromRuntime(waitFailure);
+            } else if (poisonedNow) {
                 releaseDomain(ownerDomain);
                 future.failFromRuntime(new PoisonedMutexException());
             } else if (acquired) {
-                SharedGuard guard = new SharedGuard(
-                        ownerDomain,
-                        enforceOwnerDomain);
-                if (!future.completeFromRuntime(guard)) {
-                    guard.releaseFromRuntime();
+                try {
+                    markOwner(ownerDomain);
+                    SharedGuard guard = new SharedGuard(
+                            ownerDomain,
+                            enforceOwnerDomain);
+                    if (!future.completeFromRuntime(guard)) {
+                        guard.releaseFromRuntime();
+                    }
+                } catch (RuntimeException | Error failure) {
+                    releaseDomain(ownerDomain);
+                    releasePermitOrHandoff();
+                    future.failFromRuntime(failure);
                 }
             }
 
@@ -681,6 +791,7 @@ public final class OresMutex {
             Objects.requireNonNull(repair, "repair");
             Object ownerDomain = reserveDomain(false);
             boolean acquired = false;
+            boolean waiting = false;
             try {
                 if (ActorRuntime.inActorExecution()) {
                     // Recovery is expected to happen after the poisoning guard
@@ -693,8 +804,12 @@ public final class OresMutex {
                     }
                 } else {
                     try {
+                        beginWait(ownerDomain);
+                        waiting = true;
                         permit.acquire();
                         acquired = true;
+                        endWait(ownerDomain);
+                        waiting = false;
                     } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
                         throw new java.util.concurrent.CancellationException(
@@ -702,6 +817,7 @@ public final class OresMutex {
                     }
                 }
 
+                markOwner(ownerDomain);
                 if (!poisoned.get()) {
                     throw new IllegalStateException(
                             "SharedMutex is not poisoned; recover(...) is only for repairing poisoned state");
@@ -715,8 +831,12 @@ public final class OresMutex {
                     throw failure;
                 }
             } finally {
+                if (waiting) endWait(ownerDomain);
+                if (acquired) {
+                    clearOwner(ownerDomain);
+                    releasePermitOrHandoff();
+                }
                 releaseDomain(ownerDomain);
-                if (acquired) releasePermitOrHandoff();
             }
         }
 
@@ -767,6 +887,7 @@ public final class OresMutex {
 
             private void releaseFromRuntime() {
                 if (!released.compareAndSet(false, true)) return;
+                clearOwner(ownerDomain);
                 releaseDomain(ownerDomain);
                 releasePermitOrHandoff();
             }
@@ -776,6 +897,7 @@ public final class OresMutex {
                 requireOwnerDomain();
                 if (!released.compareAndSet(false, true)) return;
                 poisoned.set(true);
+                clearOwner(ownerDomain);
                 releaseDomain(ownerDomain);
                 releasePermitOrHandoff();
             }

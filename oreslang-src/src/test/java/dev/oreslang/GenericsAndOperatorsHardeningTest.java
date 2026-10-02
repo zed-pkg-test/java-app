@@ -164,6 +164,104 @@ final class GenericsAndOperatorsHardeningTest {
     }
 
     @Test
+    void staticFunctionsOwnTheirGenericParametersAndCannotCaptureClassGenerics() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module model
+                  define class Box<T>
+                    pub static fnc identity<U>(U value) => U {
+                      return value;
+                    }
+                  end
+                end
+
+                define module app
+                  fnc use() => void {
+                    val value = model.Box.identity<>(7);
+                    stdio.println(value);
+                    stdio.println(value);
+                    return;
+                  }
+                end
+                """)));
+
+        IllegalArgumentException captured = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          define class Bad<T>
+                            pub static fnc leak(T value) => T {
+                              return value;
+                            }
+                          end
+                        end
+                        """)));
+        assertTrue(captured.getMessage().contains("cannot reference enclosing class generic"));
+    }
+
+    @Test
+    void inferredConstructorsBindClassGenericsIncludingInheritedFields() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class Box<T>
+                    pub val T value;
+                  end
+
+                  define class Parent<T>
+                    pub val T value;
+                  end
+
+                  define class Child<U> extends Parent<U>
+                  end
+
+                  fnc use() => void {
+                    val box = new Box<>(7);
+                    val number = box.value;
+                    stdio.println(number);
+                    stdio.println(number);
+
+                    val child = new Child<>("ores");
+                    val label = child.value;
+                    stdio.println(label);
+                    stdio.println(label);
+                    return;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void inferredConstructorsRejectMissingAndConflictingBindings() {
+        IllegalArgumentException missing = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          define class Phantom<T>
+                          end
+
+                          fnc bad() => void {
+                            val value = new Phantom<>();
+                            return;
+                          }
+                        end
+                        """)));
+        assertTrue(missing.getMessage().contains("cannot infer class generic"));
+
+        IllegalArgumentException conflict = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          define class Same<T>
+                            pub val T left;
+                            pub val T right;
+                          end
+
+                          fnc bad() => void {
+                            val value = new Same<>(1, "mixed");
+                            return;
+                          }
+                        end
+                        """)));
+        assertTrue(conflict.getMessage().contains("conflicting inference"));
+    }
+
+    @Test
     void spacedComparisonsAreNotMistakenForGenericCalls() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app

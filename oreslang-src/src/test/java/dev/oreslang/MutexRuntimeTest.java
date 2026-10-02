@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -405,6 +406,108 @@ final class MutexRuntimeTest {
     }
 
     @Test
+    void crossMutexTwoDomainCycleIsRejectedInsteadOfHanging() throws Exception {
+        var left = OresMutex.shared(new int[]{0});
+        var right = OresMutex.shared(new int[]{0});
+        CountDownLatch bothHeld = new CountDownLatch(2);
+        CountDownLatch startCrossAcquire = new CountDownLatch(1);
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
+
+        Thread first = Thread.ofPlatform().start(() -> {
+            OresMutex.Guard<int[]> leftGuard = left.lock();
+            try {
+                bothHeld.countDown();
+                assertTrue(bothHeld.await(2, TimeUnit.SECONDS));
+                assertTrue(startCrossAcquire.await(2, TimeUnit.SECONDS));
+                try {
+                    var rightGuard = right.lock();
+                    rightGuard.release();
+                } catch (Throwable failure) {
+                    firstFailure.set(failure);
+                }
+            } catch (Throwable failure) {
+                firstFailure.compareAndSet(null, failure);
+            } finally {
+                leftGuard.release();
+            }
+        });
+
+        Thread second = Thread.ofPlatform().start(() -> {
+            OresMutex.Guard<int[]> rightGuard = right.lock();
+            try {
+                bothHeld.countDown();
+                assertTrue(bothHeld.await(2, TimeUnit.SECONDS));
+                assertTrue(startCrossAcquire.await(2, TimeUnit.SECONDS));
+                try {
+                    var leftGuard = left.lock();
+                    leftGuard.release();
+                } catch (Throwable failure) {
+                    secondFailure.set(failure);
+                }
+            } catch (Throwable failure) {
+                secondFailure.compareAndSet(null, failure);
+            } finally {
+                rightGuard.release();
+            }
+        });
+
+        assertTrue(bothHeld.await(2, TimeUnit.SECONDS));
+        startCrossAcquire.countDown();
+        first.join(3_000);
+        second.join(3_000);
+
+        assertFalse(first.isAlive(), "first domain must not remain deadlocked");
+        assertFalse(second.isAlive(), "second domain must not remain deadlocked");
+        assertTrue(
+                firstFailure.get() instanceof OresMutex.DeadlockDetectedException
+                        || secondFailure.get() instanceof OresMutex.DeadlockDetectedException,
+                "at least one edge that closes the cycle must be rejected");
+    }
+
+    @Test
+    void timedOutAsyncWaitRemovesDeadlockGraphEdge() throws Exception {
+        var held = OresMutex.shared(new int[]{0});
+        var free = OresMutex.shared(new int[]{0});
+        var owner = held.lock();
+
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread waiter = Thread.ofPlatform().start(() -> {
+            try {
+                var timed = held.lockAsyncFor(Duration.ofMillis(25));
+                var timedFailure = assertThrows(
+                        java.util.concurrent.ExecutionException.class,
+                        () -> timed.get(2, TimeUnit.SECONDS));
+                assertInstanceOf(OresMutex.LockTimeoutException.class, timedFailure.getCause());
+
+                // The same semantic domain must be free to establish another
+                // wait/acquisition after the timed edge is removed.
+                var next = free.lock();
+                next.release();
+            } catch (Throwable problem) {
+                failure.set(problem);
+            }
+        });
+
+        waiter.join(3_000);
+        assertFalse(waiter.isAlive());
+        assertNull(failure.get());
+        owner.release();
+    }
+
+    @Test
+    void zeroDurationLockForRemainsTryOnly() throws Exception {
+        var mutex = OresMutex.shared(new int[]{0});
+        var owner = mutex.lock();
+        AtomicReference<Optional<OresMutex.Guard<int[]>>> result = new AtomicReference<>();
+        Thread contender = Thread.ofPlatform().start(
+                () -> result.set(mutex.lockFor(Duration.ZERO)));
+        contender.join();
+        assertTrue(result.get().isEmpty());
+        owner.release();
+    }
+
+    @Test
     void sharedMutexRejectsSameDomainAsyncReentryBeforeDeadlock() {
         var mutex = OresMutex.shared(new int[]{0});
         var guard = mutex.lockAsync().join();
@@ -689,7 +792,8 @@ final class MutexRuntimeTest {
             sender.join();
 
             assertInstanceOf(IllegalStateException.class, senderFailure.get());
-            assertTrue(senderFailure.get().getMessage().contains("terminated before message admission"));
+            assertTrue(senderFailure.get().getMessage().contains("unknown actor"),
+                    "send races should expose the stable dead-ref contract");
 
             CountDownLatch delivered = new CountDownLatch(1);
             var receiver = runtimeB.<OresMutex.Shared<int[]>>spawn(() -> (mutex, context) -> {

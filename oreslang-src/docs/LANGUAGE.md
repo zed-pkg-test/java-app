@@ -270,7 +270,7 @@ fnc use(Box<int> box) => int {
 }
 ```
 
-Known classes, interfaces, aliases, and built-ins enforce generic arity. Generic parameters are opaque types, not an implicit `any`: a concrete value is not assignable to an unconstrained `T` unless call-site inference has bound that `T`. Generic function and method calls infer type arguments from value arguments. Calls may also state type arguments explicitly with `identity<int>(42)`; `identity<>(42)` explicitly requests inference. The `<` opening a call-site generic list must be adjacent to the callable name/member, which keeps ordinary spaced comparisons such as `a < b` unambiguous. Nested generic closers such as `Option<Array<int>>` remain valid.
+Known classes, interfaces, aliases, and built-ins enforce generic arity. Generic parameters are opaque types, not an implicit `any`: a concrete value is not assignable to an unconstrained `T` unless inference has bound that `T`. Generic function and method calls infer type arguments from value arguments. Calls may also state type arguments explicitly with `identity<int>(42)`; `identity<>(42)` explicitly requests inference. Constructors support the same inference marker: `new Box<>(7)` infers `Box<int>` from positional fields, including inherited generic fields. Every class generic must be inferable and repeated occurrences must infer compatibly; otherwise explicit type arguments are required. The `<` opening a call-site generic list must be adjacent to the callable name/member, which keeps ordinary spaced comparisons such as `a < b` unambiguous. Nested generic closers such as `Option<Array<int>>` remain valid.
 
 Generic bindings are substituted through inherited class fields/methods, constructors, inherited interfaces, and structural-typing views, so `Child<U> extends Parent<U>` preserves the concrete `U` all the way through member access.
 
@@ -690,7 +690,8 @@ A static class function:
 - has no implicit or explicit `self`;
 - cannot be invoked through an instance;
 - may be extracted as a function value from the class namespace;
-- has one shared definition, just like any other named function.
+- has one shared definition, just like any other named function;
+- does not capture enclosing class generics. In `class Box<T>`, a static function cannot use that `T`; declare its own `static fnc identity<U>(U value) => U` instead. Static-function generics support the same explicit and inferred call syntax as top-level functions.
 
 Static data fields are intentionally not part of v0.5 yet; `static` on a class binding is rejected rather than silently acquiring Java-like global mutable state semantics.
 
