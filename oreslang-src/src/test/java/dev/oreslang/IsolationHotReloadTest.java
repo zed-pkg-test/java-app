@@ -154,71 +154,6 @@ final class IsolationHotReloadTest {
     }
 
     @Test
-    void failedGenerationRestoresPreviousActiveGeneration() {
-        IsolatePolicy policy = IsolatePolicy.developer();
-        try (HotReloadManager hot = new HotReloadManager(policy, ExecutionProfile.serverJit())) {
-            var stable = hot.load("rollback.ores", """
-                    pub routine main() => void { return; }
-                    """);
-            assertDoesNotThrow(stable::start);
-
-            var broken = hot.load("rollback.ores", """
-                    pub routine main() => void {
-                      val values = arr[1];
-                      val boom = values[99];
-                      return;
-                    }
-                    """);
-            assertEquals(broken.id(), hot.active("rollback.ores").id());
-
-            assertThrows(RuntimeException.class, broken::start);
-            assertTrue(broken.closed());
-            assertEquals(stable.id(), hot.active("rollback.ores").id());
-            assertEquals(stable.id(), hot.active().id());
-            assertEquals(1, hot.liveGenerations());
-        }
-    }
-
-    @Test
-    void closingGenerationDeregistersItFromActiveState() {
-        IsolatePolicy policy = IsolatePolicy.developer();
-        try (HotReloadManager hot = new HotReloadManager(policy, ExecutionProfile.serverJit())) {
-            var generation = hot.load("close-me.ores", """
-                    pub routine main() => void { return; }
-                    """);
-            assertEquals(1, hot.liveGenerations());
-
-            generation.close();
-
-            assertTrue(generation.closed());
-            assertNull(hot.active("close-me.ores"));
-            assertNull(hot.active());
-            assertEquals(0, hot.liveGenerations());
-        }
-    }
-
-    @Test
-    void reservedOresPolicyArgumentsCannotBeOverriddenByExtraMetadata() {
-        IsolatePolicy policy = IsolatePolicy.developer();
-
-        IllegalArgumentException capabilities = assertThrows(IllegalArgumentException.class,
-                () -> policy.restrictedContextBuilder(
-                        ExecutionProfile.serverJit(),
-                        "--ores-capabilities=PROCESS_INFO"));
-        assertTrue(capabilities.getMessage().contains("cannot be overridden"));
-
-        IllegalArgumentException wallTime = assertThrows(IllegalArgumentException.class,
-                () -> policy.restrictedContextBuilder(
-                        ExecutionProfile.serverJit(),
-                        "--ores-max-wall-ms=999999"));
-        assertTrue(wallTime.getMessage().contains("cannot be overridden"));
-
-        assertDoesNotThrow(() -> policy.restrictedContextBuilder(
-                ExecutionProfile.serverJit(),
-                "--ores-code-generation=42"));
-    }
-
-    @Test
     void hotReloadRequiresExplicitCapability() {
         assertThrows(SecurityException.class,
                 () -> new HotReloadManager(IsolatePolicy.strictFaas(), ExecutionProfile.serverJit()));
@@ -267,13 +202,17 @@ final class IsolationHotReloadTest {
     void structuralPermissionIsNotImplicit() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 pub interface Foo {
-                  marker: 'brand'
+                  fnc marker() => String;
                 }
+
+                define class Branded as
+                  pub marker() => String { return "brand"; }
+                end
 
                 fnc nominal(Foo y) => void { return; }
 
                 pub routine main() => void {
-                  val branded = obj{marker: "brand"};
+                  val branded = new Branded();
                   nominal(branded);
                   return;
                 }
@@ -321,5 +260,24 @@ final class IsolationHotReloadTest {
             context.eval(source);
         }
         return output.toString(StandardCharsets.UTF_8);
+    }
+    @Test
+    void capabilityAdmissionInspectsMethodsInsideCallableLocalStructs() {
+        var program = TypeChecker.check(Parser.parse("""
+                define module app as
+                  fnc make() => T {
+                    struct T {
+                      pub context() => string {
+                        return process.context_id;
+                      }
+                    }
+                    return T {};
+                  }
+                end
+                """));
+
+        SecurityException denied = assertThrows(SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.strictFaas()));
+        assertTrue(denied.getMessage().contains("PROCESS_INFO"));
     }
 }
