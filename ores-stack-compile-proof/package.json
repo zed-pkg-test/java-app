@@ -1,0 +1,14 @@
+{
+  "name": "ores-stack-compile-proof",
+  "private": true,
+  "engines": { "node": ">=22.9" },
+  "devDependencies": {
+    "@oresoftware/typespec-json-schema-validator": "https://github.com/ORESoftware/typespec-json-schema-validator/archive/2f6a5e1564c2a52af0e61e5b47a983b145b28884.tar.gz",
+    "@typespec/compiler": "1.16.0",
+    "@typespec/json-schema": "1.16.0"
+  },
+  "scripts": {
+    "check:lambda-compile-unit": "tjsv check --int64-strategy=number --mapping=contracts/ores-lambda-compile-unit.mapping.json --typespec=contracts/ores-lambda-compile-unit.tsp --schema=contracts/ores-lambda-compile-unit.schema.json --report=.ores-stack/lambda-compile-unit-schema-parity.json",
+    "check:lambda-compile-receipt": "tjsv check --int64-strategy=number --mapping=contracts/ores-lambda-compile-receipt.mapping.json --typespec=contracts/ores-lambda-compile-receipt.tsp --schema=contracts/ores-lambda-compile-receipt.schema.json --report=.ores-stack/lambda-compile-receipt-schema-parity.json"
+  }
+}
