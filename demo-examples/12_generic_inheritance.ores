@@ -1,0 +1,41 @@
+namespace generic_inheritance_demo;
+
+define module model
+
+  define interface HasValue<T>
+    value: T;
+  end
+
+  define class Parent<T>
+    pub val T value;
+
+    pub get() => T {
+      return self.value;
+    }
+  end
+
+  define class Child<U> extends Parent<U> implements HasValue<U>
+  end
+
+  define class IntChild extends Parent<int>
+  end
+
+end
+
+fnc read_child(model.Child<int> child) => int {
+  return child.get();
+}
+
+fnc read_int_child(model.IntChild child) => int {
+  return child.value;
+}
+
+pub routine main() => void {
+  val child = new model.Child<int>(7);
+  val int_child = new model.IntChild(11);
+
+  stdio.println(read_child(child));
+  stdio.println(read_int_child(int_child));
+
+  return;
+}
