@@ -103,7 +103,7 @@ public final class OresEvalRootNode extends RootNode {
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
-        private boolean initialized;
+        private StartupPhase startupPhase = StartupPhase.CREATED;
 
         private Evaluator(Ast.Program program, OresContext context, String codeUnitId) {
             this.program = program;
@@ -159,19 +159,51 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private synchronized void link() {
+            if (startupPhase == StartupPhase.FAILED) {
+                throw new IllegalStateException("cannot relink failed code unit " + codeUnitId);
+            }
             context.registerLinkedCodeUnit(codeUnitId, this);
+            if (startupPhase == StartupPhase.CREATED) startupPhase = StartupPhase.LINKED;
         }
 
         private synchronized Object initialize() {
-            if (initialized) return null;
-            // Mark before invocation so a recursive path cannot run init twice.
-            initialized = true;
-            Ast.FunctionDecl init = functions.get(Parser.ROOT_MODULE + ".init");
-            if (init == null) return null;
-            return callFunction(init, List.of());
+            if (startupPhase == StartupPhase.READY) return null;
+            if (startupPhase == StartupPhase.INITIALIZING) {
+                throw new IllegalStateException("recursive initialization of code unit " + codeUnitId);
+            }
+            if (startupPhase == StartupPhase.FAILED) {
+                throw new IllegalStateException("initialization previously failed for code unit " + codeUnitId);
+            }
+            if (startupPhase == StartupPhase.CREATED) link();
+
+            startupPhase = StartupPhase.INITIALIZING;
+            Object last = null;
+            try {
+                // indexDeclarations() completed in the evaluator constructor, and
+                // LinkedProgramRunner links every reachable unit before issuing
+                // INIT_ONLY. Therefore all module/function symbols are available
+                // before the first lifecycle hook runs.
+                for (Ast.ModuleDecl module : program.modules()) {
+                    for (Ast.Decl decl : module.declarations()) {
+                        if (decl instanceof Ast.FunctionDecl fn && fn.name().equals("init")) {
+                            last = invokeFunctionBody(fn, List.of());
+                        }
+                    }
+                }
+                startupPhase = StartupPhase.READY;
+                return last;
+            } catch (RuntimeException | Error failure) {
+                startupPhase = StartupPhase.FAILED;
+                throw failure;
+            }
         }
 
         private Object executeMain(Object[] arguments) {
+            if (startupPhase != StartupPhase.READY) {
+                throw new IllegalStateException(
+                        "main cannot run before successful initialization of code unit "
+                                + codeUnitId + "; current phase=" + startupPhase);
+            }
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
@@ -179,10 +211,18 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
+            if (fn.name().equals("init")) {
+                throw new IllegalStateException(
+                        "init is a lifecycle hook and cannot be invoked directly; startup runs it exactly once");
+            }
             if (fn.actorKind() != Ast.ActorKind.NONE) {
                 throw new IllegalStateException("actor fnc '" + fn.name()
                         + "' cannot execute on the caller stack; it must be lowered through ActorRuntime");
             }
+            return invokeFunctionBody(fn, args);
+        }
+
+        private Object invokeFunctionBody(Ast.FunctionDecl fn, List<?> args) {
             if (args.size() != fn.parameters().size()) {
                 if (fn.parameters().isEmpty() && args.size() == 1 && args.getFirst() instanceof Object[] array && array.length == 0) args = List.of();
                 else throw new IllegalArgumentException("function " + fn.name() + " expects " + fn.parameters().size() + " arguments, got " + args.size());
@@ -320,6 +360,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (local != Env.MISSING) return local;
                 if (name.name().equals("stdio")) return new StdioFacade(context);
                 if (name.name().equals("process")) return new ProcessFacade(context);
+                if (name.name().equals("actor")) return new ActorFacade(context);
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
                 if (name.name().equals("print")) return (Invokable) args -> {
@@ -531,7 +572,14 @@ public final class OresEvalRootNode extends RootNode {
                     case "context_id" -> process.contextId();
                     case "descriptor" -> process.descriptor();
                     case "share_readonly" -> (Invokable) process::shareReadonly;
+                    case "gc" -> (Invokable) process::gc;
                     default -> throw new IllegalArgumentException("unknown process member " + name);
+                };
+            }
+            if (receiver instanceof ActorFacade actor) {
+                return switch (name) {
+                    case "gc" -> (Invokable) actor::gc;
+                    default -> throw new IllegalArgumentException("unknown actor member " + name);
                 };
             }
             if (receiver instanceof MutexFactory factory) {
@@ -1239,7 +1287,16 @@ public final class OresEvalRootNode extends RootNode {
         private ReturnSignal(Object value) { super(null,null,false,false); this.value=value; }
     }
 
-    private record Complex(double real, double imaginary) {
+    private enum StartupPhase {
+        CREATED,
+        LINKED,
+        INITIALIZING,
+        READY,
+        FAILED
+    }
+
+    private record Complex(double real, double imaginary) implements OresMutex.SharedState {
+        @Override public Iterable<?> sharedStateChildren(){return List.of();}
         private Complex add(Complex o){return new Complex(real+o.real,imaginary+o.imaginary);}
         private Complex sub(Complex o){return new Complex(real-o.real,imaginary-o.imaginary);}
         private Complex mul(Complex o){return new Complex(real*o.real-imaginary*o.imaginary,real*o.imaginary+imaginary*o.real);}
@@ -1247,7 +1304,7 @@ public final class OresEvalRootNode extends RootNode {
         @Override public String toString(){return real+(imaginary<0?"":"+")+imaginary+"i";}
     }
 
-    private static final class OresObject {
+    private static final class OresObject implements OresMutex.SharedState {
         private final Evaluator owner;
         private final Ast.ClassDecl klass;
         private final Map<String,Object> fields;
@@ -1256,6 +1313,7 @@ public final class OresEvalRootNode extends RootNode {
             this.klass = klass;
             this.fields = fields;
         }
+        @Override public Iterable<?> sharedStateChildren(){return fields.values();}
         @Override public String toString(){return klass.name()+fields;}
     }
 
@@ -1335,10 +1393,12 @@ public final class OresEvalRootNode extends RootNode {
             return false;
         }
     }
-    private record OptionValue(boolean present, Object value) {
+    private record OptionValue(boolean present, Object value) implements OresMutex.SharedState {
+        @Override public Iterable<?> sharedStateChildren(){return present ? List.of(value) : List.of();}
         @Override public String toString(){return present ? "Some(" + value + ")" : "None";}
     }
-    private record ResultValue(boolean ok, Object value) {
+    private record ResultValue(boolean ok, Object value) implements OresMutex.SharedState {
+        @Override public Iterable<?> sharedStateChildren(){return List.of(value);}
         @Override public String toString(){return ok ? "Ok(" + value + ")" : "Err(" + value + ")";}
     }
     private record OptionUnwrapError(String reason) {
@@ -1359,6 +1419,10 @@ public final class OresEvalRootNode extends RootNode {
         private String contextId(){context.requireCapability(IsolatePolicy.Capability.PROCESS_INFO,"process.context_id");return context.contextId().toString();}
         private Map<String,Object> descriptor(){context.requireCapability(IsolatePolicy.Capability.PROCESS_INFO,"process.descriptor");return context.processDescriptor();}
         private Object shareReadonly(List<Object> args){context.requireCapability(IsolatePolicy.Capability.ACTOR_SHARE_READONLY,"process.share_readonly");requireOne(args,"process.share_readonly");return context.actors().shareReadonly(args.getFirst());}
+        private Map<String,Object> gc(List<Object> args){context.requireCapability(IsolatePolicy.Capability.GC_CONTROL,"process.gc");requireZero(args,"process.gc");return context.garbageCollector().collectProcess().asMap();}
+    }
+    private record ActorFacade(OresContext context) {
+        private Map<String,Object> gc(List<Object> args){requireZero(args,"actor.gc");return context.garbageCollector().collectCurrentActor().asMap();}
     }
     private static void requireZero(List<Object> args,String name){if(!args.isEmpty())throw new IllegalArgumentException(name+" expects no arguments");}
     private static void requireOne(List<Object> args,String name){if(args.size()!=1)throw new IllegalArgumentException(name+" expects one argument");}

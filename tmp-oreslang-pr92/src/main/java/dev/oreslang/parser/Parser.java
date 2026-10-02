@@ -1125,6 +1125,9 @@ public final class Parser {
         if (match(FALSE)) return new Ast.LiteralExpr(Boolean.FALSE);
         if (match(NULL)) throw error(previous(), "standalone null values are forbidden; use Option<T>");
         if (match(SELF)) return new Ast.NameExpr("self");
+        // 'actor' remains reserved, but in expression position it names the
+        // actor-local runtime namespace (actor.gc and future local primitives).
+        if (match(ACTOR)) return new Ast.NameExpr("actor");
         if (match(IDENT)) return new Ast.NameExpr(previous().lexeme());
         if (match(NEW)) {
             Ast.TypeRef type = parseTypeRef();
