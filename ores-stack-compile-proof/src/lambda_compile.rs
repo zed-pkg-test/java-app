@@ -168,10 +168,14 @@ impl LambdaCompileDependency {
 
     pub fn validate(&self) -> Result<(), LambdaCompileError> {
         if !valid_alias(&self.alias) {
-            return Err(LambdaCompileError::InvalidDependencyAlias(self.alias.clone()));
+            return Err(LambdaCompileError::InvalidDependencyAlias(
+                self.alias.clone(),
+            ));
         }
         if !valid_package(&self.package) {
-            return Err(LambdaCompileError::InvalidDependencyPackage(self.package.clone()));
+            return Err(LambdaCompileError::InvalidDependencyPackage(
+                self.package.clone(),
+            ));
         }
         validate_features(&self.alias, &self.features)?;
 
@@ -185,14 +189,12 @@ impl LambdaCompileDependency {
                         self.alias.clone(),
                     ));
                 }
-                let repository = self
-                    .repository
-                    .as_deref()
-                    .ok_or_else(|| LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone()))?;
-                let rev = self
-                    .rev
-                    .as_deref()
-                    .ok_or_else(|| LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone()))?;
+                let repository = self.repository.as_deref().ok_or_else(|| {
+                    LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone())
+                })?;
+                let rev = self.rev.as_deref().ok_or_else(|| {
+                    LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone())
+                })?;
                 if !valid_repository(repository) || !is_lower_hex(rev, 40) {
                     return Err(LambdaCompileError::InvalidDependencyCoordinate(
                         self.alias.clone(),
@@ -208,14 +210,12 @@ impl LambdaCompileDependency {
                         self.alias.clone(),
                     ));
                 }
-                let registry = self
-                    .registry
-                    .as_deref()
-                    .ok_or_else(|| LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone()))?;
-                let version = self
-                    .version
-                    .as_deref()
-                    .ok_or_else(|| LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone()))?;
+                let registry = self.registry.as_deref().ok_or_else(|| {
+                    LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone())
+                })?;
+                let version = self.version.as_deref().ok_or_else(|| {
+                    LambdaCompileError::InvalidDependencyCoordinate(self.alias.clone())
+                })?;
                 if !valid_registry(registry) || !valid_exact_version(version) {
                     return Err(LambdaCompileError::InvalidDependencyCoordinate(
                         self.alias.clone(),
@@ -416,7 +416,10 @@ impl LambdaCompileUnit {
         out.push_str("[dependencies]\n");
 
         for dependency in &self.dependencies {
-            out.push_str(&format!("{} = {{ package = {:?}", dependency.alias, dependency.package));
+            out.push_str(&format!(
+                "{} = {{ package = {:?}",
+                dependency.alias, dependency.package
+            ));
             match dependency.kind {
                 LambdaCompileDependencyKind::Git => {
                     let repository = dependency.repository.as_deref().ok_or_else(|| {
@@ -438,7 +441,9 @@ impl LambdaCompileUnit {
                     out.push_str(&format!(", version = {:?}", format!("={version}")));
                     if dependency.registry.as_deref() != Some("crates_io") {
                         let registry = dependency.registry.as_deref().ok_or_else(|| {
-                            LambdaCompileError::InvalidDependencyCoordinate(dependency.alias.clone())
+                            LambdaCompileError::InvalidDependencyCoordinate(
+                                dependency.alias.clone(),
+                            )
                         })?;
                         out.push_str(&format!(", registry = {:?}", registry));
                     }
@@ -530,9 +535,10 @@ impl LambdaCompileReceipt {
         }
         validate_architecture(self.provider, self.architecture)?;
         if self.target_triple != target_triple(self.architecture)
-            || !self
-                .executable_path
-                .ends_with(&format!("/{}/release/{LAMBDA_COMPILE_BINARY}", self.target_triple))
+            || !self.executable_path.ends_with(&format!(
+                "/{}/release/{LAMBDA_COMPILE_BINARY}",
+                self.target_triple
+            ))
         {
             return Err(LambdaCompileError::InvalidCompileReceipt);
         }
@@ -558,14 +564,18 @@ pub enum LambdaCompileError {
     InvalidDependencyFeature { alias: String, feature: String },
     #[error("duplicate dependency alias in compile unit: {0}")]
     DuplicateDependencyAlias(String),
-    #[error("compile unit dependency aliases differ from the closed ABI set; expected={expected:?}, actual={actual:?}")]
+    #[error(
+        "compile unit dependency aliases differ from the closed ABI set; expected={expected:?}, actual={actual:?}"
+    )]
     DependencyAliasSet {
         expected: Vec<String>,
         actual: Vec<String>,
     },
     #[error("repository dependency {0:?} must use immutable Git provenance through zed-pkg")]
     RepositoryDependencyMustUseZedPkg(String),
-    #[error("tokio must be an exact registry dependency with only macros + rt-multi-thread features")]
+    #[error(
+        "tokio must be an exact registry dependency with only macros + rt-multi-thread features"
+    )]
     InvalidTokioDependency,
     #[error("runtime profile is incompatible with provider/kind/carrier")]
     InvalidRuntimeProfile,
@@ -590,7 +600,9 @@ pub enum LambdaCompileError {
     InvalidCompileReceipt,
 }
 
-fn runtime_profile(unit: &LambdaFunctionBuildUnit) -> Result<LambdaRuntimeProfile, LambdaCompileError> {
+fn runtime_profile(
+    unit: &LambdaFunctionBuildUnit,
+) -> Result<LambdaRuntimeProfile, LambdaCompileError> {
     runtime_profile_parts(unit.provider, unit.kind, unit.carrier)
 }
 
@@ -733,9 +745,9 @@ fn valid_registry(value: &str) -> bool {
 
 fn valid_exact_version(value: &str) -> bool {
     !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
         && value.bytes().any(|byte| byte == b'.')
         && !value
             .chars()
@@ -767,9 +779,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda_build::{
-        LambdaHttpProjection, LambdaServerRole, LambdaSourceIdentity,
-    };
+    use crate::lambda_build::{LambdaHttpProjection, LambdaServerRole, LambdaSourceIdentity};
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
