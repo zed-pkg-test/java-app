@@ -511,21 +511,6 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
-        private <T> T guestRuntimeBoundary(
-                String api,
-                java.util.function.Supplier<T> operation) {
-            try {
-                return operation.get();
-            } catch (OresRuntimeException | SecurityException | CancellationException failure) {
-                throw failure;
-            } catch (IllegalArgumentException | IllegalStateException failure) {
-                String detail = failure.getMessage();
-                throw new OresRuntimeException(
-                        detail == null || detail.isBlank() ? api + " failed" : api + ": " + detail,
-                        failure);
-            }
-        }
-
         private Object member(Object receiver, String name) {
             if (receiver instanceof StdioFacade stdio) {
                 return switch (name) {
@@ -1501,6 +1486,21 @@ public final class OresEvalRootNode extends RootNode {
         private String display(Object value) { return value instanceof Complex c ? c.toString() : String.valueOf(value); }
     }
 
+    private static <T> T guestRuntimeBoundary(
+            String api,
+            java.util.function.Supplier<T> operation) {
+        try {
+            return operation.get();
+        } catch (OresRuntimeException | SecurityException | CancellationException failure) {
+            throw failure;
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            String detail = failure.getMessage();
+            throw new OresRuntimeException(
+                    detail == null || detail.isBlank() ? api + " failed" : api + ": " + detail,
+                    failure);
+        }
+    }
+
     private record DeferredAction(Ast.Expr expression, Env environment) { }
 
     @FunctionalInterface
@@ -1662,7 +1662,7 @@ public final class OresEvalRootNode extends RootNode {
         private Object write(List<Object> args){context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.stdout.write");requireOne(args,"stdio.stdout.write");context.output().print(String.valueOf(args.getFirst()));context.output().flush();return null;}
         private Object println(List<Object> args){context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.stdout.println");requireOne(args,"stdio.stdout.println");context.output().println(String.valueOf(args.getFirst()));return null;}
     }
-    private final class ProcessFacade {
+    private static final class ProcessFacade {
         private final OresContext context;
         private ProcessFacade(OresContext context){this.context=context;}
         private String contextId(){context.requireCapability(IsolatePolicy.Capability.PROCESS_INFO,"process.context_id");return context.contextId().toString();}
