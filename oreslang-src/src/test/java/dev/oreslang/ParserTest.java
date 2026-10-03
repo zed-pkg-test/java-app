@@ -55,7 +55,7 @@ final class ParserTest {
     void methodReceiverIsImplicitOrExplicitSelf() {
         String source = """
                 define module model
-                  define class x
+                  define class x as
                     @Ret<self>
                     find() {
                       return self;
@@ -354,6 +354,25 @@ final class ParserTest {
                   }
                 end
                 """));
+    }
+
+    @Test
+    void classDeclarationsRequireAsDelimiter() {
+        assertDoesNotThrow(() -> Parser.parse("""
+                define class CounterState as
+                  pub let int value = 10;
+                end
+                """));
+
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        define class CounterState
+                          pub let int value = 10;
+                        end
+                        """));
+
+        assertTrue(failure.getMessage().contains("expected 'as' after class header"));
     }
 
 }
