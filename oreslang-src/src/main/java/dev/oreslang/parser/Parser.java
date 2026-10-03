@@ -174,7 +174,9 @@ public final class Parser {
             if (isolated && modifiers.shared) {
                 throw error(actorToken, "'shared isoactor' is contradictory; use either actor/shared actor or isoactor");
             }
-            Ast.ActorKind actorKind = isolated ? Ast.ActorKind.PRIVATE : Ast.ActorKind.SHARED;
+            Ast.ActorKind actorKind = (isolated || !modifiers.shared)
+                    ? Ast.ActorKind.PRIVATE
+                    : Ast.ActorKind.SHARED;
             if (isLegacyFnSpelling()) {
                 throw error(peek(), "actor functions are declared with 'actor fnc', not 'actor fn'");
             }
