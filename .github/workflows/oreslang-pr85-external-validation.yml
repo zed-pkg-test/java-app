@@ -1,0 +1,103 @@
+name: oreslang-pr85-external-validation
+
+on:
+  push:
+    branches:
+      - "ci/validate-oreslang-pr85-de2f306-20261002"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oreslang-pr85-external-validation
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: oreslang-src
+
+jobs:
+  gpu-compiler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: oreslang-src/pom.xml
+      - name: Compile and validate OpenCL lowering
+        run: |
+          mvn -B -ntp -DskipTests compile
+          ORES_GPU_VALIDATE_OPENCL=1 mvn -B -ntp -Dtest=GpuExecutionTest,IncrementalFunctorStaticTest test
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: "25.3"
+          java-version: "25"
+          distribution: graalvm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+          cache-dependency-path: oreslang-src/pom.xml
+      - name: Verify JVM/JIT profile
+        run: mvn -B -ntp verify
+      - name: Run examples
+        run: |
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
+
+  native-aot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: "25.3"
+          java-version: "25"
+          distribution: graalvm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+          cache-dependency-path: oreslang-src/pom.xml
+      - run: mvn -B -ntp -Pnative-aot -DskipTests package
+      - run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+
+  native-hybrid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: "25.3"
+          java-version: "25"
+          distribution: graalvm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+          cache-dependency-path: oreslang-src/pom.xml
+      - run: mvn -B -ntp -Pnative-hybrid -DskipTests package
+      - run: ./target/ores-hybrid --mode=hybrid --platform=linux examples/together.ores
+
+  polyglot-isolate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: "25.3"
+          java-version: "25"
+          distribution: graalvm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+          cache-dependency-path: oreslang-src/pom.xml
+      - name: Build isolate library
+        run: mvn -B -ntp -Pnative-isolate -DskipTests package
+      - name: Run strict isolate
+        shell: bash
+        run: |
+          lib="$(find target -maxdepth 1 -type f \( -name 'oresvm.so' -o -name 'liboresvm.so' -o -name 'oresvm.dylib' -o -name 'liboresvm.dylib' \) | head -n1)"
+          test -n "$lib"
+          mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="$PWD/$lib" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"
