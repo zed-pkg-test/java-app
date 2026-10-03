@@ -197,6 +197,43 @@ final class MultipleInheritanceTest {
     }
 
     @Test
+    void traitComposedMethodsRejectSuperWithALanguageDiagnostic() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model as
+                          define class Base as
+                            pub foo() => int { return 1; }
+                          end
+
+                          define trait CallsSuper as
+                            pub foo() => int { return super.foo(); }
+                          end
+
+                          define class Child extends Base with CallsSuper as
+                          end
+                        end
+                        """)));
+
+        assertTrue(error.getMessage().contains("trait-composed methods cannot use super"));
+    }
+
+    @Test
+    void genericSingleParentSuperPreservesParentTypeArguments() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module model as
+                  define class Base<T> as
+                    pub echo(T value) => T { return value; }
+                  end
+
+                  define class Child<T> extends Base<T> as
+                    pub echo(T value) => T { return super.echo(value); }
+                  end
+                end
+                """)));
+    }
+
+    @Test
     void inheritedStateCollisionIsNeverResolvedByParentOrder() {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class,
