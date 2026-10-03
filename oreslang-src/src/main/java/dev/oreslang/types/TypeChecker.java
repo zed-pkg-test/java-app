@@ -232,7 +232,7 @@ public final class TypeChecker {
                     "program entrypoint 'main' cannot be an actor fnc; main must run synchronously and explicitly launch actors");
         }
         Set<String> generics = uniqueGenerics(fn.genericParameters(), (fn.kind() == Ast.CallableKind.ROUTINE ? "routine " : "function ") + fn.name());
-        Env env = new Env(null, fn.nonLexical());
+        Env env = new Env(moduleBindingEnv(module), fn.nonLexical());
         for (Ast.Param param : fn.parameters()) {
             Type parameterType = resolveParam(param, generics, null);
             if (fn.actorKind() != Ast.ActorKind.NONE) {
@@ -388,6 +388,20 @@ public final class TypeChecker {
                 throw new IllegalArgumentException("class '" + klass.name() + "' does not implement interface '" + interfaceRef.name() + "': expected " + expected + " but got " + actual);
             }
         }
+    }
+
+    private Env moduleBindingEnv(String moduleName) {
+        Env env = new Env(null);
+        Ast.ModuleDecl module = modules.get(moduleName);
+        if (module == null) return env;
+        for (Ast.Decl declaration : module.declarations()) {
+            if (!(declaration instanceof Ast.FieldDecl field) || field.initializer() == null) continue;
+            Type type = field.type() == null
+                    ? typeOf(field.initializer(), env, Set.of(), null)
+                    : resolve(field.type(), Set.of(), null);
+            env.define(field.name(), type, field.bindingKind());
+        }
+        return env;
     }
 
     private void checkModuleBinding(Ast.FieldDecl field) {
@@ -951,15 +965,18 @@ public final class TypeChecker {
             boolean dynamicKeys = false;
             Type dynamicValue = null;
             for (Ast.ObjectField field : object.fields()) {
-                Type valueType = widenCollectionElement(typeOf(field.value(), env, generics, self));
-                dynamicValue = dynamicValue == null ? valueType : collectionElementJoin(dynamicValue, valueType);
+                Type exactValueType = typeOf(field.value(), env, generics, self);
+                Type dynamicValueType = widenCollectionElement(exactValueType);
+                dynamicValue = dynamicValue == null
+                        ? dynamicValueType
+                        : collectionElementJoin(dynamicValue, dynamicValueType);
                 if (field.isDynamic()) {
                     dynamicKeys = true;
                     requireAssignable(
                             typeOf(field.dynamicName(), env, generics, self),
                             Primitive.STRING,
                             "dynamic obj key");
-                } else if (members.putIfAbsent(field.name(), valueType) != null) {
+                } else if (members.putIfAbsent(field.name(), exactValueType) != null) {
                     throw new IllegalArgumentException("duplicate obj field '" + field.name() + "'");
                 }
             }
