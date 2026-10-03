@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "test/oreslang-pr134-*"
+  pull_request:
 
 permissions:
   contents: read
