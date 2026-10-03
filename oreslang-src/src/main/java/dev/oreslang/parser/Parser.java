@@ -987,6 +987,16 @@ public final class Parser {
         if (match(FALSE)) return new Ast.LiteralExpr(Boolean.FALSE);
         if (match(NULL)) throw error(previous(), "standalone null values are forbidden; use Option<T>");
         if (match(SELF)) return new Ast.NameExpr("self");
+        if (match(SUPER)) {
+            String parent = null;
+            // super.A.foo(): consume only the direct-parent qualifier here and
+            // leave the final ".foo" for ordinary postfix/member parsing.
+            if (check(DOT) && checkAhead(1, IDENT) && checkAhead(2, DOT)) {
+                advance();
+                parent = advance().lexeme();
+            }
+            return new Ast.SuperExpr(parent);
+        }
         if (match(STRUCT)) return parseStructInitializer(null);
         if (check(IDENT) && looksLikeNamedStructInitializer()) {
             Ast.TypeRef type = parseTypeRef();
@@ -1166,6 +1176,10 @@ public final class Parser {
 
     private boolean check(Token.Type type) { return peek().type() == type; }
     private boolean checkNext(Token.Type type) { return current + 1 < tokens.size() && tokens.get(current + 1).type() == type; }
+    private boolean checkAhead(int offset, Token.Type type) {
+        int index = current + offset;
+        return index >= 0 && index < tokens.size() && tokens.get(index).type() == type;
+    }
     private boolean checkNextLexeme(String lexeme) {
         return current + 1 < tokens.size() && tokens.get(current + 1).type() == IDENT
                 && tokens.get(current + 1).lexeme().equals(lexeme);
