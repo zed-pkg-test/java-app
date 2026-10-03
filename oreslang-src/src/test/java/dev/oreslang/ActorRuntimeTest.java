@@ -1273,4 +1273,87 @@ final class ActorRuntimeTest {
     }
 
 
+    @Test
+    void dispatcherConfigGivesUntrustedActorsSingleMessageQuantum() {
+        var config = new ActorRuntime.DispatcherConfig(4, 3, 2, 64, 1024);
+        assertEquals(64, config.throughputFor(ActorRuntime.ActorKind.PRIVATE));
+        assertEquals(64, config.throughputFor(ActorRuntime.ActorKind.SHARED));
+        assertEquals(1, config.throughputFor(ActorRuntime.ActorKind.UNTRUSTED));
+
+        var defaults = ActorRuntime.DispatcherConfig.defaults();
+        assertTrue(defaults.privateParallelism() >= 1);
+        assertTrue(defaults.sharedParallelism() >= 1);
+        assertTrue(defaults.untrustedParallelism() >= 1);
+    }
+
+    @Test
+    void boundedPrivateMailboxBatchLetsQueuedPeerRunBeforeHotActorDrains() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(1, 1, 1, 2, 128);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            CountDownLatch firstHotEntered = new CountDownLatch(1);
+            CountDownLatch releaseFirstHot = new CountDownLatch(1);
+            CountDownLatch peerRan = new CountDownLatch(1);
+            AtomicInteger hotProcessed = new AtomicInteger();
+            AtomicInteger hotCountWhenPeerRan = new AtomicInteger(Integer.MAX_VALUE);
+
+            var hot = runtime.<Integer>spawnPrivateTrusted(factory -> (message, context) -> {
+                if (message == 0) {
+                    firstHotEntered.countDown();
+                    assertTrue(releaseFirstHot.await(2, TimeUnit.SECONDS));
+                }
+                hotProcessed.incrementAndGet();
+            });
+            var peer = runtime.<String>spawnPrivateTrusted(factory -> (message, context) -> {
+                hotCountWhenPeerRan.set(hotProcessed.get());
+                peerRan.countDown();
+            });
+
+            for (int i = 0; i < 10; i++) hot.send(i);
+            assertTrue(firstHotEntered.await(2, TimeUnit.SECONDS));
+            peer.send("peer");
+            releaseFirstHot.countDown();
+
+            assertTrue(peerRan.await(2, TimeUnit.SECONDS));
+            assertTrue(
+                    hotCountWhenPeerRan.get() <= config.throughput(),
+                    "hot actor must re-enter at the tail after one bounded batch");
+        }
+    }
+
+    @Test
+    void mainProcessTasksShareSharedLaneAndActorTurnsCannotAmplifyIt() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(1, 1, 1, 4, 128);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            AtomicReference<String> processThread = new AtomicReference<>();
+            runtime.submitProcessTask(() -> processThread.set(Thread.currentThread().getName()))
+                    .get(2, TimeUnit.SECONDS);
+            assertNotNull(processThread.get());
+            assertTrue(processThread.get().startsWith("ores-shared-actor-dispatcher-"));
+
+            var isolated = runtime.<String>spawnPrivate(factory -> (message, context) ->
+                    context.runtime().submitProcessTask(() -> { }));
+            isolated.send("attempt");
+            assertTrue(isolated.awaitTermination(2, TimeUnit.SECONDS));
+            assertInstanceOf(SecurityException.class, isolated.failure().orElseThrow());
+
+            var sharedActor = runtime.<String>spawnShared(factory -> (message, context) ->
+                    context.runtime().submitProcessTask(() -> { }));
+            sharedActor.send("attempt");
+            assertTrue(sharedActor.awaitTermination(2, TimeUnit.SECONDS));
+            assertInstanceOf(SecurityException.class, sharedActor.failure().orElseThrow());
+
+            ActorRuntime.DispatcherStats shared =
+                    runtime.dispatcherStats(ActorRuntime.ActorKind.SHARED);
+            ActorRuntime.DispatcherStats isolatedStats =
+                    runtime.dispatcherStats(ActorRuntime.ActorKind.PRIVATE);
+            ActorRuntime.DispatcherStats untrusted =
+                    runtime.dispatcherStats(ActorRuntime.ActorKind.UNTRUSTED);
+            assertEquals(1, shared.parallelism());
+            assertEquals(1, isolatedStats.parallelism());
+            assertEquals(1, untrusted.parallelism());
+            assertTrue(shared.completedDispatches() >= 1);
+        }
+    }
+
+
 }
