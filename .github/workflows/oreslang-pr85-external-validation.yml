@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "ci/validate-oreslang-pr85-de2f306-20261002"
+  pull_request:
 
 permissions:
   contents: read
