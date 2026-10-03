@@ -1,6 +1,7 @@
 package dev.oreslang.launcher;
 
 import dev.oreslang.OresLanguage;
+import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.IsolatePolicy;
 import org.graalvm.polyglot.Context;
@@ -48,6 +49,12 @@ public final class OresMain {
 
         Path path = Path.of(filename);
         if (!Files.isRegularFile(path)) throw new IllegalArgumentException("not a file: " + path);
+
+        var checked = OresCompiler.parseAndTypeCheckWithDiagnostics(Files.readString(path));
+        for (var diagnostic : checked.diagnostics()) {
+            System.err.println(path + ": " + diagnostic.severity().name().toLowerCase(Locale.ROOT)
+                    + "[" + diagnostic.code() + "]: " + diagnostic.message());
+        }
 
         ExecutionProfile profile = ExecutionProfile.parse(mode, platform);
         IsolatePolicy policy = strict ? IsolatePolicy.strictFaas() : IsolatePolicy.developer();
