@@ -853,7 +853,10 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private Object freezeForMessage(Object value) {
-        return freezeValue(value, runtimeId, true, new IdentityHashMap<>(), 0, false, new GraphBudget());
+        // Ordinary actor messages are copied into an immutable transport graph.
+        // Actor-owned state uses the separate freezeForActorState path so it can
+        // remain mutable inside the receiving actor.
+        return freezeValue(value, runtimeId, true, new IdentityHashMap<>(), 0, true, new GraphBudget());
     }
 
     private static Object freezeReadonly(Object value) {
