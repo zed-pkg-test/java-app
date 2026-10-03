@@ -11,7 +11,13 @@ public final class OresCompiler {
     private OresCompiler() { }
 
     public static Ast.Program parseAndTypeCheck(String source) {
-        return TypeChecker.check(Parser.parse(source));
+        return parseAndTypeCheckWithDiagnostics(source).program();
+    }
+
+    /** Parse/type-check while preserving non-fatal compiler diagnostics such as
+     * multiple-class-inheritance guidance. */
+    public static TypeChecker.CheckResult parseAndTypeCheckWithDiagnostics(String source) {
+        return TypeChecker.checkWithDiagnostics(Parser.parse(source));
     }
 
     /**
