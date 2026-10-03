@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -563,6 +564,71 @@ final class UntrustedActorRuntimeTest {
                     ref.failure().orElseThrow());
             assertTrue(response.aborted.get());
             assertEquals(0, response.bytes.get());
+        }
+    }
+
+
+    @Test
+    void untrustedActorsRunOnlyOnDedicatedSandboxPool() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(1, 1, 1, 64, 128);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            var limits = new ActorRuntime.UntrustedActorLimits(
+                    Duration.ofSeconds(2), 1000, 1024, 1024, 1024);
+
+            var sandbox = runtime.<String>spawnUntrusted(
+                    IsolatePolicy.untrustedActor(),
+                    limits,
+                    null,
+                    null,
+                    ignored -> (message, turn) -> {
+                        assertTrue(Thread.currentThread().getName()
+                                .startsWith("ores-untrusted-actor-dispatcher-"));
+                        turn.self().stop();
+                    });
+
+            sandbox.send("check");
+            assertTrue(sandbox.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(sandbox.failure().isEmpty());
+        }
+    }
+
+    @Test
+    void uncooperativeSandboxCpuWorkCannotStarveTrustedPools() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(1, 1, 1, 4, 128);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            CountDownLatch privateRan = new CountDownLatch(1);
+            CountDownLatch sharedRan = new CountDownLatch(1);
+
+            var privateActor = runtime.<String>spawnPrivateTrusted(
+                    factory -> (message, turn) -> privateRan.countDown());
+            var sharedActor = runtime.<String>spawnSharedTrusted(
+                    factory -> (message, turn) -> sharedRan.countDown());
+
+            var limits = new ActorRuntime.UntrustedActorLimits(
+                    Duration.ofSeconds(2), 1000, 1024, 1024, 1024);
+            var sandbox = runtime.<String>spawnUntrusted(
+                    IsolatePolicy.untrustedActor(),
+                    limits,
+                    null,
+                    null,
+                    ignored -> (message, turn) -> {
+                        // Deliberately ignore cooperative checkpoints for a
+                        // bounded interval to model a hostile host callback.
+                        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300);
+                        while (System.nanoTime() < deadline) {
+                            // busy
+                        }
+                        turn.self().stop();
+                    });
+
+            sandbox.send("hog");
+            privateActor.send("trusted-private");
+            sharedActor.send("trusted-shared");
+
+            assertTrue(privateRan.await(1, TimeUnit.SECONDS));
+            assertTrue(sharedRan.await(1, TimeUnit.SECONDS));
+            assertTrue(sandbox.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(sandbox.failure().isEmpty());
         }
     }
 
