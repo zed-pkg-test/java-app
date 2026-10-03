@@ -38,7 +38,7 @@ final class OwnershipAndClosureTest {
     void ordinaryParametersAreImmutableForFieldMutation() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -53,7 +53,7 @@ final class OwnershipAndClosureTest {
     @Test
     void ownedMutParameterMayMutateAndReturnOwnership() throws Exception {
         String output = run("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -75,7 +75,7 @@ final class OwnershipAndClosureTest {
     @Test
     void mutableBorrowAllowsMutationWithoutMovingOwner() throws Exception {
         String output = run("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -98,7 +98,7 @@ final class OwnershipAndClosureTest {
     void immutableBorrowBlocksOverlappingMutableBorrow() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -122,7 +122,7 @@ final class OwnershipAndClosureTest {
     void useAfterMoveIsRejected() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -144,7 +144,7 @@ final class OwnershipAndClosureTest {
     void borrowOfLocalCannotEscapeFunction() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -159,7 +159,7 @@ final class OwnershipAndClosureTest {
     @Test
     void borrowedParameterCanBeReturned() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -173,7 +173,7 @@ final class OwnershipAndClosureTest {
     @Test
     void multipleImmutableBorrowsMayCoexist() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -192,7 +192,7 @@ final class OwnershipAndClosureTest {
     void secondMutableBorrowIsRejected() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -212,7 +212,7 @@ final class OwnershipAndClosureTest {
     void moveWhileBorrowedIsRejected() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -232,7 +232,7 @@ final class OwnershipAndClosureTest {
     @Test
     void lexicalScopeEndsStoredBorrow() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -257,7 +257,7 @@ final class OwnershipAndClosureTest {
     @Test
     void moveInBothIfBranchesIsAllowedButValueIsMovedAfterJoin() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Bar
+                define class Bar as
                   pub let String foo = "start";
                 end
 
@@ -276,7 +276,7 @@ final class OwnershipAndClosureTest {
 
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub let String foo = "start";
                         end
 
@@ -300,7 +300,7 @@ final class OwnershipAndClosureTest {
     void immutableFieldStaysImmutableEvenThroughMutOwner() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Bar
+                        define class Bar as
                           pub val String foo = "start";
                         end
 
@@ -316,7 +316,7 @@ final class OwnershipAndClosureTest {
     void moveOnlyCaptureTransfersIntoClosure() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        define class Box
+                        define class Box as
                           pub val int value = 7;
                         end
 
