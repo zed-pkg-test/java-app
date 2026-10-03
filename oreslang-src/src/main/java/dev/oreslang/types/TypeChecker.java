@@ -2096,7 +2096,15 @@ public final class TypeChecker {
 
         Set<String> localMethodKeys = new LinkedHashSet<>();
         for (Ast.MethodDecl method : klass.methods()) {
-            if (!method.isStatic()) localMethodKeys.add(methodKey(method.name(), method.arity()));
+            // Only an explicit public method declared by the subclass resolves
+            // a concrete-parent collision. A flattened trait method is reusable
+            // composition, not an inheritance choice, and a private method
+            // cannot satisfy the public contracts of both parent branches.
+            if (!method.isStatic()
+                    && !method.composed()
+                    && method.visibility() == Ast.Visibility.PUBLIC) {
+                localMethodKeys.add(methodKey(method.name(), method.arity()));
+            }
         }
 
         Map<String, String> inheritedMethodOrigins = new LinkedHashMap<>();
@@ -2140,7 +2148,16 @@ public final class TypeChecker {
                 }
             }
         }
-        for (Ast.FieldDecl field : klass.fields()) mergeMember(members, field.name(), resolve(field.type(), generics, self), "class " + klass.name());
+        for (Ast.FieldDecl field : klass.fields()) {
+            String inheritedOrigin = inheritedFieldOrigins.get(field.name());
+            if (inheritedOrigin != null) {
+                throw new IllegalArgumentException(
+                        "class '" + klass.name() + "' redeclares inherited state field '" + field.name()
+                                + "' from parent branch '" + inheritedOrigin
+                                + "'; inherited state is not virtual and cannot be shadowed or replaced");
+            }
+            mergeMember(members, field.name(), resolve(field.type(), generics, self), "class " + klass.name());
+        }
         for (Ast.MethodDecl method : klass.methods()) {
             if (method.isStatic()) continue;
             mergeMember(members, methodKey(method.name(), method.arity()),
@@ -2218,6 +2235,13 @@ public final class TypeChecker {
                         local.arity(),
                         new LinkedHashSet<>());
                 if (inherited == null) continue;
+
+                if (local.visibility() != Ast.Visibility.PUBLIC) {
+                    throw new IllegalArgumentException(
+                            "override '" + klass.name() + "." + local.name() + "/" + local.arity()
+                                    + "' cannot reduce visibility of inherited public method from parent '"
+                                    + parent.name() + "'; declare the resolving override pub");
+                }
 
                 Type resolvedParent = resolve(parentRef, classGenerics, self);
                 Function inheritedSignature = methodFunctionTypeForReceiver(
