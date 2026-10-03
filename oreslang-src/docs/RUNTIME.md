@@ -110,17 +110,29 @@ Compiler-generated/context-aware `BehaviorFactory` values are capture-free for b
 
 ## Actor dispatchers
 
-The host actor runtime follows the same scheduling shape as Akka's event-based dispatcher: many actors share an executor, each actor has its own mailbox, and a scheduled actor drains only a bounded number of messages before yielding back to the executor. The configured throughput bound prevents one hot mailbox from monopolizing a worker.
+The scheduler combines three useful actor-runtime ideas: Erlang-style bounded execution quanta, Akka-style bounded mailbox throughput and bulkheading, and Rust/async actor practice that keeps one actor's handler serial while multiplexing many actors over a smaller execution substrate.
 
-Oreslang deliberately uses three executors:
+Oreslang deliberately has exactly three actor execution lanes:
 
-- **private dispatcher** — private actors, isolation-copy message transport;
-- **shared dispatcher** — shared actors, immutable sharing plus explicit `SyncCell<T>` shared state;
-- **untrusted dispatcher** — adversarial, memory-isolated actors with enforced fuel/deadline checks, separated so hostile work cannot consume the trusted/private carrier pool.
+- **shared/process dispatcher** — shared actors plus trusted host/main-process tasks;
+- **private dispatcher** — trusted/cooperative memory-isolated actors using isolation-copy transport;
+- **untrusted dispatcher** — adversarial memory-isolated actors with mandatory fuel/deadline checks.
 
-A per-actor atomic scheduling gate ensures only one drain task for that actor is active. The executor may run different turns on different threads; thread identity is never actor identity.
+The default worker allocation divides the available CPU budget across the three lanes instead of assigning a full CPU-count pool to every lane. Every lane still receives at least one worker. This prevents a busy trust domain from consuming every actor carrier merely because the machine has many cores.
 
-Normal private/shared actor cancellation does not interrupt a pooled carrier merely to stop one actor; cancellation is observed at compiler-injected scheduler safepoints. An untrusted actor additionally has a dedicated-dispatcher watchdog: when its hard deadline expires the runtime marks that actor stopped and interrupts only its currently active untrusted carrier as a wake-up/control signal. The turn clears that interrupt before the pooled carrier is reused. Security does not depend on the guest voluntarily yielding: untrusted statement/expression dispatch, loop backedges, and callable/recursion execution consume runtime fuel and recheck the deadline.
+Each actor owns exactly one mailbox and one atomic scheduling gate, so it can have at most one ready/running drain task. Ready queues are bounded FIFO queues with fair lock acquisition. Trusted private/shared actors process at most `DispatcherConfig.throughput` messages per dispatch turn; if work remains, the actor is re-enqueued at the tail. **Untrusted actors always process exactly one mailbox message per dispatch turn**, regardless of trusted throughput, before returning to the sandbox ready queue.
+
+The runtime records per-lane queue depth, active workers, completed dispatches, maximum ready-queue wait, and starvation events (ready wait >= one second) through `dispatcherStats(...)`. These are diagnostics rather than a claim that an overloaded finite machine can make starvation mathematically impossible.
+
+Trusted main-process work can be submitted through `submitProcessTask(...)`, which deliberately uses the shared/process pool. Actor turns cannot call that API: shared actors already run on the lane, and allowing an actor to enqueue arbitrary extra process tasks would create a scheduler-amplification path.
+
+### Cooperative versus uncooperative execution
+
+For trusted private/shared Oreslang code, compiler-injected scheduler safepoints remain cooperative. Mailbox batching prevents a hot **mailbox** from monopolizing a worker, and safepoints yield CPU to the operating system, but the JVM cannot safely suspend an arbitrary Java stack in the middle of one handler and later resume it as an actor continuation. A trusted host callback that never returns is therefore a programming error; blocking/CPU-heavy host work must be moved to an explicitly managed service rather than hidden inside an actor turn.
+
+Untrusted actors use a different contract. They have their own pool, a one-message dispatcher quantum, mandatory statement/expression/call/loop fuel checkpoints, a hard lifetime watchdog, bounded mailbox output, per-actor heap/mailbox limits, and the parent runtime's aggregate actor-memory ceiling. The watchdog may interrupt the currently active sandbox carrier as a wake-up/control signal, and the turn clears that interrupt before a pooled worker is reused. Production security relies on metered Oreslang guest execution plus the killable Graal/OS sandbox boundary, not on Java's inability to force-stop an arbitrary hostile host callback safely.
+
+This separation means an uncooperative sandbox callback can consume at most the sandbox lane's configured carrier capacity; it cannot take a private/shared carrier. Tests deliberately run a busy, checkpoint-free sandbox callback while private and shared actors continue to make progress on their own pools.
 
 
 ## Untrusted actor sandbox
