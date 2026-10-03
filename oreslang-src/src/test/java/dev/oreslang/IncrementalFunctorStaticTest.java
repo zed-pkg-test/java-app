@@ -158,7 +158,7 @@ final class IncrementalFunctorStaticTest {
     void staticClassFunctionsUseStaticFncAndDoNotReceiveSelf() throws Exception {
         String output = run("""
                 define module model
-                  define class Counter
+                  define class Counter as
                     pub val int value = 9;
 
                     pub static fnc twice(int x) => int {
@@ -179,19 +179,19 @@ final class IncrementalFunctorStaticTest {
         assertEquals("18", output);
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                define class Bad
+                define class Bad as
                   static nope() => int { return 1; }
                 end
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   static fnc nope() => int { return self.value; }
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   static fnc make() => int { return 1; }
                 end
                 fnc bad() => int {
