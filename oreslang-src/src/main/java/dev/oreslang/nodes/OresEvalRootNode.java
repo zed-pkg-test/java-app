@@ -530,14 +530,19 @@ public final class OresEvalRootNode extends RootNode {
                 SingletonState singletonState) {
             if (singletonState != null) ProcessSingletonRegistry.checkExecutionBudget();
             if (args.size() != method.parameters().size()) throw new IllegalArgumentException("method " + method.name() + " arity mismatch");
-            Env lexical = classLexicalModuleState(dispatchClass, singletonState);
-            Env env = new Env(lexical, singletonState);
+            Ast.ClassDecl methodOwner = findRuntimeMethodOwner(dispatchClass, method, new LinkedHashSet<>());
+            if (methodOwner == null) {
+                throw new IllegalStateException("cannot determine declaring class for method "
+                        + dispatchClass.name() + "." + method.name());
+            }
+            Env lexical = classLexicalModuleState(methodOwner, singletonState);
+            Env env = new Env(lexical, singletonState, false, methodOwner);
             if (!method.isStatic()) env.define("self", receiver, Ast.BindingKind.VAL);
             for (int i = 0; i < method.parameters().size(); i++) {
                 Ast.Param param = method.parameters().get(i);
                 env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
-            Ast.ModuleDecl owner = ownerModule(dispatchClass);
+            Ast.ModuleDecl owner = ownerModule(methodOwner);
             predeclareLocalTypes(method.body(), env, owner == null ? null : owner.name());
             try {
                 executeBlock(method.body(), env);
@@ -701,6 +706,10 @@ public final class OresEvalRootNode extends RootNode {
                 if (literal.value() instanceof Ast.Imaginary imaginary) return new Complex(0.0, imaginary.coefficient());
                 return literal.value();
             }
+            if (expr instanceof Ast.SuperExpr) {
+                throw new IllegalArgumentException(
+                        "super is only valid as a direct method call: super.foo(...) or super.Parent.foo(...)");
+            }
             if (expr instanceof Ast.NameExpr name) {
                 Object local = env.lookup(name.name());
                 if (local != Env.MISSING) return local;
@@ -823,6 +832,10 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.CallExpr call) {
                 if (call.callee() instanceof Ast.MemberExpr methodCall) {
+                    if (methodCall.receiver() instanceof Ast.SuperExpr superExpr) {
+                        List<Object> args = call.arguments().stream().map(arg -> eval(arg, env)).toList();
+                        return invokeSuperMethod(superExpr, methodCall.member(), args, env);
+                    }
                     Object receiver = eval(methodCall.receiver(), env);
                     List<Object> args = call.arguments().stream().map(arg -> eval(arg, env)).toList();
                     if (receiver instanceof OresObject object) {
@@ -858,7 +871,13 @@ public final class OresEvalRootNode extends RootNode {
                 if (!(callee instanceof Invokable invokable)) throw new IllegalArgumentException("value is not callable: " + callee);
                 return invokable.call(args);
             }
-            if (expr instanceof Ast.MemberExpr member) return member(eval(member.receiver(), env), member.member(), env.singletonState);
+            if (expr instanceof Ast.MemberExpr member) {
+                if (member.receiver() instanceof Ast.SuperExpr) {
+                    throw new IllegalArgumentException(
+                            "super methods cannot be extracted as values; invoke super.foo(...) or super.Parent.foo(...) directly");
+                }
+                return member(eval(member.receiver(), env), member.member(), env.singletonState);
+            }
             if (expr instanceof Ast.IndexExpr indexed) {
                 Object receiver = eval(indexed.receiver(), env);
                 Object index = eval(indexed.index(), env);
@@ -1347,6 +1366,90 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
+        private Object invokeSuperMethod(
+                Ast.SuperExpr superExpr,
+                String methodName,
+                List<Object> args,
+                Env env) {
+            if (env.methodOwnerClass == null) {
+                throw new IllegalArgumentException("super may be used only inside an instance method");
+            }
+            Object self = env.lookup("self");
+            if (!(self instanceof OresObject receiver)) {
+                throw new IllegalArgumentException("super requires an instance receiver");
+            }
+
+            Ast.TypeRef parentRef = resolveRuntimeDirectSuperParent(env.methodOwnerClass, superExpr.parent());
+            if (parentRef.name().equals("Object") || parentRef.name().equals("List")) {
+                throw new IllegalArgumentException("built-in parent '" + parentRef.name() + "' has no callable super methods");
+            }
+            Ast.ClassDecl parent = findClass(parentRef.name());
+            if (parent == null) {
+                throw new IllegalArgumentException("unknown direct parent class '" + parentRef.name() + "'");
+            }
+            Ast.MethodDecl method = findMethod(parent, methodName, args.size(), new LinkedHashSet<>());
+            if (method == null) {
+                throw new IllegalArgumentException("no superclass method " + parent.name() + "." + methodName
+                        + " with arity " + args.size());
+            }
+            return callMethod(receiver, parent, method, args, env.singletonState);
+        }
+
+        private Ast.TypeRef resolveRuntimeDirectSuperParent(Ast.ClassDecl owner, String requestedParent) {
+            if (owner.parents().isEmpty()) {
+                throw new IllegalArgumentException("class '" + owner.name() + "' has no superclass");
+            }
+            if (requestedParent == null) {
+                if (owner.parents().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "unqualified super is ambiguous in multiply inherited class '" + owner.name()
+                                    + "'; use super.Parent.method(...) to select a direct parent");
+                }
+                return owner.parents().getFirst();
+            }
+
+            List<Ast.TypeRef> matches = owner.parents().stream()
+                    .filter(parent -> parent.name().equals(requestedParent)
+                            || simpleRuntimeTypeName(parent.name()).equals(requestedParent))
+                    .toList();
+            if (matches.size() != 1) {
+                throw new IllegalArgumentException(
+                        "super." + requestedParent + " must name exactly one direct parent of class '" + owner.name()
+                                + "'; direct parents are " + owner.parents().stream().map(Ast.TypeRef::name).toList());
+            }
+            return matches.getFirst();
+        }
+
+        private String simpleRuntimeTypeName(String name) {
+            int dot = name.lastIndexOf('.');
+            return dot < 0 ? name : name.substring(dot + 1);
+        }
+
+        private Ast.ClassDecl findRuntimeMethodOwner(
+                Ast.ClassDecl current,
+                Ast.MethodDecl target,
+                Set<Ast.ClassDecl> seen) {
+            if (!seen.add(current)) return null;
+            for (Ast.MethodDecl method : current.methods()) {
+                if (method == target) {
+                    seen.remove(current);
+                    return current;
+                }
+            }
+            for (Ast.TypeRef parentRef : current.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent == null) continue;
+                Ast.ClassDecl found = findRuntimeMethodOwner(parent, target, seen);
+                if (found != null) {
+                    seen.remove(current);
+                    return found;
+                }
+            }
+            seen.remove(current);
+            return null;
+        }
+
         private Ast.MethodDecl findMethod(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
             if (!seen.add(klass)) throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
             for (Ast.MethodDecl method : klass.methods()) {
@@ -1681,22 +1784,33 @@ public final class OresEvalRootNode extends RootNode {
         private final Env parent;
         private final SingletonState singletonState;
         private final boolean singletonStorage;
+        private final Ast.ClassDecl methodOwnerClass;
         private final Map<String, Slot> slots = new LinkedHashMap<>();
         private final Map<String, Ast.ClassDecl> localTypes = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> localTypeAliases = new HashMap<>();
 
         private Env(Env parent) {
-            this(parent, parent == null ? null : parent.singletonState, false);
+            this(parent, parent == null ? null : parent.singletonState, false,
+                    parent == null ? null : parent.methodOwnerClass);
         }
 
         private Env(Env parent, SingletonState singletonState) {
-            this(parent, singletonState, false);
+            this(parent, singletonState, false, parent == null ? null : parent.methodOwnerClass);
         }
 
         private Env(Env parent, SingletonState singletonState, boolean singletonStorage) {
+            this(parent, singletonState, singletonStorage, parent == null ? null : parent.methodOwnerClass);
+        }
+
+        private Env(
+                Env parent,
+                SingletonState singletonState,
+                boolean singletonStorage,
+                Ast.ClassDecl methodOwnerClass) {
             this.parent = parent;
             this.singletonState = singletonState;
             this.singletonStorage = singletonStorage;
+            this.methodOwnerClass = methodOwnerClass;
         }
 
         private void define(String name, Object value, Ast.BindingKind kind) {
@@ -1777,7 +1891,11 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Env snapshot() {
-            Env cp = new Env(parent == null ? null : parent.snapshot(), singletonState, singletonStorage);
+            Env cp = new Env(
+                    parent == null ? null : parent.snapshot(),
+                    singletonState,
+                    singletonStorage,
+                    methodOwnerClass);
             cp.slots.putAll(slots);
             cp.localTypes.putAll(localTypes);
             cp.localTypeAliases.putAll(localTypeAliases);
