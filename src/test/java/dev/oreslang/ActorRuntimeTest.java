@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 final class ActorRuntimeTest {
     @Test
-    void freezesMessagesBeforeDelivery() throws Exception {
+    void copiesMessagesBeforeDeliveryIntoActorLocalMutableOwnership() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             CountDownLatch received = new CountDownLatch(1);
             AtomicReference<List<?>> observed = new AtomicReference<>();
@@ -30,7 +30,9 @@ final class ActorRuntimeTest {
 
             assertTrue(received.await(2, TimeUnit.SECONDS));
             assertEquals(List.of(1, 2), observed.get());
-            assertThrows(UnsupportedOperationException.class, () -> ((List<Object>) observed.get()).add(9));
+            ((List<Object>) observed.get()).add(9);
+            assertEquals(List.of(1, 2, 9), observed.get());
+            assertEquals(List.of(1, 2, 3), mutable);
         }
     }
 
