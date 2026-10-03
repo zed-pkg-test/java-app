@@ -1,5 +1,6 @@
 package dev.oreslang;
 
+import dev.oreslang.compiler.IncrementalCompiler;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.TypeChecker;
 import org.graalvm.polyglot.Context;
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,6 +36,24 @@ final class MultipleInheritanceTest {
                 diagnostic.code().equals("ORES-MI-001")
                         && diagnostic.message().contains("interfaces")
                         && diagnostic.message().contains("traits")));
+    }
+
+    @Test
+    void incrementalCompilerPropagatesMultipleInheritanceWarning() {
+        var result = new IncrementalCompiler().compile(Map.of("model.ores", """
+                define module model as
+                  define class A as
+                  end
+                  define class B as
+                  end
+                  define class C extends A, B as
+                  end
+                end
+                """));
+
+        assertTrue(result.diagnostics().stream().anyMatch(unitDiagnostic ->
+                unitDiagnostic.unitId().equals("model.ores")
+                        && unitDiagnostic.diagnostic().code().equals("ORES-MI-001")));
     }
 
     @Test
