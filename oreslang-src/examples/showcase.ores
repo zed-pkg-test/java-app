@@ -22,11 +22,6 @@ define module model as
 
   define class Box<T> extends Base as
     val T value;
-
-    @Ret<self>
-    identity() {
-      return self;
-    }
   end
 end
 
