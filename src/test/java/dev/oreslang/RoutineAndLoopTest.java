@@ -163,7 +163,8 @@ final class RoutineAndLoopTest {
                 }
                 """);
         assertTrue(output.startsWith("123"));
-        assertTrue(output.endsWith("3"));
+        // main() contributes one guest-call entry safepoint; the loop contributes three.
+        assertTrue(output.endsWith("4"));
     }
 
     @Test
@@ -176,7 +177,8 @@ final class RoutineAndLoopTest {
                   stdio.stdout.write(process.descriptor.scheduler_safepoints)
                 }
                 """);
-        assertEquals("0123", output);
+        // main() contributes one guest-call entry safepoint; the loop contributes three.
+        assertEquals("0124", output);
     }
 
     @Test
