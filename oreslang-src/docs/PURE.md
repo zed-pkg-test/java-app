@@ -331,6 +331,8 @@ Optimizations must not assume that `pure` means `nothrow`, `noraises`, `nopanic`
 
 Call-stack/debug metadata attached by the runtime is diagnostic metadata, not an ambient capability granted to pure code. Reading caller stack, thread, source-loader state, or similar runtime metadata inside a pure callable is an introspection effect and is forbidden.
 
+See `docs/TRAP.md` for the detailed `trap` / `throw` / `raise` / `panic` / `recover` contract.
+
 Host/FFI failures are not automatically trusted as pure guest control effects and remain covered by foreign-effect rules. Fatal VM/native corruption, OS termination, hardware faults, OOM, stack exhaustion, or sandbox fuel exhaustion are outside the source-level purity guarantee.
 
 ## Java, JNI, native, and host interop
