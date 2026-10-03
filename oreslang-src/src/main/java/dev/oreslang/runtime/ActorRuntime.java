@@ -188,13 +188,22 @@ public final class ActorRuntime implements AutoCloseable {
             int untrusted = Math.max(1, remaining - Math.min(remaining, isolated));
             return new DispatcherConfig(isolated, shared, untrusted, 64, 16_384);
         }
+
+        public DispatcherConfig withMaxActors(int replacementMaxActors) {
+            return new DispatcherConfig(
+                    privateParallelism,
+                    sharedParallelism,
+                    untrustedParallelism,
+                    throughput,
+                    replacementMaxActors);
+        }
     }
 
     public record DispatcherStats(
             ActorKind kind,
             int parallelism,
             int activeWorkers,
-            int queuedActors,
+            int queuedTasks,
             long completedDispatches,
             long starvationEvents,
             long maxQueueWaitNanos) { }
@@ -694,6 +703,7 @@ public final class ActorRuntime implements AutoCloseable {
     private final Set<SyncCell<?>> syncCells = ConcurrentHashMap.newKeySet();
     private final Set<Shared<?>> sharedValues = ConcurrentHashMap.newKeySet();
     private static final long STARVATION_THRESHOLD_NANOS = TimeUnit.SECONDS.toNanos(1);
+    private static final int PROCESS_TASKS_PER_SHARED_WORKER = 2;
 
     private final IsolatePolicy policyCeiling;
     private final DispatcherConfig dispatcherConfig;
@@ -708,6 +718,8 @@ public final class ActorRuntime implements AutoCloseable {
     private final AtomicLong privateMaxQueueWaitNanos = new AtomicLong();
     private final AtomicLong sharedMaxQueueWaitNanos = new AtomicLong();
     private final AtomicLong untrustedMaxQueueWaitNanos = new AtomicLong();
+    private final int maxProcessTasksInFlight;
+    private final AtomicInteger processTasksInFlight = new AtomicInteger();
     private final ThreadLocal<ActorCell<?>> currentActor = new ThreadLocal<>();
     private final ThreadLocal<SyncCell<?>> currentSyncCell = new ThreadLocal<>();
 
@@ -722,11 +734,7 @@ public final class ActorRuntime implements AutoCloseable {
     public ActorRuntime(IsolatePolicy policyCeiling, int maxActors) {
         this(
                 policyCeiling,
-                new DispatcherConfig(
-                        DispatcherConfig.defaults().privateParallelism(),
-                        DispatcherConfig.defaults().sharedParallelism(),
-                        DispatcherConfig.defaults().throughput(),
-                        maxActors),
+                DispatcherConfig.defaults().withMaxActors(maxActors),
                 TurnExecutor.direct());
     }
 
@@ -741,13 +749,18 @@ public final class ActorRuntime implements AutoCloseable {
         this.policyCeiling = Objects.requireNonNull(policyCeiling);
         this.dispatcherConfig = Objects.requireNonNull(dispatcherConfig);
         this.turnExecutor = Objects.requireNonNull(turnExecutor);
+        this.maxProcessTasksInFlight = Math.max(
+                1,
+                Math.multiplyExact(
+                        dispatcherConfig.sharedParallelism(),
+                        PROCESS_TASKS_PER_SHARED_WORKER));
         this.privateDispatcher = newDispatcher(
                 dispatcherConfig.privateParallelism(),
                 dispatcherConfig.maxActors(),
                 "ores-private-actor-dispatcher-");
         this.sharedDispatcher = newDispatcher(
                 dispatcherConfig.sharedParallelism(),
-                dispatcherConfig.maxActors(),
+                Math.addExact(dispatcherConfig.maxActors(), maxProcessTasksInFlight),
                 "ores-shared-actor-dispatcher-");
         this.untrustedDispatcher = newDispatcher(
                 dispatcherConfig.untrustedParallelism(),
@@ -801,7 +814,41 @@ public final class ActorRuntime implements AutoCloseable {
             throw new SecurityException(
                     "actor turns cannot submit host/main process-lane work");
         }
-        return java.util.concurrent.CompletableFuture.runAsync(task, sharedDispatcher);
+        reserveProcessTask();
+        try {
+            return java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    task.run();
+                } finally {
+                    releaseProcessTask();
+                }
+            }, sharedDispatcher);
+        } catch (RuntimeException | Error failure) {
+            releaseProcessTask();
+            throw failure;
+        }
+    }
+
+    public int maxProcessTasksInFlight() { return maxProcessTasksInFlight; }
+    public int processTasksInFlight() { return processTasksInFlight.get(); }
+
+    private void reserveProcessTask() {
+        while (true) {
+            int current = processTasksInFlight.get();
+            if (current >= maxProcessTasksInFlight) {
+                throw new RejectedExecutionException(
+                        "main-process task limit exceeded: " + maxProcessTasksInFlight);
+            }
+            if (processTasksInFlight.compareAndSet(current, current + 1)) return;
+        }
+    }
+
+    private void releaseProcessTask() {
+        int remaining = processTasksInFlight.decrementAndGet();
+        if (remaining < 0) {
+            processTasksInFlight.incrementAndGet();
+            throw new IllegalStateException("main-process task accounting underflow");
+        }
     }
 
     /**
