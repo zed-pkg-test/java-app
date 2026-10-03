@@ -124,7 +124,7 @@ Each actor owns exactly one mailbox and one atomic scheduling gate, so it can ha
 
 The runtime records per-lane queue depth, active workers, completed dispatches, maximum ready-queue wait, and starvation events (ready wait >= one second) through `dispatcherStats(...)`. These are diagnostics rather than a claim that an overloaded finite machine can make starvation mathematically impossible.
 
-Trusted main-process work can be submitted through `submitProcessTask(...)`, which deliberately uses the shared/process pool. Actor turns cannot call that API: shared actors already run on the lane, and allowing an actor to enqueue arbitrary extra process tasks would create a scheduler-amplification path.
+Trusted main-process work can be submitted through `submitProcessTask(...)`, which deliberately uses the shared/process pool. Actor turns cannot call that API: shared actors already run on the lane, and allowing an actor to enqueue arbitrary extra process tasks would create a scheduler-amplification path. Host process work has a separate in-flight admission limit (two tasks per shared worker by default), and the shared executor reserves additional queue capacity for those process tasks rather than letting them consume the actor-ready capacity implied by `maxActors`.
 
 ### Cooperative versus uncooperative execution
 
