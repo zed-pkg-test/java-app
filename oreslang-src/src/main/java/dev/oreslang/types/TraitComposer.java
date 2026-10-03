@@ -248,7 +248,7 @@ public final class TraitComposer {
                 String moduleName,
                 Ast.Expr expr,
                 Set<String> generics) {
-            if (expr == null || expr instanceof Ast.LiteralExpr || expr instanceof Ast.NameExpr) return;
+            if (expr == null || expr instanceof Ast.LiteralExpr || expr instanceof Ast.NameExpr || expr instanceof Ast.SuperExpr) return;
             if (expr instanceof Ast.BinaryExpr e) {
                 validateExprTypes(moduleName, e.left(), generics);
                 validateExprTypes(moduleName, e.right(), generics);
@@ -1012,7 +1012,7 @@ public final class TraitComposer {
         }
 
         private Ast.Expr composeExpr(String moduleName, Ast.Expr expr) {
-            if (expr == null || expr instanceof Ast.LiteralExpr || expr instanceof Ast.NameExpr) return expr;
+            if (expr == null || expr instanceof Ast.LiteralExpr || expr instanceof Ast.NameExpr || expr instanceof Ast.SuperExpr) return expr;
             if (expr instanceof Ast.BinaryExpr e) {
                 return new Ast.BinaryExpr(e.operator(), composeExpr(moduleName, e.left()), composeExpr(moduleName, e.right()));
             }
@@ -1486,7 +1486,7 @@ public final class TraitComposer {
                 Ast.Expr expression,
                 Map<String, Ast.TypeRef> substitutions) {
             if (expression == null) return null;
-            if (expression instanceof Ast.LiteralExpr || expression instanceof Ast.NameExpr) {
+            if (expression instanceof Ast.LiteralExpr || expression instanceof Ast.NameExpr || expression instanceof Ast.SuperExpr) {
                 return expression;
             }
             if (expression instanceof Ast.BinaryExpr binary) {
