@@ -886,9 +886,24 @@ public final class Parser {
     }
 
     private Ast.Expr parseCondition() {
-        Ast.Expr expression = parseLogicalOr();
+        Ast.Expr expression = normalizeLegacyConditionPipe(parseLogicalOr());
         // Legacy condition-only comma means logical AND. Prefer && in new code.
-        while (match(COMMA)) expression = new Ast.BinaryExpr("&&", expression, parseLogicalOr());
+        while (match(COMMA)) {
+            expression = new Ast.BinaryExpr(
+                    "&&",
+                    expression,
+                    normalizeLegacyConditionPipe(parseLogicalOr()));
+        }
+        return expression;
+    }
+
+    private Ast.Expr normalizeLegacyConditionPipe(Ast.Expr expression) {
+        if (expression instanceof Ast.BinaryExpr binary && binary.operator().equals("|")) {
+            return new Ast.BinaryExpr(
+                    "||",
+                    normalizeLegacyConditionPipe(binary.left()),
+                    normalizeLegacyConditionPipe(binary.right()));
+        }
         return expression;
     }
 
