@@ -273,4 +273,71 @@ final class MultipleInheritanceTest {
         assertTrue(error.getMessage().contains("ambiguous inherited state field"));
         assertTrue(error.getMessage().contains("parent order"));
     }
+    @Test
+    void privateChildMethodCannotResolvePublicParentCollision() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model as
+                          define class A as
+                            pub foo() => int { return 1; }
+                          end
+                          define class B as
+                            pub foo() => int { return 2; }
+                          end
+                          define class C extends A, B as
+                            private foo() => int { return 3; }
+                          end
+                        end
+                        """)));
+
+        assertTrue(error.getMessage().contains("ambiguous inherited method")
+                || error.getMessage().contains("cannot reduce visibility"));
+    }
+
+    @Test
+    void traitMethodDoesNotSilentlyResolveConcreteParentCollision() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model as
+                          define class A as
+                            pub foo() => int { return 1; }
+                          end
+                          define class B as
+                            pub foo() => int { return 2; }
+                          end
+
+                          define trait Picks as
+                            pub foo() => int { return 3; }
+                          end
+
+                          define class C extends A, B with Picks as
+                          end
+                        end
+                        """)));
+
+        assertTrue(error.getMessage().contains("ambiguous inherited method"));
+        assertTrue(error.getMessage().contains("must override"));
+    }
+
+    @Test
+    void subclassCannotShadowInheritedStateField() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model as
+                          define class A as
+                            pub val int id = 1;
+                          end
+                          define class B extends A as
+                            pub val int id = 2;
+                          end
+                        end
+                        """)));
+
+        assertTrue(error.getMessage().contains("redeclares inherited state field"));
+        assertTrue(error.getMessage().contains("cannot be shadowed"));
+    }
+
 }
