@@ -1,0 +1,43 @@
+name: ownership-diagnostics
+
+on:
+  push:
+    branches: ["feat/ownership-intrinsics-copy-audit"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Capture Maven verify log
+        shell: bash
+        run: |
+          set +e
+          mvn -B -ntp verify > ownership-mvn.log 2>&1
+          status=$?
+          echo "$status" > ownership-mvn.status
+          tail -n 250 ownership-mvn.log || true
+          exit 0
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ownership-maven-log
+          path: |
+            ownership-mvn.log
+            ownership-mvn.status
+      - name: Preserve Maven result
+        shell: bash
+        run: exit "$(cat ownership-mvn.status)"
