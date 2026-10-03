@@ -181,7 +181,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private void indexLocalClasses(Ast.Expr expr, String moduleName) {
-            if (expr == null || expr instanceof Ast.LiteralExpr || expr instanceof Ast.NameExpr) return;
+            if (expr == null || expr instanceof Ast.LiteralExpr || expr instanceof Ast.NameExpr || expr instanceof Ast.SuperExpr) return;
             if (expr instanceof Ast.AssignExpr e) {
                 indexLocalClasses(e.target(), moduleName);
                 indexLocalClasses(e.value(), moduleName);
