@@ -429,20 +429,28 @@ public final class IncrementalCompiler {
             String abiDigest,
             Set<String> dependencies,
             String sourceText,
-            Ast.Program program) {
+            Ast.Program program,
+            List<TypeChecker.Diagnostic> diagnostics) {
         public CompiledUnit {
             dependencies = Set.copyOf(dependencies);
+            diagnostics = List.copyOf(diagnostics);
         }
     }
+
+    public record UnitDiagnostic(
+            String unitId,
+            TypeChecker.Diagnostic diagnostic) { }
 
     public record BuildResult(
             Map<String, CompiledUnit> units,
             Set<String> rebuiltUnits,
-            Set<String> reusedUnits) {
+            Set<String> reusedUnits,
+            List<UnitDiagnostic> diagnostics) {
         public BuildResult {
             units = Map.copyOf(units);
             rebuiltUnits = Set.copyOf(rebuiltUnits);
             reusedUnits = Set.copyOf(reusedUnits);
+            diagnostics = List.copyOf(diagnostics);
         }
 
         public boolean rebuilt(String unitId) { return rebuiltUnits.contains(normalizeUnitId(unitId)); }
