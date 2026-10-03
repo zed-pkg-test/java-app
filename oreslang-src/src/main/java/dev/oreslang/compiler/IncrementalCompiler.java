@@ -3,6 +3,7 @@ package dev.oreslang.compiler;
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.TraitComposer;
+import dev.oreslang.types.TypeChecker;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -28,7 +29,7 @@ public final class IncrementalCompiler {
     private final Map<String, CompiledUnit> cache = new LinkedHashMap<>();
 
     public synchronized BuildResult compile(Map<String, String> sources) {
-        if (sources.isEmpty()) return new BuildResult(Map.of(), Set.of(), Set.of());
+        if (sources.isEmpty()) return new BuildResult(Map.of(), Set.of(), Set.of(), List.of());
 
         LinkedHashMap<String, String> normalized = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : sources.entrySet()) {
@@ -90,7 +91,9 @@ public final class IncrementalCompiler {
                 continue;
             }
 
-            Ast.Program checked = OresCompiler.parseAndTypeCheck(normalized.get(id));
+            TypeChecker.CheckResult checkedResult =
+                    OresCompiler.parseAndTypeCheckWithDiagnostics(normalized.get(id));
+            Ast.Program checked = checkedResult.program();
             CompiledUnit unit = new CompiledUnit(
                     id,
                     packageId(id, checked),
@@ -99,14 +102,25 @@ public final class IncrementalCompiler {
                     abiHashes.get(id),
                     dependencies.get(id),
                     normalized.get(id),
-                    checked);
+                    checked,
+                    checkedResult.diagnostics());
             next.put(id, unit);
             rebuilt.add(id);
         }
 
         cache.keySet().retainAll(normalized.keySet());
         cache.putAll(next);
-        return new BuildResult(Map.copyOf(next), Set.copyOf(rebuilt), Set.copyOf(reused));
+        List<UnitDiagnostic> diagnostics = new ArrayList<>();
+        for (Map.Entry<String, CompiledUnit> entry : next.entrySet()) {
+            for (TypeChecker.Diagnostic diagnostic : entry.getValue().diagnostics()) {
+                diagnostics.add(new UnitDiagnostic(entry.getKey(), diagnostic));
+            }
+        }
+        return new BuildResult(
+                Map.copyOf(next),
+                Set.copyOf(rebuilt),
+                Set.copyOf(reused),
+                List.copyOf(diagnostics));
     }
 
     public synchronized void clear() {
