@@ -103,19 +103,19 @@ final class LanguageHardeningTest {
                     fnc b() => int;
                   end
 
-                  define class A
+                  define class A as
                     pub a() => int { return 1; }
                   end
-                  define class B
+                  define class B as
                     pub b() => int { return 2; }
                   end
 
-                  define class Combined extends A, B implements AApi, BApi
+                  define class Combined extends A, B implements AApi, BApi as
                   end
 
-                  define class ObjectChild extends Object
+                  define class ObjectChild extends Object as
                   end
-                  define class ListChild extends List
+                  define class ListChild extends List as
                   end
                 end
                 """)));
@@ -125,22 +125,22 @@ final class LanguageHardeningTest {
     void inheritanceCyclesAndConflictingDiamondsAreRejected() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module m
-                  define class A extends B
+                  define class A extends B as
                   end
-                  define class B extends A
+                  define class B extends A as
                   end
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module m
-                  define class A
+                  define class A as
                     pub val int id = 1;
                   end
-                  define class B
+                  define class B as
                     pub val String id = "b";
                   end
-                  define class C extends A, B
+                  define class C extends A, B as
                   end
                 end
                 """)));
