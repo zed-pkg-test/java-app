@@ -541,7 +541,7 @@ public final class Parser {
         do {
             Ast.TypeRef type = parseTypeRef();
             boolean mutable = match(MUT);
-            String name = consume(IDENT, "lambda-style callable declaration parameters require 'Type name'");
+            String name = consume(IDENT, "lambda-style callable declaration parameters require 'Type name'").lexeme();
             params.add(new Ast.Param(type, name, false, mutable));
         } while (match(COMMA));
         return List.copyOf(params);
