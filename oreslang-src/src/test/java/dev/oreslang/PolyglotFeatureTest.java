@@ -18,10 +18,10 @@ final class PolyglotFeatureTest {
                 end
 
                 define module model
-                  define class A
+                  define class A as
                     pub value() => int { return 7; }
                   end
-                  define class B extends A
+                  define class B extends A as
                   end
                 end
 
