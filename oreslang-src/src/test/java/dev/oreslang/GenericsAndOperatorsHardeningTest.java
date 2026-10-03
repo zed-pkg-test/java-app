@@ -41,7 +41,7 @@ final class GenericsAndOperatorsHardeningTest {
     void enforcesKnownGenericArityAndSubstitutesClassMembers() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  define class Box<T>
+                  define class Box<T> as
                     pub val T value;
 
                     pub get() => T {
@@ -61,7 +61,7 @@ final class GenericsAndOperatorsHardeningTest {
 
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  define class Pair<A, B>
+                  define class Pair<A, B> as
                     val A left;
                     val B right;
                   end
@@ -120,7 +120,7 @@ final class GenericsAndOperatorsHardeningTest {
                     value: T;
                   end
 
-                  define class Parent<T>
+                  define class Parent<T> as
                     pub val T value;
 
                     pub get() => T {
@@ -128,10 +128,10 @@ final class GenericsAndOperatorsHardeningTest {
                     }
                   end
 
-                  define class Child<U> extends Parent<U> implements HasValue<U>
+                  define class Child<U> extends Parent<U> implements HasValue<U> as
                   end
 
-                  define class IntChild extends Parent<int>
+                  define class IntChild extends Parent<int> as
                   end
 
                   fnc read(Child<int> child) => int {
@@ -208,7 +208,7 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  define class Box
+                  define class Box as
                     pub map<T>(T value) => T { return value; }
                   end
 
@@ -242,7 +242,7 @@ final class GenericsAndOperatorsHardeningTest {
     void genericObjectDestructuringPreservesConcreteFieldTypes() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  define class Box<T>
+                  define class Box<T> as
                     pub val T value;
                   end
 
@@ -264,7 +264,7 @@ final class GenericsAndOperatorsHardeningTest {
                     fnc map<U>(T input, U fallback) => U;
                   end
 
-                  define class Good<T> implements Mapper<T>
+                  define class Good<T> implements Mapper<T> as
                     pub map<V>(T input, V fallback) => V {
                       return fallback;
                     }
@@ -278,7 +278,7 @@ final class GenericsAndOperatorsHardeningTest {
                     fnc map<U>(T input, U fallback) => U;
                   end
 
-                  define class Bad<T> implements Mapper<T>
+                  define class Bad<T> implements Mapper<T> as
                     pub map<A, B>(T input, A fallback) => A {
                       return fallback;
                     }
@@ -298,11 +298,11 @@ final class GenericsAndOperatorsHardeningTest {
                   define interface ExtendedValue<T> extends HasValue<T>
                   end
 
-                  define class Parent<T>
+                  define class Parent<T> as
                     pub val T value;
                   end
 
-                  define class Child<T> extends Parent<T> implements ExtendedValue<T>
+                  define class Child<T> extends Parent<T> implements ExtendedValue<T> as
                   end
 
                   fnc takeParentInt(Parent<int> value) => void { return; }
@@ -318,11 +318,11 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  define class Parent<T>
+                  define class Parent<T> as
                     pub val T value;
                   end
 
-                  define class Child<T> extends Parent<T>
+                  define class Child<T> extends Parent<T> as
                   end
 
                   fnc takeString(Parent<String> value) => void { return; }
@@ -343,7 +343,7 @@ final class GenericsAndOperatorsHardeningTest {
                   define interface ExtendedValue<T> extends HasValue<T>
                   end
 
-                  define class Box<T> implements ExtendedValue<T>
+                  define class Box<T> implements ExtendedValue<T> as
                     pub val T value;
                   end
 
@@ -361,7 +361,7 @@ final class GenericsAndOperatorsHardeningTest {
     void staticFunctionsOwnTheirGenericParametersAndCannotCaptureClassGenerics() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module model
-                  define class Box<T>
+                  define class Box<T> as
                     pub static fnc identity<U>(U value) => U {
                       return value;
                     }
@@ -381,7 +381,7 @@ final class GenericsAndOperatorsHardeningTest {
         IllegalArgumentException captured = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         define module app
-                          define class Bad<T>
+                          define class Bad<T> as
                             pub static fnc leak(T value) => T {
                               return value;
                             }
@@ -393,7 +393,7 @@ final class GenericsAndOperatorsHardeningTest {
         IllegalArgumentException bodyCapture = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         define module app
-                          define class Bad<T>
+                          define class Bad<T> as
                             pub static fnc leakInside() => void {
                               val T value = process.dynamic;
                               return;
@@ -408,15 +408,15 @@ final class GenericsAndOperatorsHardeningTest {
     void inferredConstructorsBindClassGenericsIncludingInheritedFields() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  define class Box<T>
+                  define class Box<T> as
                     pub val T value;
                   end
 
-                  define class Parent<T>
+                  define class Parent<T> as
                     pub val T value;
                   end
 
-                  define class Child<U> extends Parent<U>
+                  define class Child<U> extends Parent<U> as
                   end
 
                   fnc use() => void {
@@ -440,7 +440,7 @@ final class GenericsAndOperatorsHardeningTest {
         IllegalArgumentException missing = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         define module app
-                          define class Phantom<T>
+                          define class Phantom<T> as
                           end
 
                           fnc bad() => void {
@@ -454,7 +454,7 @@ final class GenericsAndOperatorsHardeningTest {
         IllegalArgumentException conflict = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         define module app
-                          define class Same<T>
+                          define class Same<T> as
                             pub val T left;
                             pub val T right;
                           end
