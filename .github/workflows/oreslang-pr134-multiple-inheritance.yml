@@ -1,0 +1,30 @@
+name: Oreslang PR134 multiple inheritance
+
+on:
+  push:
+    branches:
+      - "test/oreslang-pr134-*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Compile and run complete JVM test suite
+        run: mvn -B -ntp test
+      - name: Re-run inheritance and trait regressions explicitly
+        run: mvn -B -ntp -Dtest=MultipleInheritanceTest,TraitCompositionTest,LanguageHardeningTest test
