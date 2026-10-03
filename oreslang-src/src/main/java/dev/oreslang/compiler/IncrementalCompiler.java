@@ -2,7 +2,6 @@ package dev.oreslang.compiler;
 
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
-import dev.oreslang.types.TraitComposer;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -28,7 +27,7 @@ public final class IncrementalCompiler {
     private final Map<String, CompiledUnit> cache = new LinkedHashMap<>();
 
     public synchronized BuildResult compile(Map<String, String> sources) {
-        if (sources.isEmpty()) return new BuildResult(Map.of(), Set.of(), Set.of());
+        if (sources.isEmpty()) return new BuildResult(Map.of(), Set.of(), Set.of(), List.of());
 
         LinkedHashMap<String, String> normalized = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : sources.entrySet()) {
@@ -41,16 +40,21 @@ public final class IncrementalCompiler {
         Map<String, String> hashes = new LinkedHashMap<>();
         Map<String, String> abiHashes = new LinkedHashMap<>();
         Map<String, Ast.Program> parsed = new LinkedHashMap<>();
-        Map<String, Set<String>> dependencies = new LinkedHashMap<>();
 
+        // Parse the complete source set before resolving imports. This is the
+        // first half of cycle tolerance: A may name B while B names A because
+        // neither unit is recursively compiled while discovering the other.
         for (Map.Entry<String, String> entry : normalized.entrySet()) {
             hashes.put(entry.getKey(), digest(entry.getValue()));
             Ast.Program program = Parser.parse(entry.getValue());
             parsed.put(entry.getKey(), program);
-            Ast.Program composedForAbi = TraitComposer.compose(program);
-            abiHashes.put(entry.getKey(), abiDigest(composedForAbi));
-            dependencies.put(entry.getKey(), resolveDependencies(entry.getKey(), program, normalized.keySet()));
+            abiHashes.put(entry.getKey(), abiDigest(program));
         }
+
+        ImportGraph.validateLinkedImports(parsed);
+        Map<String, Set<String>> dependencies =
+                ImportGraph.resolveDependencies(parsed, normalized.keySet());
+        List<List<String>> initializationGroups = ImportGraph.initializationGroups(dependencies);
 
         LinkedHashSet<String> dirty = new LinkedHashSet<>();
         LinkedHashSet<String> abiChanged = new LinkedHashSet<>();
@@ -106,7 +110,11 @@ public final class IncrementalCompiler {
 
         cache.keySet().retainAll(normalized.keySet());
         cache.putAll(next);
-        return new BuildResult(Map.copyOf(next), Set.copyOf(rebuilt), Set.copyOf(reused));
+        return new BuildResult(
+                Map.copyOf(next),
+                Set.copyOf(rebuilt),
+                Set.copyOf(reused),
+                initializationGroups);
     }
 
     public synchronized void clear() {
@@ -114,12 +122,11 @@ public final class IncrementalCompiler {
     }
 
     private static String abiDigest(Ast.Program program) {
-        StringBuilder abi = new StringBuilder("ores-abi-v2\n");
+        StringBuilder abi = new StringBuilder("ores-abi-v1\n");
         abi.append("namespace=").append(program.namespace() == null ? "" : program.namespace()).append('\n');
 
         for (Ast.ModuleDecl module : program.modules()) {
-            abi.append(module.singleton() ? "singleton module " : "module ")
-                    .append(module.name()).append('\n');
+            abi.append("module ").append(module.name()).append('\n');
             for (Ast.Annotation annotation : module.annotations()) {
                 if (annotation.name().equals("AdheresTo")) {
                     abi.append(" module-annotation AdheresTo:");
@@ -133,32 +140,27 @@ public final class IncrementalCompiler {
     }
 
     private static void appendAbi(StringBuilder abi, Ast.Decl decl) {
-        // Init routines are lifecycle implementation details. Source digest
-        // changes rebuild this unit, but init bodies are not exported ABI.
-        if (decl instanceof Ast.InitDecl) return;
         if (decl instanceof Ast.FunctionDecl fn) {
             if (fn.visibility() != Ast.Visibility.PUBLIC) return;
-            abi.append(fn.kind()).append(" pub ").append(fn.name());
+            abi.append(fn.actorKind()).append(' ').append(fn.kind()).append(" pub ").append(fn.name());
             appendGenerics(abi, fn.genericParameters());
             appendParams(abi, fn.parameters());
             abi.append("=>").append(typeRef(fn.returnType())).append('\n');
-            appendCallableLocalTypes(abi, fn.body(), fn.parameters(), fn.returnType());
             return;
         }
         if (decl instanceof Ast.ClassDecl klass) {
-            abi.append(klass.isStruct() ? "struct " : "class ").append(klass.name());
+            abi.append(klass.actorKind()).append(" class ").append(klass.name());
             appendGenerics(abi, klass.genericParameters());
             abi.append(" extends ");
             for (Ast.TypeRef parent : klass.parents()) abi.append(typeRef(parent)).append(',');
             abi.append(" implements ");
             for (Ast.TypeRef iface : klass.interfaces()) abi.append(typeRef(iface)).append(',');
-            abi.append(" with ");
-            for (Ast.TypeRef trait : klass.traits()) abi.append(typeRef(trait)).append(',');
             abi.append('\n');
             for (Ast.FieldDecl field : klass.fields()) {
                 if (field.visibility() != Ast.Visibility.PUBLIC) continue;
                 abi.append(" field ").append(field.bindingKind()).append(' ')
-                        .append(typeRef(field.type())).append(' ').append(field.name()).append('\n');
+                        .append(field.type() == null ? "<inferred:" + field.initializer() + ">" : typeRef(field.type()))
+                        .append(' ').append(field.name()).append('\n');
             }
             for (Ast.MethodDecl method : klass.methods()) {
                 if (method.visibility() != Ast.Visibility.PUBLIC) continue;
@@ -167,7 +169,6 @@ public final class IncrementalCompiler {
                 appendGenerics(abi, method.genericParameters());
                 appendParams(abi, method.parameters());
                 abi.append("=>").append(typeRef(method.returnType())).append('\n');
-                appendCallableLocalTypes(abi, method.body(), method.parameters(), method.returnType());
             }
             return;
         }
@@ -183,6 +184,8 @@ public final class IncrementalCompiler {
                     appendGenerics(abi, fn.genericParameters());
                     appendParams(abi, fn.parameters());
                     abi.append("=>").append(typeRef(fn.returnType())).append('\n');
+                } else if (member instanceof Ast.InterfaceFieldDecl field) {
+                    abi.append(" iface-field ").append(field.name()).append(':').append(typeRef(field.type())).append('\n');
                 }
             }
             return;
@@ -197,129 +200,6 @@ public final class IncrementalCompiler {
             abi.append("binding ").append(field.bindingKind()).append(' ')
                     .append(field.type() == null ? "<inferred:" + field.initializer() + ">" : typeRef(field.type()))
                     .append(' ').append(field.name()).append('\n');
-        }
-    }
-
-    private static void appendCallableLocalTypes(
-            StringBuilder abi,
-            List<Ast.Stmt> body,
-            List<Ast.Param> parameters,
-            Ast.TypeRef returnType) {
-        LinkedHashMap<String, Ast.Decl> locals = new LinkedHashMap<>();
-        for (Ast.Stmt stmt : body) {
-            if (stmt instanceof Ast.TypeDeclStmt local) {
-                Ast.Decl decl = local.declaration();
-                String name = switch (decl) {
-                    case Ast.ClassDecl struct -> struct.name();
-                    case Ast.InterfaceDecl iface -> iface.name();
-                    case Ast.TypeAliasDecl alias -> alias.name();
-                    default -> null;
-                };
-                if (name != null) locals.put(name, decl);
-            }
-        }
-        if (locals.isEmpty()) return;
-
-        LinkedHashSet<String> reachable = new LinkedHashSet<>();
-        for (Ast.Param parameter : parameters) {
-            collectLocalTypeRefs(parameter.type(), locals.keySet(), reachable);
-        }
-        collectLocalTypeRefs(returnType, locals.keySet(), reachable);
-
-        LinkedHashSet<String> emitted = new LinkedHashSet<>();
-        for (String name : reachable) {
-            appendReachableLocalType(abi, name, locals, emitted);
-        }
-    }
-
-    private static void appendReachableLocalType(
-            StringBuilder abi,
-            String name,
-            Map<String, Ast.Decl> locals,
-            Set<String> emitted) {
-        if (!emitted.add(name)) return;
-        Ast.Decl decl = locals.get(name);
-        if (decl == null) return;
-
-        if (decl instanceof Ast.ClassDecl struct) {
-            abi.append(" local-struct ").append(struct.name());
-            appendGenerics(abi, struct.genericParameters());
-            abi.append(" is ");
-            for (Ast.TypeRef iface : struct.interfaces()) abi.append(typeRef(iface)).append(',');
-            abi.append(" with ");
-            for (Ast.TypeRef trait : struct.traits()) abi.append(typeRef(trait)).append(',');
-            abi.append('\n');
-
-            LinkedHashSet<String> dependencies = new LinkedHashSet<>();
-            for (Ast.TypeRef iface : struct.interfaces()) collectLocalTypeRefs(iface, locals.keySet(), dependencies);
-            for (Ast.TypeRef trait : struct.traits()) collectLocalTypeRefs(trait, locals.keySet(), dependencies);
-
-            for (Ast.FieldDecl field : struct.fields()) {
-                if (field.visibility() != Ast.Visibility.PUBLIC) continue;
-                abi.append("  local-field ").append(field.bindingKind()).append(' ')
-                        .append(typeRef(field.type())).append(' ').append(field.name()).append('\n');
-                collectLocalTypeRefs(field.type(), locals.keySet(), dependencies);
-            }
-            for (Ast.MethodDecl method : struct.methods()) {
-                if (method.visibility() != Ast.Visibility.PUBLIC) continue;
-                abi.append(method.isStatic() ? "  local-static-fnc " : "  local-method ")
-                        .append(method.name());
-                appendGenerics(abi, method.genericParameters());
-                appendParams(abi, method.parameters());
-                abi.append("=>").append(typeRef(method.returnType())).append('\n');
-                for (Ast.Param parameter : method.parameters()) {
-                    collectLocalTypeRefs(parameter.type(), locals.keySet(), dependencies);
-                }
-                collectLocalTypeRefs(method.returnType(), locals.keySet(), dependencies);
-                appendCallableLocalTypes(abi, method.body(), method.parameters(), method.returnType());
-            }
-
-            for (String dependency : dependencies) appendReachableLocalType(abi, dependency, locals, emitted);
-            return;
-        }
-
-        if (decl instanceof Ast.InterfaceDecl iface) {
-            abi.append(" local-interface ").append(iface.name());
-            appendGenerics(abi, iface.genericParameters());
-            abi.append(" extends ");
-            for (Ast.TypeRef parent : iface.parents()) abi.append(typeRef(parent)).append(',');
-            abi.append('\n');
-
-            LinkedHashSet<String> dependencies = new LinkedHashSet<>();
-            for (Ast.TypeRef parent : iface.parents()) collectLocalTypeRefs(parent, locals.keySet(), dependencies);
-            for (Ast.InterfaceMember member : iface.members()) {
-                Ast.InterfaceFunctionDecl method = (Ast.InterfaceFunctionDecl) member;
-                abi.append("  local-iface-fnc ").append(method.name());
-                appendGenerics(abi, method.genericParameters());
-                appendParams(abi, method.parameters());
-                abi.append("=>").append(typeRef(method.returnType())).append('\n');
-                for (Ast.Param parameter : method.parameters()) {
-                    collectLocalTypeRefs(parameter.type(), locals.keySet(), dependencies);
-                }
-                collectLocalTypeRefs(method.returnType(), locals.keySet(), dependencies);
-            }
-            for (String dependency : dependencies) appendReachableLocalType(abi, dependency, locals, emitted);
-            return;
-        }
-
-        if (decl instanceof Ast.TypeAliasDecl alias) {
-            abi.append(" local-type ").append(alias.name());
-            appendGenerics(abi, alias.genericParameters());
-            abi.append('=').append(typeRef(alias.target())).append('\n');
-            LinkedHashSet<String> dependencies = new LinkedHashSet<>();
-            collectLocalTypeRefs(alias.target(), locals.keySet(), dependencies);
-            for (String dependency : dependencies) appendReachableLocalType(abi, dependency, locals, emitted);
-        }
-    }
-
-    private static void collectLocalTypeRefs(
-            Ast.TypeRef ref,
-            Set<String> localNames,
-            Set<String> out) {
-        if (ref == null) return;
-        if (localNames.contains(ref.name())) out.add(ref.name());
-        for (Ast.TypeRef argument : ref.arguments()) {
-            collectLocalTypeRefs(argument, localNames, out);
         }
     }
 
@@ -424,14 +304,35 @@ public final class IncrementalCompiler {
     public record BuildResult(
             Map<String, CompiledUnit> units,
             Set<String> rebuiltUnits,
-            Set<String> reusedUnits) {
+            Set<String> reusedUnits,
+            List<List<String>> initializationGroups) {
         public BuildResult {
             units = Map.copyOf(units);
             rebuiltUnits = Set.copyOf(rebuiltUnits);
             reusedUnits = Set.copyOf(reusedUnits);
+            initializationGroups = initializationGroups.stream()
+                    .map(List::copyOf)
+                    .toList();
+        }
+
+        /** Backward-compatible constructor for callers that do not need lifecycle planning. */
+        public BuildResult(
+                Map<String, CompiledUnit> units,
+                Set<String> rebuiltUnits,
+                Set<String> reusedUnits) {
+            this(units, rebuiltUnits, reusedUnits, List.of());
         }
 
         public boolean rebuilt(String unitId) { return rebuiltUnits.contains(normalizeUnitId(unitId)); }
         public boolean reused(String unitId) { return reusedUnits.contains(normalizeUnitId(unitId)); }
+
+        /**
+         * Flattens the dependency-first SCC plan. Units in the same inner list
+         * form one load barrier: all of them must be linked before the first
+         * init hook in that group executes.
+         */
+        public List<String> initializationOrder() {
+            return initializationGroups.stream().flatMap(List::stream).toList();
+        }
     }
 }

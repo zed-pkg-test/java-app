@@ -4,20 +4,16 @@ Oreslang is a statically typed guest language for GraalVM/Truffle. Named types a
 
 ## Files, modules, and imports
 
-A source file may contain multiple named modules. A normal module is a namespace: exported members are accessed through the module name, such as `math.add(1, 2)`.
-
-A process-wide singleton module is declared with `define singleton module NAME as`. Its language-level contract is exactly one runtime state cell per canonical module identity per OS process, owned by a hidden serial actor/service. Every caller receives only a proxy/handle; importing or referencing the module never copies its mutable state. Canonical identity includes the defining source code-unit identity, namespace, and module name. Process-singleton access requires the `PROCESS_SINGLETON` capability.
-
-The local JVM backend satisfies this contract only when callers share the host runtime heap. A spawned Graal isolate has a separate heap, so the current adversarial isolate profile refuses `PROCESS_SINGLETON`. A future/embedding-specific trusted supervisor coordinator must route those requests outside tenant heaps; Oreslang does not silently degrade `singleton` to one instance per isolate.
+A source file may contain multiple named modules. A module is a namespace: exported members are accessed through the module name, such as `math.add(1, 2)`.
 
 ```ores
-define module math as
+define module math
   pub fnc add(int a, int b) => int {
     return a + b;
   }
 end
 
-define module app as
+define module app
   pub fnc main() => void {
     val answer = math.add(40, 2);
     stdio.println(answer);
@@ -25,86 +21,6 @@ define module app as
   }
 end
 ```
-
-Singleton state is actor-private. Public functions are asynchronous request/reply boundaries. In addition, a singleton module may export an immutable `val`/`const` class instance as a typed process-object proxy; the raw class instance never leaves the owner actor:
-
-```ores
-define singleton module counter as
-  let int count = 0;
-
-  pub fnc next() => int {
-    count = count + 1;
-    return count;
-  }
-end
-
-define module app as
-  pub fnc main() => void {
-    val int n = await counter.next();
-    stdio.println(n);
-    return;
-  }
-end
-```
-
-```ores
-define class Foo as
-  val int value = 42;
-
-  pub read() => int {
-    return self.value;
-  }
-end
-
-define singleton module X as
-  pub val Foo f = new Foo();
-end
-
-define module app as
-  pub routine main() => void {
-    val int value = await X.f.read();
-    stdio.println(value);
-    return;
-  }
-end
-```
-
-Outside `X`, `X.f` is not an ordinary local `Foo`: it is a capability proxy. Its public method calls execute in the singleton owner actor and must be immediately awaited. Object fields, raw references, method extraction, and rebinding the proxy into an ordinary local are rejected. Other public singleton fields remain illegal.
-
-Singleton state fields require explicit process-stable types because they form a process-lifetime hot-reload schema. Ordinary state initializers must be context-free: literals and pure expressions over already initialized stable singleton fields are allowed, while capability access, arbitrary function calls, `await`, mutation, and closures are not. The narrow exception is an exported immutable class-instance proxy initialized directly with a context-free `new Class(...)`. Type aliases are currently excluded from process state so redefining an alias cannot silently reinterpret an existing layout.
-
-The exported transport surface is intentionally strict. Public singleton functions may use sendable scalar values, `Option<T>`, and `Array/List<T>` of sendable values. Until explicit `Send` constraints are part of the type system, exported singleton functions cannot be generic or `async`, cannot accept `mut` or structural parameters, and cannot transport borrows, class instances, functions/closures, or unresolved actor-local values. Classes declared inside a singleton module are actor-private helpers and cannot be accessed through the external module/class namespace.
-
-Process-owned code also has a stricter effect boundary. Singleton functions and process-owned object methods may use their own singleton state, helper functions/classes declared in the same singleton module, and explicit calls to other singleton services. They may not depend on caller/context-local modules, ordinary helper functions, imports, `process`, `stdio`, or `print`. Exported process-object classes declared outside the singleton module are checked under the same rule. This avoids making process state or behavior depend on whichever actor/context invoked it. A future explicit `process-safe`/effect declaration can widen this surface deliberately.
-
-Every external singleton call must be immediately awaited. Calls from one singleton function to another function in the same singleton are direct and keep the same actor-owned state, including helper method/static-function dispatch. Calls between different singleton actors use request/reply mailboxes. The runtime detects wait cycles before they can deadlock, applies caller mailbox/backpressure limits, and treats queueing time as part of the caller's wall-time budget.
-
-A hot-reloaded generation with the same singleton field schema reuses the existing actor state while executing the new function bodies. Incompatible singleton field-schema changes are rejected until an explicit migration mechanism is provided; the runtime never silently treats old process state as a new layout. Replacing singleton code against live state requires `HOT_CODE_LOAD`; managed generations are process-monotonic and stale code cannot roll active singleton behavior backward.
-
-## Initialization lifecycle
-
-Oreslang has one explicit lifecycle declaration:
-
-```ores
-init routine() => void {
-  // initialization work
-  return;
-}
-```
-
-Its scope determines its lifetime:
-
-- **file/root scope:** once per executing actor when reached from an actor; otherwise once for the owning Graal context;
-- **ordinary module:** once per executing actor when first activated by that actor; otherwise once for the owning Graal context;
-- **singleton module:** once when the OS-process singleton state cell is first created.
-
-Actor-local module state is stored on the actor cell itself and disappears when that actor dies. Non-actor/main execution uses context-lifetime storage, so repeatedly invoking the same checked source in one Graal context does not rerun ordinary init. Ordinary module state is keyed by the checked code digest; changed code gets fresh ordinary state rather than silently reinterpreting an old layout.
-
-Module/file field initializers run first, in declaration order, and the `init routine` runs afterward. A scope may declare at most one init routine. It has no parameters, must explicitly declare `=> void`, cannot be public/async, and classes cannot declare it. Process-global initialization is intentionally not available as a free-floating file hook: it belongs inside a `singleton module`, where ownership and serialization are explicit.
-
-Singleton-module init is deliberately deterministic and context-free: it may derive and assign singleton state from already-declared singleton values, but it cannot use ambient capabilities, arbitrary calls, `await`, object creation, or caller-local state. This prevents whichever tenant first touches the singleton from defining process-global state accidentally.
-
-Hot reload does not rerun an already-created singleton module's process init. Compatible process state is retained; incompatible schema changes require an explicit migration.
 
 Imports are explicit about what kind of symbol is entering the compilation unit:
 
@@ -118,24 +34,61 @@ import * as x from './xyz';
 
 Wildcard imports always require a namespace alias. This avoids silently injecting an unbounded set of names into the local scope. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
 
-## Module interfaces / OCaml-style module signatures
+### Circular imports and file initialization
 
-Interfaces are storage-free function contracts and can also describe the callable public shape required of a module. A module opts into checking with `@AdheresTo(...)`:
+Import cycles are legal. Oreslang does not reject a program merely because its
+file/module graph contains a cycle such as `a.ores -> b.ores -> a.ores`.
+
+The loader uses a staged lifecycle:
+
+1. parse and statically validate the complete reachable source graph;
+2. resolve/link imports for every code unit;
+3. compute strongly connected components (SCCs) of the import graph;
+4. for each dependency-first SCC, verify that **all** members are linked;
+5. run each member's optional file init hook;
+6. after initialization, invoke the entry unit's `main`.
+
+A file init hook has the exact shape:
 
 ```ores
-define module contracts as
-  define interface MathApi as
+fnc init() => void {
+  // side effects are allowed here
+  return;
+}
+```
+
+It is private, synchronous, non-actor, non-generic, takes no parameters, and
+returns `void`. The hook runs at most once for that loaded code-unit
+generation. Inside a cycle, init hooks execute in deterministic normalized
+code-unit-id order, but code must rely only on the stronger barrier guarantee:
+**every peer in the cycle is already linked before any peer's init begins**.
+
+This means an init hook may call exported declarations from a cyclic peer
+without observing an "unloaded module" state. If application state requires a
+specific sequencing relationship *between* two init hooks in the same cycle,
+that relationship should be made explicit in application code rather than
+inferred from the import edges.
+
+## Module interfaces / OCaml-style module signatures
+
+Interfaces can describe the structural public shape required of a module. A module opts into checking with `@AdheresTo(...)`:
+
+```ores
+define module contracts
+  define interface MathApi
     fnc add(int a, int b) => int;
+    String name;
   end
 end
 
 @AdheresTo(contracts.MathApi)
-define module math as
+define module math
   pub fnc add(int a, int b) => int { return a + b; }
+  pub val String name = "math";
 end
 ```
 
-Only exported (`pub`) callable members satisfy an interface contract. `@AdheresTo(A, B)` may name more than one interface. Data layout is intentionally not part of an interface; reusable stored state belongs in a trait or class.
+Only exported (`pub`) module members satisfy an adherence contract. `@AdheresTo(A, B)` may name more than one interface.
 
 ## Functions and returns
 
@@ -154,92 +107,25 @@ fnc answer() {
 
 `@Ret<T>` and `=> T` are equivalent. If both are present they must agree. A function returns exactly one value; multiple logical values are represented by a tuple, array, object, class value, or another aggregate.
 
-
-## Callable-local type declarations
-
-`struct` and `interface` declarations may appear inside callable and method blocks. They live in a lexical **type namespace**, separate from value bindings. Direct declarations in a callable body are type-hoisted across that callable so its signature can name a type declared textually inside the body without publishing that name into module/file scope.
+Return types may be unions, homogeneous arrays, finite tuple types, or structural record types:
 
 ```ores
-pub fnc getat() => T {
-  struct T {
-    foo: string
-  }
+type intOrBoolOrString = bool | int | string;
 
-  return obj{
-    foo: "hello"
-  };
+fnc mixed() => Array<type intOrBoolOrString> {
+  return [3, true, "yes"];
 }
 
-pub fnc use_it() => void {
-  val result = getat();
-  stdio.println(result.foo);
-  return;
+fnc fixed() => [int, bool, string] {
+  return [3, true, "yes"];
+}
+
+fnc named() => {foo: int, bar: string} {
+  return obj{foo: 5, bar: "x"};
 }
 ```
 
-The name `T` is not visible in `use_it`. The compiler gives the escaped local struct an internal nominal identity and carries its shape through the return type, so callers may infer the result and use its fields/methods without adding `T` to shared file/module scope. Two unrelated callables may each declare a different local `T` without collision.
-
-Nested block type declarations remain block-scoped. Local interfaces are still storage-free method contracts. Local traits are compile-time-only composition units: they may contribute initialized state and behavior to local structs, are flattened before later compiler/runtime passes, and cannot be used as runtime value types. Generic local structs, traits, and interfaces use the same explicit generic rules as their module-level equivalents. Callable-local `type` aliases are also supported; aliases erase to their resolved type when they escape, so the alias name itself never enters module/file scope.
-
-Both compact and long forms are accepted:
-
-```ores
-struct Point {
-  x: int
-  y: int
-}
-
-define struct Point as
-  x: int
-  y: int
-end
-
-trait Printable {
-  pub print() => void {
-    stdio.println("value");
-    return;
-  }
-}
-
-interface Readable {
-  fnc read() => string;
-}
-
-define interface Readable as
-  fnc read() => string;
-end
-```
-
-
-Local aliases use the normal alias syntax and are hoisted within their lexical block:
-
-```ores
-pub fnc answer() => Answer {
-  type Answer = int;
-  return 42;
-}
-
-pub fnc boxed() => View<int> {
-  interface View<T> {
-    fnc get() => T;
-  }
-
-  struct Box is View<int> {
-    value: int;
-
-    pub get() => int {
-      return self.value;
-    }
-  }
-
-  return Box { value = 7 };
-}
-```
-
-Callers may infer and use the resolved return shapes, but names such as `Answer`, `View`, and `Box` are not visible outside the declaring callable. A nested block may shadow an outer local type name; the shadow ends with that block.
-
-The type namespace is separate from the value namespace, so a block may contain both a local type `T` and a value binding named `T`. Generic type parameters are part of the type namespace, however, so a callable-local `struct T`, `trait T`, `interface T`, or `type T = ...` may not reuse an in-scope generic parameter named `T`. This is rejected instead of relying on name-resolution order.
-
+The `type` marker inside `Array<type intOrBoolOrString>` is accepted as an explicit alias marker; `Array<intOrBoolOrString>` is equivalent. A finite tuple type records exact arity and the type of each position even though the interpreter represents the value with a JVM `List`. A record type names required members; extra members remain compatible with the structural type system.
 
 ## Bindings
 
@@ -256,24 +142,33 @@ let retries = 0;
 retries = retries + 1;
 ```
 
-Destructuring carries mutability per element:
+Destructuring carries mutability per element. A binding kind propagates through later unqualified names until another explicit binding kind appears. A binding kind may also prefix the whole pattern.
 
 ```ores
-[const code, let body] = (200, "ok");
+[const number, flag, answer] = fixed();   // all const
+const [x, y, z] = fixed();               // all const
+[const head, let middle, tail] = fixed(); // head const; middle/tail let
+
+const {foo, bar} = named();
+// Equivalent per-item spelling, shown in a separate scope:
+// {const foo, const bar} = named();
 ```
 
-## Interface, trait, struct, and class
+A bare `_` is a sequence discard pattern: it consumes that array/tuple position without declaring a variable, so it can be repeated in the same sequence pattern or reused by later destructures. Object patterns do not accept bare `_` because object destructuring is key-based rather than positional.
 
-Oreslang keeps four distinct concepts instead of blending them:
+```ores
+[const code, _, let body] = (200, "ignored", "ok");
+[const next, _, let tail] = (201, "ignored again", "done");
+[_, _, const final] = (1, 2, 3);
+```
 
-- `interface` — storage-free method contract only.
-- `trait` — non-instantiable compile-time composition of reusable instance state and behavior.
-- `struct` — concrete value-semantic aggregate with nominal named identity.
-- `class` — concrete reference/identity type with lifecycle/allocation semantics.
+`_` is not readable after the destructure because no lexical binding is created for it. A destructured `const` is an immutable runtime binding; unlike a standalone `const x = ...` declaration, the aggregate being destructured does not need to be a compile-time constant.
 
-`is` is the canonical interface-conformance spelling. `with` composes traits. Legacy `implements` / `impl` remain accepted during migration.
+Sequence destructuring requires a returned tuple or array/list. Finite tuples are checked for exact arity and per-position type. Object destructuring requires a record/map-like value and every requested key must exist. If the returned type is a union, destructuring is allowed only when every union alternative supports the requested pattern; each extracted binding receives the union of the corresponding alternative member types. Function-parameter destructuring is intentionally not part of this syntax yet.
 
-## Classes and receivers
+## Classes, receivers, multiple inheritance, and interfaces
+
+Class headers use `as` as the required body delimiter. The canonical form is `define class Name as ... end`; when `extends` or `implements` are present, `as` follows the complete class header.
 
 Methods omit `fnc`. Instance methods always have an implicit receiver named `self`.
 
@@ -294,27 +189,16 @@ The explicit receiver form remains available:
 find(self Box)(int key) => self {
   return self;
 }
-
-bump(self &mut self)() => int {
-  self.count = self.count + 1;
-  return self.count;
-}
 ```
 
-The receiver variable name is always `self`. Mutating instance/trait state requires an explicit mutable receiver such as `self &mut self`; ownership analysis treats ordinary implicit `self` as immutable.
+The receiver variable name is always `self`.
 
-A class may list multiple parent classes, satisfy interfaces with `is`, and compose reusable state/behavior with `with`:
+A class may list multiple parent classes and multiple interfaces:
 
 ```ores
-define class Combined
-    extends Cacheable, Serializable
-    is HasId, Named
-    with Metrics, RetryState
-as
+define class Combined extends Cacheable, Serializable implements HasId, Named as
 end
 ```
-
-`implements` and `impl` remain accepted as migration aliases for `is`; new source should use `is`.
 
 Parent order is significant and is the deterministic v0.2 method-resolution order after child methods: the first declared parent is searched before the next parent. The static checker rejects inheritance cycles and incompatible inherited member shapes. Child members may override inherited members only with compatible types.
 
@@ -329,46 +213,6 @@ end
 ```
 
 Inline object and array literals are values, not classes, and cannot be inherited from.
-
-
-## Structs
-
-Named structs are value types: they have fields and may have methods, but they do not have class identity and are not allocated with `new`. They cannot extend classes. Named structs remain nominal even when two structs have identical fields.
-
-```ores
-struct Point {
-  x: f64
-  y: f64
-
-  pub length_squared() => f64 {
-    return self.x * self.x + self.y * self.y;
-  }
-}
-
-val p = Point { x = 3.0, y = 4.0 };
-```
-
-The long spelling is equivalent:
-
-```ores
-define struct Point as
-  x: f64
-  y: f64
-end
-```
-
-Struct fields support the compact name-first form (`x: f64`) as well as the existing type-first forms. A bare struct field is immutable (`val`) unless `let` is written explicitly.
-
-Anonymous struct values are structural:
-
-```ores
-val p = struct { x = 3, y = 4 };
-```
-
-An `obj{...}` literal may be contextually promoted to an expected named struct at an explicit typed boundary such as a typed binding or return. That conversion requires the exact field set and assignable field types; arbitrary already-typed records do not silently become a nominal struct merely because they have the same shape.
-
-Struct equality is value equality within the same named struct identity. Structs remain affine/move-only by default—copying is never implicit—but `copy(value)` derives a recursive copy for structs. Trait-composed state participates in the same derivation. Recursive struct/container type graphs are permitted; the runtime copier preserves graph topology with identity tracking rather than duplicating back-references.
-
 
 ## Inline values
 
@@ -388,85 +232,36 @@ val first = values[0];
 
 `arr[...]` is the canonical inline-array spelling. The original bare `[...]` literal remains accepted for source compatibility and destructuring migration.
 
-Tuples preserve per-position static types:
+Tuples preserve per-position static types. Parenthesized tuple literals and list-backed values returned against a finite tuple type both retain the declared positional types:
 
 ```ores
 val pair = (1, "one");
 [const number, let label] = pair;
+
+fnc result() => [int, bool, string] {
+  return [3, true, "yes"];
+}
+
+const [num, ok, answer] = result();
 ```
 
-## Interfaces and stateful traits
+## Structural typing and interfaces
 
-Interfaces are storage-free method contracts. They contain function signatures only: no instance fields, no backing storage, and no object identity. A class uses `is` to ask the compiler to prove conformance.
+Interfaces are structural contracts. Explicit `implements` asks the compiler to prove conformance and documents intent; structural compatibility does not require nominal ancestry in every context.
 
 ```ores
-define interface Named as
-  fnc name() => String;
+define interface Named
+  String name;
 end
 
-define class User is Named as
-  private val String first = "Ada";
-  private val String last = "Lovelace";
-
-  pub name() => String {
-    return self.first + " " + self.last;
-  }
+define class User implements Named as
+  pub val String name;
 end
 ```
 
-Stateful reuse is a distinct construct: `trait`. A trait may contain initialized fields, concrete methods, abstract method requirements, and interface obligations. It cannot be instantiated and contributes no separate runtime object identity. Traits are not nominal runtime types: they cannot be used as parameter, field, return, alias, or generic argument types. Use an interface for a contract and a class for a value type.
+Class interface satisfaction uses public members, including inherited public members.
 
-```ores
-define interface CounterApi as
-  fnc bump() => int;
-end
-
-define trait Counter is CounterApi as
-  private let int count = 0;
-
-  pub bump(self &mut self)() => int {
-    self.count = self.count + 1;
-    return self.count;
-  }
-end
-
-define class Worker with Counter as
-end
-```
-
-The compiler flattens trait storage and behavior into the host class before ownership/capability/runtime lowering. Trait fields require initializers and are not positional constructor parameters. Private trait state remains lexical to the defining trait; host classes cannot reach it directly. A trait method may depend on another host method only when that dependency is declared as an abstract trait method requirement.
-
-Traits must declare their dependencies. If a trait method needs host behavior, it declares an abstract method requirement instead of silently reaching into the host class:
-
-```ores
-define trait Loads as
-  pub abstract load() => int;
-
-  pub read() => int {
-    return self.load();
-  }
-end
-
-define class Store with Loads as
-  pub load() => int {
-    return 42;
-  }
-end
-```
-
-Trait composition is intentionally strict:
-
-- two traits contributing the same field are rejected;
-- two concrete trait methods with the same name and arity are rejected unless the class declares a compatible resolving method;
-- there is no declaration-order or “last wins” rule;
-- concrete classes must implement abstract trait requirements;
-- unused traits are still statically validated.
-
-For v0, trait composition is module-local. This preserves lexical module lookup while flattening is the implementation strategy. Cross-module traits can be added later with an explicit lexical-environment/import contract.
-
-Class interface satisfaction uses public members, including inherited and composed public members.
-
-## Option and null
+## Option, Result, and null
 
 Oreslang does **not** have ambient nullable references. A bare `null` value is a compile-time error, and `null` is not a standalone variable/parameter/return type.
 
@@ -482,6 +277,32 @@ fnc lookup(bool found) => Option<int> {
 }
 ```
 
+Fallible operations use `Result<T, E>`, constructed with `Ok(value)` or `Err(error)`. `Result` always has exactly two explicit type arguments.
+
+```ores
+val Option<int> present = Some(42);
+val number = present.unwrap();
+
+val Option<int> missing = None;
+val safe = missing.unwrap_safe();          // Err(OptionUnwrapError(...))
+
+val Result<int, String> parsed = Ok(123);
+val same = parsed.unwrap_safe();            // Ok(123)
+```
+
+- `Option<T>.unwrap() -> T` returns the `Some` payload and panics on `None`.
+- `Option<T>.unwrap_safe() -> Result<T, OptionUnwrapError>` never panics for absence.
+- `Result<T,E>.unwrap() -> T` returns the `Ok` payload and panics on `Err`.
+- `Result<T,E>.unwrap_safe() -> Result<T,E>` never panics; it preserves the error-as-value carrier.
+- `expect(String)` is the descriptive panicking form; `unwrap_or(T)` supplies a fallback.
+- `is_some()/is_none()` and `is_ok()/is_err()` inspect variants without extraction.
+
+Like Rust methods that take `self`, extraction consumes a move-only `Option` or `Result`. `Option<T>` is `Copy` exactly when `T` is `Copy`; `Result<T,E>` is `Copy` exactly when both payload types are `Copy`.
+
+Owned sum values cannot hide lexical borrows until explicit lifetime parameters exist, so `Some(&value)`, `Ok(&value)`, and `Err(&value)` are rejected.
+
+Panics are distinct from ordinary recoverable errors. Normal `try/catch` does not swallow an unwrap panic, while lexical cleanup and `finally` still execute during unwind. Use `unwrap_safe()`, matching, or explicit variant inspection when absence/failure should remain data.
+
 `Option<null>` is accepted only as an explicit type-level escape hatch when an interoperability boundary truly needs to preserve a null marker. The `null` marker cannot escape that direct `Option<null>` position. `Option<void>` is invalid; use `void` when a function returns no value.
 
 ## Numbers
@@ -496,11 +317,38 @@ Numeric widening is loss-aware; real values can widen toward complex values, but
 
 ## Lambdas
 
-Lambdas use `->`:
+Lambdas are lexical closures by default and use `->`. The canonical block
+form keeps returns explicit:
 
 ```ores
-val Fnc<int, int> inc = (int x) -> x + 1;
+val Fnc<int, int> inc = |int x| -> {
+  return x + 1;
+};
 ```
+
+A normal lambda may capture activation-local bindings from its enclosing
+function or block. Captured mutable state remains part of the closure.
+
+## Non-lexical callables (`nlex`)
+
+`nlex` is an opt-in **capture barrier**, not a ban on global/module lookup.
+It prevents a callable from capturing bindings owned by an enclosing runtime
+activation, so an `nlex` lambda does not retain or snapshot an outer local
+environment.
+
+Inside an `nlex` region:
+
+- parameters and locals declared inside the callable remain available;
+- locals shadow module/global/import bindings normally;
+- module members, imports, top-level callables/classes, and built-ins remain
+  statically resolvable;
+- enclosing activation-local bindings cannot be captured;
+- lambdas nested in an `nlex fnc`, `nlex routine`, or `nlex` lambda inherit
+  the barrier.
+
+Actor entry points remain governed by their actor isolation rules. `nlex` may
+add a capture-free guarantee to an actor fnc, but it does not replace mailbox,
+private-slice, or shared-actor isolation.
 
 ## Conditionals
 
@@ -536,13 +384,127 @@ try {
 
 ## Async / await
 
-`async` and `await` are reserved and parsed. `await` unwraps future-like runtime values. The scheduler is intentionally separate from the language surface so actor isolation does not depend on a specific OS-thread implementation.
+`Future<T>` is Oreslang's local asynchronous result handle. It is deliberately
+not actor-sendable and not shared-safe: a pending computation belongs to the
+execution domain that created it. `await future` is the only operation that
+extracts the future's result; Oreslang does not expose a blocking
+`Future.get()` / `join()` equivalent.
+
+The built-in `Futures` control-flow facade provides:
+
+```ores
+// first and second are Future<Response> values returned by an async API.
+val responses = await Futures.all([first, second]);
+```
+
+- `Futures.all([...])` returns one future, preserves input order, and fails if
+  one constituent future fails.
+- `Futures.race([...])` completes from the first constituent completion.
+- `future.is_done()`, `future.is_cancelled()`, and `future.cancel()` are
+  nonblocking state/control operations.
+- cancellation is cooperative with the host operation. A sandbox resource
+  permit is not considered free merely because guest code requested
+  cancellation; the underlying host operation must actually finish.
+
+For actor code, `await` is a **suspension point, never a carrier-thread
+blocking point**. Compiler backends must lower an incomplete actor await to a
+resumable continuation: the carrier returns to its dispatcher, the actor's
+current mailbox turn remains logically in progress, and no later mailbox
+message may mutate that actor's state until the continuation resumes and
+finishes. The reference JVM interpreter therefore rejects an incomplete
+actor-side `await` unless that continuation lowering is active rather than
+silently blocking a dispatcher worker.
+
+The scheduler remains separate from the language surface so actor isolation
+does not depend on a specific OS-thread implementation.
 
 ## Actors
 
-Actors own their mutable heaps. Cross-actor communication occurs through mailboxes, and message values are frozen/copied/serialized at the runtime boundary. Arbitrary mutable host objects are rejected as messages. Deeply immutable values may use read-only sharing.
+Oreslang uses an Akka-style dispatcher model: an actor is **not** a thread. Every actor owns one mailbox, and at most one mailbox turn for a given actor may execute at a time. Actors are multiplexed over bounded thread pools, so the carrier thread may change between turns.
 
-A `singleton module` is a language-level process service built on the same ownership rule: one actor owns the module bindings for the entire OS process, while all other actors/isolates communicate with it through generated/runtime proxies. It is not one singleton per isolate or per Graal context.
+There are three actor execution domains:
+
+```ores
+pub actor fnc worker(int value) => int {
+  return value;
+}
+
+shared actor Account {
+  let int balance = 100;
+
+  pub fnc withdraw(int amount) => void {
+    self.balance = self.balance - amount;
+    return;
+  }
+}
+
+untrusted actor RequestSandbox {
+  pub fnc handle() => void {
+    // The host may bind this actor to one bounded HTTP exchange.
+    return;
+  }
+}
+```
+
+- an unqualified `actor` is **private**;
+- `shared actor` is a **shared-memory-capable** actor;
+- `untrusted actor` is a **memory-isolated adversarial sandbox** with a hard lifetime/fuel/capability budget;
+- private, shared, and untrusted actors are scheduled on **different dispatcher pools** for bulkheading;
+- compiler-generated/context-aware actor factories are capture-free for **both** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
+- trusted host embedding has separately named supervisor-only construction escape hatches, and adversarial policies reject them;
+- both kinds still process their own mailbox serially;
+- actor-owned `let` fields may mutate during a mailbox turn because that turn is the exclusive mutation capability for `self`;
+- no lock is required around ordinary actor-owned fields, including fields of a shared actor;
+- actor `self` and move-only state rooted at `self` cannot escape the mailbox turn by value or returned borrow; copy-like values such as integers, booleans, and strings may be returned normally;
+- synchronized shared memory requires the host-granted `SHARED_MEMORY` capability.
+
+Private and untrusted actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
+
+The slice has two simultaneous limits:
+
+- a per-actor limit from that actor's `IsolatePolicy.maxHeapBytes()`;
+- an aggregate private-actor memory budget from the parent runtime policy.
+
+This prevents many private actors from multiplying the parent's memory ceiling. Destroying the actor closes its slice and releases its accounting.
+
+The JVM backend's slice is a language/runtime ownership and accounting boundary, not a separate Java GC heap. The slice follows the actor id across dispatcher workers; it is not thread-local state. When physical heap separation is required for adversarial tenant code, the same private-actor semantics must be backed by a cross-thread-capable private region or a separate Graal polyglot/native isolate.
+
+Shared actors may additionally receive:
+
+1. deeply immutable `Shared<T>` values; and
+2. explicit synchronized shared cells.
+
+The runtime primitive for the second case is `SyncCell<T>`. A cell stores only frozen state and serializes replacement updates under a lock. Shared-cell state is quota-accounted against the same parent actor-memory ceiling as private actor slices. Private actor turns cannot create, inspect, mutate, or close a `SyncCell<T>`. This is the intended lowering target for a future `sync` language construct; `sync` is **not** an implicit lock around actor methods.
+
+Actor message graphs are cyclicity-checked and bounded by nesting depth, node count, and logical byte quotas before admission so malicious container graphs cannot turn actor transport into unbounded recursion, CPU, or memory use.
+
+This preserves the central invariant:
+
+> Actor state is mutated through mailbox ownership. Shared mutable state outside an actor is exceptional and must use an explicit synchronization abstraction.
+
+Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into a private, shared, or untrusted actor invalidates dependent compiled units.
+
+An untrusted actor cannot obtain ambient network access. Its only permitted
+outbound network primitive is a host-owned **stateless HTTP/HTTPS capability**.
+The default hard per-actor limit is **5 in-flight outbound HTTP calls** and may
+be configured downward or upward by the supervisor within the runtime hard
+ceiling. The sixth call is rejected before it reaches the host transport; it is
+not hidden in an unbounded guest queue. `CONNECT`, WebSocket/protocol upgrades,
+non-HTTP schemes, raw TCP sockets, actor-visible connection-pool handles, cookie
+jars, and stateful session connections are forbidden. A host may reuse
+connections internally for normal HTTP efficiency, but that state never
+becomes an actor capability.
+
+This gives an untrusted actor useful I/O parallelism without letting it spawn
+more actors. It can start up to its HTTP limit, compose those futures with
+`Futures.all`, and suspend at `await`; the network operations continue while
+the actor consumes no carrier thread.
+
+For HTTP request handling, the host may instead bind exactly one accepted request/response exchange to the actor. The runtime exposes bounded, owner-only request-body and response-body stream capabilities through the actor turn context, allowing the HTTP server to stream directly from/to its socket or event-loop buffers without copying bulk body data through actor mailboxes. Body bytes and HTTP metadata have independent limits; request method/path/header access and response headers are bounded so metadata cannot be used to evade the body/mailbox quotas. When body data is staged in an actor-owned native block, the runtime can read/write that FFM-backed region directly through the HTTP capability without an intermediate heap byte array. The capability is deliberately higher-level than a raw fd so it remains safe for multiplexed HTTP/2 and HTTP/3 connections. HTTP capability handles themselves are non-Sendable and cannot escape through actor messages.
+
+If an untrusted actor is explicitly given an `ActorRef`, that grant authorizes bounded message sending, not lifecycle control: it cannot stop another actor or synchronously wait for another actor's termination. Prefer the narrower `Recipient<M>` capability for parent replies and one-way channels. A `Recipient<M>` can send only; it has no stop/wait/failure API and cannot cross into a different `ActorRuntime`. Supervisory control remains outside the untrusted actor.
+
+Shared writable handles use transactional publication. A `SharedMutex<T>` is reserved to the destination runtime before mailbox visibility, committed only after queue admission, and unbound again when first publication fails. This prevents failed sends from accidentally claiming a writable capability for the wrong runtime.
 
 ## Isolates
 
@@ -571,7 +533,7 @@ The parser and static checker execute no user code.
 Named modules remain the normal namespace unit, but a source file may also contain file-level callables such as an entrypoint. The compiler places those declarations in an internal file-root namespace; that namespace is not written by user code.
 
 ```ores
-define module x as
+define module x
   define class y as
   end
 end
@@ -703,9 +665,9 @@ define class Bag as
 end
 ```
 
-The compiler/runtime inserts a scheduler safepoint on **every loop iteration**. The current runtime hook checks cancellation/interruption and yields execution; it is intentionally centralized so actor supervisor/control-mailbox polling can evolve without changing source syntax. User code does not receive ambient thread-control capability.
+The compiler/runtime inserts a scheduler safepoint on **every loop iteration**. For untrusted actors, statement/expression evaluation and callable/recursive execution are also metered. Each checkpoint rechecks the actor deadline and consumes execution fuel; exhausting fuel fails the actor. The runtime may yield a carrier as a scheduling optimization, but untrusted-system liveness does **not** depend on source code voluntarily calling `yield`.
 
-This means Oreslang does not require recursion as the only way to loop, while still giving actor/isolate schedulers a compulsory cooperation point inside generated loop execution.
+This means Oreslang does not require recursion as the only way to loop, and recursive code is not a loophole around sandbox scheduling. User code receives no ambient thread-control capability.
 
 ## Standard output
 
@@ -737,7 +699,7 @@ Security is layered. Oreslang uses a deny-by-default language capability policy 
 
 An isolate policy can independently allow or deny:
 
-`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
+`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
 
 The trusted compiler API can reject forbidden API usage before execution:
 
@@ -1075,82 +1037,12 @@ Borrow rules:
 - reading the owner is forbidden while an exclusive mutable borrow is active;
 - mutable borrowing requires a mutable owner;
 - a borrow of a local value may not escape the owner's lifetime;
-- borrow provenance is propagated through borrow-returning functions/methods instead of being erased at call boundaries;
-- ordinary borrows cannot be hidden inside owning lists/tuples/objects/structs/classes/Options until explicit container lifetime relationships are modeled;
 - temporary call borrows end at the call boundary;
-- borrows stored or re-bound in local bindings remain active until every registered alias leaves lexical scope;
-- detached values created by `share(...)` are not ordinary borrows and may be stored, captured, or returned safely.
+- borrows stored in local bindings remain active until that binding's lexical scope ends.
 
 The initial checker is deliberately conservative around complex branch/loop lifetime shortening. It rejects uncertain aliasing rather than silently accepting it. Later control-flow/NLL work may accept more programs without weakening these invariants.
 
 Structural parameters remain read-only views and therefore do not consume the supplied value.
-
-### Explicit ownership intrinsics
-
-The pointer-free ownership operations use ordinary call-shaped syntax:
-
-```ores
-borrow(value)
-copy(value)
-take(value)
-share(value)
-```
-
-They are **contextual compiler intrinsics**, not lexer keywords and not ordinary global functions. Normal name resolution wins first: a local binding, imported value, module/class name, or user-defined function named `copy`, `borrow`, `take`, or `share` shadows the intrinsic. This keeps the language namespace usable even as the ownership vocabulary grows.
-
-The operations are:
-
-- `borrow(x)` — immutable borrow of `x`. A persistent binding created from it keeps the owner borrowed until that binding leaves scope.
-- `copy(x)` — produce a new owned value while preserving `x`. `copy(borrow(x))` is valid and returns a new owner.
-- `take(x)` — explicitly transfer ownership. It rejects borrowed values; after taking a move-only owner, the old binding is unusable.
-- `share(x)` — produce an independent, deeply read-only snapshot. It is typed as an immutable view but has no borrow dependency on the source owner, so the source may be mutated afterward and the shared snapshot may safely escape the source's local lifetime.
-
-`copy` intentionally differs by aggregate kind:
-
-- **struct** — copy behavior is compiler-derived from every stored field, including trait-composed fields. Nested structs/lists/tuples/records recurse automatically. If a stored field is a class, that concrete class must itself satisfy the class copy contract; the struct does not need or permit a hand-written struct-level `copy()` merely to become copyable.
-- **class** — never implicitly copyable. Every concrete class that wants to participate in `copy(...)` must declare its **own** concrete, synchronous, non-generic, public instance `copy() => Self` method with an immutable receiver. An inherited method or trait-composed method does not satisfy the concrete class's identity-copy contract; subclasses opt in again explicitly so copying cannot silently slice or reuse base-class identity/state.
-- **trait** — has no independent runtime identity; once composed, its stored fields follow the host struct/class rule. A trait-provided method named `copy` does not make a host class copyable.
-- **interface** — is a contract, not concrete storage, so an interface-typed value does not by itself prove copyability.
-
-The four ownership operations are deliberately type-aware rather than aliases for pointer operations:
-
-| operation | struct value | class value |
-| --- | --- | --- |
-| `copy(x)` | compiler-derived recursive value copy; original remains usable | invokes the concrete class's own verified `copy() => Self`; original identity remains usable |
-| `take(x)` | transfers ownership of the whole value without copying | transfers ownership of the class identity/owning handle without cloning the object graph |
-| `borrow(x)` | temporary immutable view into the owned value; no copy | temporary immutable alias to the same class identity; no ownership transfer |
-| `share(x)` | detached deeply read-only snapshot derived recursively | detached deeply read-only snapshot through the same verified class-copy boundary, then recursively frozen |
-
-This distinction is semantic, not an optimization hint. Backends may elide physical moves/copies when uniqueness and escape analysis prove that doing so preserves these observable ownership rules.
-
-A class copy implementation is checked twice. Static ownership analysis prevents mutation through `self`, including nested projections such as `self.child.bump()` when `bump` requires a mutable receiver. At runtime, Oreslang also verifies that `copy()` did not mutate the source graph, returned the same concrete class, and retained no mutable object/list/set/map/array aliases from the source graph. Immutable wrappers are traversed so mutable aliases cannot be hidden inside `Option` or similar containers.
-
-The verifier is intentionally fail-closed at host/FFI boundaries: if a class graph contains a foreign reference whose mutability/alias structure Oreslang cannot inspect, `copy()` is rejected unless that value is an explicitly recognized immutable capability (for example actor identity/reference values). Future FFI copy adapters can widen this safely without weakening the language guarantee.
-
-```ores
-define class Buffer as
-  pub let int value = 0;
-
-  pub copy() => Buffer {
-    return new Buffer(self.value);
-  }
-end
-
-let Buffer original = new Buffer(7);
-let Buffer duplicate = copy(original);
-```
-
-Returning `self`, or constructing a new root object while reusing mutable nested storage, violates the Copy contract and is rejected. Nested storage can be made independent explicitly:
-
-```ores
-pub copy() => Bucket {
-  return new Bucket(copy(self.values));
-}
-```
-
-`share` uses the same guaranteed-copy boundary and then freezes the detached graph. The freeze is recursive and identity-aware, so shared snapshots cannot become a writable alias back into the source graph.
-
-The legacy `&T` / `&mut T` syntax remains supported for compatibility. `borrow(x)` is the preferred pointer-free immutable-borrow spelling while the broader Java-like default-borrow parameter model continues to evolve.
 
 ## Multi-threaded targets
 

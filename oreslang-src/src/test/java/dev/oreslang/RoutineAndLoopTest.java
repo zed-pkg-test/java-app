@@ -15,7 +15,7 @@ final class RoutineAndLoopTest {
     @Test
     void exactFncProgramCompilesAndRuns() throws Exception {
         String program = """
-                define module x as
+                define module x
                   define class y as
                   end
                 end
@@ -32,7 +32,7 @@ final class RoutineAndLoopTest {
     @Test
     void routineMainCompilesWithSafeSemicolonOmission() throws Exception {
         String program = """
-                define module x as
+                define module x
                   define class y as
                   end
                 end
@@ -69,7 +69,7 @@ final class RoutineAndLoopTest {
     @Test
     void methodsOverloadOnlyByArity() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define module m as
+                define module m
                   define class C as
                     pub find() => int { return 0; }
                     pub find(int value) => int { return value; }
@@ -78,7 +78,7 @@ final class RoutineAndLoopTest {
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define module m as
+                define module m
                   define class C as
                     pub find(int value) => int { return value; }
                     pub find(String value) => int { return 1; }
@@ -118,24 +118,18 @@ final class RoutineAndLoopTest {
     void structuralParametersAreOptInAndSupportBrandedInterfaces() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 pub interface Bar {
-                  fnc markerBrand() => String;
+                  markerBrand: 'marking/branding'
                 }
 
                 pub interface Foo extends Bar {
                 }
 
-                define class Branded as
-                  pub markerBrand() => String {
-                    return "marking/branding";
-                  }
-                end
-
                 fnc structural(@Structural Foo value) => String {
-                  return value.markerBrand();
+                  return value.markerBrand;
                 }
 
                 fnc main() => void {
-                  val branded = new Branded();
+                  val branded = obj{markerBrand: "marking/branding"};
                   stdio.println(structural(branded));
                   return;
                 }
@@ -143,21 +137,15 @@ final class RoutineAndLoopTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 pub interface Foo {
-                  fnc markerBrand() => String;
+                  markerBrand: 'marking/branding'
                 }
 
-                define class Branded as
-                  pub markerBrand() => String {
-                    return "marking/branding";
-                  }
-                end
-
                 fnc nominal(Foo value) => String {
-                  return value.markerBrand();
+                  return "ok";
                 }
 
                 fnc main() => void {
-                  val branded = new Branded();
+                  val branded = obj{markerBrand: "marking/branding"};
                   stdio.println(nominal(branded));
                   return;
                 }
@@ -194,7 +182,7 @@ final class RoutineAndLoopTest {
     @Test
     void customJavascriptStyleIteratorDrivesForOf() throws Exception {
         String output = run("""
-                define module collections as
+                define module collections
                   define class Bag as
                     [Symbol.iterator]() => Array<int> {
                       return arr[4, 5];

@@ -1,4 +1,4 @@
-define module x as
+define module x
 
   define class y as
 

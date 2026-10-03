@@ -1,12 +1,8 @@
 package dev.oreslang.launcher;
 
-import dev.oreslang.OresLanguage;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.IsolatePolicy;
-import org.graalvm.polyglot.Context;
-import org.graalvm.polyglot.Source;
-
-import java.io.File;
+import dev.oreslang.runtime.LinkedProgramRunner;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -55,13 +51,6 @@ public final class OresMain {
             policy = policy.withCapabilities(additionalCapabilities.toArray(IsolatePolicy.Capability[]::new));
         }
 
-        Context.Builder builder = policy.restrictedContextBuilder(profile);
-        Source source = Source.newBuilder(OresLanguage.ID, new File(filename))
-                .mimeType(OresLanguage.MIME_TYPE)
-                .build();
-
-        try (Context context = builder.build()) {
-            context.eval(source);
-        }
+        LinkedProgramRunner.run(path, policy, profile, System.out, System.err);
     }
 }

@@ -47,7 +47,7 @@ final class OwnershipAndClosureTest {
                           return;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("immutable parameter/binding"), error.getMessage());
+        assertTrue(error.getMessage().contains("immutable parameter/binding"));
     }
 
     @Test
@@ -137,7 +137,7 @@ final class OwnershipAndClosureTest {
                           return;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("use of moved value 'b'"), error.getMessage());
+        assertTrue(error.getMessage().contains("use of moved value 'b'"));
     }
 
     @Test
@@ -153,7 +153,7 @@ final class OwnershipAndClosureTest {
                           return &b;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("outlive its owner"), error.getMessage());
+        assertTrue(error.getMessage().contains("outlive its owner"));
     }
 
     @Test
@@ -226,7 +226,7 @@ final class OwnershipAndClosureTest {
                           return;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("cannot move"), error.getMessage());
+        assertTrue(error.getMessage().contains("cannot move"));
     }
 
     @Test
@@ -293,7 +293,7 @@ final class OwnershipAndClosureTest {
                           return;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("use of moved value 'b'"), error.getMessage());
+        assertTrue(error.getMessage().contains("use of moved value 'b'"));
     }
 
     @Test
@@ -309,7 +309,7 @@ final class OwnershipAndClosureTest {
                           return;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("field 'Bar.foo' is immutable"), error.getMessage());
+        assertTrue(error.getMessage().contains("field 'Bar.foo' is immutable"));
     }
 
     @Test
@@ -329,108 +329,7 @@ final class OwnershipAndClosureTest {
                           return;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("use of moved value 'box'"), error.getMessage());
-    }
-
-    @Test
-    void callableLocalStructMutableReceiverUsesLexicalOwnershipMetadata() {
-        IllegalArgumentException immutableOwner = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc bad() => void {
-                          struct Local {
-                            pub let value: int;
-
-                            pub bump(self &mut self)() => void {
-                              self.value = self.value + 1;
-                              return;
-                            }
-                          }
-
-                          val Local item = Local { value = 0 };
-                          item.bump();
-                          return;
-                        }
-                        """)));
-        assertTrue(immutableOwner.getMessage().contains("cannot mutate method 'bump' receiver")
-                || immutableOwner.getMessage().contains("immutable parameter/binding 'item'"), immutableOwner.getMessage());
-
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc ok() => void {
-                  struct Local {
-                    pub let value: int;
-
-                    pub bump(self &mut self)() => void {
-                      self.value = self.value + 1;
-                      return;
-                    }
-                  }
-
-                  let Local item = Local { value = 0 };
-                  item.bump();
-                  return;
-                }
-                """)));
-    }
-
-    @Test
-    void callableLocalStructFieldMutabilityIsResolvedLexically() {
-        IllegalArgumentException error = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc bad() => void {
-                          struct Local {
-                            pub val value: int;
-                          }
-
-                          let Local item = Local { value = 0 };
-                          item.value = 1;
-                          return;
-                        }
-                        """)));
-
-        assertTrue(error.getMessage().contains("field 'Local.value' is immutable"), error.getMessage());
-    }
-
-    @Test
-    void aliasesPreserveOwnershipCategoryAndLocalStructReceiverRules() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                type Count = int;
-
-                fnc consume(Count value) => void {
-                  return;
-                }
-
-                fnc ok() => void {
-                  val Count value = 7;
-                  consume(value);
-                  stdio.println(value);
-                  return;
-                }
-                """)));
-
-        IllegalArgumentException immutableAliasOwner = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc bad() => void {
-                          struct Local {
-                            pub let value: int;
-
-                            pub bump(self &mut self)() => void {
-                              self.value = self.value + 1;
-                              return;
-                            }
-                          }
-
-                          type Alias = Local;
-                          val Alias item = Local { value = 0 };
-                          item.bump();
-                          return;
-                        }
-                        """)));
-
-        assertTrue(immutableAliasOwner.getMessage().contains("cannot mutate method 'bump' receiver")
-                || immutableAliasOwner.getMessage().contains("immutable parameter/binding 'item'"), immutableAliasOwner.getMessage());
+        assertTrue(error.getMessage().contains("use of moved value 'box'"));
     }
 
     private static String run(String program) throws Exception {
@@ -445,22 +344,5 @@ final class OwnershipAndClosureTest {
             context.eval(source);
         }
         return output.toString(StandardCharsets.UTF_8);
-    }
-    @Test
-    void ownershipCheckerInspectsMethodsInsideCallableLocalStructs() {
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc make() => T {
-                          struct T {
-                            pub bad() => &int {
-                              let int local = 7;
-                              return &local;
-                            }
-                          }
-                          return T {};
-                        }
-                        """)));
-
-        assertTrue(error.getMessage().contains("outlive its owner"), error.getMessage());
     }
 }
