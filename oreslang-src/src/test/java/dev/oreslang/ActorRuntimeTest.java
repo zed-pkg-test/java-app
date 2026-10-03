@@ -1356,4 +1356,44 @@ final class ActorRuntimeTest {
     }
 
 
+    @Test
+    void mainProcessTasksAreBoundedWithoutConsumingActorQueueReservation() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(1, 1, 1, 4, 8);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            assertEquals(2, runtime.maxProcessTasksInFlight());
+
+            CountDownLatch firstStarted = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            var first = runtime.submitProcessTask(() -> {
+                firstStarted.countDown();
+                try {
+                    assertTrue(release.await(2, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+
+            var second = runtime.submitProcessTask(() -> { });
+            assertEquals(2, runtime.processTasksInFlight());
+            assertThrows(
+                    java.util.concurrent.RejectedExecutionException.class,
+                    () -> runtime.submitProcessTask(() -> { }));
+
+            // The process-task quota reserves separate queue capacity, so
+            // actor scheduling is still admitted while process work is full.
+            CountDownLatch actorRan = new CountDownLatch(1);
+            var actor = runtime.<String>spawnSharedTrusted(
+                    factory -> (message, turn) -> actorRan.countDown());
+            actor.send("actor");
+
+            release.countDown();
+            first.get(2, TimeUnit.SECONDS);
+            second.get(2, TimeUnit.SECONDS);
+            assertTrue(actorRan.await(2, TimeUnit.SECONDS));
+            assertEquals(0, runtime.processTasksInFlight());
+        }
+    }
+
+
 }
