@@ -165,11 +165,39 @@ public final class ActorRuntime implements AutoCloseable {
             this(privateParallelism, sharedParallelism, privateParallelism, throughput, 16_384);
         }
 
+        /**
+         * Mailbox quantum for one dispatcher turn. Adversarial actors always
+         * surrender the carrier after one message; trusted actors may amortize
+         * scheduling overhead with a bounded batch.
+         */
+        public int throughputFor(ActorKind kind) {
+            Objects.requireNonNull(kind, "kind");
+            return kind == ActorKind.UNTRUSTED ? 1 : throughput;
+        }
+
         public static DispatcherConfig defaults() {
-            int cpus = Math.max(2, Runtime.getRuntime().availableProcessors());
-            return new DispatcherConfig(cpus, cpus, Math.max(1, cpus / 2), 64, 16_384);
+            int cpus = Math.max(1, Runtime.getRuntime().availableProcessors());
+
+            // Keep the total number of hot actor workers near the CPU count
+            // instead of independently allocating N CPUs to every trust lane.
+            // Each lane still gets at least one worker so a blocked/hostile lane
+            // cannot consume all execution capacity from another lane.
+            int shared = Math.max(1, cpus / 2);
+            int remaining = Math.max(0, cpus - shared);
+            int isolated = Math.max(1, (remaining + 1) / 2);
+            int untrusted = Math.max(1, remaining - Math.min(remaining, isolated));
+            return new DispatcherConfig(isolated, shared, untrusted, 64, 16_384);
         }
     }
+
+    public record DispatcherStats(
+            ActorKind kind,
+            int parallelism,
+            int activeWorkers,
+            int queuedActors,
+            long completedDispatches,
+            long starvationEvents,
+            long maxQueueWaitNanos) { }
 
     /**
      * Hard sandbox limits for one untrusted actor. The 300 second lifetime is
@@ -665,13 +693,21 @@ public final class ActorRuntime implements AutoCloseable {
     private final Object runtimeLifecycleLock = new Object();
     private final Set<SyncCell<?>> syncCells = ConcurrentHashMap.newKeySet();
     private final Set<Shared<?>> sharedValues = ConcurrentHashMap.newKeySet();
+    private static final long STARVATION_THRESHOLD_NANOS = TimeUnit.SECONDS.toNanos(1);
+
     private final IsolatePolicy policyCeiling;
     private final DispatcherConfig dispatcherConfig;
     private final TurnExecutor turnExecutor;
-    private final ExecutorService privateDispatcher;
-    private final ExecutorService sharedDispatcher;
-    private final ExecutorService untrustedDispatcher;
+    private final ThreadPoolExecutor privateDispatcher;
+    private final ThreadPoolExecutor sharedDispatcher;
+    private final ThreadPoolExecutor untrustedDispatcher;
     private final ScheduledThreadPoolExecutor untrustedWatchdog;
+    private final AtomicLong privateStarvationEvents = new AtomicLong();
+    private final AtomicLong sharedStarvationEvents = new AtomicLong();
+    private final AtomicLong untrustedStarvationEvents = new AtomicLong();
+    private final AtomicLong privateMaxQueueWaitNanos = new AtomicLong();
+    private final AtomicLong sharedMaxQueueWaitNanos = new AtomicLong();
+    private final AtomicLong untrustedMaxQueueWaitNanos = new AtomicLong();
     private final ThreadLocal<ActorCell<?>> currentActor = new ThreadLocal<>();
     private final ThreadLocal<SyncCell<?>> currentSyncCell = new ThreadLocal<>();
 
@@ -732,6 +768,40 @@ public final class ActorRuntime implements AutoCloseable {
     /** Runtime observability: canceled deadlines are removed immediately. */
     public int pendingUntrustedDeadlineCount() {
         return untrustedWatchdog.getQueue().size();
+    }
+
+    /**
+     * Snapshot one scheduler lane without exposing the executor itself.
+     * queuedActors counts ready actor drain tasks, never mailbox messages.
+     */
+    public DispatcherStats dispatcherStats(ActorKind kind) {
+        Objects.requireNonNull(kind, "kind");
+        ThreadPoolExecutor executor = dispatcherFor(kind);
+        AtomicLong starvation = starvationEventsFor(kind);
+        AtomicLong maxWait = maxQueueWaitFor(kind);
+        return new DispatcherStats(
+                kind,
+                executor.getCorePoolSize(),
+                executor.getActiveCount(),
+                executor.getQueue().size(),
+                executor.getCompletedTaskCount(),
+                starvation.get(),
+                maxWait.get());
+    }
+
+    /**
+     * Trusted host/main-process work shares the SHARED lane by design.
+     * Actor turns already consume this lane according to their actor kind and
+     * may not enqueue arbitrary process tasks as a scheduler-amplification path.
+     */
+    public java.util.concurrent.CompletableFuture<Void> submitProcessTask(Runnable task) {
+        Objects.requireNonNull(task, "task");
+        if (closed.get()) throw new IllegalStateException("actor runtime is closed");
+        if (CURRENT_ACTOR_EXECUTION.get() != null) {
+            throw new SecurityException(
+                    "actor turns cannot submit host/main process-lane work");
+        }
+        return java.util.concurrent.CompletableFuture.runAsync(task, sharedDispatcher);
     }
 
     /**
@@ -3108,12 +3178,36 @@ public final class ActorRuntime implements AutoCloseable {
         actorCount.set(0);
     }
 
-    private ExecutorService dispatcherFor(ActorKind kind) {
+    private ThreadPoolExecutor dispatcherFor(ActorKind kind) {
         return switch (kind) {
             case PRIVATE -> privateDispatcher;
             case SHARED -> sharedDispatcher;
             case UNTRUSTED -> untrustedDispatcher;
         };
+    }
+
+    private AtomicLong starvationEventsFor(ActorKind kind) {
+        return switch (kind) {
+            case PRIVATE -> privateStarvationEvents;
+            case SHARED -> sharedStarvationEvents;
+            case UNTRUSTED -> untrustedStarvationEvents;
+        };
+    }
+
+    private AtomicLong maxQueueWaitFor(ActorKind kind) {
+        return switch (kind) {
+            case PRIVATE -> privateMaxQueueWaitNanos;
+            case SHARED -> sharedMaxQueueWaitNanos;
+            case UNTRUSTED -> untrustedMaxQueueWaitNanos;
+        };
+    }
+
+    private void recordQueueWait(ActorKind kind, long waitedNanos) {
+        if (waitedNanos < 0) return;
+        maxQueueWaitFor(kind).accumulateAndGet(waitedNanos, Math::max);
+        if (waitedNanos >= STARVATION_THRESHOLD_NANOS) {
+            starvationEventsFor(kind).incrementAndGet();
+        }
     }
 
     private static ScheduledThreadPoolExecutor newUntrustedWatchdog(ThreadFactory threadFactory) {
@@ -3124,7 +3218,7 @@ public final class ActorRuntime implements AutoCloseable {
         return executor;
     }
 
-    private static ExecutorService newDispatcher(
+    private static ThreadPoolExecutor newDispatcher(
             int parallelism,
             int readyQueueCapacity,
             String threadPrefix) {
@@ -3133,7 +3227,9 @@ public final class ActorRuntime implements AutoCloseable {
                 parallelism,
                 0L,
                 TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(readyQueueCapacity),
+                // FIFO tasks plus fair queue-lock acquisition keeps a flood of
+                // producers from repeatedly barging ahead of waiting peers.
+                new ArrayBlockingQueue<>(readyQueueCapacity, true),
                 namedFactory(threadPrefix),
                 new ThreadPoolExecutor.AbortPolicy());
         // Core workers are created lazily on first scheduled actor turn.
@@ -3169,6 +3265,7 @@ public final class ActorRuntime implements AutoCloseable {
         private final AtomicBoolean scheduled = new AtomicBoolean();
         private final AtomicBoolean stopped = new AtomicBoolean();
         private final AtomicInteger queuedMessages = new AtomicInteger();
+        private final AtomicLong readySinceNanos = new AtomicLong();
         private final AtomicLong sharedMailboxBytes = new AtomicLong();
         private final Object lifecycleLock = new Object();
         private final Object executionDomain = new Object();
@@ -3392,9 +3489,11 @@ public final class ActorRuntime implements AutoCloseable {
         private void schedule() {
             if (stopped.get() || closed.get()) return;
             if (!scheduled.compareAndSet(false, true)) return;
+            readySinceNanos.set(System.nanoTime());
             try {
                 dispatcherFor(kind).execute(this::runBatch);
             } catch (RejectedExecutionException rejected) {
+                readySinceNanos.set(0L);
                 scheduled.set(false);
                 stop();
                 if (!closed.get()) throw rejected;
@@ -3402,6 +3501,10 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void runBatch() {
+            long enqueuedAt = readySinceNanos.getAndSet(0L);
+            if (enqueuedAt != 0L) {
+                recordQueueWait(kind, Math.max(0L, System.nanoTime() - enqueuedAt));
+            }
             ACTOR_CARRIER.set(Boolean.TRUE);
             try {
                 turnExecutor.execute(this::runBatchEntered);
@@ -3465,7 +3568,7 @@ public final class ActorRuntime implements AutoCloseable {
                 }
 
                 int processed = 0;
-                while (processed < dispatcherConfig.throughput() && !stopped.get()) {
+                while (processed < dispatcherConfig.throughputFor(kind) && !stopped.get()) {
                     MessageEnvelope envelope = mailbox.poll();
                     if (envelope == null) break;
                     releaseMailboxSlot();
