@@ -39,6 +39,7 @@ final class MixedSourceInteropTest {
         assertEquals(MixedSourceUnit.PrimaryLanguage.ORES, unit.primaryLanguage());
         assertEquals(1, unit.javaBindings().size());
         assertEquals("Hashing", unit.javaBindings().getFirst().simpleName());
+        assertEquals(MixedSourceUnit.IslandKind.DECLARATION, unit.foreignIslands().getFirst().kind());
         assertFalse(unit.oresSource().contains("module demo"));
         assertDoesNotThrow(() -> Parser.parse(unit.oresSource()));
     }
@@ -189,6 +190,217 @@ final class MixedSourceInteropTest {
                 new ByteArrayOutputStream(),
                 new ByteArrayOutputStream()));
         assertTrue(denied.getMessage().contains("require --mode=jit"));
+    }
+
+    @Test
+    void inertJavaDeclarationDoesNotRunByPresence() throws Exception {
+        Path source = temp.resolve("inert.ores");
+        Files.writeString(source, """
+                pub fnc main(): void {
+                  stdio.println("ores-main");
+                  return;
+                }
+
+                java {
+                  final class Dormant {
+                    static {
+                      if (true) throw new AssertionError("java declaration was initialized eagerly");
+                    }
+                  }
+                }
+                """);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        assertDoesNotThrow(() -> LinkedProgramRunner.run(
+                source,
+                trustedMixedPolicy(),
+                ExecutionProfile.serverJit(),
+                Set.of(),
+                out,
+                new ByteArrayOutputStream()));
+
+        assertTrue(out.toString(StandardCharsets.UTF_8).contains("ores-main"));
+    }
+
+    @Test
+    void doJavaLowersToRunnableAndExecutesExactlyAtStatementPosition() throws Exception {
+        Path source = temp.resolve("do-java.ores");
+        Files.writeString(source, """
+                java {
+                  final class State {
+                    private static int count = 0;
+                    public static void increment() { count++; }
+                    public static int count() { return count; }
+                  }
+                }
+
+                pub fnc main(): void {
+                  stdio.println(State.count());
+
+                  do java {
+                    State.increment();
+                  }
+
+                  stdio.println(State.count());
+                  return;
+                }
+                """);
+
+        MixedSourceUnit parsed = MixedSourceUnit.parse(source, Files.readString(source));
+        assertEquals(2, parsed.foreignIslands().size());
+        assertEquals(MixedSourceUnit.IslandKind.DECLARATION, parsed.foreignIslands().get(0).kind());
+        assertEquals(MixedSourceUnit.IslandKind.EXECUTION, parsed.foreignIslands().get(1).kind());
+        assertTrue(parsed.javaSources().stream().anyMatch(s -> s.sourceText().contains("implements java.lang.Runnable")));
+        assertTrue(parsed.oresSource().contains(".run();"));
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        LinkedProgramRunner.run(
+                source,
+                trustedMixedPolicy(),
+                ExecutionProfile.serverJit(),
+                Set.of(),
+                out,
+                new ByteArrayOutputStream());
+
+        String output = out.toString(StandardCharsets.UTF_8).replace("\r\n", "\n");
+        assertTrue(output.contains("0\n1\n"), output);
+    }
+
+    @Test
+    void declarationJavaInsideExecutableOresBodyIsRejected() {
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () ->
+                MixedSourceUnit.parse("/tmp/bad.ores", "bad.ores", """
+                        pub fnc main(): void {
+                          java {
+                            final class Hidden {}
+                          }
+                          return;
+                        }
+                        """));
+        assertTrue(failure.getMessage().contains("use do java"));
+    }
+
+    @Test
+    void doJavaAtDeclarationScopeIsRejected() {
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () ->
+                MixedSourceUnit.parse("/tmp/bad.ores", "bad.ores", """
+                        do java {
+                          System.out.println("not a statement scope");
+                        }
+
+                        pub fnc main(): void { return; }
+                        """));
+        assertTrue(failure.getMessage().contains("inside an Oreslang callable"));
+    }
+
+    @Test
+    void doJavaDoesNotImplicitlyCaptureOresLocals() throws Exception {
+        Path source = temp.resolve("no-capture.ores");
+        Files.writeString(source, """
+                pub fnc main(): void {
+                  val ores_value = 42;
+
+                  do java {
+                    if (ores_value != 42) {
+                      throw new AssertionError("unreachable");
+                    }
+                  }
+
+                  return;
+                }
+                """);
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () ->
+                LinkedProgramRunner.run(
+                        source,
+                        trustedMixedPolicy(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+
+        assertTrue(failure.getMessage().contains("mixed Java source compilation failed"));
+        assertTrue(failure.getMessage().contains("ores_value"));
+    }
+
+    @Test
+    void doJavaCanCallExportedOresThroughGeneratedFacade() throws Exception {
+        Path source = temp.resolve("do-java-calls-ores.ores");
+        Files.writeString(source, """
+                pub fnc bridge_hit(): void {
+                  stdio.println("bridge-hit");
+                  return;
+                }
+
+                pub fnc main(): void {
+                  do java {
+                    Ores.bridge_hit();
+                  }
+                  return;
+                }
+                """);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        assertDoesNotThrow(() -> LinkedProgramRunner.run(
+                source,
+                trustedMixedPolicy(),
+                ExecutionProfile.serverJit(),
+                Set.of(),
+                out,
+                new ByteArrayOutputStream()));
+
+        assertTrue(out.toString(StandardCharsets.UTF_8).contains("bridge-hit"));
+    }
+
+    @Test
+    void doJavaCheckedExceptionsMustBeHandledInsideRunnableRun() throws Exception {
+        Path source = temp.resolve("checked-exception.ores");
+        Files.writeString(source, """
+                pub fnc main(): void {
+                  do java {
+                    throw new java.io.IOException("checked");
+                  }
+                  return;
+                }
+                """);
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () ->
+                LinkedProgramRunner.run(
+                        source,
+                        trustedMixedPolicy(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+
+        assertTrue(failure.getMessage().contains("mixed Java source compilation failed"));
+        assertTrue(failure.getMessage().contains("IOException")
+                || failure.getMessage().contains("must be caught")
+                || failure.getMessage().contains("unreported exception"));
+    }
+
+    @Test
+    void doJavaRunCannotReturnAValueBecauseRunnableRunIsVoid() throws Exception {
+        Path source = temp.resolve("void-run.ores");
+        Files.writeString(source, """
+                pub fnc main(): void {
+                  do java {
+                    return 42;
+                  }
+                  return;
+                }
+                """);
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, () ->
+                LinkedProgramRunner.run(
+                        source,
+                        trustedMixedPolicy(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+
+        assertTrue(failure.getMessage().contains("mixed Java source compilation failed"));
     }
 
     @Test
