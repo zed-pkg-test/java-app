@@ -698,10 +698,7 @@ public final class OresEvalRootNode extends RootNode {
                 case "==" -> Objects.equals(left, right); case "!=" -> !Objects.equals(left, right);
                 case "<" -> compare(left, right) < 0; case "<=" -> compare(left, right) <= 0;
                 case ">" -> compare(left, right) > 0; case ">=" -> compare(left, right) >= 0;
-                case "|" -> {
-                    if (left instanceof Boolean a && right instanceof Boolean b) yield a || b;
-                    yield integral(left, "bitwise |") | integral(right, "bitwise |");
-                }
+                case "|" -> integral(left, "bitwise |") | integral(right, "bitwise |");
                 case "&" -> integral(left, "bitwise &") & integral(right, "bitwise &");
                 case "^" -> integral(left, "bitwise ^") ^ integral(right, "bitwise ^");
                 case "<<" -> integral(left, "bitwise <<") << integral(right, "bitwise <<");
