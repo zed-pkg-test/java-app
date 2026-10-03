@@ -171,7 +171,7 @@ final class IsolationHotReloadTest {
     @Test
     void extractedMethodValueKeepsReceiverAndSelfCannotBeRebound() throws Exception {
         String output = run("""
-                define class Box
+                define class Box as
                   val int value;
 
                   pub get() => int {
@@ -188,7 +188,7 @@ final class IsolationHotReloadTest {
         assertEquals("17", output);
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Box
+                define class Box as
                   pub bad() => void {
                     self = new Box();
                     return;
