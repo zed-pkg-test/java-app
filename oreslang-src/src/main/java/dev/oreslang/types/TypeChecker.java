@@ -28,6 +28,16 @@ import java.util.Set;
 
 /** Static semantic pass run before Oreslang code is lowered/executed. */
 public final class TypeChecker {
+    public enum DiagnosticSeverity { WARNING }
+
+    public record Diagnostic(String code, DiagnosticSeverity severity, String message) { }
+
+    public record CheckResult(Ast.Program program, List<Diagnostic> diagnostics) {
+        public CheckResult {
+            diagnostics = List.copyOf(diagnostics);
+        }
+    }
+
     private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
     private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
     private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
@@ -54,12 +64,19 @@ public final class TypeChecker {
     private final Set<Ast.TypeAliasDecl> resolvingAliases = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<Ast.ClassDecl> processEffectCheckedClasses =
             java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<Ast.ClassDecl> warnedMultipleInheritance =
+            java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    private final List<Diagnostic> diagnostics = new ArrayList<>();
     // Set only while checking a method flattened from a trait.
     private String activeTraitOwner;
     // Lexical aggregate owner for ordinary private member access.
     private Ast.ClassDecl activeClassOwner;
 
     public static Ast.Program check(Ast.Program program) {
+        return checkWithDiagnostics(program).program();
+    }
+
+    public static CheckResult checkWithDiagnostics(Ast.Program program) {
         Ast.Program composed = TraitComposer.compose(program);
         TypeChecker checker = new TypeChecker();
         checker.validateImports(composed);
@@ -67,7 +84,7 @@ public final class TypeChecker {
         checker.validateRoutineRecursion();
         checker.validate(composed);
         OwnershipChecker.check(composed);
-        return composed;
+        return new CheckResult(composed, checker.diagnostics);
     }
 
     private void validateImports(Ast.Program program) {
@@ -995,6 +1012,13 @@ public final class TypeChecker {
             if (!parentNames.add(parent.name())) throw new IllegalArgumentException("duplicate parent class '" + parent.name() + "' on " + klass.name());
             resolveClassParent(parent, klass);
         }
+        if (klass.parents().size() > 1 && warnedMultipleInheritance.add(klass)) {
+            diagnostics.add(new Diagnostic(
+                    "ORES-MI-001",
+                    DiagnosticSeverity.WARNING,
+                    "class '" + klass.name() + "' uses multiple class inheritance; prefer multiple interfaces with 'is' "
+                            + "and reusable behavior/state with traits via 'with' unless concrete class inheritance is required"));
+        }
 
         Set<String> localMethodSignatures = new HashSet<>();
         for (Ast.MethodDecl method : klass.methods()) {
@@ -1006,6 +1030,8 @@ public final class TypeChecker {
                         + "; class callables may overload only by arity within their own static/instance namespace");
             }
         }
+
+        validateInheritedMethodOverrides(klass, self, classGenerics);
 
         Ast.ModuleDecl lexicalOwner = modules.get(module);
         Env classModuleEnv = lexicalOwner == null
@@ -1216,6 +1242,10 @@ public final class TypeChecker {
             if (value instanceof Ast.Imaginary) return Primitive.COMPLEX;
             return Unknown.INSTANCE;
         }
+        if (expr instanceof Ast.SuperExpr) {
+            throw new IllegalArgumentException(
+                    "super is only valid as a direct method call: super.foo(...) or super.Parent.foo(...)");
+        }
         if (expr instanceof Ast.NameExpr name) {
             Env.Binding local = env.lookup(name.name());
             if (local != null) return local.type();
@@ -1338,6 +1368,9 @@ public final class TypeChecker {
                 }
             }
             if (call.callee() instanceof Ast.MemberExpr member) {
+                if (member.receiver() instanceof Ast.SuperExpr superExpr) {
+                    return typeOfSuperCall(superExpr, member.member(), call.arguments(), env, generics, self);
+                }
                 if (member.receiver() instanceof Ast.NameExpr namespace
                         && env.lookup(namespace.name()) == null
                         && modules.containsKey(namespace.name())) {
@@ -1471,6 +1504,10 @@ public final class TypeChecker {
             return fn.result();
         }
         if (expr instanceof Ast.MemberExpr member) {
+            if (member.receiver() instanceof Ast.SuperExpr) {
+                throw new IllegalArgumentException(
+                        "super methods cannot be extracted as values; invoke them directly as super.foo(...) or super.Parent.foo(...)");
+            }
             if (member.receiver() instanceof Ast.NameExpr namespace && modules.containsKey(namespace.name())) {
                 Ast.ModuleDecl module = modules.get(namespace.name());
                 Ast.ClassDecl memberClass = classes.get(namespace.name() + "." + member.member());
@@ -2056,12 +2093,50 @@ public final class TypeChecker {
         Map<String, Type> members = new LinkedHashMap<>();
         Set<String> generics = Set.copyOf(klass.genericParameters());
         Type self = nominalClassType(klass);
+
+        Set<String> localMethodKeys = new LinkedHashSet<>();
+        for (Ast.MethodDecl method : klass.methods()) {
+            if (!method.isStatic()) localMethodKeys.add(methodKey(method.name(), method.arity()));
+        }
+
+        Map<String, String> inheritedMethodOrigins = new LinkedHashMap<>();
+        Map<String, String> inheritedFieldOrigins = new LinkedHashMap<>();
         for (Ast.TypeRef parentRef : klass.parents()) {
             Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
             if (parent != null) {
                 Record inheritedShape = instantiateParentShape(classShape(parent, stack), parent, parentRef, generics, self);
                 for (Map.Entry<String, Type> inherited : inheritedShape.members().entrySet()) {
-                    mergeMember(members, inherited.getKey(), inherited.getValue(), "multiple inheritance of " + klass.name());
+                    String key = inherited.getKey();
+                    if (isMethodShapeKey(key)) {
+                        String inheritedName = methodNameFromKey(key);
+                        int inheritedArity = methodArityFromKey(key);
+                        if (findInheritableMethod(parent, inheritedName, inheritedArity, new LinkedHashSet<>()) == null) {
+                            // Private parent methods are lexical implementation
+                            // details, not members inherited into the child.
+                            continue;
+                        }
+                        String previousOrigin = inheritedMethodOrigins.putIfAbsent(key, parent.name());
+                        if (previousOrigin != null && !localMethodKeys.contains(key)) {
+                            throw new IllegalArgumentException(
+                                    "ambiguous inherited method '" + displayMethodKey(key) + "' on class '" + klass.name()
+                                            + "' from parent branches '" + previousOrigin + "' and '" + parent.name()
+                                            + "'; the subclass must override this method explicitly and may delegate with "
+                                            + "super." + previousOrigin + "." + methodNameFromKey(key) + "(...) or super."
+                                            + parent.name() + "." + methodNameFromKey(key) + "(...)");
+                        }
+                        // A local override is the explicit conflict resolver. Its
+                        // compatibility with every inherited branch is checked in checkClass().
+                        if (localMethodKeys.contains(key)) continue;
+                    } else {
+                        String previousOrigin = inheritedFieldOrigins.putIfAbsent(key, parent.name());
+                        if (previousOrigin != null) {
+                            throw new IllegalArgumentException(
+                                    "ambiguous inherited state field '" + key + "' on class '" + klass.name()
+                                            + "' from parent branches '" + previousOrigin + "' and '" + parent.name()
+                                            + "'; inherited state collisions cannot be resolved by parent order");
+                        }
+                    }
+                    mergeMember(members, key, inherited.getValue(), "multiple inheritance of " + klass.name());
                 }
             }
         }
@@ -2075,6 +2150,175 @@ public final class TypeChecker {
         Record result = new Record(members);
         classShapeCache.put(klass, result);
         return result;
+    }
+
+    private boolean isMethodShapeKey(String key) {
+        return key.lastIndexOf("$arity") > 0;
+    }
+
+    private String methodNameFromKey(String key) {
+        int marker = key.lastIndexOf("$arity");
+        return marker > 0 ? key.substring(0, marker) : key;
+    }
+
+    private int methodArityFromKey(String key) {
+        int marker = key.lastIndexOf("$arity");
+        if (marker <= 0) throw new IllegalArgumentException("invalid method-shape key '" + key + "'");
+        return Integer.parseInt(key.substring(marker + "$arity".length()));
+    }
+
+    private String displayMethodKey(String key) {
+        int marker = key.lastIndexOf("$arity");
+        if (marker <= 0) return key;
+        return key.substring(0, marker) + "/" + key.substring(marker + "$arity".length());
+    }
+
+    private Ast.MethodDecl findInheritableMethod(
+            Ast.ClassDecl klass,
+            String name,
+            int arity,
+            Set<Ast.ClassDecl> seen) {
+        if (!seen.add(klass)) return null;
+        for (Ast.MethodDecl method : klass.methods()) {
+            if (!method.isStatic()
+                    && method.visibility() == Ast.Visibility.PUBLIC
+                    && method.name().equals(name)
+                    && method.arity() == arity) {
+                seen.remove(klass);
+                return method;
+            }
+        }
+        for (Ast.TypeRef parentRef : klass.parents()) {
+            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+            if (parent == null) continue;
+            Ast.MethodDecl inherited = findInheritableMethod(parent, name, arity, seen);
+            if (inherited != null) {
+                seen.remove(klass);
+                return inherited;
+            }
+        }
+        seen.remove(klass);
+        return null;
+    }
+
+    private void validateInheritedMethodOverrides(
+            Ast.ClassDecl klass,
+            Type self,
+            Set<String> classGenerics) {
+        if (klass.parents().isEmpty()) return;
+        for (Ast.MethodDecl local : klass.methods()) {
+            if (local.isStatic()) continue;
+            Function localSignature = methodFunctionType(local, klass, self);
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+                if (parent == null) continue;
+                Ast.MethodDecl inherited = findInheritableMethod(
+                        parent,
+                        local.name(),
+                        local.arity(),
+                        new LinkedHashSet<>());
+                if (inherited == null) continue;
+
+                Type resolvedParent = resolve(parentRef, classGenerics, self);
+                Function inheritedSignature = methodFunctionTypeForReceiver(
+                        inherited,
+                        parent,
+                        resolvedParent);
+                if (!assignable(localSignature, inheritedSignature)
+                        || !assignable(inheritedSignature, localSignature)) {
+                    throw new IllegalArgumentException(
+                            "override '" + klass.name() + "." + local.name() + "/" + local.arity()
+                                    + "' is incompatible with inherited method from parent '" + parent.name()
+                                    + "': " + localSignature + " vs " + inheritedSignature);
+                }
+            }
+        }
+    }
+
+    private Type typeOfSuperCall(
+            Ast.SuperExpr superExpr,
+            String methodName,
+            List<Ast.Expr> arguments,
+            Env env,
+            Set<String> generics,
+            Type self) {
+        if (activeClassOwner == null || self == null) {
+            throw new IllegalArgumentException("super may be used only inside an instance method");
+        }
+        if (activeTraitOwner != null) {
+            throw new IllegalArgumentException(
+                    "trait-composed methods cannot use super; declare an abstract trait requirement and let the host class resolve inheritance");
+        }
+
+        Ast.TypeRef parentRef = resolveDirectSuperParent(activeClassOwner, superExpr.parent());
+        Ast.ClassDecl parent = resolveClassParent(parentRef, activeClassOwner);
+        if (parent == null) {
+            throw new IllegalArgumentException("built-in parent '" + parentRef.name() + "' has no callable super methods");
+        }
+
+        Ast.MethodDecl method = findMethod(
+                parent,
+                methodName,
+                arguments.size(),
+                new LinkedHashSet<>());
+        if (method == null) {
+            throw new IllegalArgumentException(
+                    "no superclass method '" + methodName + "' with arity " + arguments.size()
+                            + " on parent branch '" + parent.name() + "'");
+        }
+        requireTraitMethodAccessible(method, "super." + parent.name() + "." + methodName);
+
+        Type parentType = resolve(
+                parentRef,
+                Set.copyOf(activeClassOwner.genericParameters()),
+                nominalClassType(activeClassOwner));
+        if (self instanceof Named named
+                && named.arguments().size() == activeClassOwner.genericParameters().size()) {
+            parentType = substituteGenerics(
+                    parentType,
+                    classGenericSubstitutions(activeClassOwner, named));
+        }
+
+        List<Type> actualTypes = arguments.stream()
+                .map(argument -> typeOf(argument, env, generics, self))
+                .toList();
+        Function signature = instantiateCallableGenerics(
+                methodFunctionTypeForReceiver(method, parent, parentType),
+                method.genericParameters(),
+                actualTypes,
+                "super call to " + parent.name() + "." + method.name());
+        validateCallArguments(arguments, actualTypes, signature, env, generics, self, "super argument");
+        return signature.result();
+    }
+
+    private Ast.TypeRef resolveDirectSuperParent(Ast.ClassDecl owner, String requestedParent) {
+        if (owner.parents().isEmpty()) {
+            throw new IllegalArgumentException("class '" + owner.name() + "' has no superclass");
+        }
+        if (requestedParent == null) {
+            if (owner.parents().size() != 1) {
+                throw new IllegalArgumentException(
+                        "unqualified super is ambiguous in multiply inherited class '" + owner.name()
+                                + "'; use super.Parent.method(...) to select a direct parent");
+            }
+            return owner.parents().getFirst();
+        }
+
+        List<Ast.TypeRef> matches = owner.parents().stream()
+                .filter(parent -> parent.name().equals(requestedParent)
+                        || simpleTypeName(parent.name()).equals(requestedParent))
+                .toList();
+        if (matches.size() != 1) {
+            throw new IllegalArgumentException(
+                    "super." + requestedParent + " must name exactly one direct parent of class '" + owner.name()
+                            + "'; direct parents are " + owner.parents().stream().map(Ast.TypeRef::name).toList());
+        }
+        return matches.getFirst();
+    }
+
+    private String simpleTypeName(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot < 0 ? name : name.substring(dot + 1);
     }
 
     private Record publicClassShape(Ast.ClassDecl klass, Set<Ast.ClassDecl> stack) {
