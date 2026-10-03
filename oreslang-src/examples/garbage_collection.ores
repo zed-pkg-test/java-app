@@ -1,0 +1,18 @@
+// Ownership-first GC example.
+//
+// Normal Oreslang code should not need either call. Ownership/lifetime checking
+// makes values unreachable at the right scope boundary and JVM/Graal GC reclaims
+// backing heap storage automatically.
+//
+// actor.gc() is valid only during an actor turn.
+// process.gc() is for unusual interop/reflection/cache-heavy cleanup phases.
+
+pub fnc cleanup_actor_runtime_caches() => void {
+  actor.gc();
+  return;
+}
+
+pub routine main() => void {
+  process.gc();
+  return;
+}
