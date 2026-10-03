@@ -375,4 +375,26 @@ final class ParserTest {
         assertTrue(failure.getMessage().contains("expected 'as' after class header"));
     }
 
+    @Test
+    void sharedAndUntrustedRemainContextualActorModifiers() {
+        assertDoesNotThrow(() -> Parser.parse("""
+                define module app
+                  fnc names() => void {
+                    val shared = 1;
+                    val untrusted = 2;
+                    stdio.println(shared + untrusted);
+                    return;
+                  }
+                end
+
+                shared actor SharedWorker {
+                  pub fnc ping() => void { return; }
+                }
+
+                untrusted actor SandboxWorker {
+                  pub fnc ping() => void { return; }
+                }
+                """));
+    }
+
 }
