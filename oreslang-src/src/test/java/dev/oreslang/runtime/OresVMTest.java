@@ -5,10 +5,13 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -47,11 +50,27 @@ final class OresVMTest {
         assertFalse(Modifier.isPublic(OresVM.class.getModifiers()),
                 "OresVM is a runtime kernel type, not a user/interop API");
 
-        for (Method method : OresContext.class.getMethods()) {
-            assertNotEquals(
-                    OresVM.class,
-                    method.getReturnType(),
-                    "OresContext must never hand guest/interop code the VM object: " + method);
+        for (Class<?> apiType : List.of(OresContext.class, ActorRuntime.class)) {
+            for (Method method : apiType.getMethods()) {
+                assertNotEquals(
+                        OresVM.class,
+                        method.getReturnType(),
+                        apiType.getSimpleName()
+                                + " must never hand guest/interop code the VM object: "
+                                + method);
+            }
+        }
+    }
+
+    @Test
+    void generationPublicApiDoesNotExposeRawGraalHandles() {
+        for (Method method : HotReloadManager.Generation.class.getMethods()) {
+            Class<?> returned = method.getReturnType();
+            assertNotEquals(org.graalvm.polyglot.Context.class, returned, method.toString());
+            assertNotEquals(org.graalvm.polyglot.Source.class, returned, method.toString());
+            assertNotEquals(org.graalvm.polyglot.Engine.class, returned, method.toString());
+            assertNotEquals(OresVM.class, returned, method.toString());
+            assertNotEquals(ActorRuntime.class, returned, method.toString());
         }
     }
 
@@ -76,16 +95,121 @@ final class OresVMTest {
                 }
                 """);
         assertEquals(HotReloadManager.GenerationState.ACTIVE, generation.state());
+        assertEquals(1, vm.generationBindingCount());
 
         vm.shutdownNow();
 
         assertTrue(vm.shutdown());
         assertEquals(0, vm.hotReloadManagerCount());
+        assertEquals(0, vm.generationBindingCount(),
+                "VM shutdown must revoke every opaque generation binding");
         assertTrue(generation.closed(),
                 "dedicated VM shutdown must retire contexts/generations it owns");
         assertThrows(
                 IllegalStateException.class,
                 () -> hot.load("after-shutdown.ores", "pub routine main() => void { return; }"));
+    }
+
+    @Test
+    void replacingUnpinnedGenerationRevokesItsOpaqueBinding() {
+        OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
+        try (HotReloadManager hot = vm.newHotReloadManager(
+                IsolatePolicy.developer(),
+                IsolatePolicy.developer(),
+                ExecutionProfile.serverJit(),
+                HotReloadManager.ExecutionDomain.TRUSTED_JIT)) {
+
+            HotReloadManager.Generation first = hot.loadAndStart(
+                    "service.ores",
+                    "pub routine main() => void { return; }");
+            assertEquals(1, vm.generationBindingCount());
+
+            HotReloadManager.Generation second = hot.loadAndStart(
+                    "service.ores",
+                    """
+                    pub routine main() => void {
+                      val version = 2;
+                      return;
+                    }
+                    """);
+
+            assertTrue(first.closed());
+            assertTrue(second.active());
+            assertEquals(1, vm.generationBindingCount(),
+                    "only the active generation binding should remain");
+        } finally {
+            assertEquals(0, vm.generationBindingCount());
+            vm.shutdownNow();
+        }
+    }
+
+
+    @Test
+    void opaqueVmBindingsRejectCallerShadowingAndDuplicateArguments() {
+        OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
+        String generationToken = vm.registerGenerationBinding(() -> () -> { });
+        try {
+            assertThrows(
+                    SecurityException.class,
+                    () -> vm.bindApplicationArguments(
+                            new String[] {"--ores-vm-binding=caller-controlled"},
+                            generationToken));
+            assertThrows(
+                    SecurityException.class,
+                    () -> vm.bindApplicationArguments(
+                            new String[] {"--ores-generation-binding=caller-controlled"},
+                            generationToken));
+
+            String[] bound = vm.bindApplicationArguments(
+                    new String[] {"--ordinary=value"},
+                    generationToken);
+            assertSame(vm, OresVM.contextOwner(bound));
+            assertNotNull(vm.generationLeaseFactory(bound));
+
+            String[] duplicateVm = Arrays.copyOf(bound, bound.length + 1);
+            duplicateVm[bound.length] = bound[bound.length - 2];
+            assertThrows(SecurityException.class, () -> OresVM.contextOwner(duplicateVm));
+
+            String[] duplicateGeneration = Arrays.copyOf(bound, bound.length + 1);
+            duplicateGeneration[bound.length] = bound[bound.length - 1];
+            assertThrows(
+                    SecurityException.class,
+                    () -> vm.generationLeaseFactory(duplicateGeneration));
+        } finally {
+            vm.unregisterGenerationBinding(generationToken);
+            vm.shutdownNow();
+        }
+    }
+
+    @Test
+    void dedicatedVmShutdownClosesRegistrationWindowAtomically() {
+        OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
+        String[] bound = vm.bindApplicationArguments(new String[0], null);
+
+        vm.shutdownNow();
+
+        assertThrows(
+                IllegalStateException.class,
+                () -> vm.registerGenerationBinding(() -> () -> { }));
+        assertThrows(
+                IllegalStateException.class,
+                () -> vm.newHotReloadManager(
+                        IsolatePolicy.developer(),
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        HotReloadManager.ExecutionDomain.TRUSTED_JIT));
+        assertThrows(SecurityException.class, () -> OresVM.contextOwner(bound));
+        assertEquals(0, vm.generationBindingCount());
+        assertEquals(0, vm.hotReloadManagerCount());
+    }
+
+    @Test
+    void onlyUntrustedHotLoadDomainUsesSpawnedGraalIsolate() {
+        assertFalse(HotReloadManager.ExecutionDomain.TRUSTED_JIT.spawnedIsolate());
+        assertFalse(HotReloadManager.ExecutionDomain.TRUSTED_ISOACTOR_JIT.spawnedIsolate());
+        assertFalse(HotReloadManager.ExecutionDomain.AOT_INTERPRETED.spawnedIsolate());
+        assertTrue(HotReloadManager.ExecutionDomain.UNTRUSTED_JIT.spawnedIsolate());
+        assertTrue(HotReloadManager.ExecutionDomain.UNTRUSTED_JIT.untrusted());
     }
 
     @Test
@@ -118,6 +242,126 @@ final class OresVMTest {
     }
 
     @Test
+    void actorGenerationLeaseIsAcquiredAtBirthAndReleasedExactlyOnce() {
+        OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
+        AtomicInteger activeLeases = new AtomicInteger();
+        AtomicInteger releasedLeases = new AtomicInteger();
+
+        ActorRuntime runtime = ActorRuntime.attachToVm(
+                vm,
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct(),
+                () -> {
+                    activeLeases.incrementAndGet();
+                    AtomicBoolean released = new AtomicBoolean();
+                    return () -> {
+                        if (released.compareAndSet(false, true)) {
+                            activeLeases.decrementAndGet();
+                            releasedLeases.incrementAndGet();
+                        }
+                    };
+                },
+                ActorRuntime.RuntimePlacement.MAIN_GRAAL_ISOLATE);
+        try {
+            ActorRuntime.ActorRef<String> actor = runtime.spawnPrivate(
+                    IsolatePolicy.developer(),
+                    ignored -> (message, turn) -> { });
+
+            assertEquals(1, activeLeases.get());
+            actor.stop();
+            assertEquals(0, activeLeases.get());
+            assertEquals(1, releasedLeases.get());
+
+            runtime.close();
+            assertEquals(1, releasedLeases.get(),
+                    "runtime teardown must never release a finalized actor generation twice");
+        } finally {
+            runtime.close();
+            vm.shutdownNow();
+        }
+    }
+
+    @Test
+    void mainGraalIsolateRefusesDirectUntrustedActorExecution() {
+        OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
+        ActorRuntime runtime = ActorRuntime.attachToVm(
+                vm,
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct(),
+                () -> () -> { },
+                ActorRuntime.RuntimePlacement.MAIN_GRAAL_ISOLATE);
+        try {
+            SecurityException denied = assertThrows(
+                    SecurityException.class,
+                    () -> runtime.<String>spawnUntrusted(
+                            ignored -> (message, turn) -> { }));
+            assertTrue(denied.getMessage().contains("main Graal isolate"));
+        } finally {
+            runtime.close();
+            vm.shutdownNow();
+        }
+    }
+
+    @Test
+    void mailmanControlCarrierDoesNotConferSupervisorAuthority() throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(1),
+                1,
+                64);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            CountDownLatch attempted = new CountDownLatch(1);
+            AtomicReference<Throwable> denied = new AtomicReference<>();
+
+            ActorGroupConfig.GroupPolicy policy = new ActorGroupConfig.GroupPolicy(
+                    ActorRuntime.ActorKind.SHARED,
+                    0,
+                    4,
+                    32,
+                    32,
+                    ActorGroupConfig.RestartStrategy.ONE_FOR_ONE,
+                    3,
+                    Duration.ofSeconds(5),
+                    ActorGroupConfig.RestartPolicy.PERMANENT,
+                    null);
+
+            ActorGroupRef<String> group = runtime.defineActorGroup(
+                    ActorRuntime.ActorKind.SHARED,
+                    policy,
+                    new ActorMailman<>() {
+                        @Override
+                        public void receiveMail(
+                                ActorMail<String> mail,
+                                ActorGroupContext<String> ignored) {
+                            try {
+                                runtime.executeRootTask(() -> null);
+                            } catch (Throwable failure) {
+                                denied.set(failure);
+                            } finally {
+                                attempted.countDown();
+                            }
+                        }
+                    });
+
+            ActorRuntime.ActorRef<String> actor = runtime.spawnInGroup(
+                    group,
+                    ActorRuntime.ActorKind.SHARED,
+                    IsolatePolicy.developer(),
+                    ignored -> (message, turn) -> turn.emit(message));
+
+            actor.send("mail");
+
+            assertTrue(attempted.await(5, TimeUnit.SECONDS));
+            SecurityException failure = assertInstanceOf(
+                    SecurityException.class,
+                    denied.get());
+            assertTrue(failure.getMessage().contains("host/supervisor"));
+        }
+    }
+
+    @Test
     void controlPlaneRunsRootAndMailmanOffSharedActorCarriers() throws Exception {
         ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
                 1,
@@ -138,7 +382,6 @@ final class OresVMTest {
             assertNotNull(rootThread.get());
             assertTrue(rootThread.get().contains("control-plane-dispatcher-"));
 
-            CountDownLatch actorRan = new CountDownLatch(1);
             CountDownLatch mailDelivered = new CountDownLatch(1);
             AtomicReference<String> actorThread = new AtomicReference<>();
             AtomicReference<String> mailmanThread = new AtomicReference<>();
@@ -163,6 +406,7 @@ final class OresVMTest {
                         public void receiveMail(
                                 ActorMail<String> mail,
                                 ActorGroupContext<String> ignored) {
+                            actorThread.set(mail.message());
                             mailmanThread.set(Thread.currentThread().getName());
                             mailDelivered.countDown();
                         }
@@ -172,15 +416,11 @@ final class OresVMTest {
                     group,
                     ActorRuntime.ActorKind.SHARED,
                     IsolatePolicy.developer(),
-                    ignored -> (message, turn) -> {
-                        actorThread.set(Thread.currentThread().getName());
-                        turn.emit(message);
-                        actorRan.countDown();
-                    });
+                    ignored -> (message, turn) ->
+                            turn.emit(Thread.currentThread().getName()));
 
             actor.send("hello");
 
-            assertTrue(actorRan.await(5, TimeUnit.SECONDS));
             assertTrue(mailDelivered.await(5, TimeUnit.SECONDS));
             assertTrue(actorThread.get().contains("shared-actor-dispatcher-"));
             assertTrue(mailmanThread.get().contains("control-plane-dispatcher-"));
