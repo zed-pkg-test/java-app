@@ -46,6 +46,9 @@ public final class OresMutex {
         if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
             throw new SecurityException("private actors cannot create SharedMutex<T>");
         }
+        if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+            throw new SecurityException("untrusted actors cannot create SharedMutex<T>");
+        }
         IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
         if (actorPolicy != null) {
             actorPolicy.require(
@@ -409,6 +412,9 @@ public final class OresMutex {
         private void requireActorAccess() {
             if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
                 throw new SecurityException("private actors cannot access SharedMutex<T>");
+            }
+            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+                throw new SecurityException("untrusted actors cannot access SharedMutex<T>");
             }
             IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
             if (actorPolicy != null) {

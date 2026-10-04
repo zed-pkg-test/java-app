@@ -6,18 +6,18 @@ end
 
 @AdheresTo(contracts.MathApi)
 define module math
-  pub fnc add(int a, int b): int {
+  pub fnc add(int a, int b) => int {
     return a + b;
   }
 
-  fnc impedance(): complex {
+  fnc impedance() => complex {
     return 3 + 4i;
   }
 end
 
 define module model
   define class Base as
-    pub seven(): int { return 7; }
+    pub seven() => int { return 7; }
   end
 
   define class Box<T> extends Base as
@@ -31,7 +31,7 @@ define module model
 end
 
 define module app
-  pub fnc main(): void {
+  pub fnc main() => void {
     let answer = math.add(40, 2);
     answer = answer + 1;
     val complex z = 3 + 4i;

@@ -1,16 +1,16 @@
 namespace demo;
 
 define module math
-  pub fnc factorial(int n): int {
+  pub fnc factorial(int n) => int {
     return n == 0 ? 1 : n * factorial(n - 1);
   }
 
-  pub fnc offset(int x): int {
+  pub fnc offset(int x) => int {
     return x + 10;
   }
 end
 
-pub routine main(): void {
+pub routine main() => void {
   val int base = 7;
 
   val Fnc<int, int> lexical = |int x| -> {

@@ -5,6 +5,7 @@ import dev.oreslang.runtime.IsolatePolicy;
 import org.junit.jupiter.api.Test;
 
 import java.util.AbstractList;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -13,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -137,6 +139,95 @@ final class ActorRuntimeTest {
     }
 
     @Test
+    void boundedMailboxBatchLetsPeerActorRunBeforeHotMailboxDrains() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(
+                1,
+                1,
+                1,
+                2,
+                Long.MAX_VALUE,
+                1024);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            CountDownLatch firstHotEntered = new CountDownLatch(1);
+            CountDownLatch releaseFirstHot = new CountDownLatch(1);
+            CountDownLatch peerRan = new CountDownLatch(1);
+            AtomicInteger hotProcessed = new AtomicInteger();
+            AtomicInteger hotCountWhenPeerRan = new AtomicInteger(Integer.MAX_VALUE);
+
+            var hot = runtime.<Integer>spawnPrivate(() -> (message, context) -> {
+                if (message == 0) {
+                    firstHotEntered.countDown();
+                    assertTrue(releaseFirstHot.await(2, TimeUnit.SECONDS));
+                }
+                hotProcessed.incrementAndGet();
+            });
+            var peer = runtime.<String>spawnPrivate(() -> (message, context) -> {
+                hotCountWhenPeerRan.set(hotProcessed.get());
+                peerRan.countDown();
+            });
+
+            for (int i = 0; i < 10; i++) hot.send(i);
+            assertTrue(firstHotEntered.await(2, TimeUnit.SECONDS));
+            peer.send("peer");
+            releaseFirstHot.countDown();
+
+            assertTrue(peerRan.await(2, TimeUnit.SECONDS));
+            assertTrue(
+                    hotCountWhenPeerRan.get() <= config.throughput(),
+                    "hot actor must return to the FIFO dispatcher queue after one bounded message batch");
+        }
+    }
+
+    @Test
+    void wallClockBatchQuantumLetsPeerRunEvenWithLargeMessageThroughput() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(
+                1,
+                1,
+                1,
+                64,
+                1L,
+                1024);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            CountDownLatch firstHotEntered = new CountDownLatch(1);
+            CountDownLatch releaseFirstHot = new CountDownLatch(1);
+            CountDownLatch peerRan = new CountDownLatch(1);
+            AtomicInteger hotProcessed = new AtomicInteger();
+            AtomicInteger hotCountWhenPeerRan = new AtomicInteger(Integer.MAX_VALUE);
+
+            var hot = runtime.<Integer>spawnPrivate(() -> (message, context) -> {
+                if (message == 0) {
+                    firstHotEntered.countDown();
+                    assertTrue(releaseFirstHot.await(2, TimeUnit.SECONDS));
+                }
+                hotProcessed.incrementAndGet();
+            });
+            var peer = runtime.<String>spawnPrivate(() -> (message, context) -> {
+                hotCountWhenPeerRan.set(hotProcessed.get());
+                peerRan.countDown();
+            });
+
+            for (int i = 0; i < 10; i++) hot.send(i);
+            assertTrue(firstHotEntered.await(2, TimeUnit.SECONDS));
+            peer.send("peer");
+            releaseFirstHot.countDown();
+
+            assertTrue(peerRan.await(2, TimeUnit.SECONDS));
+            assertEquals(
+                    1,
+                    hotCountWhenPeerRan.get(),
+                    "elapsed batch quantum must requeue a hot actor before its next mailbox message");
+        }
+    }
+
+    @Test
+    void untrustedDispatcherAlwaysUsesSingleMessageTurns() {
+        var config = new ActorRuntime.DispatcherConfig(4, 4, 2, 64, 1024);
+        assertEquals(64, config.throughputFor(ActorRuntime.ActorKind.PRIVATE));
+        assertEquals(64, config.throughputFor(ActorRuntime.ActorKind.SHARED));
+        assertEquals(1, config.throughputFor(ActorRuntime.ActorKind.UNTRUSTED));
+    }
+
+    @Test
     void sharedActorsCanCoordinateThroughExplicitSyncCell() throws Exception {
         var config = new ActorRuntime.DispatcherConfig(1, 4, 32);
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
@@ -244,7 +335,7 @@ final class ActorRuntimeTest {
             var ref = runtime.<String>spawnPrivate(small, () -> (message, context) -> { });
             String tooLarge = "x".repeat(9 * 1024 * 1024);
             IllegalStateException failure = assertThrows(IllegalStateException.class, () -> ref.send(tooLarge));
-            assertTrue(failure.getMessage().contains("private actor mailbox limit exceeded"));
+            assertTrue(failure.getMessage().contains("private actor inbox limit exceeded"));
             assertEquals(0L, runtime.privateMemoryBytes(), "failed admission must roll back aggregate accounting");
         }
     }
@@ -672,8 +763,11 @@ final class ActorRuntimeTest {
             assertFalse(closer.isAlive(), "runtime close must not wait for user code holding a SyncCell lock");
             assertInstanceOf(IllegalStateException.class, closeFailure.get());
             assertTrue(closeFailure.get().getMessage().contains("full actor termination"));
-            assertTrue(cell.closed());
-            assertEquals(0L, runtime.sharedMemoryBytes());
+            // A timed-out close must not tear shared state out from under a
+            // still-running actor. Cleanup is completed by the retry after the
+            // actor releases the user-held lock and fully terminates.
+            assertFalse(cell.closed());
+            assertTrue(runtime.sharedMemoryBytes() > 0L);
         } finally {
             release.countDown();
             closer.join(2000);
@@ -681,6 +775,8 @@ final class ActorRuntimeTest {
 
         assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
         assertDoesNotThrow(runtime::close);
+        assertTrue(cell.closed());
+        assertEquals(0L, runtime.sharedMemoryBytes());
     }
 
 
@@ -1124,7 +1220,7 @@ final class ActorRuntimeTest {
                 @Override
                 public Object get(int index) {
                     traversed.set(true);
-                    throw new AssertionError("message graph must not be traversed after mailbox admission fails");
+                    throw new AssertionError("message graph must not be traversed after inbox admission fails");
                 }
 
                 @Override
@@ -1136,7 +1232,7 @@ final class ActorRuntimeTest {
             IllegalStateException error = assertThrows(
                     IllegalStateException.class,
                     () -> ref.send(shouldNotTraverse));
-            assertTrue(error.getMessage().contains("mailbox limit exceeded"));
+            assertTrue(error.getMessage().contains("inbox limit exceeded"));
             assertFalse(traversed.get());
 
             release.countDown();
@@ -1222,7 +1318,7 @@ final class ActorRuntimeTest {
             IllegalStateException rejected = assertThrows(
                     IllegalStateException.class,
                     () -> ref.send(second));
-            assertTrue(rejected.getMessage().contains("mailbox limit exceeded"));
+            assertTrue(rejected.getMessage().contains("inbox limit exceeded"));
             assertFalse(secondTraversalRan.get());
 
             releaseFirstTraversal.countDown();
@@ -1282,6 +1378,465 @@ final class ActorRuntimeTest {
                             factoryContext -> (message, context) -> { }));
             assertTrue(failure.getMessage().contains("adversarial"));
         }
+    }
+
+    @Test
+    void productionDefaultsUseThreeElasticFiveToTwentyCarrierPools() {
+        var config = ActorRuntime.DispatcherConfig.defaultsForProcessors(16);
+
+        assertEquals(5, config.privateParallelism());
+        assertEquals(5, config.sharedParallelism());
+        assertEquals(5, config.untrustedParallelism());
+        assertEquals(20, config.maxParallelismFor(ActorRuntime.ActorKind.PRIVATE));
+        assertEquals(20, config.maxParallelismFor(ActorRuntime.ActorKind.SHARED));
+        assertEquals(20, config.maxParallelismFor(ActorRuntime.ActorKind.UNTRUSTED));
+        assertTrue(config.maxCompensatingThreads() > 0);
+        assertTrue(config.maxMessageNanos() >= config.maxBatchNanos());
+    }
+
+    @Test
+    void everyActorKindHasAtMostOneActiveCarrier() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            int messages = 32;
+
+            AtomicInteger privateActive = new AtomicInteger();
+            AtomicInteger privateMax = new AtomicInteger();
+            CountDownLatch privateDone = new CountDownLatch(messages);
+            var privateRef = runtime.<Integer>spawnPrivateTrusted(ignored -> (message, turn) -> {
+                int now = privateActive.incrementAndGet();
+                privateMax.accumulateAndGet(now, Math::max);
+                try {
+                    Thread.sleep(1);
+                } finally {
+                    privateActive.decrementAndGet();
+                    privateDone.countDown();
+                }
+            });
+
+            AtomicInteger sharedActive = new AtomicInteger();
+            AtomicInteger sharedMax = new AtomicInteger();
+            CountDownLatch sharedDone = new CountDownLatch(messages);
+            var sharedRef = runtime.<Integer>spawnSharedTrusted(ignored -> (message, turn) -> {
+                int now = sharedActive.incrementAndGet();
+                sharedMax.accumulateAndGet(now, Math::max);
+                try {
+                    Thread.sleep(1);
+                } finally {
+                    sharedActive.decrementAndGet();
+                    sharedDone.countDown();
+                }
+            });
+
+            AtomicInteger untrustedActive = new AtomicInteger();
+            AtomicInteger untrustedMax = new AtomicInteger();
+            CountDownLatch untrustedDone = new CountDownLatch(messages);
+            ActorRuntime.HttpResponseTransport responseTransport = source -> {
+                int now = untrustedActive.incrementAndGet();
+                untrustedMax.accumulateAndGet(now, Math::max);
+                try {
+                    Thread.sleep(1);
+                    int remaining = source.remaining();
+                    source.position(source.limit());
+                    return remaining;
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new java.io.IOException("interrupted", interrupted);
+                } finally {
+                    untrustedActive.decrementAndGet();
+                    untrustedDone.countDown();
+                }
+            };
+            var untrustedRef = runtime.<Integer>spawnUntrusted(
+                    IsolatePolicy.untrustedActor(),
+                    ActorRuntime.UntrustedActorLimits.defaults(),
+                    responseTransport,
+                    ignored -> (message, turn) ->
+                            turn.httpResponse().orElseThrow().write(
+                                    java.nio.ByteBuffer.wrap(new byte[] { 1 })));
+
+            for (int i = 0; i < messages; i++) {
+                privateRef.send(i);
+                sharedRef.send(i);
+                untrustedRef.send(i);
+            }
+
+            assertTrue(privateDone.await(5, TimeUnit.SECONDS));
+            assertTrue(sharedDone.await(5, TimeUnit.SECONDS));
+            assertTrue(untrustedDone.await(5, TimeUnit.SECONDS));
+            assertEquals(1, privateMax.get());
+            assertEquals(1, sharedMax.get());
+            assertEquals(1, untrustedMax.get());
+
+            privateRef.stop();
+            sharedRef.stop();
+            untrustedRef.stop();
+        }
+    }
+
+    @Test
+    void rootProcessExecutesOnControlPlaneCarrierPool() {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            String threadName = runtime.executeRootTask(
+                    () -> Thread.currentThread().getName());
+            assertTrue(
+                    threadName.startsWith("ores-control-plane-dispatcher-"),
+                    threadName);
+        }
+    }
+
+    @Test
+    void stuckTrustedActorGetsBoundedCompensationSoPeerStillRuns() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(
+                1,
+                1,
+                1,
+                64,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.MILLISECONDS.toNanos(40),
+                1,
+                64);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            CountDownLatch hogEntered = new CountDownLatch(1);
+            CountDownLatch releaseHog = new CountDownLatch(1);
+            CountDownLatch peerRan = new CountDownLatch(1);
+
+            var hog = runtime.<String>spawnPrivateTrusted(
+                    IsolatePolicy.developer(),
+                    ignored -> (message, turn) -> {
+                        hogEntered.countDown();
+                        while (releaseHog.getCount() != 0) {
+                            // Deliberately no Oreslang/runtime checkpoint and no
+                            // interrupt handling: model an uncooperative host stack.
+                            Thread.onSpinWait();
+                        }
+                    });
+            var peer = runtime.<String>spawnPrivateTrusted(
+                    IsolatePolicy.developer(),
+                    ignored -> (message, turn) -> peerRan.countDown());
+
+            hog.send("hog");
+            assertTrue(hogEntered.await(2, TimeUnit.SECONDS));
+            peer.send("peer");
+
+            assertTrue(
+                    peerRan.await(2, TimeUnit.SECONDS),
+                    "a stuck actor must not permanently consume the domain's only base carrier");
+            assertTrue(runtime.dispatcherStats(ActorRuntime.ActorKind.PRIVATE).overrunTurns() >= 1);
+            assertTrue(runtime.dispatcherStats(ActorRuntime.ActorKind.PRIVATE).largestPoolSize() >= 2);
+            assertInstanceOf(
+                    ActorRuntime.ActorTurnExceededException.class,
+                    hog.failure().orElseThrow());
+
+            releaseHog.countDown();
+            assertTrue(hog.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void entryWaitIsWatchdogBoundedBeforeTurnExecutorRunsGuestCode() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(
+                1,
+                1,
+                1,
+                64,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.MILLISECONDS.toNanos(40),
+                1,
+                64);
+
+        ReentrantLock contextGate = new ReentrantLock(true);
+        contextGate.lock();
+        ActorRuntime.TurnExecutor interruptibleEntry = turn -> {
+            boolean locked = false;
+            try {
+                contextGate.lockInterruptibly();
+                locked = true;
+                turn.run();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new java.util.concurrent.CancellationException(
+                        "interrupted before actor context entry");
+            } finally {
+                if (locked) contextGate.unlock();
+            }
+        };
+
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                config,
+                interruptibleEntry)) {
+            var blocked = runtime.<String>spawnPrivateTrusted(
+                    IsolatePolicy.developer(),
+                    ignored -> (message, turn) -> fail(
+                            "guest callback must not run while context entry is blocked"));
+
+            blocked.send("blocked");
+
+            assertTrue(
+                    blocked.awaitTermination(2, TimeUnit.SECONDS),
+                    "context-entry wait must be covered by the actor turn watchdog");
+            assertInstanceOf(
+                    ActorRuntime.ActorTurnExceededException.class,
+                    blocked.failure().orElseThrow());
+            assertTrue(
+                    runtime.dispatcherStats(ActorRuntime.ActorKind.PRIVATE).overrunTurns() >= 1);
+        } finally {
+            contextGate.unlock();
+        }
+    }
+
+    @Test
+    void hostileUntrustedActorsCannotConsumeEveryActorIdentity() {
+        var config = new ActorRuntime.DispatcherConfig(
+                2,
+                2,
+                1,
+                64,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.MILLISECONDS.toNanos(250),
+                1,
+                16);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            int limit = config.maxUntrustedActors();
+            List<ActorRuntime.ActorRef<String>> sandboxes = new ArrayList<>();
+            for (int i = 0; i < limit; i++) {
+                sandboxes.add(runtime.<String>spawnUntrusted(
+                        ignored -> (message, turn) -> { }));
+            }
+
+            IllegalStateException rejected = assertThrows(
+                    IllegalStateException.class,
+                    () -> runtime.<String>spawnUntrusted(
+                            ignored -> (message, turn) -> { }));
+            assertTrue(rejected.getMessage().contains("untrusted actor limit"));
+
+            // Trusted actors still retain admission capacity under sandbox load.
+            assertDoesNotThrow(() ->
+                    runtime.<String>spawnPrivate(
+                            ignored -> (message, turn) -> { }));
+        }
+    }
+
+    @Test
+    void processSharedRuntimesReuseCarriersAndCloseIndependently() {
+        ActorRuntime first = ActorRuntime.processShared(
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct());
+        ActorRuntime second = ActorRuntime.processShared(
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct());
+        try {
+            assertTrue(first.usesProcessSharedDispatchers());
+            assertTrue(second.usesProcessSharedDispatchers());
+
+            String firstThread = first.executeRootTask(
+                    () -> Thread.currentThread().getName());
+            assertTrue(firstThread.startsWith("ores-process-control-plane-dispatcher-"),
+                    firstThread);
+
+            first.close();
+
+            String secondThread = second.executeRootTask(
+                    () -> Thread.currentThread().getName());
+            assertTrue(secondThread.startsWith("ores-process-control-plane-dispatcher-"),
+                    secondThread);
+        } finally {
+            try {
+                first.close();
+            } catch (IllegalStateException ignored) {
+                // A prior close already completed or reported its own teardown issue.
+            }
+            second.close();
+        }
+    }
+
+    @Test
+    void cooperativeRunawayRootIsWallTimeBoundedAndCompensated() {
+        var base = IsolatePolicy.developer();
+        var shortRootPolicy = new IsolatePolicy(
+                base.capabilities(),
+                base.maxHeapBytes(),
+                base.maxMailboxMessages(),
+                Duration.ofMillis(40),
+                false);
+        var config = new ActorRuntime.DispatcherConfig(
+                1,
+                2,
+                1,
+                64,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.MILLISECONDS.toNanos(250),
+                1,
+                64);
+
+        try (ActorRuntime runtime = new ActorRuntime(shortRootPolicy, config)) {
+            assertThrows(
+                    java.util.concurrent.CancellationException.class,
+                    () -> runtime.executeRootTask(() -> {
+                        while (true) runtime.schedulerSafepoint();
+                    }));
+
+            assertTrue(
+                    runtime.controlDispatcherStats().overrunTurns() >= 1,
+                    "root wall-time expiration must be observable on the control-plane dispatcher");
+            assertEquals(
+                    0,
+                    runtime.dispatcherStats(ActorRuntime.ActorKind.SHARED).overrunTurns(),
+                    "root wall-time expiration must not contaminate shared-actor metrics");
+        }
+    }
+
+    @Test
+    void rootTaskCannotStarveSharedActorsOfEveryBaseCarrier() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(
+                1,
+                2,
+                1,
+                64,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(5),
+                1,
+                64);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            CountDownLatch rootEntered = new CountDownLatch(1);
+            CountDownLatch releaseRoot = new CountDownLatch(1);
+            CountDownLatch actorRan = new CountDownLatch(1);
+            AtomicReference<Throwable> rootFailure = new AtomicReference<>();
+
+            Thread rootCaller = new Thread(() -> {
+                try {
+                    runtime.executeRootTask(() -> {
+                        rootEntered.countDown();
+                        try {
+                            releaseRoot.await();
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(interrupted);
+                        }
+                        return null;
+                    });
+                } catch (Throwable failure) {
+                    rootFailure.set(failure);
+                }
+            }, "root-caller-test");
+            rootCaller.start();
+
+            assertTrue(rootEntered.await(2, TimeUnit.SECONDS));
+
+            var shared = runtime.<String>spawnSharedTrusted(
+                    IsolatePolicy.developer(),
+                    ignored -> (message, turn) -> actorRan.countDown());
+            shared.send("ping");
+
+            assertTrue(
+                    actorRan.await(2, TimeUnit.SECONDS),
+                    "a control-plane root/main task must not consume shared-actor carriers");
+
+            releaseRoot.countDown();
+            rootCaller.join(2_000);
+            assertFalse(rootCaller.isAlive());
+            assertNull(rootFailure.get());
+        }
+    }
+
+    @Test
+    void adversarialRootCannotSynchronouslyWaitOnSerializedActorTurn() {
+        try (ActorRuntime runtime = ActorRuntime.processShared(
+                IsolatePolicy.strictFaas(),
+                ActorRuntime.TurnExecutor.direct())) {
+            SecurityException denied = assertThrows(
+                    SecurityException.class,
+                    () -> runtime.executeRootTask(() -> runtime.invoke(
+                            ActorRuntime.ActorKind.PRIVATE,
+                            "ping",
+                            (message, turn) -> message)));
+            assertTrue(denied.getMessage().contains("cannot synchronously invoke"));
+        }
+    }
+
+    @Test
+    void processSharedMemoryAccountingSpansContextsAndReleasesOnClose() {
+        ActorRuntime first = ActorRuntime.processShared(
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct());
+        ActorRuntime second = ActorRuntime.processShared(
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct());
+        ActorRuntime.SyncCell<List<Integer>> cell = null;
+        try {
+            long baseline = second.processCarrierMemoryBytes();
+            cell = first.syncCell(List.of(1, 2, 3, 4));
+            long reserved = second.processCarrierMemoryBytes();
+
+            assertTrue(reserved > baseline,
+                    "process carrier memory accounting must include other contexts");
+
+            first.close();
+            assertTrue(cell.closed());
+            assertThrows(IllegalStateException.class, cell::snapshot);
+            assertEquals(
+                    baseline,
+                    second.processCarrierMemoryBytes(),
+                    "closing one context must release its process-level reservations");
+
+            assertEquals(
+                    "still-alive",
+                    second.executeRootTask(() -> "still-alive"),
+                    "releasing one context's memory must not shut the shared carriers");
+        } finally {
+            try {
+                first.close();
+            } catch (IllegalStateException ignored) {
+            }
+            second.close();
+        }
+    }
+
+    @Test
+    void closeTimeoutDoesNotBlockOnSharedCellHeldByUncooperativeTurn() throws Exception {
+        var config = new ActorRuntime.DispatcherConfig(
+                1,
+                1,
+                1,
+                64,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(5),
+                1,
+                64);
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config);
+        AtomicBoolean release = new AtomicBoolean();
+        CountDownLatch holdingCell = new CountDownLatch(1);
+
+        ActorRuntime.SyncCell<Integer> cell = runtime.syncCell(0);
+        var actor = runtime.<String>spawnSharedTrusted(
+                IsolatePolicy.developer(),
+                ignored -> (message, turn) -> cell.update(value -> {
+                    holdingCell.countDown();
+                    while (!release.get()) Thread.onSpinWait();
+                    return value + 1;
+                }));
+        actor.send("hold");
+        assertTrue(holdingCell.await(2, TimeUnit.SECONDS));
+
+        long started = System.nanoTime();
+        IllegalStateException timeout = assertThrows(
+                IllegalStateException.class,
+                runtime::close);
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - started);
+
+        assertTrue(timeout.getMessage().contains("still running"));
+        assertTrue(
+                elapsedMillis < 2_000,
+                "close must respect its bounded guest-quiescence wait instead of blocking on SyncCell");
+
+        release.set(true);
+        assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+        assertDoesNotThrow(runtime::close);
+        assertTrue(cell.closed());
     }
 
 

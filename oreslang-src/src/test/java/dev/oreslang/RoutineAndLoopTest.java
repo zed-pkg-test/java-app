@@ -20,7 +20,7 @@ final class RoutineAndLoopTest {
                   end
                 end
 
-                pub fnc main(): void {
+                pub fnc main() => void {
                   val y = new x.y();
                   stdio.stdout.write(y);
                 }
@@ -37,7 +37,7 @@ final class RoutineAndLoopTest {
                   end
                 end
 
-                pub routine main(): void {
+                pub routine main() => void {
                   val y = new x.y();
                   stdio.stdout.write(y)
                 }
@@ -49,14 +49,14 @@ final class RoutineAndLoopTest {
     @Test
     void routinesCannotParticipateInRecursionButFncsCan() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                routine spin(): void {
+                routine spin() => void {
                   spin();
                 }
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc recurse(bool shouldStop): void {
-                  if shouldStop; do
+                fnc recurse(bool stop) => void {
+                  if stop; do
                     return;
                   else
                     recurse(true);
@@ -71,8 +71,8 @@ final class RoutineAndLoopTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module m
                   define class C as
-                    pub find(): int { return 0; }
-                    pub find(int value): int { return value; }
+                    pub find() => int { return 0; }
+                    pub find(int value) => int { return value; }
                   end
                 end
                 """)));
@@ -80,22 +80,22 @@ final class RoutineAndLoopTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module m
                   define class C as
-                    pub find(int value): int { return value; }
-                    pub find(String value): int { return 1; }
+                    pub find(int value) => int { return value; }
+                    pub find(String value) => int { return 1; }
                   end
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                fnc find(): int { return 0; }
-                fnc find(int value): int { return value; }
+                fnc find() => int { return 0; }
+                fnc find(int value) => int { return value; }
                 """)));
     }
 
     @Test
     void explicitlyTypedLambdasCanRecurse() throws Exception {
         String output = run("""
-                pub routine main(): void {
+                pub routine main() => void {
                   let Fnc<int, int> fact = |int n| -> {
                     return n == 0 ? 1 : n * fact(n - 1);
                   };
@@ -108,7 +108,7 @@ final class RoutineAndLoopTest {
     @Test
     void ternaryWorksWithOption() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc find(bool found): Option<int> {
+                fnc find(bool found) => Option<int> {
                   return found ? Some(42) : None;
                 }
                 """)));
@@ -124,11 +124,11 @@ final class RoutineAndLoopTest {
                 pub interface Foo extends Bar {
                 }
 
-                fnc structural(@Structural Foo value): String {
+                fnc structural(@Structural Foo value) => String {
                   return value.markerBrand;
                 }
 
-                fnc main(): void {
+                fnc main() => void {
                   val branded = obj{markerBrand: "marking/branding"};
                   stdio.println(structural(branded));
                   return;
@@ -140,11 +140,11 @@ final class RoutineAndLoopTest {
                   markerBrand: 'marking/branding'
                 }
 
-                fnc nominal(Foo value): String {
+                fnc nominal(Foo value) => String {
                   return "ok";
                 }
 
-                fnc main(): void {
+                fnc main() => void {
                   val branded = obj{markerBrand: "marking/branding"};
                   stdio.println(nominal(branded));
                   return;
@@ -155,7 +155,7 @@ final class RoutineAndLoopTest {
     @Test
     void forOfInjectsSchedulerSafepoints() throws Exception {
         String output = run("""
-                pub routine main(): void {
+                pub routine main() => void {
                   for (val item of arr[1, 2, 3]) {
                     stdio.stdout.write(item);
                   }
@@ -169,7 +169,7 @@ final class RoutineAndLoopTest {
     @Test
     void conventionalForLoopAlsoInjectsSafepoints() throws Exception {
         String output = run("""
-                pub routine main(): void {
+                pub routine main() => void {
                   for (let i = 0; i < 3; i = i + 1) {
                     stdio.stdout.write(i);
                   }
@@ -184,13 +184,13 @@ final class RoutineAndLoopTest {
         String output = run("""
                 define module collections
                   define class Bag as
-                    [Symbol.iterator](): Array<int> {
+                    [Symbol.iterator]() => Array<int> {
                       return arr[4, 5];
                     }
                   end
                 end
 
-                pub routine main(): void {
+                pub routine main() => void {
                   val bag = new collections.Bag();
                   for (val item of bag) {
                     stdio.stdout.write(item)

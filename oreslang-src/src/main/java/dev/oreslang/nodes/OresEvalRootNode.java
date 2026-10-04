@@ -2,16 +2,15 @@ package dev.oreslang.nodes;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.frame.VirtualFrame;
-import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.nodes.RootNode;
 import dev.oreslang.OresLanguage;
 import dev.oreslang.ast.Ast;
-import dev.oreslang.imports.ImportRules;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.OresContext;
 import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
+import dev.oreslang.runtime.OresFutures;
 import dev.oreslang.runtime.ActorRuntime;
 
 import java.nio.file.Path;
@@ -31,7 +30,6 @@ public final class OresEvalRootNode extends RootNode {
     public static final String LINK_ONLY_COMMAND = "__ores_internal_link_only__";
     public static final String INIT_ONLY_COMMAND = "__ores_internal_init_only__";
     public static final String MAIN_ONLY_COMMAND = "__ores_internal_main_only__";
-    public static final String INVOKE_PUBLIC_COMMAND = "__ores_internal_invoke_public__";
 
     private final Ast.Program program;
     private final String codeUnitId;
@@ -71,15 +69,12 @@ public final class OresEvalRootNode extends RootNode {
             current.link();
             return current.executeMain(new Object[0]);
         }
-        if (arguments.length >= 2
-                && INVOKE_PUBLIC_COMMAND.equals(arguments[0])
-                && arguments[1] instanceof String functionName) {
-            current.link();
-            return current.invokePublic(functionName, java.util.Arrays.copyOfRange(arguments, 2, arguments.length));
-        }
 
-        // Backward-compatible single-source execution. Multi-file hosts use
-        // link/init/main commands to install a full import graph before init.
+        // RootNode is already executing inside an entered Graal context. It
+        // must not hop to another carrier here. Official launchers place the
+        // entire Context lifecycle on the process SHARED/root carrier before
+        // entering Graal; direct embedders retain ownership of their entry
+        // thread unless they opt into ActorRuntime.executeProcessRoot(...).
         current.link();
         current.initialize();
         return current.executeMain(arguments);
@@ -107,15 +102,12 @@ public final class OresEvalRootNode extends RootNode {
         private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> typeAliases = new HashMap<>();
         private final Map<String, Ast.ModuleDecl> modules = new HashMap<>();
-        private final Map<String, ImportedBinding> namedImports = new HashMap<>();
+        private final Map<String, Ast.ImportDecl> namedImports = new HashMap<>();
         private final Map<String, Ast.ImportDecl> namespaceImports = new HashMap<>();
-        private final Map<String, HostClassFacade> hostClasses = new HashMap<>();
-        private final Map<String, Invokable> hostFunctions = new HashMap<>();
-        private final Map<String, HostClassFacade> hostSymbols = new HashMap<>();
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
-        private StartupPhase startupPhase = StartupPhase.CREATED;
+        private boolean initialized;
 
         private Evaluator(Ast.Program program, OresContext context, String codeUnitId) {
             this.program = program;
@@ -127,80 +119,11 @@ public final class OresEvalRootNode extends RootNode {
 
         private void indexImports() {
             for (Ast.ImportDecl imported : program.imports()) {
-                ImportRules.validate(imported);
-                if (ImportRules.isJavaPath(imported.path())) {
-                    indexHostImport(imported);
-                    continue;
-                }
-
                 if (imported.wildcard()) {
                     namespaceImports.put(imported.namespace(), imported);
                 } else {
-                    for (String sourceName : imported.names()) {
-                        String localName = ImportRules.localName(imported, sourceName);
-                        ImportedBinding previous = namedImports.putIfAbsent(
-                                localName,
-                                new ImportedBinding(imported, sourceName));
-                        if (previous != null) {
-                            throw new IllegalArgumentException("duplicate import binding " + localName);
-                        }
-                    }
+                    for (String name : imported.names()) namedImports.put(name, imported);
                 }
-            }
-        }
-
-        private void indexHostImport(Ast.ImportDecl imported) {
-            String className = ImportRules.javaClassName(imported.path());
-            HostClassFacade symbol = hostSymbols.computeIfAbsent(
-                    className,
-                    ignored -> new HostClassFacade(className, context.lookupHostSymbol(className), true));
-
-            if (imported.kind() == Ast.ImportKind.CLASS) {
-                String sourceName = imported.names().getFirst();
-                putHostClass(ImportRules.localName(imported, sourceName), symbol);
-                return;
-            }
-
-            if (imported.kind() == Ast.ImportKind.FUNCTION && imported.wildcard()) {
-                putHostClass(imported.namespace(), new HostClassFacade(className, symbol.symbol(), false));
-                return;
-            }
-
-            if (imported.kind() == Ast.ImportKind.FUNCTION) {
-                InteropLibrary interop = InteropLibrary.getUncached(symbol.symbol());
-                for (String sourceName : imported.names()) {
-                    if (!interop.isMemberInvocable(symbol.symbol(), sourceName)) {
-                        throw new IllegalArgumentException("Java host class '" + className
-                                + "' does not export invocable static member '" + sourceName + "'");
-                    }
-                    String localName = ImportRules.localName(imported, sourceName);
-                    putHostFunction(localName, args -> {
-                        context.requireCapability(
-                                IsolatePolicy.Capability.JAVA_INTEROP,
-                                "Java host method " + className + "." + sourceName);
-                        return invokeHostMember(symbol.symbol(), sourceName, args);
-                    });
-                }
-                return;
-            }
-
-            if (imported.kind() == Ast.ImportKind.ALL) {
-                putHostClass(imported.namespace(), symbol);
-                return;
-            }
-
-            throw new IllegalArgumentException("unsupported Java host import kind: " + imported.kind());
-        }
-
-        private void putHostClass(String name, HostClassFacade value) {
-            if (hostClasses.putIfAbsent(name, value) != null || hostFunctions.containsKey(name)) {
-                throw new IllegalArgumentException("duplicate Java host import binding " + name);
-            }
-        }
-
-        private void putHostFunction(String name, Invokable value) {
-            if (hostFunctions.putIfAbsent(name, value) != null || hostClasses.containsKey(name)) {
-                throw new IllegalArgumentException("duplicate Java host import binding " + name);
             }
         }
 
@@ -240,80 +163,64 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private synchronized void link() {
-            if (startupPhase == StartupPhase.FAILED) {
-                throw new IllegalStateException("cannot relink failed code unit " + codeUnitId);
-            }
             context.registerLinkedCodeUnit(codeUnitId, this);
-            if (startupPhase == StartupPhase.CREATED) startupPhase = StartupPhase.LINKED;
         }
 
         private synchronized Object initialize() {
-            if (startupPhase == StartupPhase.READY) return null;
-            if (startupPhase == StartupPhase.INITIALIZING) {
-                throw new IllegalStateException("recursive initialization of code unit " + codeUnitId);
-            }
-            if (startupPhase == StartupPhase.FAILED) {
-                throw new IllegalStateException("initialization previously failed for code unit " + codeUnitId);
-            }
-            if (startupPhase == StartupPhase.CREATED) link();
-
-            startupPhase = StartupPhase.INITIALIZING;
-            Object last = null;
-            try {
-                for (Ast.ModuleDecl module : program.modules()) {
-                    for (Ast.Decl decl : module.declarations()) {
-                        if (decl instanceof Ast.FunctionDecl fn && fn.name().equals("init")) {
-                            last = callFunctionBody(fn, List.of());
-                        }
-                    }
-                }
-                startupPhase = StartupPhase.READY;
-                return last;
-            } catch (RuntimeException | Error failure) {
-                startupPhase = StartupPhase.FAILED;
-                throw failure;
-            }
+            if (initialized) return null;
+            // Mark before invocation so a recursive path cannot run init twice.
+            initialized = true;
+            Ast.FunctionDecl init = functions.get(Parser.ROOT_MODULE + ".init");
+            if (init == null) return null;
+            return callFunction(init, List.of());
         }
 
         private Object executeMain(Object[] arguments) {
-            if (startupPhase != StartupPhase.READY) {
-                throw new IllegalStateException(
-                        "main cannot run before successful initialization of code unit "
-                                + codeUnitId + "; current phase=" + startupPhase);
-            }
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
             return callFunction(main, List.of(arguments));
         }
 
-        private Object invokePublic(String name, Object[] arguments) {
-            Ast.FunctionDecl fn = findFunction(name);
-            if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
-                throw new IllegalArgumentException("code unit '" + codeUnitId
-                        + "' does not export public function '" + name + "'");
+        private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
+            List<?> normalized = normalizeFunctionArguments(fn, args);
+            if (fn.actorKind() != Ast.ActorKind.NONE) {
+                throw new IllegalStateException(
+                        "actor callable '" + fn.name()
+                                + "' cannot be invoked directly; use spawn " + fn.name() + "(...)");
             }
-            Object result = callFunction(fn, java.util.Arrays.asList(arguments));
-            return result instanceof HostObjectFacade host ? host.value() : result;
+            return callFunctionBody(fn, normalized);
         }
 
-        private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
-            if (fn.name().equals("init")) {
-                throw new IllegalStateException(
-                        "init is a lifecycle hook and cannot be invoked directly; startup runs it exactly once");
+        private Object spawnFunction(Ast.CallExpr call, Env env) {
+            Ast.FunctionDecl fn;
+            if (call.callee() instanceof Ast.NameExpr name) {
+                fn = findFunction(name.name());
+            } else if (call.callee() instanceof Ast.MemberExpr member
+                    && member.receiver() instanceof Ast.NameExpr namespace) {
+                fn = functions.get(namespace.name() + "." + member.member());
+            } else {
+                throw new IllegalArgumentException(
+                        "spawn requires a direct actor fnc/routine call");
             }
-            List<?> normalized = normalizeFunctionArguments(fn, args);
+            if (fn == null) throw new IllegalArgumentException("unknown spawn target");
             if (fn.actorKind() == Ast.ActorKind.NONE) {
-                return callFunctionBody(fn, normalized);
+                throw new IllegalArgumentException(
+                        "spawn target '" + fn.name() + "' is not an actor callable");
             }
 
             ActorRuntime.ActorKind runtimeKind = switch (fn.actorKind()) {
-                case NONE -> throw new AssertionError("non-actor callable reached actor lowering");
+                case NONE -> throw new AssertionError("non-actor callable reached spawn lowering");
                 case PRIVATE -> ActorRuntime.ActorKind.PRIVATE;
                 case SHARED -> ActorRuntime.ActorKind.SHARED;
+                case UNTRUSTED -> throw new SecurityException(
+                        "untrusted actor callables require GraalWasm sandbox lowering; "
+                                + "the ordinary JVM interpreter must not execute hostile guest code");
             };
 
-            return context.actors().invoke(
+            List<Object> evaluated = call.arguments().stream().map(arg -> eval(arg, env)).toList();
+            List<?> normalized = normalizeFunctionArguments(fn, evaluated);
+            return context.actors().spawnInvocation(
                     runtimeKind,
                     normalized,
                     (delivered, actorContext) -> callFunctionBody(fn, delivered));
@@ -390,6 +297,12 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private void executeStatement(Ast.Stmt stmt, Env env, ArrayDeque<Ast.Expr> deferred) {
+            // Every actor kind observes stop/turn-overrun signals at statement
+            // boundaries. UNTRUSTED actors additionally consume fuel here and
+            // at expression boundaries below.
+            if (ActorRuntime.inActorExecution() || ActorRuntime.inRootExecution()) {
+                context.schedulerSafepoint();
+            }
             if (stmt instanceof Ast.BindingStmt binding) {
                 if (binding.initializer() instanceof Ast.LambdaExpr) {
                     env.reserve(binding.name(), binding.kind());
@@ -435,6 +348,7 @@ public final class OresEvalRootNode extends RootNode {
                 catch (ReturnSignal signal) { throw signal; }
                 catch (OresPanic panic) { throw panic; }
                 catch (RuntimeException failure) {
+                    if (ActorRuntime.isActorControlAbort(failure)) throw failure;
                     Env catchEnv = new Env(env);
                     catchEnv.define(tried.errorName(), failure, Ast.BindingKind.VAL);
                     executeBlock(tried.catchBody(), catchEnv);
@@ -463,6 +377,9 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object eval(Ast.Expr expr, Env env) {
+            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+                context.schedulerSafepoint();
+            }
             if (expr instanceof Ast.LiteralExpr literal) {
                 if (literal.value() == null) throw new IllegalArgumentException("standalone null values are forbidden");
                 if (literal.value() instanceof Ast.Imaginary imaginary) return new Complex(0.0, imaginary.coefficient());
@@ -474,6 +391,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("stdio")) return new StdioFacade(context);
                 if (name.name().equals("process")) return new ProcessFacade(context);
                 if (name.name().equals("actor")) return new ActorFacade(context);
+                if (name.name().equals("Futures")) return new FuturesFacade();
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
                 if (name.name().equals("print")) return (Invokable) args -> {
@@ -493,14 +411,6 @@ public final class OresEvalRootNode extends RootNode {
                     requireOne(args, "Err");
                     return new ResultValue(false, args.getFirst());
                 };
-                HostClassFacade hostClass = hostClasses.get(name.name());
-                if (hostClass != null) {
-                    context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
-                            "Java host class " + hostClass.className());
-                    return hostClass;
-                }
-                Invokable hostFunction = hostFunctions.get(name.name());
-                if (hostFunction != null) return hostFunction;
                 Ast.ModuleDecl module = modules.get(name.name());
                 if (module != null) return new ModuleFacade(this, module);
                 Ast.ClassDecl klass = findClass(name.name());
@@ -535,30 +445,19 @@ public final class OresEvalRootNode extends RootNode {
                         object.fields.put(target.member(), value);
                         return value;
                     }
-                    if (receiver instanceof DynamicStructValue dynamic) {
-                        dynamic.fields.put(target.member(), value);
-                        return value;
-                    }
-                    throw new IllegalArgumentException("member assignment requires a class instance, DynamicStruct, or mutex guard");
+                    throw new IllegalArgumentException("member assignment requires a class instance or mutex guard over a class instance");
                 }
                 if (assignment.target() instanceof Ast.IndexExpr target) {
                     Object receiver = eval(target.receiver(), env);
                     Object index = eval(target.index(), env);
-                    if (receiver instanceof DynamicStructValue dynamic) {
-                        if (!(index instanceof String key)) {
-                            throw new IllegalArgumentException("DynamicStruct key must be a string");
-                        }
-                        dynamic.fields.put(key, value);
-                        return value;
-                    }
-                    if (!(index instanceof Number number)) throw new IllegalArgumentException("array/list index must be an integer");
+                    if (!(index instanceof Number number)) throw new IllegalArgumentException("index must be an integer");
                     int i = Math.toIntExact(number.longValue());
                     if (receiver instanceof List<?> raw) {
                         @SuppressWarnings("unchecked") List<Object> list = (List<Object>) raw;
                         list.set(i, value);
                         return value;
                     }
-                    throw new IllegalArgumentException("indexed assignment requires a mutable array/list or DynamicStruct");
+                    throw new IllegalArgumentException("indexed assignment requires a mutable array/list");
                 }
                 throw new IllegalArgumentException("unsupported assignment target");
             }
@@ -620,49 +519,13 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.IndexExpr indexed) {
                 Object receiver = eval(indexed.receiver(), env);
                 Object index = eval(indexed.index(), env);
-                if (receiver instanceof DynamicStructValue dynamic) {
-                    if (!(index instanceof String key)) {
-                        throw new IllegalArgumentException("DynamicStruct key must be a string");
-                    }
-                    if (!dynamic.fields.containsKey(key)) {
-                        throw new IllegalArgumentException("unknown DynamicStruct key " + key);
-                    }
-                    return dynamic.fields.get(key);
-                }
-                if (receiver instanceof Map<?, ?> map) {
-                    if (!(index instanceof String key)) {
-                        throw new IllegalArgumentException("object/map key must be a string");
-                    }
-                    if (!map.containsKey(key)) {
-                        throw new IllegalArgumentException("unknown object/map key " + key);
-                    }
-                    return map.get(key);
-                }
-                if (!(index instanceof Number number)) throw new IllegalArgumentException("array/list index must be an integer");
+                if (!(index instanceof Number number)) throw new IllegalArgumentException("index must be an integer");
                 int i = Math.toIntExact(number.longValue());
                 if (receiver instanceof List<?> list) return list.get(i);
                 if (receiver instanceof Object[] array) return array[i];
                 throw new IllegalArgumentException("value is not indexable: " + receiver);
             }
             if (expr instanceof Ast.NewExpr created) {
-                if (created.type().name().equals("DynamicStruct")) {
-                    if (!created.arguments().isEmpty()) {
-                        throw new IllegalArgumentException("DynamicStruct<T> constructor takes no positional arguments");
-                    }
-                    return new DynamicStructValue();
-                }
-                HostClassFacade hostClass = hostClasses.get(created.type().name());
-                if (hostClass != null) {
-                    context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
-                            "Java host constructor " + hostClass.className());
-                    if (!hostClass.constructible()) {
-                        throw new IllegalArgumentException(
-                                "Java function namespace '" + created.type().name() + "' is not constructible");
-                    }
-                    List<Object> args = created.arguments().stream().map(arg -> eval(arg, env)).toList();
-                    return instantiateHost(hostClass, args);
-                }
-
                 Ast.ClassDecl klass = findClass(created.type().name());
                 Evaluator owner = this;
                 if (klass == null) {
@@ -676,13 +539,26 @@ public final class OresEvalRootNode extends RootNode {
                 List<Object> args = created.arguments().stream().map(arg -> eval(arg, env)).toList();
                 return owner.instantiate(klass, args);
             }
+            if (expr instanceof Ast.SpawnExpr spawned) {
+                return spawnFunction(spawned.call(), env);
+            }
             if (expr instanceof Ast.AwaitExpr awaited) {
                 Object value = eval(awaited.expression(), env);
-                if (value instanceof CompletionStage<?> stage) {
+                CompletionStage<?> stage = null;
+                if (value instanceof ActorRuntime.ActorSpawn<?, ?> spawn) {
+                    stage = spawn.ready();
+                } else if (value instanceof CompletionStage<?> futureValue) {
+                    stage = futureValue;
+                }
+                if (stage != null) {
                     var future = stage.toCompletableFuture();
                     if (ActorRuntime.inActorExecution() && !future.isDone()) {
                         throw new IllegalStateException(
                                 "await would block an actor dispatcher carrier; actor continuation lowering must suspend/resume the mailbox turn");
+                    }
+                    if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
+                        throw new IllegalStateException(
+                                "await would block an adversarial serialized root context; continuation lowering must suspend/resume before awaiting actor readiness/result");
                     }
                     return future.join();
                 }
@@ -695,24 +571,11 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.TupleExpr tuple) return tuple.elements().stream().map(item -> eval(item, env)).toList();
             if (expr instanceof Ast.ObjectExpr object) {
-                boolean dynamicKeys = object.fields().stream().anyMatch(Ast.ObjectField::isDynamic);
                 LinkedHashMap<String, Object> result = new LinkedHashMap<>();
                 for (Ast.ObjectField field : object.fields()) {
-                    String key;
-                    if (field.isDynamic()) {
-                        Object evaluatedKey = eval(field.dynamicName(), env);
-                        if (!(evaluatedKey instanceof String stringKey)) {
-                            throw new IllegalArgumentException("dynamic obj key must evaluate to a string");
-                        }
-                        key = stringKey;
-                    } else {
-                        key = field.name();
-                    }
-                    if (result.putIfAbsent(key, eval(field.value(), env)) != null) {
-                        throw new IllegalArgumentException("duplicate obj field " + key);
-                    }
+                    if (result.putIfAbsent(field.name(), eval(field.value(), env)) != null) throw new IllegalArgumentException("duplicate obj field " + field.name());
                 }
-                return dynamicKeys ? new DynamicStructValue(result) : Map.copyOf(result);
+                return Map.copyOf(result);
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
                 boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
@@ -733,16 +596,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object member(Object receiver, String name) {
-            if (receiver instanceof HostClassFacade host) {
-                context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
-                        "Java host class " + host.className());
-                return hostMember(host.symbol(), host.className(), name);
-            }
-            if (receiver instanceof HostObjectFacade host) {
-                context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
-                        "Java host object member " + name);
-                return hostMember(host.value(), "host object", name);
-            }
             if (receiver instanceof StdioFacade stdio) {
                 return switch (name) {
                     case "print" -> (Invokable) stdio::print;
@@ -771,6 +624,51 @@ public final class OresEvalRootNode extends RootNode {
                 return switch (name) {
                     case "gc" -> (Invokable) actor::gc;
                     default -> throw new IllegalArgumentException("unknown actor member " + name);
+                };
+            }
+            if (receiver instanceof FuturesFacade futures) {
+                return switch (name) {
+                    case "all" -> (Invokable) futures::all;
+                    case "race" -> (Invokable) futures::race;
+                    default -> throw new IllegalArgumentException("unknown Futures member " + name);
+                };
+            }
+            if (receiver instanceof ActorRuntime.ActorSpawn<?, ?> spawn) {
+                return switch (name) {
+                    case "id" -> spawn.id();
+                    case "ready" -> spawn.ready();
+                    case "done" -> spawn.done();
+                    case "result" -> spawn.result();
+                    default -> throw new IllegalArgumentException("unknown ActorSpawn member " + name);
+                };
+            }
+            if (receiver instanceof ActorRuntime.ActorRef<?> ref) {
+                return switch (name) {
+                    case "id" -> ref.id();
+                    case "is_alive" -> (Invokable) args -> {
+                        requireZero(args, "ActorRef.is_alive");
+                        return ref.isAlive();
+                    };
+                    default -> throw new IllegalArgumentException("unknown ActorRef member " + name);
+                };
+            }
+            if (receiver instanceof CompletionStage<?> stage) {
+                var future = stage.toCompletableFuture();
+                return switch (name) {
+                    case "is_done" -> (Invokable) args -> {
+                        requireZero(args, "Future.is_done");
+                        return future.isDone();
+                    };
+                    case "is_cancelled" -> (Invokable) args -> {
+                        requireZero(args, "Future.is_cancelled");
+                        return future.isCancelled();
+                    };
+                    case "cancel" -> (Invokable) args -> {
+                        requireZero(args, "Future.cancel");
+                        return future.cancel(true);
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown Future member " + name + "; use await to obtain its value");
                 };
             }
             if (receiver instanceof MutexFactory factory) {
@@ -802,86 +700,11 @@ public final class OresEvalRootNode extends RootNode {
                 if (object.fields.containsKey(name)) return object.fields.get(name);
                 return new BoundMethod(object.owner, object, name);
             }
-            if (receiver instanceof DynamicStructValue dynamic) {
-                if (!dynamic.fields.containsKey(name)) {
-                    throw new IllegalArgumentException("unknown DynamicStruct member " + name);
-                }
-                return dynamic.fields.get(name);
-            }
             if (receiver instanceof Map<?, ?> map) {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
                 return map.get(name);
             }
-            InteropLibrary foreign = InteropLibrary.getUncached(receiver);
-            if (foreign.hasMembers(receiver)) {
-                context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
-                        "Java host object member " + name);
-                return hostMember(receiver, "host object", name);
-            }
             throw new IllegalArgumentException("cannot access member '" + name + "' on " + receiver);
-        }
-
-        private Object hostMember(Object receiver, String ownerName, String name) {
-            InteropLibrary interop = InteropLibrary.getUncached(receiver);
-            if (interop.isMemberInvocable(receiver, name)) {
-                return (Invokable) args -> {
-                    context.requireCapability(
-                            IsolatePolicy.Capability.JAVA_INTEROP,
-                            "Java host member " + ownerName + "." + name);
-                    return invokeHostMember(receiver, name, args);
-                };
-            }
-            if (interop.isMemberReadable(receiver, name)) {
-                try {
-                    return normalizeHostResult(interop.readMember(receiver, name));
-                } catch (Exception failure) {
-                    throw hostInteropError("read Java member " + ownerName + "." + name, failure);
-                }
-            }
-            throw new IllegalArgumentException(
-                    "Java member is not exported by HostAccess: " + ownerName + "." + name);
-        }
-
-        private Object invokeHostMember(Object receiver, String name, List<Object> args) {
-            try {
-                Object[] unwrapped = args.stream().map(this::unwrapHostArgument).toArray();
-                Object result = InteropLibrary.getUncached(receiver).invokeMember(receiver, name, unwrapped);
-                return normalizeHostResult(result);
-            } catch (Exception failure) {
-                throw hostInteropError("invoke Java member " + name, failure);
-            }
-        }
-
-        private Object instantiateHost(HostClassFacade hostClass, List<Object> args) {
-            InteropLibrary interop = InteropLibrary.getUncached(hostClass.symbol());
-            if (!interop.isInstantiable(hostClass.symbol())) {
-                throw new IllegalArgumentException(
-                        "allowlisted Java host class is not constructible: " + hostClass.className());
-            }
-            try {
-                Object[] unwrapped = args.stream().map(this::unwrapHostArgument).toArray();
-                Object value = interop.instantiate(hostClass.symbol(), unwrapped);
-                return new HostObjectFacade(value);
-            } catch (Exception failure) {
-                throw hostInteropError("construct Java host class " + hostClass.className(), failure);
-            }
-        }
-
-        private Object normalizeHostResult(Object value) {
-            if (value == null) return new OptionValue(false, null);
-            if (value instanceof Number || value instanceof Boolean || value instanceof String
-                    || value instanceof Character || value instanceof CompletionStage<?>) {
-                return value;
-            }
-            return new HostObjectFacade(value);
-        }
-
-        private Object unwrapHostArgument(Object value) {
-            return value instanceof HostObjectFacade host ? host.value() : value;
-        }
-
-        private RuntimeException hostInteropError(String operation, Exception failure) {
-            return new IllegalArgumentException(operation + " failed: " + failure.getMessage(), failure);
         }
 
         private Object optionMember(OptionValue option, String name) {
@@ -1042,11 +865,8 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object importedValue(String name) {
-            ImportedBinding direct = namedImports.get(name);
-            if (direct != null) {
-                return importedTarget(direct.declaration())
-                        .exportValue(direct.declaration().kind(), direct.sourceName());
-            }
+            Ast.ImportDecl direct = namedImports.get(name);
+            if (direct != null) return importedTarget(direct).exportValue(direct.kind(), name);
             Ast.ImportDecl namespace = namespaceImports.get(name);
             if (namespace != null) return new ImportedNamespace(importedTarget(namespace), namespace.kind());
             return Env.MISSING;
@@ -1072,9 +892,8 @@ public final class OresEvalRootNode extends RootNode {
             String candidate = normalizeUnitId(candidatePath.toString());
             if (!context.hasLinkedCodeUnit(candidate)
                     && !candidate.endsWith(".ores")
-                    && !candidate.endsWith(".java")) {
-                if (context.hasLinkedCodeUnit(candidate + ".ores")) candidate += ".ores";
-                else if (context.hasLinkedCodeUnit(candidate + ".java")) candidate += ".java";
+                    && context.hasLinkedCodeUnit(candidate + ".ores")) {
+                candidate += ".ores";
             }
             return candidate;
         }
@@ -1317,6 +1136,13 @@ public final class OresEvalRootNode extends RootNode {
             throw new IllegalArgumentException("values are not comparable");
         }
 
+        private long integral(Object value, String operator) {
+            if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long) {
+                return ((Number) value).longValue();
+            }
+            throw new IllegalArgumentException(operator + " requires integer operands");
+        }
+
         private boolean truth(Object value) { if (value instanceof Boolean b) return b; throw new IllegalArgumentException("condition must be bool"); }
         private boolean isIntegral(Number value) { return value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long; }
         private Complex asComplex(Object value) { if (value instanceof Complex c) return c; if (value instanceof Number n) return new Complex(n.doubleValue(),0); throw new IllegalArgumentException("value is not numeric"); }
@@ -1388,20 +1214,6 @@ public final class OresEvalRootNode extends RootNode {
                 return shaped;
             }
 
-            if (declared.name().equals("DynamicStruct")) {
-                if (declared.arguments().size() != 1 || !(value instanceof DynamicStructValue dynamic)) {
-                    throw returnTypeMismatch(callable, declared, value);
-                }
-                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
-                    shapeReturnedValue(
-                            declared.arguments().getFirst(),
-                            entry.getValue(),
-                            callable + "[" + entry.getKey() + "]",
-                            resolving);
-                }
-                return value;
-            }
-
             if (declared.name().equals("bool") || declared.name().equals("Bool")) {
                 if (!(value instanceof Boolean)) throw returnTypeMismatch(callable, declared, value);
                 return value;
@@ -1446,12 +1258,6 @@ public final class OresEvalRootNode extends RootNode {
 
         private List<?> asSequence(Object value) { if (value instanceof List<?> l) return l; if (value instanceof Object[] a) return List.of(a); throw new IllegalArgumentException("value is not sequence-destructurable"); }
         private Object destructureMember(Object value, String name) {
-            if (value instanceof DynamicStructValue dynamic) {
-                if (!dynamic.fields.containsKey(name)) {
-                    throw new IllegalArgumentException("object destructure missing member " + name);
-                }
-                return dynamic.fields.get(name);
-            }
             if (value instanceof Map<?, ?> map) {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("object destructure missing member " + name);
                 return map.get(name);
@@ -1553,13 +1359,6 @@ public final class OresEvalRootNode extends RootNode {
                 for (Object item : set) releaseMutexGuardsInValue(item, failed, seen);
                 return;
             }
-            if (value instanceof DynamicStructValue dynamic) {
-                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
-                    releaseMutexGuardsInValue(entry.getKey(), failed, seen);
-                    releaseMutexGuardsInValue(entry.getValue(), failed, seen);
-                }
-                return;
-            }
             if (value instanceof Map<?, ?> map) {
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
                     releaseMutexGuardsInValue(entry.getKey(), failed, seen);
@@ -1584,14 +1383,6 @@ public final class OresEvalRootNode extends RootNode {
         private ReturnSignal(Object value) { super(null,null,false,false); this.value=value; }
     }
 
-    private enum StartupPhase {
-        CREATED,
-        LINKED,
-        INITIALIZING,
-        READY,
-        FAILED
-    }
-
     private record Complex(double real, double imaginary) implements OresMutex.SharedState {
         @Override public Iterable<?> sharedStateChildren(){return List.of();}
         private Complex add(Complex o){return new Complex(real+o.real,imaginary+o.imaginary);}
@@ -1599,14 +1390,6 @@ public final class OresEvalRootNode extends RootNode {
         private Complex mul(Complex o){return new Complex(real*o.real-imaginary*o.imaginary,real*o.imaginary+imaginary*o.real);}
         private Complex div(Complex o){double d=o.real*o.real+o.imaginary*o.imaginary;return new Complex((real*o.real+imaginary*o.imaginary)/d,(imaginary*o.real-real*o.imaginary)/d);}
         @Override public String toString(){return real+(imaginary<0?"":"+")+imaginary+"i";}
-    }
-
-    private static final class DynamicStructValue implements OresMutex.SharedState {
-        private final LinkedHashMap<String, Object> fields;
-        private DynamicStructValue() { this.fields = new LinkedHashMap<>(); }
-        private DynamicStructValue(Map<String, Object> initial) { this.fields = new LinkedHashMap<>(initial); }
-        @Override public Iterable<?> sharedStateChildren() { return fields.values(); }
-        @Override public String toString() { return "DynamicStruct" + fields; }
     }
 
     private static final class OresObject implements OresMutex.SharedState {
@@ -1622,14 +1405,9 @@ public final class OresEvalRootNode extends RootNode {
         @Override public String toString(){return klass.name()+fields;}
     }
 
-    private record ImportedBinding(Ast.ImportDecl declaration, String sourceName) { }
     private record ImportedNamespace(Evaluator owner, Ast.ImportKind kind) { }
     private record ModuleFacade(Evaluator owner, Ast.ModuleDecl module) { }
     private record ClassFacade(Evaluator owner, Ast.ClassDecl klass) { }
-    private record HostClassFacade(String className, Object symbol, boolean constructible) { }
-    private record HostObjectFacade(Object value) {
-        @Override public String toString() { return String.valueOf(value); }
-    }
     private record MutexFactory(boolean shared, OresContext context) {
         private Object create(List<Object> args) {
             requireOne(args, shared ? "SharedMutex.new" : "Mutex.new");
@@ -1655,8 +1433,7 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>
-                    || value instanceof CompletionStage<?> || value instanceof Invokable
-                    || value instanceof HostClassFacade || value instanceof HostObjectFacade) {
+                    || value instanceof CompletionStage<?> || value instanceof Invokable) {
                 return false;
             }
 
@@ -1679,15 +1456,6 @@ public final class OresEvalRootNode extends RootNode {
             if (value instanceof OresObject object) {
                 for (Object field : object.fields.values()) {
                     if (!runtimeSharedSafe(field, seen)) return false;
-                }
-                return true;
-            }
-            if (value instanceof DynamicStructValue dynamic) {
-                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
-                    if (!runtimeSharedSafe(entry.getKey(), seen)
-                            || !runtimeSharedSafe(entry.getValue(), seen)) {
-                        return false;
-                    }
                 }
                 return true;
             }
@@ -1742,6 +1510,34 @@ public final class OresEvalRootNode extends RootNode {
     }
     private record ActorFacade(OresContext context) {
         private Map<String,Object> gc(List<Object> args){requireZero(args,"actor.gc");return context.garbageCollector().collectCurrentActor().asMap();}
+    }
+    private record FuturesFacade() {
+        private Object all(List<Object> args) {
+            return OresFutures.all(requireFutures(args, "Futures.all"));
+        }
+
+        private Object race(List<Object> args) {
+            return OresFutures.race(requireFutures(args, "Futures.race"));
+        }
+
+        @SuppressWarnings("unchecked")
+        private static List<CompletionStage<Object>> requireFutures(
+                List<Object> args,
+                String operation) {
+            requireOne(args, operation);
+            if (!(args.getFirst() instanceof List<?> values)) {
+                throw new IllegalArgumentException(operation + " expects a list of Future values");
+            }
+            ArrayList<CompletionStage<Object>> futures = new ArrayList<>(values.size());
+            for (Object value : values) {
+                if (!(value instanceof CompletionStage<?> stage)) {
+                    throw new IllegalArgumentException(
+                            operation + " expects every list element to be a Future");
+                }
+                futures.add((CompletionStage<Object>) stage);
+            }
+            return List.copyOf(futures);
+        }
     }
     private static void requireZero(List<Object> args,String name){if(!args.isEmpty())throw new IllegalArgumentException(name+" expects no arguments");}
     private static void requireOne(List<Object> args,String name){if(args.size()!=1)throw new IllegalArgumentException(name+" expects one argument");}

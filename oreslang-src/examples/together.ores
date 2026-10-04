@@ -6,7 +6,7 @@ define module x
 
 end
 
-pub routine main(): void {
+pub routine main() => void {
 
   val y = new x.y();
 

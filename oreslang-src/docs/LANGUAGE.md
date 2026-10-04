@@ -8,13 +8,13 @@ A source file may contain multiple named modules. A module is a namespace: expor
 
 ```ores
 define module math
-  pub fnc add(int a, int b): int {
+  pub fnc add(int a, int b) => int {
     return a + b;
   }
 end
 
 define module app
-  pub fnc main(): void {
+  pub fnc main() => void {
     val answer = math.add(40, 2);
     stdio.println(answer);
     return;
@@ -26,23 +26,13 @@ Imports are explicit about what kind of symbol is entering the compilation unit:
 
 ```ores
 import module foo from "../xyz";
-import module foo as apiFoo from "../xyz";
 import module {foo, bar} from "../xyz";
-import class Widget as ApiWidget from "../xyz";
-import fnc add as apiAdd from "../xyz";
-import fnc * as funcs from "../xyz";
-import * as package from "./xyz";
+import class {x} from '../xyz';
+import fnc * as funcs from '../xyz';
+import * as x from './xyz';
 ```
 
-Wildcard imports always require a namespace alias. A single named module/class/function import may use `as` to choose its local binding; the original source name still controls export resolution. This avoids namespace pollution while supporting Kotlin-style disambiguation. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
-
-Java host classes use an explicit `java:` URI and the same alias syntax:
-
-```ores
-import class ArrayList as JArrayList from "java:java.util.ArrayList";
-```
-
-The selected name (`ArrayList`) must match the Java simple class name; `JArrayList` is only the Oreslang-local alias. Java imports never grant authority by themselves: runtime use additionally requires the `JAVA_INTEROP` capability and an exact host-class allowlist supplied by the launcher/embedder.
+Wildcard imports always require a namespace alias. This avoids silently injecting an unbounded set of names into the local scope. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
 
 ### Circular imports and file initialization
 
@@ -61,7 +51,7 @@ The loader uses a staged lifecycle:
 A file init hook has the exact shape:
 
 ```ores
-fnc init(): void {
+fnc init() => void {
   // side effects are allowed here
   return;
 }
@@ -93,7 +83,7 @@ end
 
 @AdheresTo(contracts.MathApi)
 define module math
-  pub fnc add(int a, int b): int { return a + b; }
+  pub fnc add(int a, int b) => int { return a + b; }
   pub val String name = "math";
 end
 ```
@@ -104,30 +94,8 @@ Only exported (`pub`) module members satisfy an adherence contract. `@AdheresTo(
 
 Functions use `fnc` and are private by default. `pub` exports them. Return statements are always explicit; a non-`void` function must return on every control-flow path.
 
-Named executable declarations use a colon for the return type:
-
 ```ores
-pub fnc run(): (() => void) {
-  return || -> {
-    return;
-  };
-}
-```
-
-The equivalent lambda-style declaration keeps executable `->` syntax:
-
-```ores
-pub fnc run = || -> (() => void) {
-  return || -> {
-    return;
-  };
-}
-```
-
-Here `() => void` is a function **type**, while `|| -> { ... }` is executable lambda syntax. The fat arrow is never the return separator for an executable declaration.
-
-```ores
-fnc add(int a, int b): int {
+fnc add(int a, int b) => int {
   return a + b;
 }
 
@@ -137,22 +105,22 @@ fnc answer() {
 }
 ```
 
-`@Ret<T>` and `: T` are equivalent. If both are present they must agree. A function returns exactly one value; multiple logical values are represented by a tuple, array, object, class value, or another aggregate.
+`@Ret<T>` and `=> T` are equivalent. If both are present they must agree. A function returns exactly one value; multiple logical values are represented by a tuple, array, object, class value, or another aggregate.
 
 Return types may be unions, homogeneous arrays, finite tuple types, or structural record types:
 
 ```ores
 type intOrBoolOrString = bool | int | string;
 
-fnc mixed(): Array<type intOrBoolOrString> {
+fnc mixed() => Array<type intOrBoolOrString> {
   return [3, true, "yes"];
 }
 
-fnc fixed(): [int, bool, string] {
+fnc fixed() => [int, bool, string] {
   return [3, true, "yes"];
 }
 
-fnc named(): {foo: int, bar: string} {
+fnc named() => {foo: int, bar: string} {
   return obj{foo: 5, bar: "x"};
 }
 ```
@@ -218,7 +186,7 @@ end
 The explicit receiver form remains available:
 
 ```ores
-find(self Box)(int key): self {
+find(self Box)(int key) => self {
   return self;
 }
 ```
@@ -255,26 +223,6 @@ val user = obj{name: "Ada", age: 37};
 stdio.println(user.name);
 ```
 
-Static object/map keys may be identifiers, reserved member keys such as
-`stop`/`do`/`done`, or strings written with either single or double
-quotes. Backticks make the key dynamic: the expression between the backticks
-must evaluate to a string.
-
-```ores
-val key = "score";
-val stats = obj{
-  stop: 1,
-  'do': 2,
-  "done": 3,
-  `key`: 4
-};
-```
-
-An `obj{...}` containing a dynamic key has type `DynamicStruct<T>`, where
-`T` is the joined value type. A `DynamicStruct<T>` can also be created
-directly with `new DynamicStruct<T>()`; it accepts arbitrary string keys but
-only values assignable to `T`.
-
 Inline array:
 
 ```ores
@@ -290,7 +238,7 @@ Tuples preserve per-position static types. Parenthesized tuple literals and list
 val pair = (1, "one");
 [const number, let label] = pair;
 
-fnc result(): [int, bool, string] {
+fnc result() => [int, bool, string] {
   return [3, true, "yes"];
 }
 
@@ -320,7 +268,7 @@ Oreslang does **not** have ambient nullable references. A bare `null` value is a
 Optionality is explicit, using Rust-style `Some(value)` and `None`:
 
 ```ores
-fnc lookup(bool found): Option<int> {
+fnc lookup(bool found) => Option<int> {
   if found; do
     return Some(42);
   else
@@ -342,10 +290,10 @@ val Result<int, String> parsed = Ok(123);
 val same = parsed.unwrap_safe();            // Ok(123)
 ```
 
-- `Option<T>.unwrap(): T` returns the `Some` payload and panics on `None`.
-- `Option<T>.unwrap_safe(): Result<T, OptionUnwrapError>` never panics for absence.
-- `Result<T,E>.unwrap(): T` returns the `Ok` payload and panics on `Err`.
-- `Result<T,E>.unwrap_safe(): Result<T,E>` never panics; it preserves the error-as-value carrier.
+- `Option<T>.unwrap() -> T` returns the `Some` payload and panics on `None`.
+- `Option<T>.unwrap_safe() -> Result<T, OptionUnwrapError>` never panics for absence.
+- `Result<T,E>.unwrap() -> T` returns the `Ok` payload and panics on `Err`.
+- `Result<T,E>.unwrap_safe() -> Result<T,E>` never panics; it preserves the error-as-value carrier.
 - `expect(String)` is the descriptive panicking form; `unwrap_or(T)` supplies a fallback.
 - `is_some()/is_none()` and `is_ok()/is_err()` inspect variants without extraction.
 
@@ -434,42 +382,74 @@ try {
 
 `defer` executes in LIFO order when its lexical scope unwinds, including returns and exceptional exits.
 
-## Callable-only reserved keywords
-
-`stop`, `do`, and `done` are reserved language keywords. They cannot be used as ordinary identifiers for bindings, parameters, fields, types, classes, modules, or bare function references.
-
-They have one narrow compatibility exception: the three words may be declared as callable names and used when invoking that callable. This includes `fnc`/`routine` declarations, class/actor methods, interface function signatures, `import fnc` selections, direct calls such as `stop()`, and qualified calls such as `worker.done()`.
-
-The exception does not turn the keywords back into general identifiers. For example, `val stop = 1`, `fnc f(int do)`, `val callback = done`, and `val callback = worker.stop` are invalid.
-
 ## Async / await
 
-`async` and `await` are reserved and parsed. `await` unwraps future-like runtime values. The scheduler is intentionally separate from the language surface so actor isolation does not depend on a specific OS-thread implementation.
+`Future<T>` is Oreslang's local asynchronous result handle. It is deliberately
+not actor-sendable and not shared-safe: a pending computation belongs to the
+execution domain that created it. `await future` is the only operation that
+extracts the future's result; Oreslang does not expose a blocking
+`Future.get()` / `join()` equivalent.
+
+The built-in `Futures` control-flow facade provides:
+
+```ores
+// first and second are Future<Response> values returned by an async API.
+val responses = await Futures.all([first, second]);
+```
+
+- `Futures.all([...])` returns one future, preserves input order, and fails if
+  one constituent future fails.
+- `Futures.race([...])` completes from the first constituent completion.
+- `future.is_done()`, `future.is_cancelled()`, and `future.cancel()` are
+  nonblocking state/control operations.
+- cancellation is cooperative with the host operation. A sandbox resource
+  permit is not considered free merely because guest code requested
+  cancellation; the underlying host operation must actually finish.
+
+For actor code, `await` is a **suspension point, never a carrier-thread
+blocking point**. Compiler backends must lower an incomplete actor await to a
+resumable continuation: the carrier returns to its dispatcher, the actor's
+current mailbox turn remains logically in progress, and no later mailbox
+message may mutate that actor's state until the continuation resumes and
+finishes. The reference JVM interpreter therefore rejects an incomplete
+actor-side `await` unless that continuation lowering is active rather than
+silently blocking a dispatcher worker.
+
+The scheduler remains separate from the language surface so actor isolation
+does not depend on a specific OS-thread implementation.
 
 ## Actors
 
 Oreslang uses an Akka-style dispatcher model: an actor is **not** a thread. Every actor owns one mailbox, and at most one mailbox turn for a given actor may execute at a time. Actors are multiplexed over bounded thread pools, so the carrier thread may change between turns.
 
-There are two actor execution domains:
+There are three actor execution domains:
 
 ```ores
-pub actor fnc worker(int value): int {
+pub actor fnc worker(int value) => int {
   return value;
 }
 
 shared actor Account {
   let int balance = 100;
 
-  pub fnc withdraw(int amount): void {
+  pub fnc withdraw(int amount) => void {
     self.balance = self.balance - amount;
+    return;
+  }
+}
+
+untrusted actor RequestSandbox {
+  pub fnc handle() => void {
+    // The host may bind this actor to one bounded HTTP exchange.
     return;
   }
 }
 ```
 
-- an unqualified `actor` is **private**;
+- an unqualified `actor` is **shared**; use `isoactor` for confined/private actor memory;
 - `shared actor` is a **shared-memory-capable** actor;
-- private and shared actors are scheduled on **different dispatcher pools** for bulkheading;
+- `untrusted actor` is a **memory-isolated adversarial sandbox** with a hard lifetime/fuel/capability budget;
+- private, shared, and untrusted actors are scheduled on **different dispatcher pools** for bulkheading;
 - compiler-generated/context-aware actor factories are capture-free for **both** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
 - trusted host embedding has separately named supervisor-only construction escape hatches, and adversarial policies reject them;
 - both kinds still process their own mailbox serially;
@@ -478,7 +458,49 @@ shared actor Account {
 - actor `self` and move-only state rooted at `self` cannot escape the mailbox turn by value or returned borrow; copy-like values such as integers, booleans, and strings may be returned normally;
 - synchronized shared memory requires the host-granted `SHARED_MEMORY` capability.
 
-Private actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
+Actor callables are entry points, not ordinary functions. They are invoked only
+with `spawn`:
+
+```ores
+val pending = spawn worker(41);
+
+// Available synchronously after identity reservation + spawn admission.
+stdio.println(pending.id);
+
+// READY means the actor runtime has initialized the actor and its mailbox/control
+// endpoint. It does not mean worker() has finished.
+val ref = await pending.ready;
+
+// Equivalent readiness shorthand:
+val other_ref = await spawn worker(1);
+
+// Completion is separate from readiness.
+val completed = await pending.done;
+
+// Actor functions additionally expose their returned value.
+val answer = await pending.result;
+```
+
+`spawn actor_fnc(...)` returns an `ActorSpawn<T>` ticket immediately after the
+runtime has reserved an `ActorId` and admitted the initial spawn/message. The
+fast path must not wait for actor behavior construction or actor-callable
+completion. `ActorSpawn<T>` exposes `id`, `ready: Future<ActorRef>`,
+and `done: Future<bool>`. `done` resolves to `true` only after normal actor
+callable completion and fails exceptionally on actor failure/cancellation.
+Any non-`void` actor callable—`fnc` or `routine`—additionally exposes
+`result: Future<T>`. A void actor callable has no result value and uses
+`done` when completion must be observed.
+
+`await spawn actor_fnc(...)` awaits **READY only** and yields an `ActorRef`.
+It never waits for the actor function/routine to finish. The ready reference
+exposes stable actor identity/control metadata such as `id` and
+`is_alive()`. One-shot actor callables do **not** expose an application
+mailbox: they terminate after their invocation, so accepting queued messages
+would be misleading. Typed mailboxes belong to persistent actor behavior/receive
+semantics rather than this one-shot callable launch primitive. Ordinary
+`worker(...)` calls are compile errors when `worker` is declared `actor`.
+
+Private and untrusted actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
 
 The slice has two simultaneous limits:
 
@@ -502,7 +524,27 @@ This preserves the central invariant:
 
 > Actor state is mutated through mailbox ownership. Shared mutable state outside an actor is exceptional and must use an explicit synchronization abstraction.
 
-Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into a private or shared actor invalidates dependent compiled units.
+Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into a private, shared, or untrusted actor invalidates dependent compiled units.
+
+An untrusted actor cannot obtain ambient network access. Its only permitted
+outbound network primitive is a host-owned **stateless HTTP/HTTPS capability**.
+The default hard per-actor limit is **5 in-flight outbound HTTP calls** and may
+be configured downward or upward by the supervisor within the runtime hard
+ceiling. The sixth call is rejected before it reaches the host transport; it is
+not hidden in an unbounded guest queue. `CONNECT`, WebSocket/protocol upgrades,
+non-HTTP schemes, raw TCP sockets, actor-visible connection-pool handles, cookie
+jars, and stateful session connections are forbidden. A host may reuse
+connections internally for normal HTTP efficiency, but that state never
+becomes an actor capability.
+
+This gives an untrusted actor useful I/O parallelism without letting it spawn
+more actors. It can start up to its HTTP limit, compose those futures with
+`Futures.all`, and suspend at `await`; the network operations continue while
+the actor consumes no carrier thread.
+
+For HTTP request handling, the host may instead bind exactly one accepted request/response exchange to the actor. The runtime exposes bounded, owner-only request-body and response-body stream capabilities through the actor turn context, allowing the HTTP server to stream directly from/to its socket or event-loop buffers without copying bulk body data through actor mailboxes. Body bytes and HTTP metadata have independent limits; request method/path/header access and response headers are bounded so metadata cannot be used to evade the body/mailbox quotas. When body data is staged in an actor-owned native block, the runtime can read/write that FFM-backed region directly through the HTTP capability without an intermediate heap byte array. The capability is deliberately higher-level than a raw fd so it remains safe for multiplexed HTTP/2 and HTTP/3 connections. HTTP capability handles themselves are non-Sendable and cannot escape through actor messages.
+
+If an untrusted actor is explicitly given an `ActorRef`, that grant authorizes bounded message sending, not lifecycle control: it cannot stop another actor or synchronously wait for another actor's termination. Prefer the narrower `Recipient<M>` capability for parent replies and one-way channels. A `Recipient<M>` can send only; it has no stop/wait/failure API and cannot cross into a different `ActorRuntime`. Supervisory control remains outside the untrusted actor.
 
 Shared writable handles use transactional publication. A `SharedMutex<T>` is reserved to the destination runtime before mailbox visibility, committed only after queue admission, and unbound again when first publication fails. This prevents failed sends from accidentally claiming a writable capability for the wrong runtime.
 
@@ -538,7 +580,7 @@ define module x
   end
 end
 
-pub routine main(): void {
+pub routine main() => void {
   val y = new x.y();
   stdio.stdout.write(y)
 }
@@ -553,7 +595,7 @@ Qualified names such as `x.y` retain their module namespace.
 `routine` is the non-recursive procedural form:
 
 ```ores
-pub routine main(): void {
+pub routine main() => void {
   run_app();
 }
 ```
@@ -575,7 +617,7 @@ Semicolons are strongly recommended. They remain the canonical formatter output.
 They may be omitted only where the parser has an unambiguous structural boundary, such as the final expression immediately before `}`, `fi`, or `end`. Oreslang does not use broad JavaScript-style automatic semicolon insertion.
 
 ```ores
-pub routine main(): void {
+pub routine main() => void {
   stdio.stdout.write("done")
 }
 ```
@@ -589,7 +631,7 @@ pub interface Brand {
   markerBrand: 'marking/branding'
 }
 
-fnc consume(@Structural Brand value): String {
+fnc consume(@Structural Brand value) => String {
   return value.markerBrand;
 }
 ```
@@ -615,11 +657,11 @@ Only methods overload, and only by arity:
 
 ```ores
 define class Lookup as
-  find(): Option<int> {
+  find() => Option<int> {
     return None;
   }
 
-  find(int id): Option<int> {
+  find(int id) => Option<int> {
     return Some(id);
   }
 end
@@ -632,7 +674,7 @@ Two methods with the same name and same arity are a compile-time error even when
 The ternary operator is right-associative and lazy in its selected branch:
 
 ```ores
-fnc find(bool found): Option<int> {
+fnc find(bool found) => Option<int> {
   return found ? Some(42) : None;
 }
 ```
@@ -659,15 +701,15 @@ Classes can expose a JavaScript-like iterator symbol:
 
 ```ores
 define class Bag as
-  [Symbol.iterator](): Array<int> {
+  [Symbol.iterator]() => Array<int> {
     return arr[1, 2, 3];
   }
 end
 ```
 
-The compiler/runtime inserts a scheduler safepoint on **every loop iteration**. The current runtime hook checks cancellation/interruption and yields execution; it is intentionally centralized so actor supervisor/control-mailbox polling can evolve without changing source syntax. User code does not receive ambient thread-control capability.
+The compiler/runtime inserts a scheduler safepoint on **every loop iteration**. For untrusted actors, statement/expression evaluation and callable/recursive execution are also metered. Each checkpoint rechecks the actor deadline and consumes execution fuel; exhausting fuel fails the actor. The runtime may yield a carrier as a scheduling optimization, but untrusted-system liveness does **not** depend on source code voluntarily calling `yield`.
 
-This means Oreslang does not require recursion as the only way to loop, while still giving actor/isolate schedulers a compulsory cooperation point inside generated loop execution.
+This means Oreslang does not require recursion as the only way to loop, and recursive code is not a loophole around sandbox scheduling. User code receives no ambient thread-control capability.
 
 ## Standard output
 
@@ -742,16 +784,16 @@ pub interface Foo extends Bar {
   markerBrand: 'marking/branding'
 }
 
-fnc a(@Structural Foo y): void {
+fnc a(@Structural Foo y) => void {
   return;
 }
 
-fnc b(y structural Foo): void {
+fnc b(y structural Foo) => void {
   return;
 }
 
 @AllowStructural(y)
-fnc c(y Foo): void {
+fnc c(y Foo) => void {
   return;
 }
 ```
@@ -814,7 +856,7 @@ namespace payments;
 
 import fnc {authorize} from "./auth.ores";
 
-pub fnc charge(): void {
+pub fnc charge() => void {
   return;
 }
 ```
@@ -844,7 +886,7 @@ Instance methods continue to omit `fnc`:
 
 ```ores
 define class Counter as
-  read(): int {
+  read() => int {
     return self.value;
   }
 end
@@ -854,7 +896,7 @@ Class-level functions are not methods. They are declared with the explicit `stat
 
 ```ores
 define class Counter as
-  pub static fnc twice(int value): int {
+  pub static fnc twice(int value) => int {
     return value * 2;
   }
 end
@@ -876,21 +918,20 @@ Static data fields are intentionally not part of v0.5 yet; `static` on a class b
 
 The arrows have distinct jobs:
 
-- `:` declares the return type of a **named executable callable/method**.
-- `->` is executable syntax for lambdas and lambda-style callable declarations.
-- `=>` is type-level syntax for function types and interface callable signatures.
+- `=>` declares the return type of a **named callable**.
+- `->` forms a **function type** or **lambda**.
 
 Function aliases can use `typeof fnc`:
 
 ```ores
-type F = typeof fnc() => int;
-type Predicate = typeof fnc(bool value) => bool;
+type F = typeof fnc() -> int;
+type Predicate = typeof fnc(bool value) -> bool;
 ```
 
 The shorter inline function type is also valid:
 
 ```ores
-fnc sink(): ((bool foo) => void) {
+fnc sink() => ((bool foo) -> void) {
   return |foo| -> {
     stdio.println(foo);
     return;
@@ -903,13 +944,13 @@ Parameter names inside function types are documentation-only; structural functio
 The canonical lambda syntax is pipe-delimited and block-only:
 
 ```ores
-fnc find(bool found): F {
+fnc find(bool found) => F {
   return || -> {
     return found ? 5 : 6;
   };
 }
 
-fnc callback(): ((bool foo) => void) {
+fnc callback() => ((bool foo) -> void) {
   return |foo| -> {
     stdio.println(foo);
     return;
@@ -929,7 +970,7 @@ This means higher-order functions and functors do not introduce a second return 
 Closures are lexical. A lambda resolves free variables from the scope where the lambda is created, not from the scope where it is called.
 
 ```ores
-fnc makeCounter(): (() => int) {
+fnc makeCounter() => (() -> int) {
   let int count = 0;
 
   return || -> {
@@ -956,7 +997,7 @@ This makes returned closures safe without retaining raw stack references.
 Parameters are immutable by default.
 
 ```ores
-fnc bad(Bar b): void {
+fnc bad(Bar b) => void {
   b.foo = "foobar"; // compile-time error
   return;
 }
@@ -965,7 +1006,7 @@ fnc bad(Bar b): void {
 An owned parameter may explicitly opt into mutation by putting `mut` between the type and parameter name:
 
 ```ores
-fnc change(Bar mut b): Bar {
+fnc change(Bar mut b) => Bar {
   b.foo = "foobar";
   return b;
 }
@@ -993,11 +1034,11 @@ Class instances, arrays/lists, object records, and closures are move-only by def
 A by-value binding, argument, or return consumes a non-`Copy` value:
 
 ```ores
-fnc consume(Bar value): void {
+fnc consume(Bar value) => void {
   return;
 }
 
-fnc example(): void {
+fnc example() => void {
   let Bar b = new Bar();
   consume(b);
   // b.foo; // compile-time error: use of moved value
@@ -1008,7 +1049,7 @@ fnc example(): void {
 Shared immutable borrowing uses `&T`:
 
 ```ores
-fnc inspect(&Bar value): void {
+fnc inspect(&Bar value) => void {
   stdio.println(value.foo);
   return;
 }
@@ -1017,12 +1058,12 @@ fnc inspect(&Bar value): void {
 Exclusive mutable borrowing uses `&mut T`:
 
 ```ores
-fnc change(&mut Bar value): void {
+fnc change(&mut Bar value) => void {
   value.foo = "changed";
   return;
 }
 
-fnc example(): void {
+fnc example() => void {
   let Bar b = new Bar();
   change(&mut b);
   stdio.println(b.foo); // owner is usable again after the call

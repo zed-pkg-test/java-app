@@ -22,6 +22,7 @@ public final class OresContext implements AutoCloseable {
     private final TruffleLanguage.Env env;
     private final BufferedReader input;
     private final PrintWriter output;
+    private final OresVM vm;
     private final ActorRuntime actors;
     private final RuntimeGarbageCollector garbageCollector;
     private final UUID contextId = UUID.randomUUID();
@@ -38,9 +39,9 @@ public final class OresContext implements AutoCloseable {
         this.output = new PrintWriter(env.out(), true);
         this.isolatePolicy = IsolatePolicy.fromApplicationArguments(env.getApplicationArguments());
         this.executionProfile = IsolatePolicy.executionProfileFromApplicationArguments(env.getApplicationArguments());
-        this.actors = new ActorRuntime(
+        this.vm = OresVM.contextOwner(env.getApplicationArguments());
+        this.actors = vm.newActorRuntime(
                 isolatePolicy,
-                ActorRuntime.DispatcherConfig.defaults(),
                 this::executeActorTurn);
         this.garbageCollector = new RuntimeGarbageCollector();
         this.actors.setActorExitHook(garbageCollector::retireActorDomain);
@@ -59,20 +60,6 @@ public final class OresContext implements AutoCloseable {
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
     public ExecutionProfile executionProfile() { return executionProfile; }
-
-    public Object lookupHostSymbol(String className) {
-        requireCapability(IsolatePolicy.Capability.JAVA_INTEROP, "Java host import " + className);
-        if (!env.isHostLookupAllowed()) {
-            throw new SecurityException("Java host class lookup is disabled by the embedding Context");
-        }
-        try {
-            return env.lookupHostSymbol(className);
-        } catch (RuntimeException failure) {
-            throw new IllegalArgumentException(
-                    "Java host class is not allowlisted or unavailable: " + className,
-                    failure);
-        }
-    }
 
     public void requireCapability(IsolatePolicy.Capability capability, String api) {
         IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
@@ -104,6 +91,16 @@ public final class OresContext implements AutoCloseable {
      */
     public void schedulerSafepoint() {
         schedulerSafepoints.incrementAndGet();
+        ActorRuntime carrierRuntime = ActorRuntime.currentActorRuntime();
+        if (carrierRuntime != null && carrierRuntime != actors) {
+            carrierRuntime.schedulerSafepoint();
+            return;
+        }
+        ActorRuntime rootRuntime = ActorRuntime.currentRootRuntime();
+        if (rootRuntime != null && rootRuntime != actors) {
+            rootRuntime.schedulerSafepoint();
+            return;
+        }
         actors.schedulerSafepoint();
     }
 
@@ -134,7 +131,21 @@ public final class OresContext implements AutoCloseable {
 
     private void executeActorTurn(Runnable turn) {
         boolean serialize = isolatePolicy.adversarial();
-        if (serialize) adversarialActorTurnLock.lock();
+        boolean lockHeld = false;
+        if (serialize) {
+            try {
+                // A watchdog must be able to wake a carrier that is queued
+                // behind another adversarial turn. ReentrantLock.lock() is not
+                // interruptible and would let one hostile turn pin every
+                // carrier waiting to enter this context.
+                adversarialActorTurnLock.lockInterruptibly();
+                lockHeld = true;
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new java.util.concurrent.CancellationException(
+                        "adversarial actor interrupted while waiting to enter its Truffle context");
+            }
+        }
         TruffleContext truffleContext = env.getContext();
         Object previous = null;
         boolean entered = false;
@@ -144,7 +155,7 @@ public final class OresContext implements AutoCloseable {
             turn.run();
         } finally {
             if (entered) truffleContext.leave(null, previous);
-            if (serialize) adversarialActorTurnLock.unlock();
+            if (lockHeld) adversarialActorTurnLock.unlock();
         }
     }
 
@@ -154,6 +165,10 @@ public final class OresContext implements AutoCloseable {
                 "context_id", contextId.toString(),
                 "runtime", "graalvm-truffle",
                 "language", "oreslang",
+                "vm_id", vm.id().toString(),
+                "scheduler_domains", vm.schedulerTopology().domains().stream()
+                        .map(Enum::name)
+                        .toList(),
                 "execution_mode", executionProfile.mode().name(),
                 "platform", executionProfile.platform().name(),
                 "scheduler_safepoints", schedulerSafepoints.get());
@@ -162,7 +177,7 @@ public final class OresContext implements AutoCloseable {
     @Override
     public void close() {
         try {
-            actors.close();
+            actors.closeFromSupervisor();
         } finally {
             synchronized (this) {
                 linkedCodeUnits.clear();

@@ -15,7 +15,7 @@ final class GarbageCollectionLanguageTest {
     @Test
     void processGcIsAFirstClassBuiltin() throws Exception {
         Source source = Source.newBuilder(OresLanguage.ID, """
-                pub fnc main(): void {
+                pub fnc main() => void {
                   process.gc();
                   return;
                 }
@@ -30,7 +30,7 @@ final class GarbageCollectionLanguageTest {
     @Test
     void actorGcRequiresAnActorMailboxTurn() throws Exception {
         Source source = Source.newBuilder(OresLanguage.ID, """
-                pub fnc main(): void {
+                pub fnc main() => void {
                   actor.gc();
                   return;
                 }
@@ -44,7 +44,7 @@ final class GarbageCollectionLanguageTest {
     @Test
     void strictFaasRejectsProcessGcDuringCapabilityAdmission() {
         var program = TypeChecker.check(Parser.parse("""
-                pub fnc main(): void {
+                pub fnc main() => void {
                   process.gc();
                   return;
                 }

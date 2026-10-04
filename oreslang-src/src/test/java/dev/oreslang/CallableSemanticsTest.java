@@ -19,16 +19,16 @@ final class CallableSemanticsTest {
                 namespace demo;
 
                 define module math
-                  pub fnc factorial(int n): int {
+                  pub fnc factorial(int n) => int {
                     return n == 0 ? 1 : n * factorial(n - 1);
                   }
 
-                  pub fnc offset(int x): int {
+                  pub fnc offset(int x) => int {
                     return x + 10;
                   }
                 end
 
-                pub routine main(): void {
+                pub routine main() => void {
                   val int base = 7;
                   val Fnc<int, int> lexical = |int x| -> {
                     return x + base;
@@ -53,7 +53,7 @@ final class CallableSemanticsTest {
     void explicitNlexLambdaCannotCaptureOuterLocal() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        fnc make(): (() => int) {
+                        fnc make() => (() -> int) {
                           val int local = 42;
                           return nlex || -> {
                             return local;
@@ -67,7 +67,7 @@ final class CallableSemanticsTest {
     void nlexNamedCallableMakesNestedLambdasNonCapturing() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        nlex fnc make(): (() => int) {
+                        nlex fnc make() => (() -> int) {
                           val int local = 42;
                           return || -> {
                             return local;
@@ -81,10 +81,10 @@ final class CallableSemanticsTest {
     void nlexStillResolvesModulesGlobalsAndOwnShadowingLocals() throws Exception {
         String output = run("""
                 define module math
-                  pub fnc one(): int { return 1; }
+                  pub fnc one() => int { return 1; }
                 end
 
-                pub routine main(): void {
+                pub routine main() => void {
                   val int value = 99;
                   val Fnc<int> callback = nlex || -> {
                     val int value = 2;
@@ -103,25 +103,25 @@ final class CallableSemanticsTest {
         String output = run("""
                 namespace nlex_demo;
 
-                type IntFn = typeof fnc(int value) => int;
+                type IntFn = typeof fnc(int value) -> int;
 
                 define module math
-                  pub fnc factorial(int n): int {
+                  pub fnc factorial(int n) => int {
                     return n == 0 ? 1 : n * factorial(n - 1);
                   }
 
-                  pub fnc offset(int value): int {
+                  pub fnc offset(int value) => int {
                     return value + 10;
                   }
                 end
 
-                nlex fnc makeOffsetter(): IntFn {
+                nlex fnc makeOffsetter() => IntFn {
                   return |value| -> {
                     return math.offset(value);
                   };
                 }
 
-                pub routine main(): void {
+                pub routine main() => void {
                   val int outer_bias = 100;
 
                   val IntFn lexical = |value| -> {
@@ -153,14 +153,14 @@ final class CallableSemanticsTest {
     void routineAndFncRemainSemanticallyDistinct() {
         assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
-                        routine loop(): void {
+                        routine loop() => void {
                           loop();
                         }
                         """)));
 
         assertDoesNotThrow(() ->
                 TypeChecker.check(Parser.parse("""
-                        fnc loop(bool finished): void {
+                        fnc loop(bool finished) => void {
                           if finished; do
                             return;
                           else

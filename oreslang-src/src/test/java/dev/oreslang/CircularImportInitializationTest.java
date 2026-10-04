@@ -29,18 +29,18 @@ final class CircularImportInitializationTest {
         Files.writeString(a, """
                 import fnc {b_value} from "./b.ores";
 
-                pub fnc a_value(): String {
+                pub fnc a_value() => String {
                   return "A";
                 }
 
-                fnc init(): void {
+                fnc init() => void {
                   stdio.stdout.write("init-a:");
                   stdio.stdout.write(b_value());
                   stdio.stdout.write("|");
                   return;
                 }
 
-                pub routine main(): void {
+                pub routine main() => void {
                   stdio.stdout.write("main:");
                   stdio.stdout.write(a_value());
                   stdio.stdout.write(b_value());
@@ -51,11 +51,11 @@ final class CircularImportInitializationTest {
         Files.writeString(b, """
                 import fnc {a_value} from "./a.ores";
 
-                pub fnc b_value(): String {
+                pub fnc b_value() => String {
                   return "B";
                 }
 
-                fnc init(): void {
+                fnc init() => void {
                   stdio.stdout.write("init-b:");
                   stdio.stdout.write(a_value());
                   stdio.stdout.write("|");
@@ -84,21 +84,21 @@ final class CircularImportInitializationTest {
     @Test
     void initHookHasAClosedLifecycleSignature() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc init(): void { return; }
-                pub routine main(): void { return; }
+                fnc init() => void { return; }
+                pub routine main() => void { return; }
                 """)));
 
         IllegalArgumentException withArgs = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
-                        fnc init(int value): void { return; }
+                        fnc init(int value) => void { return; }
                         """)));
         assertTrue(withArgs.getMessage().contains("init hook"));
 
         IllegalArgumentException publicInit = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
-                        pub fnc init(): void { return; }
+                        pub fnc init() => void { return; }
                         """)));
         assertTrue(publicInit.getMessage().contains("init hook"));
     }
