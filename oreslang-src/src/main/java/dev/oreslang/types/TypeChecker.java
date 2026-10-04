@@ -18,7 +18,9 @@ import dev.oreslang.types.Types.Union;
 import dev.oreslang.types.Types.Type;
 import dev.oreslang.types.Types.Unknown;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -49,6 +51,8 @@ public final class TypeChecker {
     private final Set<String> ambiguousTypeAliases = new HashSet<>();
     private final Set<String> importedValues = new HashSet<>();
     private final Set<Ast.TypeAliasDecl> resolvingAliases = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Deque<Map<String, Ast.TypeAliasDecl>> lexicalTypeAliases = new ArrayDeque<>();
+    private final Deque<Map<String, Ast.InterfaceDecl>> lexicalInterfaces = new ArrayDeque<>();
     private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
 
     public static Ast.Program check(Ast.Program program) {
@@ -97,10 +101,7 @@ public final class TypeChecker {
 
     private void collect(Ast.Program program) {
         for (Ast.ModuleDecl module : program.modules()) {
-            validateContainer(module);
-            if (modules.putIfAbsent(module.name(), module) != null) {
-                throw new IllegalArgumentException("duplicate module/namespace container '" + module.name() + "'");
-            }
+            if (modules.putIfAbsent(module.name(), module) != null) throw new IllegalArgumentException("duplicate module '" + module.name() + "'");
             for (Ast.Decl decl : module.declarations()) {
                 if (decl instanceof Ast.FunctionDecl fn) {
                     putQualified(functions, ambiguousFunctions, module.name(), fn.name(), fn, fn.kind() == Ast.CallableKind.ROUTINE ? "routine" : "function");
@@ -115,17 +116,6 @@ public final class TypeChecker {
                     putQualified(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias, "type alias");
                 }
             }
-        }
-    }
-
-    private void validateContainer(Ast.ModuleDecl container) {
-        if (!container.isNamespace()) return;
-        for (Ast.Decl declaration : container.declarations()) {
-            if (declaration instanceof Ast.TypeAliasDecl || declaration instanceof Ast.InterfaceDecl) continue;
-            if (declaration instanceof Ast.ClassDecl klass && klass.actorKind() == Ast.ActorKind.NONE) continue;
-            throw new IllegalArgumentException(
-                    "namespace '" + container.name()
-                            + "' is type-only; allowed members are type aliases, interfaces, concrete classes, and abstract classes");
         }
     }
 
@@ -146,7 +136,7 @@ public final class TypeChecker {
         for (Ast.InterfaceDecl iface : interfaceOwners.keySet()) interfaceShape(iface, Set.copyOf(iface.genericParameters()), new LinkedHashSet<>());
 
         for (Ast.ModuleDecl module : program.modules()) {
-            if (!module.isNamespace()) checkModuleAdherence(module);
+            checkModuleAdherence(module);
             for (Ast.Decl decl : module.declarations()) {
                 if (decl instanceof Ast.FunctionDecl fn) checkFunction(module.name(), fn);
                 else if (decl instanceof Ast.ClassDecl klass) checkClass(module.name(), klass);
@@ -181,9 +171,6 @@ public final class TypeChecker {
     }
 
     private Record moduleShape(Ast.ModuleDecl module) {
-        if (module.isNamespace()) {
-            throw new IllegalArgumentException("namespace '" + module.name() + "' is type-only and has no runtime module shape");
-        }
         Map<String, Type> members = new LinkedHashMap<>();
         for (Ast.Decl decl : module.declarations()) {
             if (decl instanceof Ast.FunctionDecl fn && fn.visibility() == Ast.Visibility.PUBLIC
@@ -229,63 +216,57 @@ public final class TypeChecker {
     }
 
     private void checkFunction(String module, Ast.FunctionDecl fn) {
-        if (fn.name().equals("init")) {
-            Ast.TypeRef initReturn = fn.returnType();
-            if (fn.visibility() != Ast.Visibility.PRIVATE
-                    || fn.async()
-                    || fn.nonLexical()
-                    || fn.actorKind() != Ast.ActorKind.NONE
-                    || !fn.genericParameters().isEmpty()
-                    || !fn.parameters().isEmpty()
-                    || initReturn == null
-                    || !"void".equals(initReturn.name())
-                    || !initReturn.arguments().isEmpty()
-                    || initReturn.inferArguments()) {
-                throw new IllegalArgumentException(
-                        "init hook must be a private synchronous non-actor non-generic zero-arity "
-                                + "fnc/routine returning void");
-            }
-        }
         if (fn.name().equals("main") && fn.actorKind() != Ast.ActorKind.NONE) {
             throw new IllegalArgumentException(
                     "program entrypoint 'main' cannot be an actor fnc; main must run synchronously and explicitly launch actors");
         }
-        Set<String> generics = uniqueGenerics(fn.genericParameters(), (fn.kind() == Ast.CallableKind.ROUTINE ? "routine " : "function ") + fn.name());
-        Env env = new Env(moduleBindingEnv(module), fn.nonLexical());
-        for (Ast.Param param : fn.parameters()) {
-            Type parameterType = resolveParam(param, generics, null);
+
+        pushLexicalTypes(fn.body());
+        try {
+            Set<String> generics = uniqueGenerics(
+                    fn.genericParameters(),
+                    (fn.kind() == Ast.CallableKind.ROUTINE ? "routine " : "function ") + fn.name());
+            Env env = new Env(moduleBindingEnv(module), fn.nonLexical());
+            for (Ast.Param param : fn.parameters()) {
+                Type parameterType = resolveParam(param, generics, null);
+                if (fn.actorKind() != Ast.ActorKind.NONE) {
+                    validateActorCallableBoundaryType(
+                            parameterType,
+                            fn.actorKind(),
+                            false,
+                            "parameter '" + param.name() + "' of actor callable '" + module + "." + fn.name() + "'");
+                }
+                env.define(
+                        param.name(),
+                        parameterType,
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            Type returns = resolve(fn.returnType(), generics, null);
             if (fn.actorKind() != Ast.ActorKind.NONE) {
                 validateActorCallableBoundaryType(
-                        parameterType,
+                        returns,
                         fn.actorKind(),
-                        false,
-                        "parameter '" + param.name() + "' of actor callable '" + module + "." + fn.name() + "'");
+                        true,
+                        "return type of actor callable '" + module + "." + fn.name() + "'");
             }
-            env.define(
-                    param.name(),
-                    parameterType,
-                    param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
-        }
-        Type returns = resolve(fn.returnType(), generics, null);
-        if (fn.actorKind() != Ast.ActorKind.NONE) {
-            validateActorCallableBoundaryType(
-                    returns,
-                    fn.actorKind(),
-                    true,
-                    "return type of actor callable '" + module + "." + fn.name() + "'");
-        }
-        Ast.ActorKind previousActorKind = currentActorKind;
-        currentActorKind = fn.actorKind();
-        try {
-            checkBlock(fn.body(), env, generics, returns, null);
+            Ast.ActorKind previousActorKind = currentActorKind;
+            currentActorKind = fn.actorKind();
+            try {
+                checkBlock(fn.body(), env, generics, returns, null);
+            } finally {
+                currentActorKind = previousActorKind;
+            }
+            if (returns != Primitive.VOID && !definitelyReturns(fn.body())) {
+                throw new IllegalArgumentException(
+                        "non-void " + fn.kind().name().toLowerCase() + " '" + module + "." + fn.name()
+                                + "' must explicitly return on every path");
+            }
+            if (fn.visibility() == Ast.Visibility.PUBLIC && hasInferredArgs(fn.returnType())) {
+                throw new IllegalArgumentException(
+                        "public callable '" + fn.name() + "' cannot export unresolved <> type arguments");
+            }
         } finally {
-            currentActorKind = previousActorKind;
-        }
-        if (returns != Primitive.VOID && !definitelyReturns(fn.body())) {
-            throw new IllegalArgumentException("non-void " + fn.kind().name().toLowerCase() + " '" + module + "." + fn.name() + "' must explicitly return on every path");
-        }
-        if (fn.visibility() == Ast.Visibility.PUBLIC && hasInferredArgs(fn.returnType())) {
-            throw new IllegalArgumentException("public callable '" + fn.name() + "' cannot export unresolved <> type arguments");
+            popLexicalTypes();
         }
     }
 
@@ -344,6 +325,8 @@ public final class TypeChecker {
         }
 
         for (Ast.MethodDecl method : klass.methods()) {
+            pushLexicalTypes(method.body());
+            try {
             Set<String> generics = new HashSet<>();
             if (!method.isStatic()) generics.addAll(classGenerics);
             for (String generic : method.genericParameters()) {
@@ -390,6 +373,9 @@ public final class TypeChecker {
                 String label = method.isStatic() ? "static function" : "method";
                 throw new IllegalArgumentException("non-void " + label + " '" + module + "." + klass.name() + "." + method.name() + "' must explicitly return on every path");
             }
+            } finally {
+                popLexicalTypes();
+            }
         }
 
         Set<String> implemented = new HashSet<>();
@@ -433,11 +419,50 @@ public final class TypeChecker {
     }
 
     private void checkBlock(List<Ast.Stmt> body, Env parent, Set<String> generics, Type expectedReturn, Type self) {
-        Env env = new Env(parent);
-        for (Ast.Stmt stmt : body) checkStatement(stmt, env, generics, expectedReturn, self);
+        pushLexicalTypes(body);
+        try {
+            Env env = new Env(parent);
+            for (Ast.Stmt stmt : body) checkStatement(stmt, env, generics, expectedReturn, self);
+        } finally {
+            popLexicalTypes();
+        }
+    }
+
+    private void pushLexicalTypes(List<Ast.Stmt> body) {
+        Map<String, Ast.TypeAliasDecl> aliases = new LinkedHashMap<>();
+        Map<String, Ast.InterfaceDecl> localInterfaces = new LinkedHashMap<>();
+        for (Ast.Stmt stmt : body) {
+            if (!(stmt instanceof Ast.LocalTypeDeclStmt local)) continue;
+            Ast.Decl decl = local.declaration();
+            if (decl instanceof Ast.TypeAliasDecl alias) {
+                if (aliases.putIfAbsent(alias.name(), alias) != null || localInterfaces.containsKey(alias.name())) {
+                    throw new IllegalArgumentException("duplicate lexical type '" + alias.name() + "'");
+                }
+            } else if (decl instanceof Ast.InterfaceDecl iface) {
+                if (localInterfaces.putIfAbsent(iface.name(), iface) != null || aliases.containsKey(iface.name())) {
+                    throw new IllegalArgumentException("duplicate lexical type '" + iface.name() + "'");
+                }
+            }
+        }
+        lexicalTypeAliases.push(aliases);
+        lexicalInterfaces.push(localInterfaces);
+    }
+
+    private void popLexicalTypes() {
+        lexicalTypeAliases.pop();
+        lexicalInterfaces.pop();
     }
 
     private void checkStatement(Ast.Stmt stmt, Env env, Set<String> generics, Type expectedReturn, Type self) {
+        if (stmt instanceof Ast.LocalTypeDeclStmt local) {
+            if (local.declaration() instanceof Ast.TypeAliasDecl alias) {
+                Set<String> aliasGenerics = uniqueGenerics(alias.genericParameters(), "type alias " + alias.name());
+                resolve(alias.target(), aliasGenerics, self);
+            } else if (local.declaration() instanceof Ast.InterfaceDecl iface) {
+                checkInterface(iface);
+            }
+            return;
+        }
         if (stmt instanceof Ast.BindingStmt binding) {
             Type declaredAhead = binding.declaredType() == null ? null : resolve(binding.declaredType(), generics, self);
             boolean recursiveLambda = binding.initializer() instanceof Ast.LambdaExpr;
@@ -536,14 +561,7 @@ public final class TypeChecker {
             if (name.name().equals("print")) return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             if (name.name().equals("None")) return new Named("Option", List.of(Unknown.INSTANCE));
             Ast.ModuleDecl moduleNamespace = modules.get(name.name());
-            if (moduleNamespace != null) {
-                if (moduleNamespace.isNamespace()) {
-                    throw new IllegalArgumentException(
-                            "namespace '" + name.name() + "' is type-only; qualify a declared type such as '"
-                                    + name.name() + ".TypeName' instead of using the namespace as a value");
-                }
-                return moduleShape(moduleNamespace);
-            }
+            if (moduleNamespace != null) return moduleShape(moduleNamespace);
             Ast.ClassDecl classNamespace = findClass(name.name());
             if (classNamespace != null) return new ClassNamespace(qualifiedClassName(classNamespace));
             if (importedValues.contains(name.name())) return Unknown.INSTANCE;
@@ -577,17 +595,17 @@ public final class TypeChecker {
             } else if (assignment.target() instanceof Ast.IndexExpr indexed) {
                 Type receiver = deref(typeOf(indexed.receiver(), env, generics, self));
                 Type index = typeOf(indexed.index(), env, generics, self);
-                if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-                    if (dynamic.arguments().size() != 1) {
-                        throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
+                if (receiver instanceof Named map && map.name().equals("Map")) {
+                    if (map.arguments().size() != 2) {
+                        throw new IllegalArgumentException("Map requires exactly two type arguments");
                     }
-                    requireAssignable(index, Primitive.STRING, "DynamicStruct key");
-                    targetType = dynamic.arguments().getFirst();
+                    requireAssignable(index, map.arguments().get(0), "Map key");
+                    targetType = map.arguments().get(1);
                 } else {
                     requireAssignable(index, Primitive.INT, "array/list index");
                     if (receiver instanceof ListType list) targetType = list.element();
                     else if (receiver instanceof Tuple tuple) targetType = tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
-                    else throw new IllegalArgumentException("indexed assignment requires an array/list, tuple, or DynamicStruct");
+                    else throw new IllegalArgumentException("indexed assignment requires an array/list, tuple, or Map");
                 }
                 where = "index";
             } else throw new IllegalArgumentException("unsupported assignment target");
@@ -643,18 +661,6 @@ public final class TypeChecker {
             };
         }
         if (expr instanceof Ast.CallExpr call) {
-            if (call.callee() instanceof Ast.NameExpr name
-                    && name.name().equals("init")) {
-                throw new IllegalArgumentException(
-                        "init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
-            }
-            if (call.callee() instanceof Ast.MemberExpr member
-                    && member.member().equals("init")
-                    && member.receiver() instanceof Ast.NameExpr namespace
-                    && modules.containsKey(namespace.name())) {
-                throw new IllegalArgumentException(
-                        "module init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
-            }
             if (call.callee() instanceof Ast.NameExpr functionName) {
                 Ast.FunctionDecl target = findFunction(functionName.name());
                 if (target != null) {
@@ -876,17 +882,12 @@ public final class TypeChecker {
                 if (result == null) throw new IllegalArgumentException("unknown structural member '" + member.member() + "'");
                 return result;
             }
-            if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-                if (dynamic.arguments().size() != 1) {
-                    throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
+            if (receiver instanceof Named map && map.name().equals("Map")) {
+                if (map.arguments().size() != 2) {
+                    throw new IllegalArgumentException("Map requires exactly two type arguments");
                 }
-                Type value = dynamic.arguments().getFirst();
-                return switch (member.member()) {
-                    case "get" -> new Function(List.of(Primitive.STRING), new Named("Option", List.of(value)));
-                    case "has_key" -> new Function(List.of(Primitive.STRING), Primitive.BOOL);
-                    case "get_or" -> new Function(List.of(Primitive.STRING, value), value);
-                    default -> value;
-                };
+                requireAssignable(Primitive.STRING, map.arguments().get(0), "Map member key");
+                return map.arguments().get(1);
             }
             if (receiver instanceof Named named) {
                 Ast.ClassDecl klass = findClass(named.name());
@@ -919,12 +920,12 @@ public final class TypeChecker {
         if (expr instanceof Ast.IndexExpr indexed) {
             Type receiver = deref(typeOf(indexed.receiver(), env, generics, self));
             Type index = typeOf(indexed.index(), env, generics, self);
-            if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-                if (dynamic.arguments().size() != 1) {
-                    throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
+            if (receiver instanceof Named map && map.name().equals("Map")) {
+                if (map.arguments().size() != 2) {
+                    throw new IllegalArgumentException("Map requires exactly two type arguments");
                 }
-                requireAssignable(index, Primitive.STRING, "DynamicStruct key");
-                return dynamic.arguments().getFirst();
+                requireAssignable(index, map.arguments().get(0), "Map key");
+                return map.arguments().get(1);
             }
             if (receiver instanceof Record record) {
                 requireAssignable(index, Primitive.STRING, "object/map key");
@@ -941,15 +942,15 @@ public final class TypeChecker {
             requireAssignable(index, Primitive.INT, "array/list index");
             if (receiver instanceof ListType list) return list.element();
             if (receiver instanceof Tuple tuple) return tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
-            throw new IllegalArgumentException("indexing requires an array/list, tuple, or DynamicStruct");
+            throw new IllegalArgumentException("indexing requires an array/list, tuple, or Map");
         }
         if (expr instanceof Ast.NewExpr created) {
-            if (created.type().name().equals("DynamicStruct")) {
-                Type dynamic = resolve(created.type(), generics, self);
+            if (created.type().name().equals("Map")) {
+                Type map = resolve(created.type(), generics, self);
                 if (!created.arguments().isEmpty()) {
-                    throw new IllegalArgumentException("DynamicStruct<T> constructor takes no positional arguments");
+                    throw new IllegalArgumentException("Map<K,V> constructor takes no positional arguments");
                 }
-                return dynamic;
+                return map;
             }
             Ast.ClassDecl klass = findClass(created.type().name());
             if (klass == null) return resolve(created.type(), generics, self);
@@ -1004,31 +1005,35 @@ public final class TypeChecker {
         if (expr instanceof Ast.TupleExpr tuple) {
             return new Tuple(tuple.elements().stream().map(item -> typeOf(item, env, generics, self)).toList());
         }
-        if (expr instanceof Ast.ObjectExpr object) {
-            Map<String, Type> members = new LinkedHashMap<>();
-            boolean dynamicKeys = false;
-            Type dynamicValue = null;
-            for (Ast.ObjectField field : object.fields()) {
-                Type exactValueType = typeOf(field.value(), env, generics, self);
-                Type dynamicValueType = widenCollectionElement(exactValueType);
-                dynamicValue = dynamicValue == null
-                        ? dynamicValueType
-                        : collectionElementJoin(dynamicValue, dynamicValueType);
-                if (field.isDynamic()) {
-                    dynamicKeys = true;
-                    requireAssignable(
-                            typeOf(field.dynamicName(), env, generics, self),
-                            Primitive.STRING,
-                            "dynamic obj key");
-                } else if (members.putIfAbsent(field.name(), exactValueType) != null) {
-                    throw new IllegalArgumentException("duplicate obj field '" + field.name() + "'");
+        if (expr instanceof Ast.StructExpr struct) {
+            Type target = resolve(struct.type(), generics, self);
+            if (!(target instanceof Record record)) {
+                throw new IllegalArgumentException("struct literal type '" + struct.type().name() + "' is not a struct");
+            }
+            Map<String, Type> supplied = new LinkedHashMap<>();
+            for (Ast.ObjectField field : struct.fields()) {
+                if (field.isDynamic()) throw new IllegalArgumentException("struct literal keys must be static");
+                Type value = typeOf(field.value(), env, generics, self);
+                if (supplied.putIfAbsent(field.name(), value) != null) {
+                    throw new IllegalArgumentException("duplicate struct field '" + field.name() + "'");
                 }
             }
-            if (dynamicKeys) {
-                return new Named("DynamicStruct", List.of(
-                        dynamicValue == null ? Unknown.INSTANCE : dynamicValue));
+            if (!supplied.keySet().equals(record.members().keySet())) {
+                Set<String> missing = new LinkedHashSet<>(record.members().keySet());
+                missing.removeAll(supplied.keySet());
+                Set<String> extra = new LinkedHashSet<>(supplied.keySet());
+                extra.removeAll(record.members().keySet());
+                throw new IllegalArgumentException("struct literal shape mismatch for '" + struct.type().name()
+                        + "': missing=" + missing + ", extra=" + extra);
             }
-            return new Record(members);
+            for (Map.Entry<String, Type> field : supplied.entrySet()) {
+                requireAssignable(field.getValue(), record.members().get(field.getKey()),
+                        "struct field " + struct.type().name() + "." + field.getKey());
+            }
+            return target;
+        }
+        if (expr instanceof Ast.ObjectExpr) {
+            throw new IllegalArgumentException("obj{} is shelved; use a fixed struct or Map<K,V>");
         }
         if (expr instanceof Ast.LambdaExpr lambda) {
             boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
@@ -1179,16 +1184,12 @@ public final class TypeChecker {
             if (result == null) throw new IllegalArgumentException("unknown structural member '" + member.member() + "'");
             return result;
         }
-        if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-            if (dynamic.arguments().size() != 1) {
-                throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
+        if (receiver instanceof Named map && map.name().equals("Map")) {
+            if (map.arguments().size() != 2) {
+                throw new IllegalArgumentException("Map requires exactly two type arguments");
             }
-            if (member.member().equals("get") || member.member().equals("has_key") || member.member().equals("get_or")) {
-                throw new IllegalArgumentException(
-                        "DynamicStruct method name '" + member.member()
-                                + "' is reserved for map-style lookup; use bracket assignment for a data key with that name");
-            }
-            return dynamic.arguments().getFirst();
+            requireAssignable(Primitive.STRING, map.arguments().get(0), "Map member key");
+            return map.arguments().get(1);
         }
         if (receiver instanceof Named named) {
             Ast.ClassDecl klass = findClass(named.name());
@@ -1248,15 +1249,12 @@ public final class TypeChecker {
             throw new IllegalArgumentException(
                     where + " cannot use " + named.name() + " across an actor boundary");
         }
-        if (named.name().equals("DynamicStruct")) {
-            if (named.arguments().size() != 1) {
-                throw new IllegalArgumentException(where + " requires DynamicStruct<T> with one value type");
+        if (named.name().equals("Map")) {
+            if (named.arguments().size() != 2) {
+                throw new IllegalArgumentException(where + " requires Map<K,V> with two type arguments");
             }
-            validateActorCallableBoundaryType(
-                    named.arguments().getFirst(),
-                    actorKind,
-                    false,
-                    where + " value");
+            validateActorCallableBoundaryType(named.arguments().get(0), actorKind, false, where + " key");
+            validateActorCallableBoundaryType(named.arguments().get(1), actorKind, false, where + " value");
             return;
         }
         if (named.name().equals("SharedMutex")) {
@@ -1326,9 +1324,10 @@ public final class TypeChecker {
 
         if (named.name().equals("Mutex") || named.name().equals("MutexGuard")
                 || named.name().equals("Future") || named.name().equals("SharedMutex")) return false;
-        if (named.name().equals("DynamicStruct")) {
-            return named.arguments().size() == 1
-                    && isSharedSafe(named.arguments().getFirst(), seen, genericBindings);
+        if (named.name().equals("Map")) {
+            return named.arguments().size() == 2
+                    && isSharedSafe(named.arguments().get(0), seen, genericBindings)
+                    && isSharedSafe(named.arguments().get(1), seen, genericBindings);
         }
         if (named.name().equals("OptionUnwrapError")) return named.arguments().isEmpty();
         if (named.name().equals("Option")) {
@@ -1963,6 +1962,11 @@ public final class TypeChecker {
             for (Ast.Expr item : tuple.elements()) {
                 rejectStaticClassGenericReferences(item, classGenerics, klass, method);
             }
+        } else if (expression instanceof Ast.StructExpr struct) {
+            rejectStaticClassGenericReference(struct.type(), classGenerics, klass, method);
+            for (Ast.ObjectField field : struct.fields()) {
+                rejectStaticClassGenericReferences(field.value(), classGenerics, klass, method);
+            }
         } else if (expression instanceof Ast.ObjectExpr object) {
             for (Ast.ObjectField field : object.fields()) {
                 if (field.isDynamic()) {
@@ -2231,13 +2235,18 @@ public final class TypeChecker {
                 if (!ref.inferArguments() && ref.arguments().size() != 1) throw new IllegalArgumentException(ref.name() + " requires exactly one type argument");
                 yield new ListType(ref.arguments().isEmpty() ? Unknown.INSTANCE : resolve(ref.arguments().getFirst(), generics, self));
             }
-            case "DynamicStruct" -> {
-                if (ref.inferArguments() || ref.arguments().size() != 1) {
-                    throw new IllegalArgumentException("DynamicStruct requires exactly one explicit value type");
+            case "DynamicStruct" -> throw new IllegalArgumentException(
+                    "DynamicStruct is shelved; use a fixed struct or Map<K,V>");
+            case "Map" -> {
+                if (ref.inferArguments() || ref.arguments().size() != 2) {
+                    throw new IllegalArgumentException("Map requires exactly two explicit type arguments");
                 }
-                Type value = resolve(ref.arguments().getFirst(), generics, self);
-                if (value == Primitive.VOID) throw new IllegalArgumentException("DynamicStruct<void> is invalid");
-                yield new Named("DynamicStruct", List.of(value));
+                Type key = resolve(ref.arguments().get(0), generics, self);
+                Type value = resolve(ref.arguments().get(1), generics, self);
+                if (key == Primitive.VOID || value == Primitive.VOID) {
+                    throw new IllegalArgumentException("Map<void,...> and Map<...,void> are invalid");
+                }
+                yield new Named("Map", List.of(key, value));
             }
             case "Option" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Option requires exactly one explicit type argument");
@@ -2460,11 +2469,19 @@ public final class TypeChecker {
     }
 
     private Ast.InterfaceDecl findInterface(String name) {
+        for (Map<String, Ast.InterfaceDecl> scope : lexicalInterfaces) {
+            Ast.InterfaceDecl local = scope.get(name);
+            if (local != null) return local;
+        }
         if (ambiguousInterfaces.contains(name)) throw new IllegalArgumentException("ambiguous interface name '" + name + "'; qualify it with its module");
         return interfaces.get(name);
     }
 
     private Ast.TypeAliasDecl findTypeAlias(String name) {
+        for (Map<String, Ast.TypeAliasDecl> scope : lexicalTypeAliases) {
+            Ast.TypeAliasDecl local = scope.get(name);
+            if (local != null) return local;
+        }
         if (ambiguousTypeAliases.contains(name)) throw new IllegalArgumentException("ambiguous type alias '" + name + "'; qualify it with its module");
         return typeAliases.get(name);
     }
@@ -2482,6 +2499,7 @@ public final class TypeChecker {
         if (expr instanceof Ast.ConditionalExpr conditional) return constant(conditional.condition()) && constant(conditional.whenTrue()) && constant(conditional.whenFalse());
         if (expr instanceof Ast.ListExpr list) return list.elements().stream().allMatch(this::constant);
         if (expr instanceof Ast.TupleExpr tuple) return tuple.elements().stream().allMatch(this::constant);
+        if (expr instanceof Ast.StructExpr struct) return struct.fields().stream().allMatch(field -> constant(field.value()));
         if (expr instanceof Ast.ObjectExpr object) return object.fields().stream().allMatch(field -> constant(field.value()));
         return false;
     }
@@ -2592,6 +2610,7 @@ public final class TypeChecker {
         else if (expr instanceof Ast.AwaitExpr e) collectCalls(e.expression(), module, out);
         else if (expr instanceof Ast.ListExpr e) for (Ast.Expr item : e.elements()) collectCalls(item, module, out);
         else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr item : e.elements()) collectCalls(item, module, out);
+        else if (expr instanceof Ast.StructExpr e) for (Ast.ObjectField f : e.fields()) collectCalls(f.value(), module, out);
         else if (expr instanceof Ast.ObjectExpr e) for (Ast.ObjectField f : e.fields()) collectCalls(f.value(), module, out);
         else if (expr instanceof Ast.LambdaExpr e) {
             if (e.expressionBody() != null) collectCalls(e.expressionBody(), module, out);
