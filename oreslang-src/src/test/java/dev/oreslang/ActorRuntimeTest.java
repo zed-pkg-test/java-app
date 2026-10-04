@@ -1467,12 +1467,12 @@ final class ActorRuntimeTest {
     }
 
     @Test
-    void rootProcessExecutesOnControlPlaneCarrierPool() {
+    void rootProcessExecutesOnDedicatedRootTaskCarrierPool() {
         try (ActorRuntime runtime = new ActorRuntime()) {
             String threadName = runtime.executeRootTask(
                     () -> Thread.currentThread().getName());
             assertTrue(
-                    threadName.startsWith("ores-control-plane-dispatcher-"),
+                    threadName.startsWith("ores-root-task-dispatcher-"),
                     threadName);
         }
     }
@@ -1626,14 +1626,14 @@ final class ActorRuntimeTest {
 
             String firstThread = first.executeRootTask(
                     () -> Thread.currentThread().getName());
-            assertTrue(firstThread.startsWith("ores-process-control-plane-dispatcher-"),
+            assertTrue(firstThread.startsWith("ores-process-root-task-dispatcher-"),
                     firstThread);
 
             first.close();
 
             String secondThread = second.executeRootTask(
                     () -> Thread.currentThread().getName());
-            assertTrue(secondThread.startsWith("ores-process-control-plane-dispatcher-"),
+            assertTrue(secondThread.startsWith("ores-process-root-task-dispatcher-"),
                     secondThread);
         } finally {
             try {
@@ -1672,8 +1672,8 @@ final class ActorRuntimeTest {
                     }));
 
             assertTrue(
-                    runtime.controlDispatcherStats().overrunTurns() >= 1,
-                    "root wall-time expiration must be observable on the control-plane dispatcher");
+                    runtime.rootTaskDispatcherStats().overrunTurns() >= 1,
+                    "root wall-time expiration must be observable on the root-task dispatcher");
             assertEquals(
                     0,
                     runtime.dispatcherStats(ActorRuntime.ActorKind.SHARED).overrunTurns(),
@@ -1726,7 +1726,7 @@ final class ActorRuntimeTest {
 
             assertTrue(
                     actorRan.await(2, TimeUnit.SECONDS),
-                    "a control-plane root/main task must not consume shared-actor carriers");
+                    "a root/main task must not consume shared-actor carriers");
 
             releaseRoot.countDown();
             rootCaller.join(2_000);

@@ -184,7 +184,7 @@ final class FutureLanguageTest {
                           end
                         end
                         """)));
-        assertTrue(wrongSyncReturn.getMessage().contains("must return Future"));
+        assertTrue(wrongSyncReturn.getMessage().contains("Awaitable<T>.getAwait()"));
 
         IllegalArgumentException wrongAsyncReturn = assertThrows(
                 IllegalArgumentException.class,
@@ -197,7 +197,7 @@ final class FutureLanguageTest {
                           end
                         end
                         """)));
-        assertTrue(wrongAsyncReturn.getMessage().contains("async Awaitable"));
+        assertTrue(wrongAsyncReturn.getMessage().contains("Awaitable<T>.getAwait()"));
     }
 
     @Test

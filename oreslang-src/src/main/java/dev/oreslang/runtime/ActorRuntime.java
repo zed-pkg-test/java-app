@@ -2945,6 +2945,11 @@ public final class ActorRuntime implements AutoCloseable {
         public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
             Objects.requireNonNull(unit);
             if (timeout < 0) throw new IllegalArgumentException("timeout must be non-negative");
+            ActorExecutionContext caller = CURRENT_ACTOR_EXECUTION.get();
+            if (caller != null && caller.kind() == ActorKind.UNTRUSTED) {
+                throw new SecurityException(
+                        "untrusted actors cannot synchronously await actor termination; use messages/monitoring");
+            }
             if (ActorRuntime.isOresCarrierThread()) {
                 throw new IllegalStateException(
                         "ActorRef.awaitTermination cannot block an OresVM carrier; await ref.done() instead");
@@ -3731,6 +3736,11 @@ public final class ActorRuntime implements AutoCloseable {
             throw new IllegalStateException(
                     "synchronous actor-callable invocation from an actor turn is forbidden; "
                             + "use spawn/mailbox-oriented actor composition");
+        }
+        if (inRootExecution() && policyCeiling.adversarial()) {
+            throw new SecurityException(
+                    "adversarial root/main execution cannot synchronously invoke an actor; "
+                            + "use nonblocking spawn and continuation-based await");
         }
         if (inRootExecution()) {
             throw new IllegalStateException(
@@ -5374,13 +5384,6 @@ public final class ActorRuntime implements AutoCloseable {
             rootTask.cancelFromRuntimeClose();
         }
 
-        if (firstClose && ownsVm) {
-            // Dedicated/test runtimes own their complete VM scheduler set.
-            // Production OresContext runtimes attach to OresVM.process() and
-            // must never shut down carriers serving another live generation.
-            vm.shutdownNow();
-        }
-
         long deadline = System.nanoTime() + CLOSE_WAIT_NANOS;
         boolean interrupted = false;
         List<ActorId> stillRunning = new ArrayList<>();
@@ -5432,6 +5435,14 @@ public final class ActorRuntime implements AutoCloseable {
                     "ActorRuntime close did not observe full actor termination: "
                             + stillRunning.size() + " actor(s), "
                             + activeRootTasks.get() + " root task(s) still running");
+        }
+
+        if (firstClose && ownsVm) {
+            // Dedicated/test runtimes own their complete VM scheduler set, but
+            // carriers must remain alive while actors/root tasks unwind their
+            // final runtime cleanup. Shutting the VM down earlier races the
+            // root-task finally path and can strand lifecycle accounting.
+            vm.shutdownNow();
         }
 
         for (SyncCell<?> cell : List.copyOf(syncCells)) cell.invalidateFromRuntime();
