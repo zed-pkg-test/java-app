@@ -136,11 +136,22 @@ final class IncrementalFunctorStaticTest {
             var helperGeneration = hot.load(helper);
             assertEquals("worker.ores", workerGeneration.codeUnitId());
             assertEquals(worker.sourceDigest(), workerGeneration.sha256());
+            assertNull(hot.active("worker.ores"));
+            assertNull(hot.active("helper.ores"));
+            assertTrue(hot.activeGenerations().isEmpty());
+            assertFalse(workerGeneration.started());
+            assertFalse(helperGeneration.started());
+
+            workerGeneration.start();
+            helperGeneration.start();
+            workerGeneration.activate();
+            helperGeneration.activate();
+
             assertSame(workerGeneration, hot.active("worker.ores"));
             assertSame(helperGeneration, hot.active("helper.ores"));
             assertEquals(2, hot.activeGenerations().size());
-            assertFalse(workerGeneration.started());
-            assertFalse(helperGeneration.started());
+            assertTrue(workerGeneration.started());
+            assertTrue(helperGeneration.started());
         }
     }
 
