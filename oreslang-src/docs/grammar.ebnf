@@ -35,13 +35,14 @@ module_member   = actor_decl
 visibility      = [ "pub" | "private" ] ;
 callable_modifier = "abstract" | "async" | "nlex" ;
 method_modifier   = "abstract" | "async" ;
+actor_method_modifier = "abstract" ;
 
 callable_decl   = { annotation } visibility { callable_modifier } callable_kind IDENT [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
 callable_kind   = "fnc" | "routine" ;
 
 actor_callable_decl
-                = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" | "untrusted" ] "actor" "fnc" IDENT [ generic_params ]
+                = { annotation } visibility [ "nlex" ] [ "shared" | "untrusted" ] "actor" "fnc" IDENT [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
 
 actor_decl      = visibility [ "shared" | "untrusted" ] "actor" IDENT [ generic_params ]
@@ -54,7 +55,7 @@ actor_member    = field_decl
                 | actor_method_decl
                 | static_function_decl ;
 actor_method_decl
-                = { annotation } visibility { callable_modifier } [ "fnc" ] method_name [ generic_params ]
+                = { annotation } visibility { actor_method_modifier } [ "fnc" ] method_name [ generic_params ]
                   method_head return_spec block ;
 
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
@@ -170,7 +171,7 @@ primary         = literal
                 | object_literal
                 | "(" expression ")" ;
 
-lambda          = [ "nlex" ] ( pipe_lambda | typed_legacy_lambda ) ;
+lambda          = [ "async" ] [ "nlex" ] ( pipe_lambda | typed_legacy_lambda ) ;
 pipe_lambda     = "|" [ lambda_param { "," lambda_param } ] "|" "->" block ;
 lambda_param    = IDENT | type_ref IDENT ;
 typed_legacy_lambda
@@ -238,6 +239,13 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      top-level callables/classes, and built-ins remain statically resolvable.
    - nlex may qualify an actor fnc as an additional capture-free guarantee;
      actor classes and actor/class methods do not accept nlex.
+   - Ordinary await is legal only inside an async fnc/routine/lambda. async
+     callables are MAY_SUSPEND and calling one produces Future<T> for logical
+     return type T.
+   - Actor callables and actor methods are inherently MAY_SUSPEND/async because
+     mailbox turns may suspend. Writing "async actor" or an explicit async
+     actor method is rejected as a redundant modifier; actor suspension still
+     targets the actor scheduler/lease rather than an ordinary OresScheduler.
    - fnc and routine declarations do not overload.
    - instance methods may overload only when arity differs.
    - class-level functions use "static fnc"; they have no self receiver and are
