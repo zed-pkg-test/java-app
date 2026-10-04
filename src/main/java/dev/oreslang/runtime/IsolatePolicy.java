@@ -37,6 +37,8 @@ public record IsolatePolicy(
         PROCESS_GLOBAL,
         /** Trusted authority to expose/revoke selected canonical Symbols at the untrusted boundary. */
         SYMBOL_EXPORT,
+        /** Access to one singleton state instance in the caller's semantic memory slot. Never adversarial. */
+        SINGLETON_STATE,
         GC_CONTROL,
         ACTOR_SHARE_READONLY,
         SHARED_MEMORY,
@@ -82,6 +84,10 @@ public record IsolatePolicy(
             throw new IllegalArgumentException(
                     "adversarial/untrusted isolates cannot grant SYMBOL_EXPORT");
         }
+        if (adversarial && capabilities.contains(Capability.SINGLETON_STATE)) {
+            throw new IllegalArgumentException(
+                    "adversarial/untrusted isolates cannot grant SINGLETON_STATE");
+        }
     }
 
     /**
@@ -96,7 +102,7 @@ public record IsolatePolicy(
     public static IsolatePolicy developer() {
         return new IsolatePolicy(
                 Set.of(Capability.STDIN, Capability.STDOUT, Capability.PROCESS_INFO, Capability.PROCESS_GLOBAL,
-                        Capability.SYMBOL_EXPORT, Capability.GC_CONTROL, Capability.ACTOR_SHARE_READONLY,
+                        Capability.SYMBOL_EXPORT, Capability.SINGLETON_STATE, Capability.GC_CONTROL, Capability.ACTOR_SHARE_READONLY,
                         Capability.SHARED_MEMORY, Capability.HOT_CODE_LOAD),
                 512L * 1024 * 1024, 8192, Duration.ofMinutes(10), false);
     }
