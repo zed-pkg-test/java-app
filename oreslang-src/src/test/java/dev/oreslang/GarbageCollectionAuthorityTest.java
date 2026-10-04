@@ -84,7 +84,7 @@ final class GarbageCollectionAuthorityTest {
             CountDownLatch observed = new CountDownLatch(1);
             AtomicReference<IsolatePolicy> policy = new AtomicReference<>();
 
-            ActorRuntime.ActorRef<String> actor = runtime.spawnPrivate(
+            ActorRuntime.ActorRef<String> actor = runtime.spawnPrivateTrusted(
                     IsolatePolicy.developer(),
                     factoryContext -> {
                         policy.set(factoryContext.policy());
