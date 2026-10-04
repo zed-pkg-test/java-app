@@ -739,10 +739,10 @@ public final class TypeChecker {
                 }
                 if (receiver instanceof Named named) {
                     if (named.name().equals("SharedMutex")
-                            && currentActorKind != Ast.ActorKind.NONE
-                            && member.member().equals("with_lock")) {
+                            && currentActorKind != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException(
-                                "actor code cannot use blocking SharedMutex.with_lock(); use try_lock() or await lock_async()");
+                                "actor code cannot acquire or mutate external SharedMutex<T>; "
+                                        + "use actor-owned state for writes and an explicit RwLock read capability for external reads");
                     }
                     if ((named.name().equals("Mutex") || named.name().equals("SharedMutex"))
                             && named.arguments().size() == 1
@@ -2243,7 +2243,14 @@ public final class TypeChecker {
         List<Type> patterns = params.stream().map(p -> resolveParam(p, unique, callableSelf)).toList();
 
         for (int i = 0; i < arguments.size(); i++) {
-            Type actual = typeOf(arguments.get(i), env, callerGenerics, callerSelf);
+            Ast.Expr argument = arguments.get(i);
+            // A lambda is contextually typed. Evaluating it without its expected
+            // function shape loses inferred parameter types and can produce bogus
+            // expression errors before contextual validation runs. Generic
+            // parameters must therefore be inferred from non-lambda arguments
+            // (or explicit type arguments) in this pass.
+            if (argument instanceof Ast.LambdaExpr) continue;
+            Type actual = typeOf(argument, env, callerGenerics, callerSelf);
             inferGenericBindings(patterns.get(i), actual, bindings, fixedBindings, label);
         }
         Set<String> unbound = new HashSet<>(unique);
@@ -2254,8 +2261,13 @@ public final class TypeChecker {
             if (containsGenericNamed(expected, unbound)) {
                 throw new IllegalArgumentException("cannot infer all generic parameters for " + label + " from argument " + (i + 1));
             }
-            validateLambdaArgument(arguments.get(i), expected, env, callerGenerics, callerSelf);
-            requireAssignable(typeOf(arguments.get(i), env, callerGenerics, callerSelf), expected, "argument " + (i + 1));
+            Type actual = typeOfAgainstExpected(
+                    arguments.get(i),
+                    expected,
+                    env,
+                    callerGenerics,
+                    callerSelf);
+            requireAssignable(actual, expected, "argument " + (i + 1));
         }
 
         Type result = substituteGenerics(resolve(returnRef, unique, callableSelf), bindings);
