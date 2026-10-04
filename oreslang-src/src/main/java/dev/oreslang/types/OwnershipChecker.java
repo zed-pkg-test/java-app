@@ -741,14 +741,6 @@ public final class OwnershipChecker {
 
         checkExpr(call.callee(), scope, false);
         for (Ast.Expr arg : call.arguments()) {
-            if (param.mutable() && arg instanceof Ast.NameExpr name) {
-                VarState source = requireState(scope, name.name());
-                if (source.origin == Origin.ACTOR_INPUT) {
-                    throw error(callable + " argument " + (i + 1)
-                            + " cannot upgrade actor-boundary input '" + name.name()
-                            + "' to mutable helper authority");
-                }
-            }
             ValueInfo argument = checkExpr(arg, scope, true);
             if (containsMutexGuardType(argument.type)) {
                 throw error("guard-bearing values cannot cross an arbitrary call boundary");

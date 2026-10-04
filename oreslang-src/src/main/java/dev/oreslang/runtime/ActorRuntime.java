@@ -3101,11 +3101,9 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Compiler/interpreter-only lowering target for persistent source-level
-     * shared actor classes. The factory may capture compiler/runtime-owned
-     * declaration state, but guest code never receives the factory or mutable
-     * actor object. PRIVATE/UNTRUSTED source actor classes require their
-     * isolation-aware lowering and must not use this trusted shared-state path.
+     * Compiler/interpreter lowering target for persistent source-level SHARED
+     * actor classes. Guest code never receives this factory; actor-owned state
+     * is created after the runtime has installed the actor context.
      */
     public <M> ActorRef<M> spawnSourceSharedActor(BehaviorFactory<M> behaviorFactory) {
         Objects.requireNonNull(behaviorFactory, "behaviorFactory");

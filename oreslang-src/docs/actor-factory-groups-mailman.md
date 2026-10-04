@@ -1,344 +1,318 @@
-# Actor factories, shared-actor groups, and mailmen
+# Persistent actor classes, generated factories, groups, and mailmen
 
-Status: design contract stacked on the resumable actor-event-loop work.
+Status: hardened design contract for the current actor-class/runtime model.
 
-This document reconciles the actor callable/spawn work with the serialized shared-actor event-loop model.
+This document distinguishes three concepts that must not collapse into one
+another:
 
-## 1. Core distinction
+1. **persistent actor classes** — long-lived typed mailbox objects;
+2. **actor fnc/routine callables** — one-shot scheduled actor-domain jobs;
+3. **runtime actor factories** — compiler/host construction descriptors used by
+   supervisors, groups, and generated catalogs.
 
-Oreslang has persistent actors. An `actor fnc` / `actor routine` is the **factory/launch entrypoint** for one persistent actor; it is not an ordinary function and it is not itself a one-shot inbox turn.
+A source `actor fnc` is **not** the persistent actor-class factory ABI.
 
-A spawn target MUST be declared with an actor execution-domain modifier:
+## 1. Persistent source actors are actor classes
 
-- `actor fnc` / `actor routine` -> SHARED domain
-- `isoactor fnc` / `isoactor routine` -> PRIVATE domain
-- `untrusted actor fnc` / `untrusted actor routine` -> UNTRUSTED domain
+A persistent actor is a class with an `ActorKind`:
 
-The callable's declared return type MUST satisfy the compiler-owned protocol:
+- `actor` / `shared actor` / `extends Actor` -> SHARED
+- `isoactor` / `extends IsoActor` -> PRIVATE
+- `untrusted actor` / `extends UntrustedActor` -> UNTRUSTED
 
-```ores
-ActorBehavior<In, Out>
-```
-
-A concrete actor class may satisfy this protocol structurally.
-
-The behavior has exactly one public inbox ingress:
+Example:
 
 ```ores
-compiler-generated mailbox dispatch over the actor's public protocol methods
-```
+define actor Counter as
+  let int value = 0;
 
-For shared actors, every other actor method and every mutable field is private to the behavior. The runtime never dispatches arbitrary public methods.
+  constructor(initial: int) {
+    self.value = initial;
+  }
 
-`Out` is the actor's typed outgoing-mail contract. The actor may emit zero or more `Out` values during a turn; these are appended to its ActorGroup outbox and are not returned from the hidden dispatcher.
-
-A no-output actor uses `ActorBehavior<In, void>`.
-
-## 2. Example
-
-```ores
-define struct Increment
-  int amount;
-end
-
-define struct CounterChanged
-  int value;
-end
-
-shared actor Counter
-  let int value;
-
-  pub receive(Increment msg): void {
-    self.value = self.value + msg.amount;
-    emit CounterChanged(self.value);
+  pub add(delta: int): void {
+    self.value = self.value + delta;
     return;
   }
+
+  pub current(): int {
+    return self.value;
+  }
+
+  private normalized(delta: int): int {
+    return delta;
+  }
 end
-
-pub actor fnc counter(int initial): ActorBehavior<Increment, CounterChanged> {
-  return new Counter(initial);
-}
-
-pub routine main(): void {
-  val counters = actor_groups.define<CounterChanged>({
-    min_actors: 0,
-    max_actors: 64,
-    inbox_capacity: 1024,
-    outbox_capacity: 4096
-  });
-
-  val pending = spawn counter(10) with {
-    group: counters
-  };
-
-  // identity is synchronous after reservation/admission
-  stdio.println(pending.id);
-
-  // READY means the behavior exists and its inbox endpoint is usable
-  val counter_ref = await pending.ready;
-
-  counter_ref.send(Increment(5));
-  return;
-}
 ```
 
-The actor factory runs during STARTING with the child actor context installed. It may allocate/initialize actor-owned state, but it may not leak actor-owned mutable state, capture caller-owned mutable aliases, block a carrier, or perform an incomplete `await`.
+Public instance methods form the typed source protocol. Private methods are
+ordinary direct `self` calls inside the actor turn.
 
-## 3. Spawn contract
-
-```text
-RESERVED -> STARTING -> READY -> RUNNING -> TERMINATED
-                  \-> FAILED_TO_START
-```
-
-`spawn actor_factory(args...) with { group: group_capability }` performs only bounded synchronous launch work. The `group` entry is required and non-null:
-
-1. validate the spawn target is an actor factory;
-2. resolve and authenticate the supplied ActorGroup capability;
-3. require the group's execution domain to match the actor factory domain;
-4. validate/copy/freeze/transfer launch arguments for the target actor domain;
-5. reserve group/process/domain quotas and ActorId transactionally;
-6. create local control futures;
-7. enqueue actor initialization;
-8. return the launch ticket.
-
-The actor factory executes later on the target actor dispatcher. READY is published only after:
-
-- factory execution completes successfully;
-- the returned value satisfies `ActorBehavior<In, Out>`;
-- the behavior is rooted as actor-owned state;
-- the single hidden mailbox dispatcher for the public typed protocol is installed;
-- group/mailman routing is attached.
-
-Startup failure fails `ready` and `done`, tears down the actor, releases its group/generation/quota leases, and never publishes a usable ActorRef.
-
-## 4. ActorSpawn and ActorRef
-
-Persistent actors do not have a function-result future.
-
-The source contract is:
-
-```ores
-ActorSpawn<In, Out> {
-  id: ActorId;
-  ready: Future<ActorRef<In>>;
-  done: Future<ActorExit>;
-}
-```
-
-`await spawn actor_factory(...)` is shorthand for awaiting `ready` and therefore returns `ActorRef<In>`.
-
-```ores
-ActorRef<In> {
-  id: ActorId;
-  send(In message): void;
-  is_alive(): bool; // unavailable where sandbox policy forbids lifecycle inspection
-}
-```
-
-`ActorSpawn` remains local control state and is not Sendable/shared-safe.
-
-The one-shot `ActorSpawn<T>.result` semantics introduced by the earlier spawn draft are intentionally not the persistent-actor ABI. If Oreslang retains one-shot actor tasks, they must use a distinct task abstraction rather than overloading the persistent actor factory contract.
-
-## 5. Shared actor mutation and nlex/ownership
-
-"Shared actor" means shared-address-space scheduling/capability domain, not unrestricted shared mutation.
-
-A shared actor turn may mutate only:
-
-1. actor-owned state rooted in `self`;
-2. fresh turn-local state;
-3. explicit compiler/runtime synchronization or capability objects.
-
-It may not mutate arbitrary caller/global/external mutable state.
-
-Actor-owned mutable state is non-escaping. The ownership checker must reject:
-
-- returning a mutable actor-state alias;
-- sending a borrow/reference into a mailbox;
-- storing actor-owned mutable state in global/singleton/external state;
-- capturing actor-owned mutable state in an escaping closure;
-- retaining a turn-scoped borrow across `await`.
-
-The existing `nlex` model should be reused for actor factories/actor-owned lexical state where applicable, but actor isolation is a stronger semantic rule and must not depend solely on surface `nlex` spelling.
-
-## 6. Event loop and scheduling
-
-No scheduler or mailman dynamically selects across every actor inbox.
-
-Incoming path:
-
-```text
-send(message)
-  -> actor.inbox.push(message)
-  -> CAS IDLE -> QUEUED
-  -> ActorGroup/domain runnable queue.push(actor_ref)
-```
-
-A carrier obtains an actor execution lease and runs a bounded quantum. At most one carrier executes guest code for one actor at a time.
-
-`await`, timers, and I/O completion use the existing continuation path. Completion threads enqueue wakeups only; they never execute actor code. A suspended logical inbox turn remains serialized until its continuation completes.
-
-Generator `yield` is unrelated and must never become an actor scheduling primitive.
-
-## 7. ActorGroup and mailman
-
-Every persistent actor belongs to exactly one `ActorGroup<Out>`. Source-level `spawn` MUST supply a non-null group capability explicitly; there is no implicit fallback group at spawn time.
+There is still exactly **one runtime mailbox**. The compiler lowers the public
+method set into a hidden tagged message/dispatcher ABI. A source method named
+`receive` has no special privilege.
 
 Conceptually:
 
 ```text
+Counter.add(int): void
+Counter.current(): int
+
+        lowers to
+
+hidden CounterProtocol =
+    Add(int, Reply<void>)
+  | Current(Reply<int>)
+```
+
+The exact hidden representation is compiler/runtime-private and may change as
+long as the protocol ABI digest remains stable.
+
+## 2. ActorRef is typed RPC-over-mailbox, not a raw inbox
+
+External code receives `ActorRef<Counter>` or an interface-narrowed
+`ActorRef<CounterAPI>`.
+
+```ores
+val counter = spawn Counter(40);
+
+await counter.add(2);
+val value = await counter.current();
+```
+
+The source projection is:
+
+```text
+Counter.add(int): void
+ActorRef<Counter>.add(int): Future<void>
+
+Counter.current(): int
+ActorRef<Counter>.current(): Future<int>
+```
+
+`ActorRef.send`, `ActorRef.receive`, and a public mailbox object are not
+source-language protocol surfaces for actor classes. The runtime may use raw
+mailbox primitives internally, but guest code dispatches only declared typed
+protocol methods.
+
+Protocol methods are not first-class bound callback objects. This is invalid:
+
+```ores
+val callback = counter.add;
+```
+
+Use an explicit closure when a callback is desired:
+
+```ores
+val callback = |int x| -> {
+  await counter.add(x);
+};
+```
+
+That makes capture, lifetime, suspension, and ownership visible to the
+compiler.
+
+## 3. Protocol inheritance and interfaces
+
+Actor inheritance preserves the execution/isolation domain. A child may inherit
+its entire public protocol from an actor parent.
+
+A child may add public endpoints, but it may not shadow an inherited public
+endpoint with a private method of the same name/arity; protocol visibility is
+monotone.
+
+For hot loading and abstraction, an actor may implement an interface:
+
+```ores
+define interface CounterAPI
+  fnc add(delta: int): void;
+  fnc current(): int;
+end
+
+define actor Counter implements CounterAPI as
+  // ...
+end
+```
+
+Then callers may narrow:
+
+```ores
+val ActorRef<CounterAPI> counter = spawn Counter(0);
+```
+
+Hot-loaded implementation code may remain opaque as long as it satisfies the
+declared interface/ABI, mailbox schemas, lifecycle/capability manifest, and
+sandbox policy.
+
+## 4. Boundary rules
+
+Every public actor endpoint is an actor boundary.
+
+The compiler must reject:
+
+- method-level generic protocol endpoints;
+- `mut` protocol parameters;
+- borrows/references crossing the mailbox;
+- `Future`, mutex guards, actor spawn tickets, or mutable host objects crossing
+  the boundary;
+- actor instances transported by value;
+- writable external shared state;
+- public actor fields;
+- actor constructors that are public, generic, static, or suspending;
+- raw imported/effect-unknown helper calls from actor code.
+
+`ActorRef<Protocol>` is an explicit capability and may cross a boundary when
+its protocol type is valid.
+
+A SHARED actor may receive an explicit `RwLock<T>` read capability when `T`
+is shared-safe, but actor code cannot acquire a write guard. PRIVATE and
+UNTRUSTED actors cannot use shared external memory.
+
+Actor restrictions propagate transitively through ordinary local functions and
+methods called by actor code. A helper does not become an effect escape hatch
+merely because it lacks an `actor` keyword.
+
+## 5. One-shot actor callables are separate
+
+`actor fnc` / `actor routine` remain one-shot scheduled jobs in an actor
+execution domain.
+
+They are invoked with `spawn`, not by ordinary call syntax, and produce an
+`ActorSpawn<R>` control handle:
+
+```text
+ActorSpawn<R>
+  id
+  ready : Future<ActorRef<?>>
+  done  : Future<bool>
+  result: Future<R>     // only when R != void
+```
+
+This is intentionally different from a persistent actor class. Do not use
+`actor fnc` as a hidden constructor for a long-lived class protocol.
+
+## 6. Runtime generated factories
+
+The Java/runtime `BehaviorFactory` abstraction is a kernel construction
+mechanism. It is not the source `actor fnc` ABI.
+
+For source actor classes, the compiler/linker may generate a construction
+descriptor/factory that:
+
+1. reserves the ActorId/domain/group quotas;
+2. validates and transports constructor arguments;
+3. initializes actor-owned state under the target actor context;
+4. installs the hidden typed protocol dispatcher;
+5. publishes READY only after initialization succeeds.
+
+The SHARED reference evaluator uses the privileged
+`spawnSourceSharedProtocolActor` lowering path. PRIVATE and UNTRUSTED source
+actor classes require their isolation-aware OresVM lowering and must not be
+silently routed through the shared evaluator.
+
+## 7. ActorFactoryCatalog meaning
+
+`ActorFactoryCatalog` is immutable, generated, and generation-scoped. It is
+link metadata, not a self-registering runtime service.
+
+A descriptor key is path-oriented:
+
+```text
+workers/worker.ores::Worker
+```
+
+The existing descriptor `inputType` should be read as the compiler-generated
+hidden protocol-envelope ABI for a persistent actor class, not as evidence that
+source actors have one public `receive(In)` method. `outputType` describes
+the group's typed emitted-output contract where applicable.
+
+The descriptor's ABI digest must cover the full public protocol shape,
+constructor contract, actor kind, relevant capability contract, and generated
+wire/message tags. Reordering private helpers must not perturb it; changing a
+public endpoint must.
+
+Catalogs are pinned to a code generation. Existing actors retain the generation
+lease from which they were constructed.
+
+## 8. ActorGroup and mailman
+
+An ActorGroup owns runtime policy and routing for a set of actors:
+
+```text
 ActorGroup<Out>
   actor registry
-  runnable scheduling state
-  one bounded inbox per actor
-  one bounded MPSC outbox<ActorMail<Out>>
-  exactly one logical ActorMailman<Out>
-  supervisor/lifecycle policy
+  bounded inbox policy
+  bounded MPSC outbox<ActorMail<Out>>
+  one logical serialized ActorMailman<Out>
+  supervisor/restart policy
   quotas
 ```
 
-Actors never expose one outbox per actor to a giant `select`. They append outgoing mail to the group's bounded MPSC outbox.
+No scheduler scans/selects across all actor inboxes. A mailbox transition makes
+one ActorRef runnable in its execution-domain queue.
+
+The mailman is one logical serialized consumer scheduled on the CONTROL pool,
+not a permanently dedicated OS thread and not an actor-domain carrier.
+
+Actors may emit bounded group output:
 
 ```text
-Actor A --\
-Actor B ----> group.outbox ---> logical mailman
-Actor C --/
+actor turn -> emit Out -> group outbox -> ActorMailman
 ```
 
-The mailman is one logical serialized consumer, not one permanently dedicated OS thread. It runs on the Oreslang VM CONTROL scheduler (shared with supervisors/root control work, never an actor-domain pool) and may migrate across control-plane carriers between quanta.
+The mailman/supervisor may route a reply/event by invoking the target actor's
+typed protocol, which re-enters that actor's one mailbox.
 
-A future implementation may partition mailman work by an explicit routing key, but parallel routing must be opt-in because it weakens total ordering.
+## 9. Group capabilities
 
-## 8. Outgoing envelope
+Supervisor/root code may hold `ActorGroupRef<Out>`, which is control-plane
+authority.
 
-The group outbox stores envelopes:
+Trusted actor code may receive only an opaque `ActorGroupHandle<Out>`. The
+handle contains authenticated identity/domain/generation capability data and no
+pointer to the runtime, scheduler, registry, inbox, outbox, or mailman state.
 
-```ores
-ActorMail<Out> {
-  actor: ActorId;
-  group: ActorGroupId;
-  correlation_id: Option<CorrelationId>;
-  message: Out;
-}
-```
+UNTRUSTED actors never receive a spawn-capable group handle.
 
-Trace/span id, request id, deadline, sequence, or other runtime metadata may be attached without becoming guest-mutable actor state.
+Group ownership therefore does not transfer merely because an actor can request
+a child spawn in that group.
 
-The mailman/supervisor routes with ordinary Oreslang pattern matching:
+## 10. Scheduling
 
-```ores
-match mail.message {
-  CounterChanged(value) -> {
-    // route/persist/reply/etc.
-  }
-  _ -> {
-    // group policy
-  }
-}
-```
+All actor kinds preserve:
 
-The actor itself does not receive ambient authority merely because the mailman can perform a side effect.
+- one active execution lease per actor;
+- bounded carrier pools by actor domain;
+- local/global ready queues with work stealing only within the domain;
+- no mailbox scanning;
+- bounded turn/reduction/fuel budgets;
+- `await` as a hard scheduler boundary;
+- completion threads enqueueing wakeups only;
+- continuation state rooted until the logical turn finishes.
 
-## 9. Supervisor vs mailman
+A protocol request that suspends remains the same serialized logical mailbox
+turn until its continuation completes.
 
-Keep the concepts distinct even if the first implementation shares machinery.
+## 11. Group configuration
 
-Mailman:
-- consumes ordinary actor output;
-- routes replies/events;
-- preserves configured ordering.
+`.ores-actors.toml` is deployment authority. Limits are ceilings, not hints.
 
-Supervisor:
-- owns lifecycle;
-- restart/escalation policy;
-- generation leases;
-- actor/group shutdown;
-- startup/failure handling.
+Current runtime policy uses a canonical `factory = "<path>::<symbol>"` key
+when a supervisor needs to recreate actors automatically. For persistent source
+actors, that key names a **generated actor-class constructor descriptor**, not a
+source `actor fnc` return value.
 
-An unrecovered actor `raise`/`panic` goes to supervision policy, not through ordinary outgoing mail.
-
-## 10. Compatibility with the current PR stack
-
-This design is intentionally aligned with the current actor work:
-
-- the single-carrier execution lease and three isolated SHARED/PRIVATE/UNTRUSTED dispatcher domains remain unchanged;
-- resumable actor continuations, timers, and next-tick wakeups remain unchanged;
-- generator `yield` remains separate from actor suspension;
-- actor generation leases must cover factory initialization plus the full actor lifetime;
-- global/singleton refs and shared-mutable capabilities remain forbidden from untrusted actors;
-- actor-owned state follows ownership/borrow escape rules;
-- actor HTTP/native transport ownership remains capability-based and does not turn shared actors into arbitrary socket owners.
-
-The main semantic correction is to the earlier one-shot spawn draft: a persistent actor factory returns an `ActorBehavior<In, Out>`, and `spawn` returns a launch/control ticket rather than treating the actor callable's application return value as the actor's result.
-
-## 11. Compiler/runtime enforcement checklist
-
-Compiler:
-
-- reject direct calls to actor factories;
-- reject `spawn` of non-actor callables;
-- require actor factory return type to satisfy `ActorBehavior<In, Out>`;
-- require at least one public monomorphic actor protocol method on a concrete behavior;
-- reject additional public shared-actor methods/fields;
-- derive `ActorSpawn<In, Out>` from the factory return type;
-- type `await spawn` as `ActorRef<In>`;
-- type `ActorRef.send` against `In`;
-- type `emit` against `Out`;
-- reject actor-owned mutable alias escape and forbidden external mutation;
-- preserve actor-domain/capability checks transitively.
-
-Runtime:
-
-- execute factories only after ActorId reservation on the target dispatcher;
-- publish READY only after successful behavior construction/validation;
-- root returned behavior exclusively in the actor cell;
-- enqueue one actor ref per runnable transition, never scan mailboxes;
-- enforce one active execution lease per actor;
-- bound mailbox, continuation, timer, and group-outbox admission;
-- route emitted mail through the actor's group outbox;
-- reclaim group/actor/generation/resources exactly once on failure/termination.
-
-
-## 12. Startup configuration: `.ores-actors.toml`
-
-Actor-group policy is loaded and validated before `main` is admitted. The runtime must never discover group ceilings lazily after user actors are already running.
-
-Recommended deployment file:
+Example:
 
 ```toml
 version = 1
-
-[process]
-max_groups = 4096
-max_dynamic_groups = 2048
-max_actors = 16384
-
-[dynamic_defaults]
-max_actors = 64
-inbox_capacity = 1024
-outbox_capacity = 4096
-restart_strategy = "one_for_one"
-max_restarts = 3
-restart_window = "5s"
-
-[[group]]
-name = "default"
-kind = "shared"
-min_actors = 0
-max_actors = 4096
-inbox_capacity = 2048
-outbox_capacity = 8192
-restart_strategy = "one_for_one"
-max_restarts = 10
-restart_window = "5s"
 
 [[group]]
 name = "workers"
 kind = "shared"
 min_actors = 8
 max_actors = 128
-factory = "workers/worker.ores::worker"
+factory = "workers/worker.ores::Worker"
 inbox_capacity = 1024
 outbox_capacity = 4096
 restart_strategy = "one_for_one"
@@ -351,7 +325,7 @@ kind = "shared"
 min_actors = 0
 max_actors = 32
 max_instances = 1024
-factory = "workers/tenant_worker.ores::worker"
+factory = "workers/tenant_worker.ores::TenantWorker"
 inbox_capacity = 512
 outbox_capacity = 2048
 restart_strategy = "one_for_one"
@@ -359,408 +333,77 @@ max_restarts = 3
 restart_window = "5s"
 ```
 
-The file is host/deployment authority, not actor-owned mutable state. It should be validated before guest execution using the same generated-contract discipline as other Ores configuration files.
+A positive `min_actors` requires a factory key because the supervisor needs a
+concrete generation-pinned actor constructor to restore the floor.
 
-All configured limits are ceilings. Source code may request a stricter/lower value but may not widen a deployment ceiling.
+Dynamic overrides are narrowing-only. They may not widen capacities,
+capabilities, restart intensity, or change actor execution domain.
 
-### Why a factory is required for a positive minimum
+## 12. Supervision
 
-A numeric `min_actors` does not identify what the supervisor should create. Therefore:
+Use OTP-style restart vocabulary:
 
-- `min_actors == 0` requires no factory;
-- `min_actors > 0` requires a concrete actor factory/template;
-- the supervisor creates enough instances of that factory to reach the floor before the group is declared READY;
-- after a crash or normal exit, the supervisor reconciles back to the floor unless the whole group is draining/stopping.
+- `one_for_one`
+- `one_for_all`
+- `rest_for_one`
 
-This is the Oreslang equivalent of OTP supervision child specs, with an explicit pool floor layered on top.
+Dynamic groups currently use `one_for_one` only.
 
-## 13. Static groups vs dynamic groups
+Restart intensity is bounded by `max_restarts` within `restart_window`.
+Exceeding the window escalates rather than spinning forever.
 
-There are two lifecycle classes.
+Restart policy remains distinct:
 
-### Static startup group
+- `permanent`
+- `transient`
+- `temporary`
 
-A `[[group]]` entry is part of application desired state.
+An unrecovered actor failure goes to supervision. It is not ordinary outgoing
+mail.
 
-- created before `main`;
-- recreated from configuration when the application/supervisor generation restarts;
-- may have `min_actors > 0`;
-- may use `one_for_one`, `one_for_all`, or `rest_for_one` where ordering is meaningful;
-- receives a stable logical group name, but every concrete runtime incarnation still has a generation-safe `ActorGroupId`.
+## 13. Tree shaking and hot reload
 
-### Dynamic group
+Actor declarations do not self-register or run at import time.
 
-A dynamic group is created at runtime from a configured `group_template`.
+Build roots include:
 
-Conceptually:
+1. ordinary executable roots such as `main`;
+2. actor classes referenced by static group factory keys;
+3. actor classes referenced by dynamic group templates;
+4. deliberately exported/hot-load entry actors;
+5. ordinary statically reachable actor classes/callables.
 
-```ores
-val group = actor_groups.create(
-  "tenant:acme",
-  template: "tenant-workers",
-  max_actors: 16
-);
-```
+The linker emits only required generation-scoped descriptors. No reflection,
+classpath scan, static initializer, or mutable global registry is required.
 
-Creation is a supervisor/root capability operation. Ordinary actor code does not gain ambient permission to create arbitrary groups; it must either receive an explicit group-management capability or ask its supervisor by message. Untrusted actors can never create groups.
+A new hot-load generation gets a new immutable catalog. Existing actors remain
+pinned to their birth generation until drained/terminated.
 
-Dynamic overrides are **narrowing only**:
+## 14. Enforcement checklist
 
-```text
-requested.max_actors <= template.max_actors
-requested.inbox_capacity <= template.inbox_capacity
-requested.outbox_capacity <= template.outbox_capacity
-requested.min_actors <= requested.max_actors
-```
+Compiler/type system:
 
-A runtime request may not change the template's actor execution domain, increase capabilities, increase restart intensity, or escape the process-wide ceilings.
+- actor classes are persistent; actor fnc/routine callables are one-shot;
+- at least one effective public actor protocol endpoint exists;
+- inherited protocol endpoints count;
+- public endpoint visibility cannot narrow in children;
+- actor classes may implement protocol interfaces;
+- `ActorRef<Concrete>` may narrow to a compatible `ActorRef<Interface>`;
+- direct ActorRef protocol calls return `Future<T>`;
+- protocol methods are not first-class bound values;
+- raw `send`/`receive`/mailbox access is not a source actor-class API;
+- boundary sendability is checked for every endpoint and constructor input;
+- actor effect restrictions propagate through helper call graphs;
+- imported effect-unknown calls fail closed in actor context.
 
-Dynamic groups are ephemeral by default. If their supervisor/application generation disappears, they disappear too. Oreslang should not silently pretend to persist runtime-created desired state. A future durable-group service can explicitly persist and replay group specifications.
+Runtime:
 
-This deliberately follows OTP's distinction between static child specifications and dynamically added children: dynamic children can be added to a supervisor, but dynamic additions are not magically reconstructed from the supervisor's static initialization spec after recreation.
-
-## 14. Group capacity and admission
-
-`max_actors` is a hard admission limit, not a target and not a scheduler thread count.
-
-A spawn into a full group fails synchronously during bounded spawn admission:
-
-```text
-GroupCapacityExceeded {
-  group,
-  current_actors,
-  max_actors
-}
-```
-
-The runtime does not queue an unbounded list of pending spawns behind a full group. The caller can retry, back off, choose another group, or let a higher-level router decide.
-
-Capacity checks are hierarchical and transactional:
-
-```text
-process ceiling
-  -> runtime ceiling
-    -> execution-domain ceiling
-      -> group ceiling
-        -> actor reservation
-```
-
-If any reservation fails, every earlier provisional reservation is rolled back.
-
-`min_actors` is maintained by the group supervisor; `max_actors` is enforced by admission. Neither value changes the carrier pool directly. Thousands of actors may still be multiplexed over the existing bounded carrier pools.
-
-## 15. OTP-style supervision policy
-
-Oreslang should borrow the stable OTP vocabulary rather than inventing different names:
-
-```text
-one_for_one
-one_for_all
-rest_for_one
-```
-
-Default: `one_for_one`.
-
-- `one_for_one`: restart only the failed actor.
-- `one_for_all`: terminate/restart the group's supervised cohort.
-- `rest_for_one`: restart the failed actor plus actors after it in deterministic startup order.
-
-For dynamic groups, v1 permits only `one_for_one`. Dynamically created actors generally have no semantically meaningful total startup order, and allowing `rest_for_one` would create surprising coupling.
-
-Each group also has a restart-intensity window:
-
-```text
-max_restarts = N
-restart_window = duration
-```
-
-If more than `N` supervised restarts occur inside the window, the group supervisor stops trying locally and escalates to its parent supervisor. This prevents crash loops from consuming the scheduler indefinitely.
-
-Actor restart policy is separate from actor count policy:
-
-```text
-restart = permanent | transient | temporary
-```
-
-- `permanent`: restart after any termination while the group is running.
-- `transient`: restart only after abnormal termination.
-- `temporary`: never restart.
-
-A factory used to maintain `min_actors` is effectively reconciled independently of an individual actor's restart marker: if the live count falls below the configured floor, the supervisor may create a replacement instance to restore desired capacity.
-
-## 16. Registry and identity
-
-Names are lookup conveniences; IDs are authority.
-
-```ores
-ActorGroupId {
-  process_generation;
-  group_generation;
-  nonce;
-}
-```
-
-The runtime maintains a process-local group registry:
-
-```text
-logical name -> current ActorGroupId
-ActorGroupId -> live group state
-```
-
-A stale group ID must never become valid merely because a later group reuses the same logical name.
-
-Static names must be unique at startup. Dynamic names must be unique among live groups. Destroying a dynamic group invalidates its ID before resources/outbox state are reclaimed.
-
-The registry exposes bounded observational metadata to trusted supervisor/root code:
-
-```text
-actor_count
-min_actors
-max_actors
-mailbox pressure
-outbox pressure
-restart-window count
-state: STARTING | READY | DRAINING | STOPPED | FAILED
-```
-
-Actors should normally carry `ActorGroupRef` / send capabilities rather than perform ambient global string lookups on every message.
-
-
-## 17. Actor factory catalog and tree shaking
-
-Do **not** make actor/worker definitions self-register at runtime.
-
-A Java/Angular-style eager registry implemented through import-time/static initialization would create several problems:
-
-- merely importing a file could mutate global runtime state;
-- every potentially registering actor definition could become an implicit executable root;
-- tree shaking would have to conservatively retain definitions whose registration side effect might run;
-- hot-reload generations could accidentally share/stomp registry entries;
-- startup order would become observable;
-- sandboxed/untrusted code could gain an ambient discovery surface.
-
-Oreslang instead uses a **compiler/linker-generated actor factory catalog**.
-
-Conceptually:
-
-```text
-source actor factories
-        +
-.ores-actors.toml static group factory references
-        +
-.ores-actors.toml dynamic-template factory references
-        +
-explicitly exported actor factories
-        |
-        v
-closed-world reachability / tree shaking
-        |
-        v
-generated ActorFactoryCatalog for this executable/generation
-```
-
-The catalog is immutable after a code generation becomes active.
-
-It is not populated by executing actor definitions. Actor declarations remain inert until explicitly spawned.
-
-### Build roots
-
-The tree shaker treats the following as roots:
-
-1. the ordinary executable roots such as `main`;
-2. every factory named by a static startup group;
-3. every factory named by a dynamic group template;
-4. every actor factory deliberately exported for runtime/supervisor lookup.
-
-Everything else remains removable.
-
-Example:
-
-```toml
-[[group]]
-name = "workers"
-factory = "workers/worker.ores::worker"
-min_actors = 8
-max_actors = 128
-
-[[group_template]]
-name = "tenant-workers"
-factory = "workers/tenant_worker.ores::worker"
-max_instances = 1024
-min_actors = 0
-max_actors = 32
-```
-
-Those two symbolic factory references are additional build roots. An unrelated actor factory in `workers/experimental.ores` is still tree-shaken if ordinary reachable code does not reference it.
-
-### Explicit discoverability
-
-If an application truly needs name-based actor-factory lookup beyond configured groups/templates, discoverability must be explicit rather than automatic.
-
-Proposed declaration marker:
-
-```ores
-@ExportActorFactory
-pub actor fnc image_worker(Config cfg):
-    ActorBehavior<ImageJob, ImageEvent> {
-  return new ImageWorker(cfg);
-}
-```
-
-`@ExportActorFactory` means:
-
-- retain this actor factory as a build root;
-- add one descriptor to the generated catalog;
-- permit trusted supervisor/root code to resolve it by its canonical factory key.
-
-It does **not** execute the factory, spawn an actor, create a group, or grant ordinary actor code ambient registry access.
-
-Library builds may retain exported actor factories as part of the public ABI. Executable builds retain only config-referenced/reachable/explicitly-exported factories.
-
-### Catalog descriptor
-
-The generated catalog should contain metadata, not live actor objects:
-
-```text
-ActorFactoryDescriptor {
-  key
-  actor_kind
-  input_type
-  output_type
-  abi_digest
-  code_generation
-}
-```
-
-A canonical key should be based on the path-oriented Oreslang dependency model, for example:
-
-```text
-workers/tenant_worker.ores::worker
-```
-
-The descriptor is linked to compiler-generated factory code for that same generation.
-
-Dynamic group creation therefore resolves:
-
-```text
-template.factory key
-       ->
-current generation's immutable ActorFactoryCatalog
-       ->
-validated actor factory descriptor
-       ->
-spawn
-```
-
-No directory scan, reflection, classpath scan, static initializer, or global mutable self-registration is involved.
-
-### Hot reload
-
-Catalogs are generation-scoped.
-
-A new code generation gets a new immutable catalog. Existing actors keep the generation/catalog lease they were spawned from. A dynamic group created through generation N must not silently resolve the same string key against generation N+1 halfway through its lifetime.
-
-This aligns actor-factory discovery with the existing generation-pin model and prevents stale factory handles from becoming valid against unrelated replacement code.
-
-### Why retain a catalog at all?
-
-The catalog still serves useful purposes even though actors do not self-register:
-
-- startup config validation can fail before `main` if a named factory does not exist;
-- dynamic group templates can resolve factories without reflection;
-- type/domain metadata can be validated before reserving actor capacity;
-- observability can report which concrete factory a group uses;
-- hot reload can bind a group to an exact code generation;
-- the backend can emit a compact dispatch table for only retained actor factories.
-
-So the registry concept is useful as **generated link metadata**, but harmful as a runtime side-effect mechanism.
-
-
-## 18. Actor-side group capabilities and confined memory
-
-Group ownership and group membership are intentionally different concepts.
-
-The runtime/supervisor owns the actual `ActorGroup`. Root/supervisor code may hold:
-
-```text
-ActorGroupRef<Out>
-```
-
-Actor code never receives that control-plane object. A trusted SHARED or PRIVATE actor may instead receive:
-
-```text
-ActorGroupHandle<Out>
-```
-
-The handle is an opaque capability containing identity/domain/generation authentication only. It contains no Java/Ores pointer to the runtime, supervisor, mailman, actor registry, inbox, outbox, or other mutable group state.
-
-This is especially important for `isoactor`: its `self.group` capability may cross into confined memory because it is opaque, but it cannot dereference the top-level ActorGroup graph.
-
-UNTRUSTED actors are members of a runtime-owned group for supervision/output routing, but `self.group` does not expose a spawn-capable handle to them because untrusted actors cannot spawn children.
-
-A child or grandchild spawn therefore uses a capability, never ownership transfer:
-
-```ores
-val child = spawn child_worker(config) with {
-  group: self.group
-};
-```
-
-The group continues to be supervisor-owned if the actor that requested the child later terminates.
-
-## 19. One actor inbox, one group outbox
-
-The runtime enforces the channel topology:
-
-```text
-external/group send
-        |
-        v
- actor.inbox                 exactly one per actor
-        |
-        v
- serialized actor turn      one execution lease
-        |
-      emit Out
-        |
-        v
- group.outbox                exactly one bounded outbox per group
-        |
-        v
- ActorMailman.receive_mail   one logical serialized mailman
-        |
-        +----> side effect/capability
-        |
-        +----> send(...) -> target actor.inbox
-```
-
-Actor state may be mutated only from its serialized turn. Actors do not receive direct mutable references to another actor, its inbox, group outbox, or mailman state.
-
-The mailman may be a stateful class:
-
-```ores
-class WorkerMailman : ActorMailman<WorkerEvent> {
-  let uint completed = 0;
-
-  pub receive_mail(
-      ActorMail<WorkerEvent> mail,
-      ActorGroupContext<WorkerEvent> group
-  ): void {
-    match mail.message {
-      WorkCompleted(job_id) -> {
-        self.completed += 1;
-      }
-
-      WorkerIdle() -> {
-        // Route through a typed ActorRef; this re-enters that actor's inbox.
-      }
-
-      _ -> { }
-    }
-  }
-}
-```
-
-The application does not write the endless loop. The runtime owns the resumable loop and invokes `receive_mail` for a bounded quantum while holding the mailman's single execution lease. When the outbox is empty, no carrier thread remains blocked on the group.
-
-`match` is the structural/pattern-matching construct. `switch` is reserved for classic case-style dispatch.
+- one mailbox and one execution lease per actor;
+- typed protocol calls use runtime-private request/reply metadata;
+- only user arguments/replies pass transport validation;
+- reply completion authority remains runtime-owned;
+- raw messages cannot enter a typed source protocol dispatcher;
+- queue/memory/fuel/lifetime limits are enforced before admission;
+- PRIVATE/UNTRUSTED actor memory is reclaimable at actor termination;
+- group/generation/quota reservations release exactly once;
+- hot-reload code generations remain pinned for actor lifetime.
