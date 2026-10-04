@@ -70,7 +70,6 @@ final class OresVM {
     private final UUID vmId = UUID.randomUUID();
     private final String contextBindingToken = UUID.randomUUID().toString();
     private final ActorRuntime.DispatcherGroup dispatchers;
-    private final OresScheduler rootScheduler;
     private final BlockingIoExecutor blockingIo;
     private final boolean processVm;
     private final Set<HotReloadManager> hotReloadManagers = ConcurrentHashMap.newKeySet();
@@ -89,11 +88,6 @@ final class OresVM {
         this.dispatchers = new ActorRuntime.DispatcherGroup(
                 schedulerConfig,
                 prefix);
-        int rootParallelism = Math.max(1, schedulerConfig.controlParallelism() - 1);
-        this.rootScheduler = OresScheduler.runtimeOwned(
-                prefix + "root",
-                rootParallelism,
-                dispatchers::executeControlTask);
         this.blockingIo = new BlockingIoExecutor(prefix);
         this.processVm = processVm;
         VM_BINDINGS.put(contextBindingToken, this);
@@ -194,11 +188,6 @@ final class OresVM {
 
     boolean shutdown() {
         return shutdown.get();
-    }
-
-    OresScheduler rootScheduler() {
-        ensureRunning();
-        return rootScheduler;
     }
 
     SchedulerTopology schedulerTopology() {
@@ -359,7 +348,6 @@ final class OresVM {
             }
         }
         generationBindings.clear();
-        rootScheduler.close();
         blockingIo.close();
         dispatchers.shutdownNow();
         VM_BINDINGS.remove(contextBindingToken, this);
