@@ -50,6 +50,17 @@ public final class TypeChecker {
     private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
     private boolean currentActorConstructor;
 
+    private record ActorEffectContext(Ast.ActorKind kind, boolean constructor) { }
+
+    private final IdentityHashMap<Ast.FunctionDecl, Set<ActorEffectContext>> actorEffectCheckedFunctions =
+            new IdentityHashMap<>();
+    private final IdentityHashMap<Ast.FunctionDecl, Set<ActorEffectContext>> actorEffectCheckingFunctions =
+            new IdentityHashMap<>();
+    private final IdentityHashMap<Ast.MethodDecl, Set<ActorEffectContext>> actorEffectCheckedMethods =
+            new IdentityHashMap<>();
+    private final IdentityHashMap<Ast.MethodDecl, Set<ActorEffectContext>> actorEffectCheckingMethods =
+            new IdentityHashMap<>();
+
     public static Ast.Program check(Ast.Program program) {
         TypeChecker checker = new TypeChecker();
         checker.validateImports(program);
@@ -357,14 +368,7 @@ public final class TypeChecker {
         }
 
         if (klass.actorKind() != Ast.ActorKind.NONE) {
-            if (!klass.actorProtocolTypes().isEmpty() && klass.actorProtocolTypes().size() != 3) {
-                throw new IllegalArgumentException(
-                        "actor '" + klass.name() + "' protocol must be <Message, Reply, Error>");
-            }
-            for (Ast.TypeRef protocolType : klass.actorProtocolTypes()) {
-                resolve(protocolType, classGenerics, self);
-            }
-            validateActorReceiveContract(klass);
+            validateActorProtocolContract(klass);
         }
 
         for (Ast.FieldDecl field : klass.fields()) {
@@ -420,10 +424,10 @@ public final class TypeChecker {
             boolean actorEndpoint = klass.actorKind() != Ast.ActorKind.NONE
                     && !method.isStatic()
                     && method.visibility() == Ast.Visibility.PUBLIC
-                    && method.name().equals("receive");
+                    && !method.name().equals("constructor");
             boolean actorIngress = klass.actorKind() != Ast.ActorKind.NONE
                     && !method.isStatic()
-                    && (method.name().equals("receive") || method.name().equals("constructor"));
+                    && (actorEndpoint || method.name().equals("constructor"));
             if (klass.actorKind() != Ast.ActorKind.NONE && method.isStatic()) {
                 throw new IllegalArgumentException(
                         "actor class '" + klass.name()
@@ -442,6 +446,12 @@ public final class TypeChecker {
             }
 
             for (Ast.Param param : method.parameters()) {
+                if (actorIngress && param.mutable()) {
+                    throw new IllegalArgumentException(
+                            "actor boundary parameter '" + param.name()
+                                    + "' on " + klass.name() + "." + method.name()
+                                    + " cannot be 'mut'; mutable caller authority cannot cross the actor boundary");
+                }
                 Type parameterType = resolveParam(param, generics, callableSelf);
                 if (actorIngress) {
                     validateActorCallableBoundaryType(
@@ -449,7 +459,7 @@ public final class TypeChecker {
                             klass.actorKind(),
                             false,
                             "parameter '" + param.name() + "' of actor "
-                                    + (method.name().equals("constructor") ? "constructor '" : "receive method '")
+                                    + (method.name().equals("constructor") ? "constructor '" : "protocol method '")
                                     + module + "." + klass.name() + "." + method.name() + "'");
                 }
                 env.define(
@@ -500,55 +510,155 @@ public final class TypeChecker {
         }
     }
 
-    private void validateActorReceiveContract(Ast.ClassDecl klass) {
+    private void validateActorProtocolContract(Ast.ClassDecl klass) {
         List<Ast.MethodDecl> publicInstance = klass.methods().stream()
                 .filter(method -> !method.isStatic()
                         && method.visibility() == Ast.Visibility.PUBLIC
                         && !method.name().equals("constructor"))
                 .toList();
 
-        if (publicInstance.size() != 1 || !publicInstance.getFirst().name().equals("receive")) {
+        for (Ast.MethodDecl endpoint : publicInstance) {
+            if (!endpoint.genericParameters().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "public actor protocol method '" + klass.name() + "." + endpoint.name()
+                                + "' cannot declare method generic parameters");
+            }
+            if (endpoint.explicitReceiverType() != null) {
+                throw new IllegalArgumentException(
+                        "public actor protocol method '" + klass.name() + "." + endpoint.name()
+                                + "' must use implicit self");
+            }
+            if (endpoint.parameters().stream().anyMatch(Ast.Param::mutable)) {
+                throw new IllegalArgumentException(
+                        "public actor protocol method '" + klass.name() + "." + endpoint.name()
+                                + "' cannot accept 'mut' parameters; mutable authority cannot cross the mailbox boundary");
+            }
+        }
+
+        Record effectiveProtocol = publicClassShape(klass, new LinkedHashSet<>());
+        if (effectiveProtocol.members().isEmpty()) {
             throw new IllegalArgumentException(
                     "actor '" + klass.name()
-                            + "' must expose exactly one public receive(message) mailbox ingress and no other public instance methods");
+                            + "' must expose at least one public protocol method, locally or through actor inheritance");
         }
 
-        Ast.MethodDecl receive = publicInstance.getFirst();
-        if (!receive.genericParameters().isEmpty()) {
-            throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name() + ".receive' cannot declare method generic parameters");
-        }
-        if (receive.explicitReceiverType() != null) {
-            throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name() + ".receive' must use implicit self");
-        }
-        if (receive.parameters().size() != 1) {
-            throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name() + ".receive' must accept exactly one message parameter");
-        }
-        if (receive.parameters().getFirst().mutable()) {
-            throw new IllegalArgumentException(
-                    "actor receive message cannot be 'mut'; mutable caller authority cannot cross the mailbox boundary");
-        }
-
-        Set<String> generics = new HashSet<>(klass.genericParameters());
-        Type self = nominalClassType(klass);
-        Type returns = resolve(receive.returnType(), generics, self);
-        if (returns != Primitive.VOID) {
-            throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name()
-                            + ".receive' returns void; replies/errors travel through explicit response capabilities");
-        }
-
-        if (klass.actorProtocolTypes().size() == 3) {
-            Type declaredMessage = resolve(klass.actorProtocolTypes().getFirst(), generics, self);
-            Type receiveMessage = resolveParam(receive.parameters().getFirst(), generics, self);
-            if (!assignable(receiveMessage, declaredMessage)
-                    || !assignable(declaredMessage, receiveMessage)) {
-                throw new IllegalArgumentException(
-                        "actor '" + klass.name()
-                                + "' receive message type must exactly match Actor<Message, Reply, Error>'s Message type");
+        Named selfType = nominalClassType(klass);
+        for (Ast.MethodDecl local : klass.methods()) {
+            if (local.isStatic()
+                    || local.visibility() == Ast.Visibility.PUBLIC
+                    || local.name().equals("constructor")) {
+                continue;
             }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+                if (parent == null) continue;
+                Named parentType = concreteClassReference(parentRef, klass, selfType);
+                ResolvedMethod inherited = findMethodTarget(
+                        parent,
+                        parentType,
+                        local.name(),
+                        local.arity(),
+                        new LinkedHashSet<>());
+                if (inherited != null
+                        && inherited.method().visibility() == Ast.Visibility.PUBLIC) {
+                    throw new IllegalArgumentException(
+                            "actor '" + klass.name()
+                                    + "' cannot narrow inherited public protocol method '"
+                                    + local.name() + "'/" + local.arity() + " to private");
+                }
+            }
+        }
+    }
+
+    private void validateOrdinaryFunctionForActorContext(Ast.FunctionDecl fn) {
+        if (currentActorKind == Ast.ActorKind.NONE) return;
+        ActorEffectContext effect = new ActorEffectContext(currentActorKind, currentActorConstructor);
+        Set<ActorEffectContext> checked =
+                actorEffectCheckedFunctions.computeIfAbsent(fn, ignored -> new HashSet<>());
+        if (checked.contains(effect)) return;
+        Set<ActorEffectContext> checking =
+                actorEffectCheckingFunctions.computeIfAbsent(fn, ignored -> new HashSet<>());
+        if (!checking.add(effect)) return; // recursive cycle is validated through its first active frame
+
+        Ast.ActorKind previousKind = currentActorKind;
+        boolean previousConstructor = currentActorConstructor;
+        try {
+            Set<String> generics = uniqueGenerics(
+                    fn.genericParameters(),
+                    "actor-context helper " + fn.name());
+            Env env = new Env(null);
+            for (Ast.Param param : fn.parameters()) {
+                Type parameterType = resolveParam(param, generics, null);
+                env.define(
+                        param.name(),
+                        parameterType,
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            Type returns = resolve(fn.returnType(), generics, null);
+            // Preserve actor/constructor context while recursively checking the
+            // helper body. Nested helper calls inherit it too.
+            currentActorKind = effect.kind();
+            currentActorConstructor = effect.constructor();
+            checkBlock(fn.body(), env, generics, returns, null);
+            checked.add(effect);
+        } finally {
+            currentActorKind = previousKind;
+            currentActorConstructor = previousConstructor;
+            checking.remove(effect);
+        }
+    }
+
+    private void validateOrdinaryMethodForActorContext(
+            Ast.ClassDecl owner,
+            Named ownerType,
+            Ast.MethodDecl method) {
+        if (currentActorKind == Ast.ActorKind.NONE) return;
+        if (owner.actorKind() != Ast.ActorKind.NONE && !currentActorConstructor) {
+            // Actor methods are already checked under their actor domain during
+            // class validation. Re-check only when constructor context must
+            // propagate the stricter no-suspension rule.
+            return;
+        }
+        ActorEffectContext effect = new ActorEffectContext(currentActorKind, currentActorConstructor);
+        Set<ActorEffectContext> checked =
+                actorEffectCheckedMethods.computeIfAbsent(method, ignored -> new HashSet<>());
+        if (checked.contains(effect)) return;
+        Set<ActorEffectContext> checking =
+                actorEffectCheckingMethods.computeIfAbsent(method, ignored -> new HashSet<>());
+        if (!checking.add(effect)) return;
+
+        Ast.ActorKind previousKind = currentActorKind;
+        boolean previousConstructor = currentActorConstructor;
+        try {
+            Set<String> generics = new HashSet<>(owner.genericParameters());
+            for (String generic : method.genericParameters()) {
+                if (!generics.add(generic)) {
+                    throw new IllegalArgumentException(
+                            "duplicate/shadowed generic '" + generic
+                                    + "' in actor-context helper " + owner.name() + "." + method.name());
+                }
+            }
+            Type callableSelf = method.isStatic() ? null : ownerType;
+            Env env = new Env(null);
+            if (!method.isStatic()) {
+                env.define("self", ownerType, Ast.BindingKind.VAL);
+            }
+            for (Ast.Param param : method.parameters()) {
+                Type parameterType = resolveParam(param, generics, callableSelf);
+                env.define(
+                        param.name(),
+                        parameterType,
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            Type returns = resolve(method.returnType(), generics, callableSelf);
+            currentActorKind = effect.kind();
+            currentActorConstructor = effect.constructor();
+            checkBlock(method.body(), env, generics, returns, callableSelf);
+            checked.add(effect);
+        } finally {
+            currentActorKind = previousKind;
+            currentActorConstructor = previousConstructor;
+            checking.remove(effect);
         }
     }
 
@@ -662,7 +772,9 @@ public final class TypeChecker {
             if (local != null) return local.type();
             if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("actor")) return new Named(name.name(), List.of());
             if (name.name().equals("Futures")) return new Named("$FuturesFactory", List.of());
-            if (name.name().equals("Mutex") || name.name().equals("SharedMutex")) return new Named("$" + name.name() + "Factory", List.of());
+            if (name.name().equals("Mutex") || name.name().equals("SharedMutex") || name.name().equals("RwLock")) {
+                return new Named("$" + name.name() + "Factory", List.of());
+            }
             if (name.name().equals("print")) return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             if (name.name().equals("None")) return new Named("Option", List.of(Unknown.INSTANCE));
             Ast.ModuleDecl moduleNamespace = modules.get(name.name());
@@ -695,10 +807,20 @@ public final class TypeChecker {
                 targetType = binding.type();
                 where = name.name();
             } else if (assignment.target() instanceof Ast.MemberExpr member) {
+                Type rawReceiver = typeOf(member.receiver(), env, generics, self);
+                if (rawReceiver instanceof Borrow borrow && !borrow.mutable()) {
+                    throw new IllegalArgumentException(
+                            "cannot mutate a field through an immutable borrow/read guard");
+                }
                 targetType = memberType(member, env, generics, self);
                 where = member.member();
             } else if (assignment.target() instanceof Ast.IndexExpr indexed) {
-                Type receiver = deref(typeOf(indexed.receiver(), env, generics, self));
+                Type rawReceiver = typeOf(indexed.receiver(), env, generics, self);
+                if (rawReceiver instanceof Borrow borrow && !borrow.mutable()) {
+                    throw new IllegalArgumentException(
+                            "cannot mutate indexed state through an immutable borrow/read guard");
+                }
+                Type receiver = deref(rawReceiver);
                 Type index = typeOf(indexed.index(), env, generics, self);
                 requireAssignable(index, Primitive.INT, "array/list index");
                 if (receiver instanceof ListType list) targetType = list.element();
@@ -768,6 +890,7 @@ public final class TypeChecker {
                     }
                     String label = "function " + functionName.name();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
+                    validateOrdinaryFunctionForActorContext(target);
                     return checkGenericCallable(
                             target.genericParameters(),
                             target.parameters(),
@@ -792,6 +915,7 @@ public final class TypeChecker {
                     }
                     String label = "function " + namespace.name() + "." + qualifiedCall.member();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
+                    validateOrdinaryFunctionForActorContext(target);
                     return checkGenericCallable(
                             target.genericParameters(),
                             target.parameters(),
@@ -803,6 +927,24 @@ public final class TypeChecker {
                             label);
                 }
             }
+            if (currentActorKind != Ast.ActorKind.NONE) {
+                if (call.callee() instanceof Ast.NameExpr imported
+                        && importedValues.contains(imported.name())) {
+                    throw new IllegalArgumentException(
+                            "actor code cannot invoke imported/effect-unknown callable '"
+                                    + imported.name()
+                                    + "' without a statically checked actor-safe effect contract");
+                }
+                if (call.callee() instanceof Ast.MemberExpr importedMember
+                        && importedMember.receiver() instanceof Ast.NameExpr importedNamespace
+                        && importedValues.contains(importedNamespace.name())) {
+                    throw new IllegalArgumentException(
+                            "actor code cannot invoke effect-unknown imported member '"
+                                    + importedNamespace.name() + "." + importedMember.member()
+                                    + "' without a statically checked actor-safe effect contract");
+                }
+            }
+
             if (call.callee() instanceof Ast.MemberExpr futuresCall
                     && futuresCall.receiver() instanceof Ast.NameExpr futures
                     && futures.name().equals("Futures")) {
@@ -829,22 +971,28 @@ public final class TypeChecker {
             }
             if (call.callee() instanceof Ast.MemberExpr factoryCall
                     && factoryCall.receiver() instanceof Ast.NameExpr factory
-                    && (factory.name().equals("Mutex") || factory.name().equals("SharedMutex"))
+                    && (factory.name().equals("Mutex")
+                            || factory.name().equals("SharedMutex")
+                            || factory.name().equals("RwLock"))
                     && factoryCall.member().equals("new")) {
-                if (factory.name().equals("SharedMutex") && currentActorKind != Ast.ActorKind.NONE) {
+                if ((factory.name().equals("SharedMutex") || factory.name().equals("RwLock"))
+                        && currentActorKind != Ast.ActorKind.NONE) {
                     throw new IllegalArgumentException(
-                            "actor code cannot create writable SharedMutex state; actor mutation is limited to self-owned state");
+                            "actors cannot create external shared mutable state; "
+                                    + "use actor-owned state for writes and receive an explicit RwLock<T> read capability");
                 }
                 if (call.typeArgumentsPresent()) throw new IllegalArgumentException(factory.name() + ".new does not accept call-site type arguments");
                 if (call.arguments().size() != 1) throw new IllegalArgumentException(factory.name() + ".new expects exactly one value");
                 Type element = typeOf(call.arguments().getFirst(), env, generics, self);
                 if (element instanceof Borrow) {
                     throw new IllegalArgumentException(
-                            factory.name() + "<T> requires owned data; borrowed values cannot become mutex state");
+                            factory.name() + "<T> requires owned data; borrowed values cannot become lock state");
                 }
-                if (factory.name().equals("SharedMutex") && !isSharedSafe(element, new LinkedHashSet<>(), Map.of())) {
+                if ((factory.name().equals("SharedMutex") || factory.name().equals("RwLock"))
+                        && !isSharedSafe(element, new LinkedHashSet<>(), Map.of())) {
                     throw new IllegalArgumentException(
-                            "SharedMutex<T> requires shared-safe owned data; borrows, Mutex, MutexGuard, Future, closures, and unresolved generic/dynamic values are not shareable");
+                            factory.name() + "<T> requires shared-safe owned data; "
+                                    + "borrows, locks/guards, Future, closures, and unresolved generic/dynamic values are not shareable");
                 }
                 return new Named(factory.name(), List.of(element));
             }
@@ -865,13 +1013,15 @@ public final class TypeChecker {
                 };
             }
             if (call.callee() instanceof Ast.MemberExpr member) {
-                Type receiver = deref(typeOf(member.receiver(), env, generics, self));
+                Type rawReceiver = typeOf(member.receiver(), env, generics, self);
+                Type receiver = deref(rawReceiver);
                 if (receiver instanceof ClassNamespace classNamespace) {
                     Ast.ClassDecl klass = findClass(classNamespace.className());
                     if (klass == null) throw new IllegalArgumentException("unknown class namespace '" + classNamespace.className() + "'");
                     Ast.MethodDecl fn = findStaticFunction(klass, member.member(), call.arguments().size(), new LinkedHashSet<>());
                     if (fn == null) throw new IllegalArgumentException("no static function '" + member.member() + "' with arity " + call.arguments().size() + " on " + klass.name());
                     validateCallTypeArgumentMarker(call, fn.genericParameters(), "static function " + klass.name() + "." + fn.name());
+                    validateOrdinaryMethodForActorContext(klass, nominalClassType(klass), fn);
                     List<String> callableGenerics = new ArrayList<>(fn.genericParameters());
                     String label = "static function " + klass.name() + "." + fn.name();
                     return checkGenericCallable(
@@ -897,39 +1047,38 @@ public final class TypeChecker {
 
                         Ast.ClassDecl actorClass = findClass(actorType.name());
                         if (actorClass != null && actorClass.actorKind() != Ast.ActorKind.NONE) {
-                            if (member.member().equals("receive")) {
+                            ResolvedMethod target = findMethodTarget(
+                                    actorClass,
+                                    actorType,
+                                    member.member(),
+                                    call.arguments().size(),
+                                    new LinkedHashSet<>());
+                            if (target == null
+                                    || target.method().visibility() != Ast.Visibility.PUBLIC
+                                    || target.method().name().equals("constructor")) {
                                 throw new IllegalArgumentException(
-                                        "actor receive(message) is runtime-owned; enqueue through ActorRef.send(message)");
+                                        "no public actor protocol method '" + member.member()
+                                                + "' with arity " + call.arguments().size()
+                                                + " on " + actorClass.name());
                             }
-                            if (!member.member().equals("send")) {
+                            Ast.MethodDecl method = target.method();
+                            if (!method.genericParameters().isEmpty()) {
                                 throw new IllegalArgumentException(
-                                        "unknown concrete ActorRef mailbox operation '" + member.member()
-                                                + "'; use send(message)");
+                                        "actor protocol methods cannot have method-level generics");
                             }
-                            if (call.arguments().size() != 1) {
-                                throw new IllegalArgumentException("ActorRef.send expects exactly one message");
-                            }
-
-                            Ast.MethodDecl receive = actorClass.methods().stream()
-                                    .filter(method -> !method.isStatic()
-                                            && method.visibility() == Ast.Visibility.PUBLIC
-                                            && method.name().equals("receive"))
-                                    .findFirst()
-                                    .orElseThrow(() -> new IllegalArgumentException(
-                                            "actor class '" + actorClass.name()
-                                                    + "' has no public receive(message) contract"));
-                            Map<String, Type> bindings = classGenericBindings(actorClass, actorType);
-                            Set<String> receiveGenerics = new HashSet<>(actorClass.genericParameters());
-                            Type expectedMessage = substituteGenerics(
-                                    resolveParam(receive.parameters().getFirst(), receiveGenerics, actorType),
-                                    bindings);
-                            Ast.Expr argument = call.arguments().getFirst();
-                            validateLambdaArgument(argument, expectedMessage, env, generics, self);
-                            requireAssignable(
-                                    typeOf(argument, env, generics, self),
-                                    expectedMessage,
-                                    "ActorRef.send message for " + actorClass.name());
-                            return Primitive.VOID;
+                            Map<String, Type> bindings = classGenericBindings(target.owner(), target.ownerType());
+                            Type result = checkGenericCallable(
+                                    target.owner().genericParameters(),
+                                    method.parameters(),
+                                    method.returnType(),
+                                    call.arguments(),
+                                    env,
+                                    generics,
+                                    self,
+                                    target.ownerType(),
+                                    bindings,
+                                    "actor protocol method " + target.owner().name() + "." + method.name());
+                            return new Named("Future", List.of(result));
                         }
 
                         Ast.InterfaceDecl protocol = findInterface(actorType.name());
@@ -955,9 +1104,6 @@ public final class TypeChecker {
                                     "no monomorphic actor protocol method '" + member.member()
                                             + "' with arity " + call.arguments().size()
                                             + " on interface " + protocol.name());
-                        }
-                        if (fn.parameters().size() != call.arguments().size()) {
-                            throw new IllegalArgumentException("actor protocol call arity mismatch");
                         }
                         for (int i = 0; i < fn.parameters().size(); i++) {
                             validateLambdaArgument(
@@ -1001,9 +1147,16 @@ public final class TypeChecker {
                     if (klass != null) {
                         ResolvedMethod target = findMethodTarget(klass, named, member.member(), call.arguments().size(), new LinkedHashSet<>());
                         if (target == null) throw new IllegalArgumentException("no method '" + member.member() + "' with arity " + call.arguments().size() + " on " + named.name());
+                        if (rawReceiver instanceof Borrow borrow && !borrow.mutable()) {
+                            throw new IllegalArgumentException(
+                                    "cannot invoke a potentially mutating method through an immutable borrow/read guard");
+                        }
                         Ast.MethodDecl method = target.method();
                         Ast.ClassDecl owner = target.owner();
                         Named ownerType = target.ownerType();
+                        if (owner.actorKind() == Ast.ActorKind.NONE || currentActorConstructor) {
+                            validateOrdinaryMethodForActorContext(owner, ownerType, method);
+                        }
                         if (owner.actorKind() != Ast.ActorKind.NONE && method.name().equals("constructor")) {
                             throw new IllegalArgumentException(
                                     "actor constructor '" + owner.name()
@@ -1075,6 +1228,8 @@ public final class TypeChecker {
             if (futureMember != null) return futureMember;
             Type actorHandleMember = builtinActorHandleMember(sumReceiver, member.member());
             if (actorHandleMember != null) return actorHandleMember;
+            Type rwLockMember = builtinRwLockMember(receiver, member.member());
+            if (rwLockMember != null) return rwLockMember;
             Type mutexMember = builtinMutexMember(receiver, member.member());
             if (mutexMember != null) return mutexMember;
             receiver = unwrapMutexGuard(receiver);
@@ -1116,10 +1271,39 @@ public final class TypeChecker {
                         return substituteGenerics(pattern, classGenericBindings(field.owner(), field.ownerType()));
                     }
                     List<Ast.MethodDecl> methods = findMethodsByName(klass, member.member(), new LinkedHashSet<>());
-                    if (!methods.isEmpty()) {
+                    if (!methods.isEmpty() && klass.actorKind() != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException(
-                                "instance method '" + klass.name() + "." + member.member()
-                                        + "' is not a first-class value; invoke it directly through its receiver");
+                                "actor method '" + klass.name() + "." + member.member()
+                                        + "' is not a first-class value and cannot escape an actor turn");
+                    }
+                    if (methods.size() == 1) {
+                        Ast.MethodDecl method = methods.getFirst();
+                        if (!method.genericParameters().isEmpty()) {
+                            throw new IllegalArgumentException(
+                                    "generic method '" + klass.name() + "." + method.name()
+                                            + "' must be specialized by a direct call; polymorphic bound-method values are not supported yet");
+                        }
+                        ResolvedMethod target = findMethodTarget(
+                                klass, named, member.member(), method.arity(), new LinkedHashSet<>());
+                        if (target == null) {
+                            throw new IllegalArgumentException(
+                                    "cannot resolve method owner for '" + member.member() + "'");
+                        }
+                        Set<String> memberGenerics = new HashSet<>(target.owner().genericParameters());
+                        memberGenerics.addAll(method.genericParameters());
+                        Type signature = functionType(
+                                method.parameters(),
+                                method.returnType(),
+                                memberGenerics,
+                                target.ownerType());
+                        return substituteGenerics(
+                                signature,
+                                classGenericBindings(target.owner(), target.ownerType()));
+                    }
+                    if (methods.size() > 1) {
+                        throw new IllegalArgumentException(
+                                "overloaded method '" + member.member()
+                                        + "' must be called so arity can select the overload");
                     }
                 }
             }
@@ -1535,6 +1719,19 @@ public final class TypeChecker {
             throw new IllegalArgumentException(
                     where + " cannot use writable SharedMutex<T>; actor boundaries admit data, ActorRef capabilities, and explicit read-only external-state capabilities only");
         }
+        if (named.name().equals("RwLock")) {
+            if (actorKind != Ast.ActorKind.SHARED) {
+                throw new IllegalArgumentException(
+                        where + " can use RwLock<T> only with shared actors; "
+                                + "iso/private and untrusted actors cannot access shared external memory");
+            }
+            if (named.arguments().size() != 1
+                    || !isSharedSafe(named.arguments().getFirst(), new LinkedHashSet<>(), Map.of())) {
+                throw new IllegalArgumentException(
+                        where + " requires RwLock<T> to contain shared-safe owned data");
+            }
+            return;
+        }
         if (named.name().equals("ActorRef")) {
             if (named.arguments().size() != 1) {
                 throw new IllegalArgumentException(where + " requires ActorRef<ActorOrProtocol>");
@@ -1606,6 +1803,8 @@ public final class TypeChecker {
         if (!(type instanceof Named named)) return false;
 
         if (named.name().equals("Mutex") || named.name().equals("MutexGuard")
+                || named.name().equals("RwLock") || named.name().equals("RwReadGuard")
+                || named.name().equals("RwWriteGuard")
                 || named.name().equals("Future") || named.name().equals("ActorSpawn")
                 || named.name().equals("SharedMutex")) return false;
         if (named.name().equals("OptionUnwrapError")) return named.arguments().isEmpty();
@@ -1765,37 +1964,20 @@ public final class TypeChecker {
                     }
                     yield new Function(List.of(), Primitive.BOOL);
                 }
-                case "send" -> {
-                    if (named.arguments().size() != 1
-                            || !(named.arguments().getFirst() instanceof Named protocolNamed)) {
-                        throw new IllegalArgumentException(
-                                "ActorRef.send requires ActorRef<ConcreteActor>");
-                    }
-                    Ast.ClassDecl actorClass = findClass(protocolNamed.name());
-                    if (actorClass == null || actorClass.actorKind() == Ast.ActorKind.NONE) {
-                        throw new IllegalArgumentException(
-                                "ActorRef.send requires a concrete actor class protocol");
-                    }
-                    Ast.MethodDecl receive = actorClass.methods().stream()
-                            .filter(method -> !method.isStatic()
-                                    && method.visibility() == Ast.Visibility.PUBLIC
-                                    && method.name().equals("receive"))
-                            .findFirst()
-                            .orElseThrow(() -> new IllegalArgumentException(
-                                    "actor class '" + actorClass.name()
-                                            + "' has no public receive(message) contract"));
-                    Type message = substituteGenerics(
-                            resolveParam(
-                                    receive.parameters().getFirst(),
-                                    new HashSet<>(actorClass.genericParameters()),
-                                    protocolNamed),
-                            classGenericBindings(actorClass, protocolNamed));
-                    yield new Function(List.of(message), Primitive.VOID);
-                }
+                case "mailbox" -> throw new IllegalArgumentException(
+                        "ActorRef is not an application mailbox object; "
+                                + "persistent actor classes enqueue through send(message)");
                 case "receive" -> throw new IllegalArgumentException(
-                        "actor receive(message) is runtime-owned; use ActorRef.send(message)");
-                default -> throw new IllegalArgumentException(
-                        "unknown ActorRef member '" + member + "'");
+                        "actor receive(message) is runtime-owned; enqueue through ActorRef.send(message)");
+                default -> {
+                    if (named.arguments().size() == 1) {
+                        throw new IllegalArgumentException(
+                                "unknown ActorRef operation '" + member
+                                        + "'; concrete actor references expose send(message), identity, and lifecycle control");
+                    }
+                    throw new IllegalArgumentException(
+                            "unknown ActorRef member '" + member + "'");
+                }
             };
         }
         return null;
@@ -1854,6 +2036,61 @@ public final class TypeChecker {
         }
         throw new IllegalArgumentException(
                 operation + " expects only Future<T> elements, found " + type);
+    }
+
+    private static Type rwReadView(Type element) {
+        if (element instanceof Primitive primitive && primitive != Primitive.VOID) {
+            return element;
+        }
+        if (element instanceof StringLiteral) return Primitive.STRING;
+        return new Borrow(element, false);
+    }
+
+    private Type builtinRwLockMember(Type receiver, String member) {
+        if (!(receiver instanceof Named named) || named.arguments().size() != 1) return null;
+        Type element = named.arguments().getFirst();
+
+        if (named.name().equals("RwLock")) {
+            if (currentActorKind != Ast.ActorKind.NONE
+                    && (member.equals("write_lock") || member.equals("try_write_lock"))) {
+                throw new IllegalArgumentException(
+                        "actors cannot acquire an RwLock write guard; "
+                                + "use actor-owned state for writes and RwLock<T> only for external reads");
+            }
+
+            Type readGuard = new Named("RwReadGuard", List.of(element));
+            Type writeGuard = new Named("RwWriteGuard", List.of(element));
+            return switch (member) {
+                case "read_lock" -> new Function(List.of(), readGuard);
+                case "try_read_lock" -> new Function(
+                        List.of(), new Named("Option", List.of(readGuard)));
+                case "write_lock" -> new Function(List.of(), writeGuard);
+                case "try_write_lock" -> new Function(
+                        List.of(), new Named("Option", List.of(writeGuard)));
+                default -> null;
+            };
+        }
+
+        if (named.name().equals("RwReadGuard")) {
+            return switch (member) {
+                case "value" -> new Function(List.of(), rwReadView(element));
+                case "release" -> new Function(List.of(), Primitive.VOID);
+                case "is_released" -> new Function(List.of(), Primitive.BOOL);
+                default -> null;
+            };
+        }
+
+        if (named.name().equals("RwWriteGuard")) {
+            return switch (member) {
+                case "value" -> new Function(List.of(), rwReadView(element));
+                case "replace" -> new Function(List.of(element), Primitive.VOID);
+                case "release" -> new Function(List.of(), Primitive.VOID);
+                case "is_released" -> new Function(List.of(), Primitive.BOOL);
+                default -> null;
+            };
+        }
+
+        return null;
     }
 
     private Type builtinMutexMember(Type receiver, String member) {
@@ -2661,6 +2898,8 @@ public final class TypeChecker {
             }
             case "MutexGuard" -> throw new IllegalArgumentException(
                     "MutexGuard<T> is compiler-managed and cannot be named in source declarations; acquire it from lock()/try_lock()/lock_async()");
+            case "RwReadGuard", "RwWriteGuard" -> throw new IllegalArgumentException(
+                    ref.name() + "<T> is compiler-managed and cannot be named in source declarations; acquire it from RwLock<T>");
             case "Mutex" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Mutex requires exactly one explicit type argument");
                 Type element = resolve(ref.arguments().getFirst(), generics, self);
@@ -2701,6 +2940,18 @@ public final class TypeChecker {
                             "SharedMutex<T> requires a concrete shared-safe type; borrows, Mutex, MutexGuard, Future, closures, and unresolved generic/dynamic values are not shareable");
                 }
                 yield new Named("SharedMutex", List.of(element));
+            }
+            case "RwLock" -> {
+                if (ref.inferArguments() || ref.arguments().size() != 1) {
+                    throw new IllegalArgumentException("RwLock requires exactly one explicit type argument");
+                }
+                Type element = resolve(ref.arguments().getFirst(), generics, self);
+                if (element == Primitive.VOID) throw new IllegalArgumentException("RwLock<void> is invalid");
+                if (!isSharedSafe(element, new LinkedHashSet<>(), Map.of())) {
+                    throw new IllegalArgumentException(
+                            "RwLock<T> requires a concrete shared-safe type");
+                }
+                yield new Named("RwLock", List.of(element));
             }
             case "Fnc" -> {
                 List<Type> args = ref.arguments().stream().map(arg -> resolve(arg, generics, self)).toList();

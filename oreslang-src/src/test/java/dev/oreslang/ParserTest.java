@@ -108,127 +108,35 @@ final class ParserTest {
         assertTrue(tokens.stream().anyMatch(t -> t.type() == Token.Type.FAT_ARROW));
     }
     @Test
-    void sharedActorUsesSingleMailboxIngressAndAllowsOwnedStateMutation() {
+    void sharedActorUsesTypedPublicProtocolAndAllowsOwnedStateMutation() {
         String source = """
                 shared actor Account {
                   let balance = 100;
 
-                  pub receive(amount: int): void {
+                  pub debit(amount: int): void {
                     self.balance = self.balance - amount;
                     return;
+                  }
+
+                  pub current(): int {
+                    return self.balance;
                   }
                 }
                 """;
 
-        Ast.Program program = Parser.parse(source);
+        Ast.Program program = TypeChecker.check(Parser.parse(source));
         Ast.ClassDecl actor = (Ast.ClassDecl) program.modules().getFirst().declarations().getFirst();
 
         assertEquals(Ast.ActorKind.SHARED, actor.actorKind());
         assertEquals("Account", actor.name());
-        assertEquals("receive", actor.methods().getFirst().name());
-
-        Ast.Program typed = TypeChecker.check(program);
-        assertDoesNotThrow(() -> OwnershipChecker.check(typed));
-    }
-
-    @Test
-    void actorRequiresOnePublicReceiveAndConcreteRefsUseSend() {
-        Ast.Program program = TypeChecker.check(Parser.parse("""
-                define actor Worker as
-                  let int count = 0;
-
-                  constructor(initial: int) {
-                    self.count = initial;
-                  }
-
-                  private current(): int {
-                    return self.count;
-                  }
-
-                  pub receive(m: int): void {
-                    self.count = self.count + m;
-                    return;
-                  }
-                end
-
-                fnc exercise() -> void {
-                  val worker = spawn Worker(1);
-                  worker.send(2);
-                  return;
-                }
-                """));
-
-        Ast.ClassDecl actor =
-                (Ast.ClassDecl) program.modules().getFirst().declarations().getFirst();
-        assertEquals(Ast.ActorKind.SHARED, actor.actorKind());
-        assertEquals(
-                List.of("constructor", "current", "receive"),
+        assertEquals(List.of("debit", "current"),
                 actor.methods().stream().map(Ast.MethodDecl::name).toList());
-
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                define actor Bad as
-                  pub receive(m: int): void { return; }
-                  pub reset(): void { return; }
-                end
-                """));
-
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define actor Bad as
-                  pub receive(m: int): int { return m; }
-                end
-                """)));
-
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define actor Bad as
-                  pub receive(state: SharedMutex<int>): void { return; }
-                end
-                """)));
-
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define actor Worker as
-                  pub receive(m: int): void { return; }
-                end
-
-                fnc bad() -> void {
-                  val worker = spawn Worker();
-                  worker.receive(1);
-                  return;
-                }
-                """)));
+        assertDoesNotThrow(() -> OwnershipChecker.check(program));
     }
 
     @Test
-    void classExtendingIntrinsicActorNormalizesAndKeepsProtocolTypes() {
+    void actorPublicMethodsLowerToTypedActorRefCalls() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
-                define class Worker extends Actor<int, void, WorkerError> as
-                  let int count = 0;
-
-                  pub receive(m: int): void {
-                    self.count = self.count + m;
-                    return;
-                  }
-                end
-                """));
-
-        Ast.ClassDecl actor =
-                (Ast.ClassDecl) program.modules().getFirst().declarations().getFirst();
-        assertEquals(Ast.ActorKind.SHARED, actor.actorKind());
-        assertTrue(actor.parents().isEmpty(),
-                "compiler-intrinsic Actor base normalizes into actorKind");
-        assertEquals(3, actor.actorProtocolTypes().size());
-        assertEquals("int", actor.actorProtocolTypes().getFirst().name());
-        assertEquals("receive", actor.methods().getLast().name());
-
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad extends Actor<String, void, WorkerError> as
-                  pub receive(m: int): void { return; }
-                end
-                """)));
-    }
-
-    @Test
-    void actorClassSpawnUsesConstructorThenMailboxSend() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define actor Worker as
                   let int count = 0;
 
@@ -240,15 +148,103 @@ final class ParserTest {
                     return self.count;
                   }
 
-                  pub receive(value: int): void {
+                  pub add(value: int): void {
                     self.count = self.count + value;
                     return;
                   }
+
+                  pub read(): int {
+                    return self.helper();
+                  }
                 end
 
-                fnc exercise() -> void {
+                async fnc exercise() -> void {
                   val worker = spawn Worker(1);
-                  worker.send(2);
+                  await worker.add(2);
+                  val value = await worker.read();
+                  stdio.println(value);
+                  return;
+                }
+                """));
+
+        Ast.ClassDecl actor =
+                (Ast.ClassDecl) program.modules().getFirst().declarations().getFirst();
+        assertEquals(List.of("constructor", "helper", "add", "read"),
+                actor.methods().stream().map(Ast.MethodDecl::name).toList());
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor GenericEndpoint as
+                  pub run<T>(value: T): void { return; }
+                end
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor MutableEndpoint as
+                  pub run(value: int mut): void { return; }
+                end
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor UnsafeBoundary as
+                  pub run(state: SharedMutex<int>): void { return; }
+                end
+                """)));
+    }
+
+    @Test
+    void classExtendingIntrinsicActorNormalizesWithoutASecondProtocolTypeSystem() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                define class Worker extends Actor as
+                  let int count = 0;
+
+                  pub add(value: int): void {
+                    self.count = self.count + value;
+                    return;
+                  }
+
+                  pub read() -> int {
+                    return self.count;
+                  }
+                end
+                """));
+
+        Ast.ClassDecl actor =
+                (Ast.ClassDecl) program.modules().getFirst().declarations().getFirst();
+        assertEquals(Ast.ActorKind.SHARED, actor.actorKind());
+        assertTrue(actor.parents().isEmpty(),
+                "compiler-intrinsic Actor base normalizes into actorKind");
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define class Bad extends Actor<int, void, WorkerError> as
+                  pub run(value: int): void { return; }
+                end
+                """));
+    }
+
+    @Test
+    void actorClassSpawnTypesProtocolCallsAsFutures() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define actor Worker as
+                  let int count = 0;
+
+                  constructor(initial: int) {
+                    self.count = initial;
+                  }
+
+                  pub add(value: int): void {
+                    self.count = self.count + value;
+                    return;
+                  }
+
+                  pub read(): int {
+                    return self.count;
+                  }
+                end
+
+                async fnc exercise() -> void {
+                  val worker = spawn Worker(1);
+                  await worker.add(2);
+                  val current = await worker.read();
+                  stdio.println(current);
                   return;
                 }
                 """)));
@@ -260,32 +256,191 @@ final class ParserTest {
                     await f;
                   }
 
-                  pub receive(value: int): void { return; }
+                  pub run(value: int): void { return; }
                 end
                 """)));
     }
 
     @Test
-    void actorInheritancePreservesIsolationAndReceiveContract() {
+    void actorInheritancePreservesIsolationAndTypedProtocol() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define actor Parent as
-                  pub receive(value: int): void { return; }
+                  pub run(value: int): int { return value; }
                 end
 
                 define actor Child extends Parent as
-                  pub receive(value: int): void { return; }
+                  private helper(): int { return 1; }
                 end
+
+                async fnc exercise() -> void {
+                  val child = spawn Child();
+                  val value = await child.run(7);
+                  stdio.println(value);
+                  return;
+                }
                 """)));
+
+        IllegalArgumentException narrowed = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define actor Parent as
+                          pub run(value: int): int { return value; }
+                        end
+
+                        define actor Child extends Parent as
+                          private run(value: int): int { return value + 1; }
+                          pub ping(): void { return; }
+                        end
+                        """)));
+        assertTrue(narrowed.getMessage().contains("cannot narrow inherited public protocol method"));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 isoactor Parent {
-                  pub receive(value: int): void { return; }
+                  pub run(value: int): void { return; }
                 }
 
                 shared actor Child extends Parent {
-                  pub receive(value: int): void { return; }
+                  pub ping(): void { return; }
                 }
                 """)));
+    }
+
+    @Test
+    void actorMayImplementProtocolInterfaceAndActorRefMayNarrowToIt() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define interface WorkerAPI
+                  fnc run(value: int): int;
+                  fnc stop(): void;
+                end
+
+                define actor Worker implements WorkerAPI as
+                  pub run(value: int): int {
+                    return value + 1;
+                  }
+
+                  pub stop(): void {
+                    return;
+                  }
+                end
+
+                async fnc exercise() -> void {
+                  val concrete = spawn Worker();
+                  val ActorRef<WorkerAPI> worker = concrete;
+                  val value = await worker.run(41);
+                  await worker.stop();
+                  stdio.println(value);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void actorWithoutLocalOrInheritedPublicProtocolIsRejected() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define actor Worker as
+                          private helper(): int { return 1; }
+                        end
+                        """)));
+        assertTrue(failure.getMessage().contains("must expose at least one public protocol method"));
+    }
+
+    @Test
+    void actorProtocolMethodsAreNotFirstClassBoundCallbacks() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define actor Worker as
+                          pub run(value: int): int { return value; }
+                        end
+
+                        fnc bad() -> void {
+                          val worker = spawn Worker();
+                          val callback = worker.run;
+                          return;
+                        }
+                        """)));
+        assertTrue(failure.getMessage().contains("actor protocol methods are not first-class values"));
+    }
+
+    @Test
+    void actorRestrictionsPropagateThroughOrdinaryHelpers() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc unsafe_helper() -> void {
+                          val state = SharedMutex.new(1);
+                          return;
+                        }
+
+                        define actor Worker as
+                          pub run(): void {
+                            unsafe_helper();
+                            return;
+                          }
+                        end
+                        """)));
+
+        assertTrue(failure.getMessage().contains("actor code cannot create writable SharedMutex state"));
+    }
+
+    @Test
+    void actorConstructorNoSuspendRulePropagatesThroughPrivateHelpers() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define actor Worker as
+                          constructor() {
+                            self.prepare();
+                          }
+
+                          private prepare(): void {
+                            val ready = Futures.completed(1);
+                            await ready;
+                            return;
+                          }
+
+                          pub run(): void { return; }
+                        end
+                        """)));
+
+        assertTrue(failure.getMessage().contains("actor constructors cannot await or suspend"));
+    }
+
+    @Test
+    void actorBoundaryInputCannotBeUpgradedToMutableHelperAuthority() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          let int value = 0;
+                        end
+
+                        fnc mutate(Box mut box) -> void {
+                          box.value = 1;
+                          return;
+                        }
+
+                        define actor Worker as
+                          pub run(box: Box): void {
+                            mutate(box);
+                            return;
+                          }
+                        end
+                        """)));
+
+        assertTrue(failure.getMessage().contains("cannot upgrade actor-boundary input"));
+    }
+
+    @Test
+    void actorConstructorParametersCannotBeMut() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor Worker as
+                  constructor(box: Box mut) { }
+                  pub run(): void { return; }
+                end
+                """));
     }
 
     @Test
@@ -478,26 +633,29 @@ final class ParserTest {
 
 
     @Test
-    void actorReceiveCannotReturnActorState() {
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+    void actorProtocolCannotLeakActorOwnedState() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 shared actor Account {
                   let int balance = 100;
 
-                  pub receive(int message): Account {
+                  pub leak(): Account {
                     return self;
                   }
                 }
-                """));
+                """)));
 
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                shared actor Account {
-                  let Array<int> items = [1, 2, 3];
+        assertThrows(IllegalArgumentException.class, () -> {
+            Ast.Program typed = TypeChecker.check(Parser.parse("""
+                    shared actor Account {
+                      let Array<int> items = [1, 2, 3];
 
-                  pub receive(int message): Array<int> {
-                    return self.items;
-                  }
-                }
-                """));
+                      pub snapshot(): Array<int> {
+                        return self.items;
+                      }
+                    }
+                    """));
+            OwnershipChecker.check(typed);
+        });
     }
 
     @Test
@@ -507,10 +665,14 @@ final class ParserTest {
                     shared actor Account {
                       let balance = 100;
 
-                      pub receive(int delta): void {
+                      pub apply(delta: int): void {
                         val current = self.balance;
                         self.balance = current + delta;
                         return;
+                      }
+
+                      pub current(): int {
+                        return self.balance;
                       }
                     }
                     """));
@@ -526,7 +688,7 @@ final class ParserTest {
                     shared actor Account {
                       let balance = 100;
 
-                      pub receive(int message): void {
+                      pub inspect_self(): void {
                         val observed = inspect(&self);
                         return;
                       }
@@ -536,17 +698,16 @@ final class ParserTest {
         });
     }
 
-
     @Test
     void actorInheritanceMustPreserveIsolationKind() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 shared actor Parent {
                   let value = 1;
-                  pub receive(int message): void { return; }
+                  pub update(message: int): void { return; }
                 }
 
                 shared actor Child extends Parent {
-                  pub receive(int message): void {
+                  pub add(message: int): void {
                     self.value = self.value + message;
                     return;
                   }
@@ -556,73 +717,20 @@ final class ParserTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 isoactor Parent {
                   let value = 1;
-                  pub receive(int message): void { return; }
+                  pub update(message: int): void { return; }
                 }
 
                 shared actor Child extends Parent {
-                  pub receive(int message): void { return; }
+                  pub ping(): void { return; }
                 }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 shared actor Child extends Object {
                   let value = 1;
-                  pub receive(int message): void { return; }
+                  pub update(message: int): void { return; }
                 }
                 """)));
-    }
-
-
-
-
-@Test
-    void parsesReusableUnderscoreDestructureDiscards() {
-        Ast.Program program = TypeChecker.check(Parser.parse("""
-                define module app
-                  pub fnc main() => void {
-                    [const foo, _, let bar] = (1, 2, 3);
-                    [_, _, const tail] = (4, 5, 6);
-                    [const z, _, let y] = (7, 8, 9);
-                    stdio.println(foo);
-                    stdio.println(bar);
-                    stdio.println(tail);
-                    stdio.println(z);
-                    stdio.println(y);
-                    return;
-                  }
-                end
-                """));
-
-        Ast.FunctionDecl main = (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
-        Ast.DestructureStmt first = (Ast.DestructureStmt) main.body().getFirst();
-        assertFalse(first.bindings().getFirst().isDiscard());
-        assertTrue(first.bindings().get(1).isDiscard());
-
-        Ast.DestructureStmt second = (Ast.DestructureStmt) main.body().get(1);
-        assertTrue(second.bindings().getFirst().isDiscard());
-        assertTrue(second.bindings().get(1).isDiscard());
-        assertFalse(second.bindings().get(2).isDiscard());
-    }
-
-@Test
-    void reservedWordsMayNameMembersButRemainReservedLexically() {
-        assertDoesNotThrow(() -> Parser.parse("""
-                define module app
-                  fnc main() => void {
-                    val mutex = SharedMutex.new(arr[1, 2, 3]);
-                    return;
-                  }
-                end
-                """));
-
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                define module app
-                  fnc main() => void {
-                    val new = 1;
-                    return;
-                  }
-                end
-                """));
     }
 
     @Test

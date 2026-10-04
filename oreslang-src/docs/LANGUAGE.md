@@ -464,22 +464,26 @@ capability rules.
 These declarations are semantically equivalent:
 
 ```ores
-define actor Worker {
+define actor Worker as
   let int count = 0;
 
   constructor() {
     self.count = 0;
   }
 
-  private current(): int {
-    return self.count;
-  }
-
-  pub receive(int value): void {
+  pub add(value: int): void {
     self.count = self.count + value;
     return;
   }
-}
+
+  pub current() -> int {
+    return self.count;
+  }
+
+  private normalize(value: int): int {
+    return value;
+  }
+end
 ```
 
 ```ores
@@ -490,20 +494,26 @@ define class Worker extends Actor as
     self.count = 0;
   }
 
-  private current(): int {
+  pub add(value: int): void {
+    self.count = self.count + value;
+    return;
+  }
+
+  pub current(): int {
     return self.count;
   }
 
-  pub receive(int value): void {
-    self.count = self.count + value;
-    return;
+  private normalize(value: int): int {
+    return value;
   }
 end
 ```
 
-`Actor`, `IsoActor`, and `UntrustedActor` are compiler-intrinsic base
-markers. They are normalized into the actor kind; they are not ordinary
-standard-library classes and do not grant authority through inheritance.
+`Actor`, `IsoActor`, and `UntrustedActor` are compiler-intrinsic execution
+domain markers. They are not ordinary standard-library classes and they do not
+carry a second `Actor<Message, Reply, Error>` protocol. Protocol shape comes
+from the actor's public methods and, when desired, an implemented interface.
+Writing `Actor<X,Y,Z>` is rejected.
 
 There are three actor execution domains:
 
@@ -516,63 +526,60 @@ The three domains use separate dispatcher pools. Every actor owns exactly one
 logical mailbox and at most one actor turn may execute at a time; carrier
 threads may change between turns.
 
-### Runtime-owned receiver loop
+### Typed actor protocol over one runtime mailbox
 
-Every concrete actor implements exactly one public mailbox method:
+A concrete actor exposes one or more public instance methods as its typed
+source-level protocol:
 
 ```ores
-pub receive(m: ActorMessage): void {
-  // handle exactly one dequeued message
+pub add(value: int): void {
+  self.count = self.count + value;
+}
+
+pub current(): int {
+  return self.count;
 }
 ```
 
-`receive` is **one actor turn**, not a user-written infinite loop. OresVM owns
-the persistent receiver loop conceptually:
+Those are **not** independent runtime entrypoints. The compiler lowers the
+public protocol into one hidden mailbox message union/dispatcher. Private
+methods are direct calls on `self` while the actor owns its execution lease.
+
+Outside code holds an `ActorRef<Worker>`:
+
+```ores
+val worker = spawn Worker();
+
+await worker.add(2);
+val value = await worker.current();
+```
+
+The source-level projection is therefore conceptually:
 
 ```text
-mailbox head
-    -> acquire actor execution lease
-    -> receive(message)
-    -> return / suspend at await
-    -> release or park the logical turn
-    -> schedule the next runnable turn
+Worker.add(int): void
+ActorRef<Worker>.add(int): Future<void>
+
+Worker.current(): int
+ActorRef<Worker>.current(): Future<int>
 ```
 
-Consequently, actor source must not write `while true { mailbox.receive() }`.
-The runtime can preserve fairness, one-active-thread-per-actor, fuel/deadline
-checks, supervision, hot-reload generation leases, and nonblocking `await`
-because it owns that loop.
+A method named `receive` has no privileged source-language meaning; it is just
+another public protocol method if the program declares one. The actual mailbox
+receiver/dispatch loop is compiler/runtime-owned and cannot be invoked or
+replaced by user code. This preserves fairness, one-active-thread-per-actor,
+fuel/deadline checks, supervision, hot-reload generation leases, and
+nonblocking `await`.
 
-Outside code never calls `receive` directly. It holds an actor reference and
-enqueues a message:
+Public protocol methods are currently monomorphic at method level so their
+message ABI remains closed and AOT-safe. Generic actor classes remain allowed.
+Protocol parameters cannot be `mut`, and every parameter/return type must pass
+actor-boundary sendability checks. Actor subclasses may inherit protocol
+methods, but may not narrow an inherited public endpoint to private.
 
-```ores
-val counter = spawn Counter(0);
-counter.send(Increment);
-```
-
-A direct `counter.receive(...)` is a compile error. `send` is an enqueue
-operation; it does not turn the actor into an RPC object. Reply semantics use
-explicit reply/response capabilities carried by the message when required.
-
-The class form may make the protocol types explicit:
-
-```ores
-define class Counter extends Actor<CounterMessage, CounterReply, CounterError> as
-  let int count = 0;
-
-  pub receive(m: CounterMessage): void {
-    // dispatch this one message
-    return;
-  }
-end
-```
-
-The intrinsic `Actor`, `IsoActor`, and `UntrustedActor` bases accept either
-no protocol arguments or exactly `<Message, Reply, Error>`. When supplied,
-the public `receive` parameter must exactly match `Message`. All other actor
-methods are private helpers and remain in the same actor ownership/effect
-domain.
+For abstraction and hot loading, an actor may implement an interface and callers
+may hold `ActorRef<ThatInterface>`. The implementation remains private behind
+that ABI.
 
 Actor classes do not support static functions. Until a separate effect-safe,
 non-instance actor utility construct exists, allowing static actor methods would
@@ -644,9 +651,10 @@ A launch ticket separates identity/readiness/lifecycle from actor application
 messages.
 
 This model preserves the existing ActorGroup/ActorMailman architecture:
-`ActorRef.send` enqueues bounded typed messages into the actor's mailbox;
-actors emit bounded group output; one logical serialized mailman consumes the
-group's outbox; supervisors remain responsible for lifecycle/restart policy.
+a typed `ActorRef<Protocol>.method(...)` call lowers to one bounded mailbox
+message (plus a reply Future when needed); actors may also emit bounded group
+output; one logical serialized mailman consumes the group's outbox; supervisors
+remain responsible for lifecycle/restart policy.
 
 Private and untrusted actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
 

@@ -102,7 +102,15 @@ public final class OwnershipChecker {
                     scope.define("self", new VarState(Ast.TypeRef.simple(klass.name()), false, ValueKind.IMM_BORROW, Origin.PARAM));
                 }
             }
-            for (Ast.Param param : method.parameters()) scope.define(param.name(), stateForParam(param));
+            boolean actorBoundary = klass.actorKind() != Ast.ActorKind.NONE
+                    && !method.isStatic()
+                    && (method.visibility() == Ast.Visibility.PUBLIC
+                        || method.name().equals("constructor"));
+            for (Ast.Param param : method.parameters()) {
+                scope.define(
+                        param.name(),
+                        actorBoundary ? stateForActorInput(param) : stateForParam(param));
+            }
             checkBlock(method.body(), scope, method.returnType());
             scope.close();
         }
@@ -113,6 +121,13 @@ public final class OwnershipChecker {
         boolean mutableOwner = param.mutable();
         if (param.type().isBorrow() && param.type().mutableBorrow()) mutableOwner = false;
         return new VarState(param.type(), mutableOwner, kind, Origin.PARAM);
+    }
+
+    private VarState stateForActorInput(Ast.Param param) {
+        ValueKind kind = param.structural() && !param.type().isBorrow()
+                ? ValueKind.IMM_BORROW
+                : kindOfType(param.type());
+        return new VarState(param.type(), false, kind, Origin.ACTOR_INPUT);
     }
 
     private void checkBlock(List<Ast.Stmt> body, Scope parent, Ast.TypeRef returnType) {
@@ -726,6 +741,14 @@ public final class OwnershipChecker {
 
         checkExpr(call.callee(), scope, false);
         for (Ast.Expr arg : call.arguments()) {
+            if (param.mutable() && arg instanceof Ast.NameExpr name) {
+                VarState source = requireState(scope, name.name());
+                if (source.origin == Origin.ACTOR_INPUT) {
+                    throw error(callable + " argument " + (i + 1)
+                            + " cannot upgrade actor-boundary input '" + name.name()
+                            + "' to mutable helper authority");
+                }
+            }
             ValueInfo argument = checkExpr(arg, scope, true);
             if (containsMutexGuardType(argument.type)) {
                 throw error("guard-bearing values cannot cross an arbitrary call boundary");
@@ -1550,7 +1573,7 @@ public final class OwnershipChecker {
     }
 
     private enum ValueKind { COPY, MOVE_ONLY, IMM_BORROW, MUT_BORROW }
-    private enum Origin { PARAM, LOCAL, CAPTURE }
+    private enum Origin { PARAM, ACTOR_INPUT, LOCAL, CAPTURE }
 
     private static final class ValueInfo {
         private final Ast.TypeRef type;

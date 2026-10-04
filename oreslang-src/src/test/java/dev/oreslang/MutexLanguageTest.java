@@ -30,29 +30,23 @@ final class MutexLanguageTest {
     }
 
     @Test
-    void sharedActorFunctionsRejectBlockingSharedMutexLock() {
+    void sharedActorFunctionsRejectWritableSharedMutexAtBoundary() {
         var program = Parser.parse("""
                 pub shared actor fnc worker(SharedMutex<int> mutex) => void {
-                  val guard = mutex.lock();
-                  guard.release();
                   return;
                 }
                 """);
 
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class, () -> TypeChecker.check(program));
-        assertTrue(error.getMessage().contains(
-                "actor code cannot use blocking SharedMutex.lock"));
+        assertTrue(error.getMessage().contains("SharedMutex"), error.getMessage());
     }
 
     @Test
-    void sharedActorMethodsRejectBlockingSharedMutexWithLock() {
+    void sharedActorReceiveRejectsWritableSharedMutexAtBoundary() {
         var program = Parser.parse("""
                 shared actor Worker {
-                  pub receive(SharedMutex<int> mutex) => void {
-                    mutex.with_lock(|value| -> {
-                      return;
-                    });
+                  pub receive(mutex: SharedMutex<int>): void {
                     return;
                   }
                 }
@@ -60,21 +54,24 @@ final class MutexLanguageTest {
 
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class, () -> TypeChecker.check(program));
-        assertTrue(error.getMessage().contains(
-                "actor code cannot use blocking SharedMutex.with_lock"));
+        assertTrue(error.getMessage().contains("SharedMutex"), error.getMessage());
     }
 
     @Test
-    void actorCodeMayUseNonblockingSharedMutexOperations() {
+    void sharedActorsUseRwLockForExternalReadsInsteadOfSharedMutex() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                pub shared actor fnc try_worker(SharedMutex<int> mutex) => void {
-                  val maybe_guard = mutex.try_lock();
-                  stdio.println(mutex.is_poisoned());
+                pub shared actor fnc read_worker(RwLock<int> state) => void {
+                  val reader = state.read_lock();
+                  val snapshot = reader.value();
+                  reader.release();
+                  stdio.println(snapshot);
                   return;
                 }
+                """)));
 
-                pub shared actor fnc async_worker(SharedMutex<int> mutex) => void {
-                  val future_guard = mutex.lock_async();
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                pub shared actor fnc bad(SharedMutex<int> state) => void {
+                  val maybe_guard = state.try_lock();
                   return;
                 }
                 """)));

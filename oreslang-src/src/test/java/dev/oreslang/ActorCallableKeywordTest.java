@@ -151,8 +151,17 @@ final class ActorCallableKeywordTest {
                 actor fnc invalid(&int value) => void { return; }
                 """)));
 
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                actor fnc invalid(SharedMutex<int> value) => void { return; }
+                """)));
+
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                actor fnc valid(SharedMutex<int> value) => void { return; }
+                actor fnc valid(RwLock<int> value) => void {
+                  val reader = value.read_lock();
+                  val snapshot = reader.value();
+                  reader.release();
+                  return;
+                }
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""

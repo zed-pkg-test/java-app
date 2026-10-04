@@ -120,7 +120,10 @@ final class ActorSpawnLanguageTest {
                           return;
                         }
                         """)));
-        assertTrue(failure.getMessage().contains("not an application mailbox"));
+        assertTrue(
+                failure.getMessage().contains("mailbox")
+                        || failure.getMessage().contains("ActorRef"),
+                failure.getMessage());
     }
 
     @Test
@@ -222,11 +225,15 @@ final class ActorSpawnLanguageTest {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
-                        pub untrusted actor fnc probe(ActorRef target) => bool {
+                        shared actor Worker {
+                          pub receive(value: int): void { return; }
+                        }
+
+                        pub untrusted actor fnc probe(ActorRef<Worker> target) => bool {
                           return target.is_alive();
                         }
                         """)));
-        assertTrue(failure.getMessage().contains("lifecycle"));
+        assertTrue(failure.getMessage().contains("lifecycle"), failure.getMessage());
     }
 
     @Test

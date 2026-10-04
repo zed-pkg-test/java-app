@@ -259,8 +259,8 @@ final class IncrementalFunctorStaticTest {
                 }
                 """)));
 
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                fnc wrong() -> int { return 1; }
+        assertDoesNotThrow(() -> Parser.parse("""
+                fnc canonical() -> int { return 1; }
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
