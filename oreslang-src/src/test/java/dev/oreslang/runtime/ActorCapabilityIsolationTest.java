@@ -414,5 +414,23 @@ final class ActorCapabilityIsolationTest {
     }
 
 
+    @Test
+    void sharedReadonlyBytePayloadIsCopiedAndCannotBeMutatedThroughItsView() {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            byte[] source = new byte[]{1, 2, 3};
+            ActorRuntime.Shared<Object> shared = runtime.shareReadonly((Object) source);
+
+            source[0] = 99;
+
+            Object frozen = shared.value();
+            assertEquals(java.util.List.of((byte) 1, (byte) 2, (byte) 3), frozen);
+            assertInstanceOf(java.util.List.class, frozen);
+            @SuppressWarnings("unchecked")
+            java.util.List<Object> readonly = (java.util.List<Object>) frozen;
+            assertThrows(UnsupportedOperationException.class, () -> readonly.set(0, (byte) 7));
+        }
+    }
+
+
 
 }
