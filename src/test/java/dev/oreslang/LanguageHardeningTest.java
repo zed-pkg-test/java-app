@@ -261,7 +261,7 @@ final class LanguageHardeningTest {
                           }
                         end
                         """)));
-        assertTrue(inferredReturnMismatch.getMessage().contains("return expression"));
+        assertTrue(inferredReturnMismatch.getMessage().contains("return value"));
     }
 
     @Test
