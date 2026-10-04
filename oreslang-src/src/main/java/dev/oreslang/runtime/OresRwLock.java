@@ -1,6 +1,7 @@
 package dev.oreslang.runtime;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
@@ -22,6 +23,16 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * scheduler-affine and may resume on another carrier.</p>
  */
 public final class OresRwLock<T> {
+    /**
+     * Scheduler/actor carriers are never parked waiting for an external lock.
+     * Source code may handle this explicitly or use a future async-lock layer
+     * when that layer lands.
+     */
+    public static final class WouldBlockException extends IllegalStateException {
+        public WouldBlockException(String message) {
+            super(message);
+        }
+    }
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
     private ActorRuntime owningRuntime;
     private T value;
@@ -39,8 +50,28 @@ public final class OresRwLock<T> {
      */
     public ReadGuard<T> readLock() {
         requireReadAccess();
-        lock.readLock().lock();
+
+        if (inOresExecution()) {
+            if (!lock.readLock().tryLock()) {
+                throw new WouldBlockException(
+                        "OresRwLock read would block an Ores carrier; use tryReadLock() "
+                                + "or an async lock acquisition primitive");
+            }
+        } else {
+            lock.readLock().lock();
+        }
         return new ReadGuard<>(this, Thread.currentThread());
+    }
+
+    /**
+     * Nonblocking read admission. This is the preferred primitive inside an
+     * actor/scheduler turn until async RW-lock acquisition is lowered directly
+     * to OresFuture.
+     */
+    public Optional<ReadGuard<T>> tryReadLock() {
+        requireReadAccess();
+        if (!lock.readLock().tryLock()) return Optional.empty();
+        return Optional.of(new ReadGuard<>(this, Thread.currentThread()));
     }
 
     /**
@@ -51,8 +82,23 @@ public final class OresRwLock<T> {
      */
     public WriteGuard<T> writeLock() {
         requireWriteAccess();
-        lock.writeLock().lock();
+
+        if (inOresExecution()) {
+            if (!lock.writeLock().tryLock()) {
+                throw new WouldBlockException(
+                        "OresRwLock write would block an Ores carrier; use a nonblocking "
+                                + "or async lock acquisition primitive");
+            }
+        } else {
+            lock.writeLock().lock();
+        }
         return new WriteGuard<>(this, Thread.currentThread());
+    }
+
+    public Optional<WriteGuard<T>> tryWriteLock() {
+        requireWriteAccess();
+        if (!lock.writeLock().tryLock()) return Optional.empty();
+        return Optional.of(new WriteGuard<>(this, Thread.currentThread()));
     }
 
     public int readLockCount() {
@@ -74,6 +120,10 @@ public final class OresRwLock<T> {
 
     synchronized boolean ownedBy(ActorRuntime runtime) {
         return owningRuntime == null || owningRuntime == runtime;
+    }
+
+    private static boolean inOresExecution() {
+        return ActorRuntime.inActorExecution() || OresScheduler.current() != null;
     }
 
     private void requireReadAccess() {
