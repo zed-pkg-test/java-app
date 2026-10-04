@@ -1,5 +1,5 @@
 source_repo=ores-truffle-oreslang/oreslang-source.java
 source_pr=132
-source_head=2c8d350c9631a9f8a555de207d82bc0666a8c2a8
+source_head=ed1083ce33eb4ae6f7b11b1a8c9ce881737ca371
 source_base=58ca248e0afbf755758de91df2fc1b883f63e608
 mode=current-main semantic rebase; exact source tree delta over green PR158 carrier

@@ -41,14 +41,14 @@ final class ProjectManifestImportTest {
                 main = "src/main.ores"
                 """);
         Files.writeString(src.resolve("pkg/greeting.ores"), """
-                pub fnc greeting() => string {
+                pub fnc greeting() : string {
                   return "manifest-path";
                 }
                 """);
         Files.writeString(main, """
                 import fnc greeting from "pkg/greeting";
 
-                pub fnc main() => void {
+                pub fnc main() : void {
                   stdio.println(greeting());
                   return;
                 }
@@ -77,14 +77,14 @@ final class ProjectManifestImportTest {
         Path main = app.resolve("main.ores");
 
         Files.writeString(shared.resolve("common/message.ores"), """
-                pub fnc message() => string {
+                pub fnc message() : string {
                   return "oreslang-path";
                 }
                 """);
         Files.writeString(main, """
                 import fnc message from "common/message";
 
-                pub fnc main() => void {
+                pub fnc main() : void {
                   stdio.println(message());
                   return;
                 }
