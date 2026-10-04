@@ -103,6 +103,96 @@ Host `CompletionStage` values are compatibility inputs only. They are
 immediately normalized into an OresFuture before they participate in Oreslang
 suspension.
 
+## Awaitable<T> protocol
+
+`await` is defined over a compiler-known nominal protocol rather than over a
+magic field name or arbitrary reflection.
+
+Conceptually, the built-in contract is:
+
+```ores
+define interface Awaitable<T> {
+  fnc getAwait() => Future<T>;
+}
+```
+
+`Future<T>` itself implements `Awaitable<T>`; its `getAwait()` projection
+returns the same Future. Runtime handles may also implement the protocol. For
+example, `ActorSpawn<R>` projects its readiness Future so `await spawn`
+continues to mean "wait until the actor identity is ready."
+
+A user type may compute the projected Future instead of storing it in a fixed
+field:
+
+```ores
+define class DeferredReply implements Awaitable<Response> as
+  private val Request request;
+
+  pub getAwait() => Future<Response> {
+    return self.request.response_future();
+  }
+end
+```
+
+The hook may itself be `async`:
+
+```ores
+define class LazyReply implements Awaitable<Response> as
+  pub async getAwait() => Response {
+    val headers = await load_headers();
+    return await load_body(headers);
+  }
+end
+```
+
+An `async getAwait() : T` has the same effective projection type as a
+synchronous `getAwait() : Future<T>`, because calling any async callable
+produces `Future<T>`.
+
+The lowering of `await value` is exactly:
+
+```text
+evaluate value exactly once
+        |
+        +-- Future<T> ----------------------+
+        |                                   |
+        +-- Awaitable<T>                    |
+              |                             |
+              +-- invoke getAwait() once    |
+                      |                     |
+                      +---- Future<T> -------+
+                                            |
+                                            v
+                              capture continuation
+                                            |
+                                            v
+                                  suspend on Future
+```
+
+Important invariants:
+
+- `getAwait()` is invoked at most once for one evaluation of an `await`
+  expression; resumption never invokes it again.
+- The synchronous form must return `Future<T>`; the async form declares
+  `T` and its call result is `Future<T>`.
+- `getAwait()` may lazily construct the Future.
+- A null/non-Future projection is a runtime contract violation.
+- The compiler rejects `await` on values that are neither `Future<T>` nor
+  nominally `Awaitable<T>`.
+- Oreslang never scans fields looking for a Future and never uses reflection to
+  guess what should be awaited.
+- Interfaces may extend `Awaitable<T>`, allowing framework-specific task
+  handles to add richer APIs without changing `await` semantics.
+- Cancellation/error identity comes from the projected Future.
+- AOT lowering can resolve the projection statically; no dynamic plugin lookup
+  is required.
+
+The recursive reference evaluator can execute a synchronous `getAwait()`
+projection today. An async `getAwait()` is type/effect-correct but intentionally
+fails closed in that evaluator until general async-call/CPS lowering can preserve
+its suspended frame. The scheduler/Future ABI underneath is already the same
+one the lowerer will target.
+
 ## Await
 
 The semantic lowering is:

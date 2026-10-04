@@ -215,4 +215,49 @@ final class FutureLanguageTest {
     }
 
 
+    @Test
+    void asyncCallExpressionsProduceFutureValues() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  async fnc work() => int {
+                    return 42;
+                  }
+
+                  fnc expose() => Future<int> {
+                    return work();
+                  }
+
+                  fnc consume() => int {
+                    return await work();
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void asyncGetAwaitIsExplicitlyCallableAsFutureProjection() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class LazyValue implements Awaitable<int> as
+                    pub async getAwait() => int {
+                      return 42;
+                    }
+                  end
+
+                  fnc project(LazyValue value) => Future<int> {
+                    return value.getAwait();
+                  }
+
+                  fnc consume(LazyValue value) => int {
+                    return await value;
+                  }
+
+                  fnc project_future(Future<int> value) => Future<int> {
+                    return value.getAwait();
+                  }
+                end
+                """)));
+    }
+
+
 }

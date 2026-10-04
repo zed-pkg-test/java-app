@@ -514,7 +514,12 @@ public final class TypeChecker {
                             "generic callable '" + fn.name()
                                     + "' must be specialized by a direct call; polymorphic function values are not supported yet");
                 }
-                return functionType(fn.parameters(), fn.returnType(), Set.of(), null);
+                return callableValueType(
+                        fn.parameters(),
+                        fn.returnType(),
+                        fn.async(),
+                        Set.of(),
+                        null);
             }
             throw new IllegalArgumentException("unknown name '" + name.name() + "'");
         }
@@ -601,15 +606,17 @@ public final class TypeChecker {
                     }
                     String label = "function " + functionName.name();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
-                    return checkGenericCallable(
-                            target.genericParameters(),
-                            target.parameters(),
-                            target.returnType(),
-                            call.arguments(),
-                            env, generics, self,
-                            null,
-                            explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
-                            label);
+                    return asyncCallResult(
+                            target.async(),
+                            checkGenericCallable(
+                                    target.genericParameters(),
+                                    target.parameters(),
+                                    target.returnType(),
+                                    call.arguments(),
+                                    env, generics, self,
+                                    null,
+                                    explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
+                                    label));
                 }
             }
             if (call.callee() instanceof Ast.MemberExpr qualifiedCall
@@ -625,15 +632,17 @@ public final class TypeChecker {
                     }
                     String label = "function " + namespace.name() + "." + qualifiedCall.member();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
-                    return checkGenericCallable(
-                            target.genericParameters(),
-                            target.parameters(),
-                            target.returnType(),
-                            call.arguments(),
-                            env, generics, self,
-                            null,
-                            explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
-                            label);
+                    return asyncCallResult(
+                            target.async(),
+                            checkGenericCallable(
+                                    target.genericParameters(),
+                                    target.parameters(),
+                                    target.returnType(),
+                                    call.arguments(),
+                                    env, generics, self,
+                                    null,
+                                    explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
+                                    label));
                 }
             }
             if (call.callee() instanceof Ast.MemberExpr futuresCall
@@ -703,15 +712,17 @@ public final class TypeChecker {
                     validateCallTypeArgumentMarker(call, fn.genericParameters(), "static function " + klass.name() + "." + fn.name());
                     List<String> callableGenerics = new ArrayList<>(fn.genericParameters());
                     String label = "static function " + klass.name() + "." + fn.name();
-                    return checkGenericCallable(
-                            callableGenerics,
-                            fn.parameters(),
-                            fn.returnType(),
-                            call.arguments(),
-                            env, generics, self,
-                            null,
-                            explicitGenericBindings(fn.genericParameters(), call.typeArguments(), generics, self, label),
-                            label);
+                    return asyncCallResult(
+                            fn.async(),
+                            checkGenericCallable(
+                                    callableGenerics,
+                                    fn.parameters(),
+                                    fn.returnType(),
+                                    call.arguments(),
+                                    env, generics, self,
+                                    null,
+                                    explicitGenericBindings(fn.genericParameters(), call.typeArguments(), generics, self, label),
+                                    label));
                 }
                 if (receiver instanceof Named named) {
                     if (named.name().equals("SharedMutex")
@@ -750,15 +761,17 @@ public final class TypeChecker {
                         String label = "method " + owner.name() + "." + method.name();
                         Map<String, Type> bindings = new HashMap<>(classGenericBindings(owner, ownerType));
                         bindings.putAll(explicitGenericBindings(method.genericParameters(), call.typeArguments(), generics, self, label));
-                        return checkGenericCallable(
-                                callableGenerics,
-                                method.parameters(),
-                                method.returnType(),
-                                call.arguments(),
-                                env, generics, self,
-                                ownerType,
-                                bindings,
-                                label);
+                        return asyncCallResult(
+                                method.async(),
+                                checkGenericCallable(
+                                        callableGenerics,
+                                        method.parameters(),
+                                        method.returnType(),
+                                        call.arguments(),
+                                        env, generics, self,
+                                        ownerType,
+                                        bindings,
+                                        label));
                     }
                 }
             }
@@ -788,7 +801,12 @@ public final class TypeChecker {
                                 "generic callable '" + namespace.name() + "." + member.member()
                                         + "' must be specialized by a direct call; polymorphic function values are not supported yet");
                     }
-                    return functionType(moduleFunction.parameters(), moduleFunction.returnType(), Set.of(), null);
+                    return callableValueType(
+                            moduleFunction.parameters(),
+                            moduleFunction.returnType(),
+                            moduleFunction.async(),
+                            Set.of(),
+                            null);
                 }
                 Ast.ClassDecl memberClass = classes.get(namespace.name() + "." + member.member());
                 if (memberClass != null) return new ClassNamespace(qualifiedClassName(memberClass));
@@ -833,7 +851,12 @@ public final class TypeChecker {
                                 "generic static function '" + klass.name() + "." + fn.name()
                                         + "' must be specialized by a direct call; polymorphic function values are not supported yet");
                     }
-                    return functionType(fn.parameters(), fn.returnType(), Set.of(), null);
+                    return callableValueType(
+                            fn.parameters(),
+                            fn.returnType(),
+                            fn.async(),
+                            Set.of(),
+                            null);
                 }
                 if (functions.size() > 1) throw new IllegalArgumentException("overloaded static function '" + member.member() + "' must be called so arity can select the overload");
                 throw new IllegalArgumentException("unknown static member '" + member.member() + "' on " + klass.name());
@@ -864,8 +887,15 @@ public final class TypeChecker {
                         if (target == null) throw new IllegalArgumentException("cannot resolve method owner for '" + member.member() + "'");
                         Set<String> memberGenerics = new HashSet<>(target.owner().genericParameters());
                         memberGenerics.addAll(method.genericParameters());
-                        Type signature = functionType(method.parameters(), method.returnType(), memberGenerics, target.ownerType());
-                        return substituteGenerics(signature, classGenericBindings(target.owner(), target.ownerType()));
+                        Type signature = callableValueType(
+                                method.parameters(),
+                                method.returnType(),
+                                method.async(),
+                                memberGenerics,
+                                target.ownerType());
+                        return substituteGenerics(
+                                signature,
+                                classGenericBindings(target.owner(), target.ownerType()));
                     }
                     if (methods.size() > 1) throw new IllegalArgumentException("overloaded method '" + member.member() + "' must be called so arity can select the overload");
                 }
@@ -1388,6 +1418,11 @@ public final class TypeChecker {
                 case "ready" -> new Named(
                         "Future",
                         List.of(new Named("ActorRef", List.of())));
+                case "getAwait" -> new Function(
+                        List.of(),
+                        new Named(
+                                "Future",
+                                List.of(new Named("ActorRef", List.of()))));
                 case "done" -> new Named("Future", List.of(Primitive.BOOL));
                 case "result" -> {
                     if (result == Primitive.VOID) {
@@ -1571,6 +1606,8 @@ public final class TypeChecker {
         return switch (member) {
             case "is_done", "is_cancelled", "cancel" ->
                     new Function(List.of(), Primitive.BOOL);
+            case "getAwait" ->
+                    new Function(List.of(), receiver);
             default -> null;
         };
     }
@@ -2024,6 +2061,26 @@ public final class TypeChecker {
             throw new IllegalArgumentException("conflicting member '" + name + "' in " + owner + ": " + existing + " vs " + type);
         }
         members.put(name, type);
+    }
+
+    private Type asyncCallResult(boolean async, Type result) {
+        return async
+                ? new Named("Future", List.of(result))
+                : result;
+    }
+
+    private Function callableValueType(
+            List<Ast.Param> params,
+            Ast.TypeRef returns,
+            boolean async,
+            Set<String> generics,
+            Type self) {
+        Function raw = functionType(params, returns, generics, self);
+        return async
+                ? new Function(
+                        raw.parameters(),
+                        new Named("Future", List.of(raw.result())))
+                : raw;
     }
 
     private Function functionType(List<Ast.Param> params, Ast.TypeRef returns, Set<String> generics, Type self) {
