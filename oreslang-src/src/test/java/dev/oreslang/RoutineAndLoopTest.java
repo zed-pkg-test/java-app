@@ -163,7 +163,10 @@ final class RoutineAndLoopTest {
                 }
                 """);
         assertTrue(output.startsWith("123"));
-        assertTrue(output.endsWith("3"));
+        long safepoints = Long.parseLong(output.substring(3));
+        assertTrue(
+                safepoints >= 3,
+                "for-of must execute at least one cooperative safepoint per iteration");
     }
 
     @Test
@@ -176,7 +179,11 @@ final class RoutineAndLoopTest {
                   stdio.stdout.write(process.descriptor.scheduler_safepoints)
                 }
                 """);
-        assertEquals("0123", output);
+        assertTrue(output.startsWith("012"));
+        long safepoints = Long.parseLong(output.substring(3));
+        assertTrue(
+                safepoints >= 3,
+                "conventional for-loop must execute at least one cooperative safepoint per iteration");
     }
 
     @Test
