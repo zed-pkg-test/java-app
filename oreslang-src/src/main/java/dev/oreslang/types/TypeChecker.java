@@ -514,6 +514,10 @@ public final class TypeChecker {
             return Unknown.INSTANCE;
         }
         if (expr instanceof Ast.NameExpr name) {
+            if (name.name().equals("self") && self == null) {
+                throw new IllegalArgumentException(
+                        "'self' is only available inside an instance/actor method");
+            }
             Env.Binding local = env.lookup(name.name());
             if (local != null) return local.type();
             if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("actor")) return new Named(name.name(), List.of());
