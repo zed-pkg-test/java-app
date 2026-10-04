@@ -39,6 +39,8 @@ jobs:
           test -x target/ores-aot
           target/ores-aot --check examples/showcase.ores
           target/ores-aot --check examples/together.ores
+          target/ores-aot --check-aot examples/showcase.ores
+          target/ores-aot --check-aot examples/together.ores
       - name: Run examples in AOT host profile
         run: |
           target/ores-aot --mode=aot --platform=server examples/showcase.ores

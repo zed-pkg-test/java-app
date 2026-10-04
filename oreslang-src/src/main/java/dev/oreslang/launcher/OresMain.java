@@ -143,6 +143,12 @@ public final class OresMain {
                                 "  " + unit + " ("
                                         + result.declarationsByUnit().get(unit).symbols().size()
                                         + " static declarations)"));
+                if (!result.requiredHostClasses().isEmpty()) {
+                    System.out.println("AOT Java reachability:");
+                    result.requiredHostClasses().stream()
+                            .sorted()
+                            .forEach(className -> System.out.println("  " + className));
+                }
             } catch (Exception error) {
                 System.err.println(formatCheckDiagnostic(path, error));
                 System.exit(1);

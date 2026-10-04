@@ -92,4 +92,34 @@ final class AotProgramValidationTest {
         assertTrue(error.getMessage().contains("precompiled and linked"));
         assertTrue(error.getMessage().contains("JavaCompiler/URLClassLoader"));
     }
+    @Test
+    void aotAdmissionRecordsStaticallyKnownJavaHostReachability() throws Exception {
+        Path main = temp.resolve("java-import.ores");
+        Files.writeString(main, """
+                import class {ArrayList} from "java:java.util.ArrayList";
+
+                define module app
+                  pub fnc main(): void {
+                    return;
+                  }
+                end
+                """);
+
+        assertThrows(
+                SecurityException.class,
+                () -> LinkedProgramRunner.validateForAot(
+                        main,
+                        IsolatePolicy.developer()));
+
+        IsolatePolicy javaPolicy = IsolatePolicy.developer().withCapabilities(
+                IsolatePolicy.Capability.JAVA_INTEROP);
+        LinkedProgramRunner.AotValidationResult result =
+                LinkedProgramRunner.validateForAot(main, javaPolicy);
+
+        assertEquals(
+                java.util.Set.of("java.util.ArrayList"),
+                result.requiredHostClasses());
+    }
+
+
 }

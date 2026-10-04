@@ -113,6 +113,7 @@ public final class LinkedProgramRunner {
 
         LinkedHashMap<String, OresCompiler.DeclarationManifest> manifests =
                 new LinkedHashMap<>();
+        LinkedHashSet<String> requiredHostClasses = new LinkedHashSet<>();
         List<String> ids = new ArrayList<>(build.units().keySet());
         ids.sort(String::compareTo);
         for (String id : ids) {
@@ -120,17 +121,32 @@ public final class LinkedProgramRunner {
             OresCompiler.CompilationUnit validated =
                     OresCompiler.validateProgramForAot(unit.program(), policy);
             manifests.put(id, validated.declarations());
+
+            for (Ast.ImportDecl imported : unit.program().imports()) {
+                if (ImportRules.isJavaPath(imported.path())) {
+                    policy.require(
+                            IsolatePolicy.Capability.JAVA_INTEROP,
+                            "AOT Java host import " + imported.path());
+                    requiredHostClasses.add(
+                            ImportRules.javaClassName(imported.path()));
+                }
+            }
         }
 
-        return new AotValidationResult(build, Map.copyOf(manifests));
+        return new AotValidationResult(
+                build,
+                Map.copyOf(manifests),
+                Set.copyOf(requiredHostClasses));
     }
 
     public record AotValidationResult(
             IncrementalCompiler.BuildResult build,
-            Map<String, OresCompiler.DeclarationManifest> declarationsByUnit) {
+            Map<String, OresCompiler.DeclarationManifest> declarationsByUnit,
+            Set<String> requiredHostClasses) {
         public AotValidationResult {
             Objects.requireNonNull(build, "build");
             declarationsByUnit = Map.copyOf(declarationsByUnit);
+            requiredHostClasses = Set.copyOf(requiredHostClasses);
         }
     }
 
