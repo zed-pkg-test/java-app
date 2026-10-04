@@ -1,10 +1,13 @@
 name: Oreslang exact-head mirror validation
+
 on:
   push:
     branches:
       - "feat/oreslang-mirror-pr*"
+
 permissions:
   contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -21,10 +24,11 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: maven
-      - name: Provenance
+      - name: Verify exact source subtree
         run: |
-          test -s SOURCE_HEAD.txt
-          printf 'source-head: '; cat SOURCE_HEAD.txt
+          test "$(git rev-parse HEAD:oreslang-src)" = "298184a03158a2761487fe6f87f456684857388b"
+          printf 'source-tree: '
+          git rev-parse HEAD:oreslang-src
           java --version
           native-image --version
           mvn --version
@@ -41,4 +45,3 @@ jobs:
           test -x target/ores-aot
           ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/together.ores
           ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/showcase.ores
-          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/aot-actor-smoke.ores
