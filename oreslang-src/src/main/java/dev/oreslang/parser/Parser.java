@@ -160,10 +160,14 @@ public final class Parser {
             Ast.ActorKind actorKind = modifiers.untrusted
                     ? Ast.ActorKind.UNTRUSTED
                     : isolated ? Ast.ActorKind.PRIVATE : Ast.ActorKind.SHARED;
+            if (modifiers.async) {
+                throw error(actorToken,
+                        "actor callables/classes are inherently async; explicit 'async actor' is redundant");
+            }
             if (match(FNC)) return parseFunction(annotations, modifiers, Ast.CallableKind.FNC, actorKind);
             if (match(ROUTINE)) return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE, actorKind);
-            if (modifiers.async || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
-                throw error(actorToken, "actor declarations do not accept async, nlex, static, or abstract modifiers");
+            if (modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
+                throw error(actorToken, "actor declarations do not accept nlex, static, or abstract modifiers");
             }
             return parseActorClass(actorKind);
         }
@@ -197,7 +201,8 @@ public final class Parser {
         consume(RPAREN, "expected ')' after parameters");
         Ast.TypeRef returnType = parseReturnType(annotations);
         List<Ast.Stmt> body = parseBlock();
-        return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.nonLexical, actorKind, generics, params,
+        boolean async = modifiers.async || actorKind != Ast.ActorKind.NONE;
+        return new Ast.FunctionDecl(name, kind, modifiers.visibility, async, modifiers.nonLexical, actorKind, generics, params,
                 returnType, annotations, body);
     }
 
@@ -260,12 +265,30 @@ public final class Parser {
             }
 
             if (mods.isAbstract) throw error(peek(), "actor methods cannot be abstract");
+            if (mods.async && !mods.isStatic) {
+                throw error(peek(),
+                        "actor methods are inherently async; explicit 'async' is redundant");
+            }
             if (mods.isStatic) {
                 consume(FNC, "static actor functions must be declared with 'static fnc'");
             } else {
                 match(FNC);
             }
             Ast.MethodDecl method = parseMethod(annotations, mods);
+            if (!method.isStatic() && !method.async()) {
+                method = new Ast.MethodDecl(
+                        method.name(),
+                        method.visibility(),
+                        method.isStatic(),
+                        method.isAbstract(),
+                        true,
+                        method.explicitReceiverType(),
+                        method.genericParameters(),
+                        method.parameters(),
+                        method.returnType(),
+                        method.annotations(),
+                        method.body());
+            }
             if (actorKind == Ast.ActorKind.SHARED
                     && method.visibility() == Ast.Visibility.PUBLIC) {
                 if (method.isStatic()) {
@@ -1186,13 +1209,25 @@ public final class Parser {
             consume(RBRACKET, "expected ']' after arr literal");
             return new Ast.ListExpr(items);
         }
-        if (match(NLEX)) {
-            if (check(PIPE)) return parsePipeLambda(true);
-            if (check(LPAREN) && looksLikeLambda()) return parseLambda(true);
-            throw error(previous(), "'nlex' in expression position must prefix a lambda");
+        if (check(ASYNC) || check(NLEX)) {
+            boolean async = false;
+            boolean nonLexical = false;
+            while (check(ASYNC) || check(NLEX)) {
+                if (match(ASYNC)) {
+                    if (async) throw error(previous(), "duplicate 'async' lambda modifier");
+                    async = true;
+                } else {
+                    match(NLEX);
+                    if (nonLexical) throw error(previous(), "duplicate 'nlex' lambda modifier");
+                    nonLexical = true;
+                }
+            }
+            if (check(PIPE)) return parsePipeLambda(async, nonLexical);
+            if (check(LPAREN) && looksLikeLambda()) return parseLambda(async, nonLexical);
+            throw error(previous(), "'async'/'nlex' in expression position must prefix a lambda");
         }
-        if (check(PIPE)) return parsePipeLambda(false);
-        if (check(LPAREN) && looksLikeLambda()) return parseLambda(false);
+        if (check(PIPE)) return parsePipeLambda(false, false);
+        if (check(LPAREN) && looksLikeLambda()) return parseLambda(false, false);
         if (match(LPAREN)) {
             Ast.Expr first = parseExpression();
             if (match(COMMA)) {
@@ -1229,16 +1264,16 @@ public final class Parser {
         return new Ast.ObjectExpr(fields);
     }
 
-    private Ast.LambdaExpr parseLambda(boolean nonLexical) {
+    private Ast.LambdaExpr parseLambda(boolean async, boolean nonLexical) {
         consume(LPAREN, "expected '('");
         List<Ast.Param> params = parseParametersUntil(RPAREN);
         consume(RPAREN, "expected ')' after lambda parameters");
         consume(ARROW, "expected '->' after lambda parameters");
         if (!check(LBRACE)) throw error(peek(), "lambdas always require a block body; use '-> { ... }'");
-        return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
+        return new Ast.LambdaExpr(params, null, parseBlock(), async, nonLexical);
     }
 
-    private Ast.LambdaExpr parsePipeLambda(boolean nonLexical) {
+    private Ast.LambdaExpr parsePipeLambda(boolean async, boolean nonLexical) {
         consume(PIPE, "expected '|'");
         List<Ast.Param> params = new ArrayList<>();
         if (!check(PIPE)) {
@@ -1257,7 +1292,7 @@ public final class Parser {
         consume(PIPE, "expected closing '|' after lambda parameters");
         consume(ARROW, "lambdas use the slim arrow '->'");
         if (!check(LBRACE)) throw error(peek(), "lambdas always require a block body; use '|args| -> { ... }'");
-        return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
+        return new Ast.LambdaExpr(params, null, parseBlock(), async, nonLexical);
     }
 
     private boolean looksLikeLambda() {
