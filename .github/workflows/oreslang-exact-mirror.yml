@@ -26,6 +26,7 @@ jobs:
           test -s SOURCE_HEAD.txt
           printf 'source-head: '; cat SOURCE_HEAD.txt
           java --version
+          native-image --version
           mvn --version
       - name: Full JVM verification
         run: mvn -B -ntp verify
@@ -33,3 +34,10 @@ jobs:
         run: |
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
+      - name: Build Oreslang AOT native executable
+        run: mvn -B -ntp -Pnative-aot -DskipTests package
+      - name: Smoke test AOT native executable
+        run: |
+          test -x target/ores-aot
+          ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+          ./target/ores-aot --mode=aot --platform=linux examples/showcase.ores
