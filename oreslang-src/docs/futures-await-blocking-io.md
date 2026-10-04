@@ -282,8 +282,13 @@ Actor external-state rules are stricter:
 - private/isoactors and untrusted actors cannot access that shared-memory
   capability;
 - no actor may acquire an `OresRwLock<T>` write guard;
+- actor/scheduler carriers never block waiting for an external RW lock; a
+  contended immediate acquisition fails with `WouldBlock` and future async-lock
+  lowering will suspend through `OresFuture` instead of parking a carrier;
 - `SharedMutex<T>` is not an actor escape hatch for external mutation and is
   rejected when acquired from actor execution;
+- legacy `SyncCell<T>` is host/root-only; actors cannot receive, read, update,
+  close, or create it as shared mutable state;
 - an RwLock guard is lexical/thread-affine and therefore may not live across
   `await`.
 
