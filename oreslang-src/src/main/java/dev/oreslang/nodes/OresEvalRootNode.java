@@ -1,8 +1,10 @@
 package dev.oreslang.nodes;
 
+import com.oracle.truffle.api.CompilerAsserts;
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.ExecutionSignature;
+import com.oracle.truffle.api.nodes.ExplodeLoop;
 import com.oracle.truffle.api.nodes.RootNode;
 import dev.oreslang.OresLanguage;
 import dev.oreslang.ast.Ast;
@@ -293,12 +295,18 @@ public final class OresEvalRootNode extends RootNode {
             } catch (ReturnSignal signal) { return shapeReturnedValue(method.returnType(), signal.value, "method " + method.name()); }
         }
 
+        @ExplodeLoop
         private void executeBlock(List<Ast.Stmt> statements, Env parent) {
+            CompilerAsserts.partialEvaluationConstant(statements);
             Env env = new Env(parent);
             ArrayDeque<Ast.Expr> deferred = new ArrayDeque<>();
             boolean abnormalExit = false;
             try {
-                for (Ast.Stmt stmt : statements) executeStatement(stmt, env, deferred);
+                for (int i = 0; i < statements.size(); i++) {
+                    Ast.Stmt stmt = statements.get(i);
+                    CompilerAsserts.partialEvaluationConstant(stmt);
+                    executeStatement(stmt, env, deferred);
+                }
             } catch (ReturnSignal signal) {
                 throw signal;
             } catch (RuntimeException | Error failure) {
@@ -318,6 +326,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private void executeStatement(Ast.Stmt stmt, Env env, ArrayDeque<Ast.Expr> deferred) {
+            CompilerAsserts.partialEvaluationConstant(stmt);
             // Every actor kind observes stop/turn-overrun signals at statement
             // boundaries. UNTRUSTED actors additionally consume fuel here and
             // at expression boundaries below.
@@ -398,6 +407,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object eval(Ast.Expr expr, Env env) {
+            CompilerAsserts.partialEvaluationConstant(expr);
             if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
                 context.schedulerSafepoint();
             }
