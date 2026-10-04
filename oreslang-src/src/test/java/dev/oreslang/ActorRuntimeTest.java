@@ -20,6 +20,31 @@ import static org.junit.jupiter.api.Assertions.*;
 
 final class ActorRuntimeTest {
     @Test
+    void typedSourceProtocolDispatchUsesOneMailboxAndRuntimeOwnedReplyFutures() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var ref = runtime.spawnSourceSharedProtocolActor(context -> {
+                AtomicInteger value = new AtomicInteger();
+                return (method, arguments, turnContext) -> switch (method) {
+                    case "add" -> {
+                        value.addAndGet(((Number) arguments.getFirst()).intValue());
+                        yield null;
+                    }
+                    case "read" -> value.get();
+                    default -> throw new IllegalArgumentException("unknown protocol method " + method);
+                };
+            });
+
+            assertNull(runtime.invokeSourceProtocol(ref, "add", List.of(40))
+                    .get(2, TimeUnit.SECONDS));
+            assertNull(runtime.invokeSourceProtocol(ref, "add", List.of(2))
+                    .get(2, TimeUnit.SECONDS));
+            assertEquals(42, runtime.invokeSourceProtocol(ref, "read", List.of())
+                    .get(2, TimeUnit.SECONDS));
+            assertTrue(ref.isAlive());
+        }
+    }
+
+    @Test
     void freezesMessagesBeforeDelivery() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             CountDownLatch received = new CountDownLatch(1);

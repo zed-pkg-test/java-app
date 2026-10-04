@@ -176,6 +176,50 @@ final class ActorSpawnLanguageTest {
     }
 
     @Test
+    void sharedActorClassDispatchesMultipleTypedProtocolMethods() throws Exception {
+        String program = """
+                define actor Counter as
+                  let int value = 0;
+
+                  constructor(initial: int) {
+                    self.value = initial;
+                  }
+
+                  pub add(delta: int): void {
+                    self.value = self.value + delta;
+                    return;
+                  }
+
+                  pub current(): int {
+                    return self.value;
+                  }
+                end
+
+                pub routine main() => void {
+                  val counter = spawn Counter(40);
+                  await counter.add(2);
+                  val answer = await counter.current();
+                  stdio.println(answer);
+                  return;
+                }
+                """;
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "actor-class-protocol.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("42"));
+    }
+
+    @Test
     void untrustedActorCannotSpawnChildren() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
@@ -226,7 +270,7 @@ final class ActorSpawnLanguageTest {
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         shared actor Worker {
-                          pub receive(value: int): void { return; }
+                          pub run(value: int): void { return; }
                         }
 
                         pub untrusted actor fnc probe(ActorRef<Worker> target) => bool {

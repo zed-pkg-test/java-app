@@ -1964,16 +1964,14 @@ public final class TypeChecker {
                     }
                     yield new Function(List.of(), Primitive.BOOL);
                 }
-                case "mailbox" -> throw new IllegalArgumentException(
-                        "ActorRef is not an application mailbox object; "
-                                + "persistent actor classes enqueue through send(message)");
-                case "receive" -> throw new IllegalArgumentException(
-                        "actor receive(message) is runtime-owned; enqueue through ActorRef.send(message)");
+                case "send", "receive", "mailbox" -> throw new IllegalArgumentException(
+                        "raw ActorRef mailbox operations are runtime-private; "
+                                + "invoke a declared typed actor protocol method instead");
                 default -> {
                     if (named.arguments().size() == 1) {
                         throw new IllegalArgumentException(
-                                "unknown ActorRef operation '" + member
-                                        + "'; concrete actor references expose send(message), identity, and lifecycle control");
+                                "actor protocol methods are not first-class values; invoke '"
+                                        + member + "(...)' directly through the ActorRef");
                     }
                     throw new IllegalArgumentException(
                             "unknown ActorRef member '" + member + "'");
