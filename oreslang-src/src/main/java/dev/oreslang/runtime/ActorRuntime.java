@@ -363,9 +363,9 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         /**
-         * Production defaults use four independent Erlang-style scheduler
-         * bulkheads: control-plane, shared actor, isoactor/private, and untrusted
-         * actor. Each domain starts with a small worker floor and may grow
+         * Production defaults use five independent scheduler bulkheads:
+         * control-plane, root/async task, shared actor, isoactor/private, and
+         * untrusted actor. Each domain starts with a small worker floor and may grow
          * toward a bounded ceiling when runnable actor demand accumulates.
          *
          * The pools are intentionally not partitioned as permanent CPU owners:
@@ -1331,7 +1331,11 @@ public final class ActorRuntime implements AutoCloseable {
             this.config = Objects.requireNonNull(config);
             this.maxActorMemoryBytes = configuredProcessActorMemoryLimit();
             int controlParallelism = config.controlParallelism();
-            int rootPermits = Math.max(1, config.rootTaskParallelism());
+            // Logical root tasks are virtual-thread-like executions, not
+            // carrier reservations. Suspended tasks keep logical identity but
+            // release their carrier, so admission must be independent of the
+            // ROOT_TASK carrier floor/ceiling.
+            int rootPermits = Math.max(1, config.maxActors());
             int readyQueueCapacity;
             try {
                 readyQueueCapacity = Math.addExact(config.maxActors(), rootPermits);
@@ -2013,6 +2017,55 @@ public final class ActorRuntime implements AutoCloseable {
         }
     }
 
+    /**
+     * Compiler/runtime entry point for an ordinary async Ores task.
+     *
+     * <p>Unlike executeRootTask, this never blocks the caller waiting for task
+     * completion or logical-task admission. The returned Future is the task's
+     * awaitable identity. Logical tasks are bounded independently from carrier
+     * count so suspended tasks do not consume ROOT_TASK threads.</p>
+     */
+    <T> OresFuture<T> submitAsyncRootTask(Supplier<T> task) {
+        Objects.requireNonNull(task, "task");
+        requireCallerRuntimeAffinity("submit async root task");
+        if (inActorExecution()) {
+            return OresFuture.failed(new IllegalStateException(
+                    "ordinary async root tasks cannot be spawned from an actor turn yet; "
+                            + "actor-local async child-task lowering must preserve the actor scheduler domain"));
+        }
+        if (inMailmanExecution()) {
+            return OresFuture.failed(new IllegalStateException(
+                    "ActorMailman code cannot spawn ordinary async root tasks"));
+        }
+        if (closed.get()) {
+            return OresFuture.failed(new IllegalStateException("actor runtime is closed"));
+        }
+
+        if (!dispatcherGroup.rootSlots.tryAcquire()) {
+            return OresFuture.failed(new RejectedExecutionException(
+                    "root-task logical execution limit exceeded: maximum "
+                            + dispatcherConfig.maxActors()));
+        }
+
+        RootTask<T> rootTask;
+        synchronized (runtimeLifecycleLock) {
+            if (closed.get()) {
+                dispatcherGroup.rootSlots.release();
+                return OresFuture.failed(new IllegalStateException("actor runtime is closed"));
+            }
+            activeRootTasks.incrementAndGet();
+            rootTask = new RootTask<>(task);
+            rootTasks.add(rootTask);
+        }
+
+        try {
+            vm.rootTaskScheduler().execute(rootTask);
+        } catch (RejectedExecutionException rejected) {
+            rootTask.cancelBeforeStart(rejected);
+        }
+        return rootTask.awaitableCompletion;
+    }
+
     private void releaseRootTask(RootTask<?> rootTask) {
         if (!rootTasks.remove(rootTask)) return;
         dispatcherGroup.rootSlots.release();
@@ -2034,6 +2087,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         private final Supplier<T> task;
         private final CompletableFuture<T> completion = new CompletableFuture<>();
+        private final OresFuture<T> awaitableCompletion;
         private final AtomicInteger phase = new AtomicInteger(QUEUED);
         private final AtomicReference<RootResumeEnvelope> resumeEnvelope =
                 new AtomicReference<>();
@@ -2045,6 +2099,22 @@ public final class ActorRuntime implements AutoCloseable {
 
         private RootTask(Supplier<T> task) {
             this.task = task;
+            this.awaitableCompletion = new OresFuture<>(this::cancelFromAwaitable);
+        }
+
+        private void completeSuccess(T value) {
+            completion.complete(value);
+            awaitableCompletion.completeFromRuntime(value);
+        }
+
+        private void completeFailure(Throwable failure) {
+            Throwable nonNull = Objects.requireNonNull(failure, "failure");
+            completion.completeExceptionally(nonNull);
+            if (nonNull instanceof CancellationException cancellation) {
+                awaitableCompletion.cancelFromRuntime(cancellation);
+            } else {
+                awaitableCompletion.failFromRuntime(nonNull);
+            }
         }
 
         private void suspendOn(
@@ -2065,7 +2135,7 @@ public final class ActorRuntime implements AutoCloseable {
                         value,
                         OresFuture.unwrap(failure));
                 if (!resumeEnvelope.compareAndSet(null, envelope)) {
-                    completion.completeExceptionally(new IllegalStateException(
+                    completeFailure(new IllegalStateException(
                             "root task received overlapping await completions"));
                     return;
                 }
@@ -2084,7 +2154,7 @@ public final class ActorRuntime implements AutoCloseable {
                     return;
                 }
                 if (observed != SUSPENDED) {
-                    completion.completeExceptionally(new IllegalStateException(
+                    completeFailure(new IllegalStateException(
                             "invalid root task phase while scheduling await continuation: "
                                     + observed));
                     return;
@@ -2100,7 +2170,7 @@ public final class ActorRuntime implements AutoCloseable {
                 vm.rootTaskScheduler().execute(this);
             } catch (RejectedExecutionException rejected) {
                 if (phase.compareAndSet(QUEUED, FINISHED)) {
-                    completion.completeExceptionally(rejected);
+                    completeFailure(rejected);
                     releaseRootTask(this);
                 }
             }
@@ -2130,11 +2200,11 @@ public final class ActorRuntime implements AutoCloseable {
                                 : resume.continuation().resume(
                                         resume.value(),
                                         resume.failure());
-                        completion.complete((T) result);
+                        completeSuccess((T) result);
                     } catch (RootTaskSuspendedSignal suspended) {
                         suspendedThisTurn.set(true);
                     } catch (Throwable failure) {
-                        completion.completeExceptionally(failure);
+                        completeFailure(failure);
                         if (failure instanceof VirtualMachineError fatal) throw fatal;
                         if (failure instanceof ThreadDeath fatal) throw fatal;
                         if (failure instanceof LinkageError fatal) throw fatal;
@@ -2143,7 +2213,7 @@ public final class ActorRuntime implements AutoCloseable {
             } catch (RootTaskSuspendedSignal suspended) {
                 suspendedThisTurn.set(true);
             } catch (Throwable failure) {
-                completion.completeExceptionally(failure);
+                completeFailure(failure);
                 if (failure instanceof VirtualMachineError fatal) throw fatal;
                 if (failure instanceof ThreadDeath fatal) throw fatal;
                 if (failure instanceof LinkageError fatal) throw fatal;
@@ -2203,7 +2273,7 @@ public final class ActorRuntime implements AutoCloseable {
                     && !vm.rootTaskScheduler().claimCompensatingThread()) {
                 compensationClaimed.set(false);
             }
-            completion.completeExceptionally(new CancellationException(
+            completeFailure(new CancellationException(
                     "root/main process exceeded max wall time "
                             + policyCeiling.maxWallTime()));
             running.interrupt();
@@ -2222,8 +2292,29 @@ public final class ActorRuntime implements AutoCloseable {
         private void cancelBeforeStart(Throwable failure) {
             if (!phase.compareAndSet(QUEUED, FINISHED)) return;
             vm.rootTaskScheduler().remove(this);
-            completion.completeExceptionally(failure);
+            completeFailure(failure);
             releaseRootTask(this);
+        }
+
+        private void cancelFromAwaitable() {
+            CancellationException cancellation = new CancellationException(
+                    "async Ores root task was cancelled");
+            for (;;) {
+                int observed = phase.get();
+                if (observed == FINISHED) return;
+                if (observed == RUNNING) {
+                    completion.completeExceptionally(cancellation);
+                    Thread running = carrier;
+                    if (running != null) running.interrupt();
+                    return;
+                }
+                if (observed != QUEUED && observed != SUSPENDED) return;
+                if (!phase.compareAndSet(observed, FINISHED)) continue;
+                if (observed == QUEUED) vm.rootTaskScheduler().remove(this);
+                completion.completeExceptionally(cancellation);
+                releaseRootTask(this);
+                return;
+            }
         }
 
         private void cancelFromRuntimeClose() {
@@ -2240,7 +2331,7 @@ public final class ActorRuntime implements AutoCloseable {
                 }
                 if (!phase.compareAndSet(observed, FINISHED)) continue;
                 if (observed == QUEUED) vm.rootTaskScheduler().remove(this);
-                completion.completeExceptionally(
+                completeFailure(
                         new CancellationException(
                                 "root/main execution cancelled by runtime close"));
                 releaseRootTask(this);

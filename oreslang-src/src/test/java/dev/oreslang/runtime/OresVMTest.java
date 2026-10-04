@@ -480,4 +480,52 @@ final class OresVMTest {
     }
 
 
+    @Test
+    void suspendedAsyncRootTasksOutnumberCarriersWithoutPinning() throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(2),
+                0,
+                32);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            OresFuture<Integer> gate = new OresFuture<>();
+            int taskCount = 8;
+            CountDownLatch suspended = new CountDownLatch(taskCount);
+            java.util.ArrayList<OresFuture<Integer>> results =
+                    new java.util.ArrayList<>();
+
+            for (int i = 0; i < taskCount; i++) {
+                int index = i;
+                results.add(runtime.submitAsyncRootTask(() -> {
+                    suspended.countDown();
+                    ActorRuntime.suspendCurrentRootOn(
+                            gate,
+                            (value, failure) -> {
+                                assertNull(failure);
+                                return ((Integer) value) + index;
+                            });
+                    fail("suspension must unwind the ROOT_TASK carrier");
+                    return -1;
+                }));
+            }
+
+            assertTrue(
+                    suspended.await(2, TimeUnit.SECONDS),
+                    "one carrier must be able to suspend many logical root tasks");
+            assertEquals(
+                    1,
+                    runtime.rootTaskDispatcherStats().largestPoolSize(),
+                    "suspended logical tasks must not require one carrier each");
+
+            gate.completeFromRuntime(100);
+
+            for (int i = 0; i < taskCount; i++) {
+                assertEquals(100 + i, results.get(i).get(2, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+
 }

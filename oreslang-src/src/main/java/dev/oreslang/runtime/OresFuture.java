@@ -103,6 +103,10 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
         return settle(new Failure(Objects.requireNonNull(failure, "failure")));
     }
 
+    boolean cancelFromRuntime(CancellationException failure) {
+        return settle(new Cancelled(Objects.requireNonNull(failure, "failure")));
+    }
+
     /**
      * Runtime-only completion subscription.
      *
