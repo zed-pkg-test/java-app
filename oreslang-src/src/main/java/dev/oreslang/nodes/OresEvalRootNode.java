@@ -189,6 +189,14 @@ public final class OresEvalRootNode extends RootNode {
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
+
+            if (main.async() && ActorRuntime.inRootExecution()) {
+                throw new IllegalStateException(
+                        "async main requires structured launcher/CPS lifecycle lowering; "
+                                + "the current linked launcher must not close its Graal context "
+                                + "while main's Future is still running");
+            }
+
             return callFunction(main, List.of(arguments));
         }
 

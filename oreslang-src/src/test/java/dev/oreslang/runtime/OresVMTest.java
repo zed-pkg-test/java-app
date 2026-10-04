@@ -673,4 +673,51 @@ final class OresVMTest {
     }
 
 
+    @Test
+    void suspendedRootTaskStillExpiresAtAbsoluteWallDeadline() throws Exception {
+        IsolatePolicy base = IsolatePolicy.developer();
+        IsolatePolicy shortPolicy = new IsolatePolicy(
+                base.capabilities(),
+                base.maxHeapBytes(),
+                base.maxMailboxMessages(),
+                Duration.ofMillis(80),
+                false);
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(1),
+                0,
+                32);
+
+        try (ActorRuntime runtime = new ActorRuntime(shortPolicy, config)) {
+            OresFuture<Integer> never = new OresFuture<>();
+            CountDownLatch suspended = new CountDownLatch(1);
+            CountDownLatch resumed = new CountDownLatch(1);
+
+            OresFuture<Integer> task = runtime.submitAsyncRootTask(() -> {
+                suspended.countDown();
+                ActorRuntime.suspendCurrentRootOn(
+                        never,
+                        (value, failure) -> {
+                            resumed.countDown();
+                            return 1;
+                        });
+                fail("suspension must unwind");
+                return -1;
+            });
+
+            assertTrue(suspended.await(2, TimeUnit.SECONDS));
+            assertThrows(
+                    java.util.concurrent.CancellationException.class,
+                    () -> task.get(2, TimeUnit.SECONDS));
+
+            never.completeFromRuntime(1);
+            assertFalse(
+                    resumed.await(100, TimeUnit.MILLISECONDS),
+                    "wall-time expiry while suspended must detach the old continuation");
+            assertTrue(runtime.rootTaskDispatcherStats().overrunTurns() >= 1);
+        }
+    }
+
+
 }

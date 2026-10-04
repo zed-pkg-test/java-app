@@ -643,7 +643,7 @@ public final class OwnershipChecker {
                     }
                 }
             }
-            checkExpr(member.receiver(), scope, false);
+            ValueInfo receiverInfo = checkExpr(member.receiver(), scope, false);
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
             Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
             ResolvedMethod target = klass == null ? null

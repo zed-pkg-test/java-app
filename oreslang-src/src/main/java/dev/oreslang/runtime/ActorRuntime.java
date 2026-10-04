@@ -1995,6 +1995,7 @@ public final class ActorRuntime implements AutoCloseable {
             activeRootTasks.incrementAndGet();
             rootTask = new RootTask<>(task);
             rootTasks.add(rootTask);
+            rootTask.armRootDeadline();
         }
 
         try {
@@ -2056,6 +2057,7 @@ public final class ActorRuntime implements AutoCloseable {
             activeRootTasks.incrementAndGet();
             rootTask = new RootTask<>(task);
             rootTasks.add(rootTask);
+            rootTask.armRootDeadline();
         }
 
         try {
@@ -2067,6 +2069,7 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private void releaseRootTask(RootTask<?> rootTask) {
+        rootTask.finishRootDeadline();
         if (!rootTasks.remove(rootTask)) return;
         dispatcherGroup.rootSlots.release();
         synchronized (runtimeLifecycleLock) {
@@ -2097,11 +2100,12 @@ public final class ActorRuntime implements AutoCloseable {
         private volatile ScheduledFuture<?> deadlineFuture;
         private final AtomicBoolean compensationClaimed = new AtomicBoolean();
         private final AtomicBoolean deadlineExpired = new AtomicBoolean();
-        private volatile long deadlineNanos = Long.MAX_VALUE;
+        private final long deadlineNanos;
 
         private RootTask(Supplier<T> task) {
             this.task = task;
             this.awaitableCompletion = new OresFuture<>(this::cancelFromAwaitable);
+            this.deadlineNanos = rootDeadlineNanos();
         }
 
         private void completeSuccess(T value) {
@@ -2199,9 +2203,7 @@ public final class ActorRuntime implements AutoCloseable {
             ACTOR_CARRIER.set(Boolean.TRUE);
             CURRENT_ROOT_RUNTIME.set(ActorRuntime.this);
             currentRootTask.set(this);
-            deadlineNanos = rootDeadlineNanos();
             CURRENT_ROOT_DEADLINE_NANOS.set(deadlineNanos);
-            armRootDeadline();
             if (closed.get()) carrier.interrupt();
 
             AtomicBoolean suspendedThisTurn = new AtomicBoolean();
@@ -2234,7 +2236,7 @@ public final class ActorRuntime implements AutoCloseable {
                 if (failure instanceof ThreadDeath fatal) throw fatal;
                 if (failure instanceof LinkageError fatal) throw fatal;
             } finally {
-                disarmRootDeadline();
+                vm.rootTaskScheduler().relaxAfterQuantum();
                 Thread.interrupted();
                 carrier = null;
                 CURRENT_ROOT_DEADLINE_NANOS.remove();
@@ -2283,39 +2285,60 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void armRootDeadline() {
-            if (deadlineNanos == Long.MAX_VALUE) return;
+            if (deadlineNanos == Long.MAX_VALUE || phase.get() == FINISHED) return;
             long delay = Math.max(1L, deadlineNanos - System.nanoTime());
-            deadlineFuture = messageWatchdog.schedule(
+            ScheduledFuture<?> scheduled = messageWatchdog.schedule(
                     this::expireRootTask,
                     delay,
                     TimeUnit.NANOSECONDS);
+            deadlineFuture = scheduled;
+            if (phase.get() == FINISHED) {
+                scheduled.cancel(false);
+                deadlineFuture = null;
+            }
         }
 
         private void expireRootTask() {
-            if (phase.get() != RUNNING) return;
-            Thread running = carrier;
-            if (running == null) return;
             if (!deadlineExpired.compareAndSet(false, true)) return;
 
             vm.rootTaskScheduler().recordOverrun();
-            if (compensationClaimed.compareAndSet(false, true)
-                    && !vm.rootTaskScheduler().claimCompensatingThread()) {
-                compensationClaimed.set(false);
-            }
-            completeFailure(new CancellationException(
+            CancellationException timeout = new CancellationException(
                     "root/main process exceeded max wall time "
-                            + policyCeiling.maxWallTime()));
-            running.interrupt();
+                            + policyCeiling.maxWallTime());
+
+            for (;;) {
+                int observed = phase.get();
+                if (observed == FINISHED) return;
+
+                if (observed == RUNNING) {
+                    if (compensationClaimed.compareAndSet(false, true)
+                            && !vm.rootTaskScheduler().claimCompensatingThread()) {
+                        compensationClaimed.set(false);
+                    }
+                    completeFailure(timeout);
+                    Thread running = carrier;
+                    if (running != null) running.interrupt();
+                    return;
+                }
+
+                if (observed != QUEUED && observed != SUSPENDED) return;
+                if (!phase.compareAndSet(observed, FINISHED)) continue;
+
+                if (observed == QUEUED) vm.rootTaskScheduler().remove(this);
+                completeFailure(timeout);
+                detachAwaitRegistration();
+                releaseRootTask(this);
+                return;
+            }
         }
 
-        private void disarmRootDeadline() {
+        private void finishRootDeadline() {
             ScheduledFuture<?> deadline = deadlineFuture;
             deadlineFuture = null;
             if (deadline != null) deadline.cancel(false);
             if (compensationClaimed.compareAndSet(true, false)) {
                 vm.rootTaskScheduler().releaseCompensatingThread();
             }
-            vm.rootTaskScheduler().relaxAfterQuantum();
         }
 
         private void cancelBeforeStart(Throwable failure) {

@@ -330,6 +330,20 @@ final class FutureLanguageTest {
 
 
     @Test
+    void compilerKnownAsyncProtocolTypeNamesCannotBeImportedAsClasses() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        import class Future from "./foreign.ores";
+
+                        fnc main() => void {
+                          return;
+                        }
+                        """)));
+        assertTrue(failure.getMessage().contains("compiler/runtime built-in type"));
+    }
+
+    @Test
     void compilerKnownAsyncProtocolTypeNamesCannotBeShadowed() {
         for (String declaration : java.util.List.of(
                 "define class Awaitable end",
