@@ -4,6 +4,7 @@ import dev.oreslang.config.OresProjectConfig;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.LinkedProgramRunner;
+import org.graalvm.polyglot.PolyglotException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -96,8 +97,8 @@ final class ProjectManifestImportTest {
                 }
                 """);
 
-        IllegalArgumentException failure = assertThrows(
-                IllegalArgumentException.class,
+        PolyglotException failure = assertThrows(
+                PolyglotException.class,
                 () -> LinkedProgramRunner.run(
                         main,
                         IsolatePolicy.developer(),
