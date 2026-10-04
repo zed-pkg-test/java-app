@@ -2843,13 +2843,42 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private void requireCallerRuntimeAffinity(String operation) {
-        ActorRuntime caller = currentActorRuntime();
-        if (caller == null) caller = currentRootRuntime();
-        if (caller == null) caller = CURRENT_MAILMAN_RUNTIME.get();
-        if (caller != null && caller != this) {
+        ActorRuntime actorCaller = currentActorRuntime();
+        if (actorCaller != null && actorCaller != this) {
             throw new SecurityException(
-                    "guest execution cannot " + operation + " through another ActorRuntime");
+                    "actor execution cannot " + operation + " through another ActorRuntime");
         }
+
+        ActorRuntime mailmanCaller = CURRENT_MAILMAN_RUNTIME.get();
+        if (mailmanCaller != null && mailmanCaller != this) {
+            throw new SecurityException(
+                    "mailman execution cannot " + operation + " through another ActorRuntime");
+        }
+
+        ActorRuntime rootCaller = currentRootRuntime();
+        if (rootCaller == null || rootCaller == this) return;
+
+        // Root/main work is physically owned by the OresVM CONTROL scheduler,
+        // while each OresContext owns a distinct logical ActorRuntime registry.
+        // The official launcher therefore enters a context from a lightweight
+        // root runtime attached to the same VM. Permit that bridge only when
+        // physical VM identity matches and the context runtime cannot widen the
+        // root/control policy. Actor and mailman callers above remain exact-
+        // runtime only.
+        if (rootCaller.vm != this.vm
+                || !policyContains(rootCaller.policyCeiling, this.policyCeiling)) {
+            throw new SecurityException(
+                    "root/control execution cannot " + operation
+                            + " through an unrelated or more-privileged ActorRuntime");
+        }
+    }
+
+    private static boolean policyContains(IsolatePolicy ceiling, IsolatePolicy candidate) {
+        if (!ceiling.capabilities().containsAll(candidate.capabilities())) return false;
+        if (candidate.maxHeapBytes() > ceiling.maxHeapBytes()) return false;
+        if (candidate.maxMailboxMessages() > ceiling.maxMailboxMessages()) return false;
+        if (candidate.maxWallTime().compareTo(ceiling.maxWallTime()) > 0) return false;
+        return !ceiling.adversarial() || candidate.adversarial();
     }
 
     private static void requireSupervisorContext(String operation) {
