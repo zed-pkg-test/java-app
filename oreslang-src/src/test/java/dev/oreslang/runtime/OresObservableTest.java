@@ -128,6 +128,22 @@ final class OresObservableTest {
     }
 
     @Test
+    void cancellationExceptionFailureIsNotMisclassifiedAsCancellation() {
+        OresFuture<Integer> source =
+                OresFuture.failed(new CancellationException("domain failure"));
+        OresFuture<OresNotification<Integer>> pull =
+                OresObservable.fromFuture(source).subscribe().next();
+
+        assertFalse(source.isCancelled());
+        assertFalse(pull.isCancelled(),
+                "cancellation identity comes from Future state, not exception class");
+
+        CompletionException failure =
+                assertThrows(CompletionException.class, pull::join);
+        assertInstanceOf(CancellationException.class, failure.getCause());
+    }
+
+    @Test
     void sourceFailureIsTerminal() {
         OresFuture<Integer> source =
                 OresFuture.failed(new IllegalStateException("boom"));

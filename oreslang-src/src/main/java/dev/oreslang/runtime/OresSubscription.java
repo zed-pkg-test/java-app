@@ -1,7 +1,6 @@
 package dev.oreslang.runtime;
 
 import java.util.Objects;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -107,7 +106,7 @@ public abstract class OresSubscription<T> {
             if (!exposed.isDone()) {
                 if (terminalFailure == null) {
                     exposed.completeFromRuntime(notification);
-                } else if (terminalFailure instanceof CancellationException) {
+                } else if (source.isCancelled()) {
                     exposed.cancel(true);
                 } else {
                     exposed.failFromRuntime(terminalFailure);

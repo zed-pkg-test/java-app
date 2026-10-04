@@ -5,7 +5,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.concurrent.CancellationException;
 import java.util.function.Function;
 
 /**
@@ -190,7 +189,7 @@ public abstract class OresObservable<T> {
             }
             if (failure != null) {
                 Throwable terminalFailure = OresFuture.unwrap(failure);
-                if (terminalFailure instanceof CancellationException) {
+                if (pull.isCancelled()) {
                     result.cancel(true);
                 } else {
                     result.failFromRuntime(terminalFailure);
@@ -233,7 +232,7 @@ public abstract class OresObservable<T> {
             }
             if (failure != null) {
                 Throwable terminalFailure = OresFuture.unwrap(failure);
-                if (terminalFailure instanceof CancellationException) {
+                if (source.isCancelled()) {
                     result.cancel(true);
                 } else {
                     result.failFromRuntime(terminalFailure);
