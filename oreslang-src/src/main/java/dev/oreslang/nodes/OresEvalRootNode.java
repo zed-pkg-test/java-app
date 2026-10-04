@@ -31,11 +31,11 @@ import java.util.concurrent.CompletionStage;
 /** Executable Truffle root. Parsing and static checks happen before this node is created. */
 public final class OresEvalRootNode extends RootNode {
     public static final String LINK_ONLY_COMMAND = "__ores_internal_link_only__";
-    public static final String INIT_ONLY_COMMAND = "__ores_internal_init_only__";
     public static final String MAIN_ONLY_COMMAND = "__ores_internal_main_only__";
 
     private final Ast.Program program;
     private final String codeUnitId;
+    private final Ast.FunctionDecl mainFunction;
     private volatile Evaluator evaluator;
 
     public OresEvalRootNode(OresLanguage language, Ast.Program program) {
@@ -46,6 +46,7 @@ public final class OresEvalRootNode extends RootNode {
         super(language);
         this.program = program;
         this.codeUnitId = codeUnitId;
+        this.mainFunction = resolveEntrypoint(program);
     }
 
     @Override public String getName() { return "ores-eval"; }
@@ -73,13 +74,9 @@ public final class OresEvalRootNode extends RootNode {
             current.link();
             return null;
         }
-        if (isControl(arguments, INIT_ONLY_COMMAND)) {
-            current.link();
-            return current.initialize();
-        }
         if (isControl(arguments, MAIN_ONLY_COMMAND)) {
             current.link();
-            return current.executeMain(new Object[0]);
+            return current.executeMain(mainFunction, new Object[0]);
         }
 
         // RootNode is already executing inside an entered Graal context. It
@@ -88,8 +85,7 @@ public final class OresEvalRootNode extends RootNode {
         // entering Graal; direct embedders retain ownership of their entry
         // thread unless they opt into ActorRuntime.executeProcessRoot(...).
         current.link();
-        current.initialize();
-        return current.executeMain(arguments);
+        return current.executeMain(mainFunction, arguments);
     }
 
     /**
@@ -100,6 +96,29 @@ public final class OresEvalRootNode extends RootNode {
     @TruffleBoundary
     private static void checkCapabilities(Ast.Program program, IsolatePolicy policy) {
         CapabilityChecker.check(program, policy);
+    }
+
+    private static Ast.FunctionDecl resolveEntrypoint(Ast.Program program) {
+        Ast.FunctionDecl rootMain = null;
+        Ast.FunctionDecl unqualifiedMain = null;
+        boolean ambiguous = false;
+        for (Ast.ModuleDecl module : program.modules()) {
+            for (Ast.Decl declaration : module.declarations()) {
+                if (!(declaration instanceof Ast.FunctionDecl fn) || !fn.name().equals("main")) continue;
+                if (module.name().equals(Parser.ROOT_MODULE)) {
+                    rootMain = fn;
+                } else if (unqualifiedMain == null) {
+                    unqualifiedMain = fn;
+                } else {
+                    ambiguous = true;
+                }
+            }
+        }
+        if (rootMain != null) return rootMain;
+        if (ambiguous) {
+            throw new IllegalArgumentException("ambiguous function main; qualify program entrypoint");
+        }
+        return unqualifiedMain;
     }
 
     @TruffleBoundary
@@ -130,8 +149,6 @@ public final class OresEvalRootNode extends RootNode {
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
-        private boolean initialized;
-
         private Evaluator(Ast.Program program, OresContext context, String codeUnitId) {
             this.program = program;
             this.context = context;
@@ -189,19 +206,9 @@ public final class OresEvalRootNode extends RootNode {
             context.registerLinkedCodeUnit(codeUnitId, this);
         }
 
-        private synchronized Object initialize() {
-            if (initialized) return null;
-            // Mark before invocation so a recursive path cannot run init twice.
-            initialized = true;
-            Ast.FunctionDecl init = functions.get(Parser.ROOT_MODULE + ".init");
-            if (init == null) return null;
-            return callFunction(init, List.of());
-        }
-
-        private Object executeMain(Object[] arguments) {
-            Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
-            if (main == null) main = findFunction("main");
+        private Object executeMain(Ast.FunctionDecl main, Object[] arguments) {
             if (main == null) return null;
+            CompilerAsserts.partialEvaluationConstant(main);
             return callFunction(main, List.of(arguments));
         }
 
@@ -909,7 +916,7 @@ public final class OresEvalRootNode extends RootNode {
             if (!(target instanceof Evaluator evaluator)) {
                 throw new IllegalStateException(
                         "import target '" + imported.path() + "' for '" + codeUnitId
-                                + "' is not linked yet; all members of an import cycle must be linked before init");
+                                + "' is not linked yet; all members of an import cycle must be linked before use");
             }
             return evaluator;
         }

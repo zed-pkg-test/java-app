@@ -24,7 +24,9 @@ import java.util.Map;
  *
  * Guest import statements never read the filesystem. The host discovers the
  * reachable relative-import closure, compiles the whole graph, links every
- * code unit into one Truffle context, runs init barriers, then starts main.
+ * code unit into one Truffle context, then starts the entry unit's main.
+ *
+ * Linking/importing never executes user code.
  */
 public final class LinkedProgramRunner {
     private LinkedProgramRunner() { }
@@ -72,14 +74,6 @@ public final class LinkedProgramRunner {
                 // execution.
                 for (String id : ids) {
                     parsedUnits.get(id).execute(OresEvalRootNode.LINK_ONLY_COMMAND);
-                }
-
-                // Dependencies initialize before importers. All members of an SCC
-                // have already been linked before the first init in that SCC runs.
-                for (List<String> group : build.initializationGroups()) {
-                    for (String id : group) {
-                        parsedUnits.get(id).execute(OresEvalRootNode.INIT_ONLY_COMMAND);
-                    }
                 }
 
                 Value entryPoint = parsedUnits.get(entryId);

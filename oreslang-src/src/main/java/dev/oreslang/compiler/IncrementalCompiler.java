@@ -327,9 +327,9 @@ public final class IncrementalCompiler {
         public boolean reused(String unitId) { return reusedUnits.contains(normalizeUnitId(unitId)); }
 
         /**
-         * Flattens the dependency-first SCC plan. Units in the same inner list
-         * form one load barrier: all of them must be linked before the first
-         * init hook in that group executes.
+         * Flattens the dependency-first SCC/link plan. Units in the same inner
+         * list form one linker group. The name is retained for compatibility;
+         * Oreslang performs no implicit init hook or import-time user execution.
          */
         public List<String> initializationOrder() {
             return initializationGroups.stream().flatMap(List::stream).toList();

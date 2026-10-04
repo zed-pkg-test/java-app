@@ -17,12 +17,12 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-final class CircularImportInitializationTest {
+final class CircularImportLinkingTest {
     @TempDir
     Path tempDir;
 
     @Test
-    void twoFilesMayImportEachOtherAndInitRunsOnlyAfterBothAreLinked() throws Exception {
+    void twoFilesMayImportEachOtherWithoutExecutingUserCodeOnLoad() throws Exception {
         Path a = tempDir.resolve("a.ores");
         Path b = tempDir.resolve("b.ores");
 
@@ -72,34 +72,27 @@ final class CircularImportInitializationTest {
                 output,
                 error);
 
-        assertEquals("init-a:B|init-b:A|main:AB", output.toString(StandardCharsets.UTF_8));
+        assertEquals("main:AB", output.toString(StandardCharsets.UTF_8));
 
         List<List<String>> groups = build.initializationGroups();
-        assertEquals(1, groups.size(), "the A<->B cycle should form one initialization barrier");
+        assertEquals(1, groups.size(), "the A<->B cycle should form one linker SCC");
         assertEquals(2, groups.getFirst().size());
         assertTrue(groups.getFirst().contains(a.toAbsolutePath().normalize().toString().replace('\\', '/')));
         assertTrue(groups.getFirst().contains(b.toAbsolutePath().normalize().toString().replace('\\', '/')));
     }
 
     @Test
-    void initHookHasAClosedLifecycleSignature() {
+    void initHasNoReservedLifecycleMeaning() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc init() => void { return; }
-                pub routine main() => void { return; }
+                pub fnc init(int value) => int {
+                  return value + 1;
+                }
+
+                pub routine main() => void {
+                  val result = init(41);
+                  stdio.println(result);
+                  return;
+                }
                 """)));
-
-        IllegalArgumentException withArgs = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc init(int value) => void { return; }
-                        """)));
-        assertTrue(withArgs.getMessage().contains("init hook"));
-
-        IllegalArgumentException publicInit = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        pub fnc init() => void { return; }
-                        """)));
-        assertTrue(publicInit.getMessage().contains("init hook"));
     }
 }
