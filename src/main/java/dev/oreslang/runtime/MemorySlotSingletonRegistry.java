@@ -46,6 +46,7 @@ public final class MemorySlotSingletonRegistry implements AutoCloseable {
     public <S> Handle<S> getOrCreate(
             String key,
             Supplier<? extends S> stateFactory) {
+        requireSingletonAuthority("singleton lookup/create");
         Objects.requireNonNull(stateFactory, "stateFactory");
         String normalized = normalizeKey(key);
         Object slot = runtime.currentMemorySlotKey();
@@ -175,6 +176,14 @@ public final class MemorySlotSingletonRegistry implements AutoCloseable {
                 closed = true;
             }
             removeWaitEdge(caller, target);
+        }
+    }
+
+    private void requireSingletonAuthority(String api) {
+        runtime.policyCeiling().require(IsolatePolicy.Capability.SINGLETON_STATE, api);
+        IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
+        if (actorPolicy != null) {
+            actorPolicy.require(IsolatePolicy.Capability.SINGLETON_STATE, api);
         }
     }
 
