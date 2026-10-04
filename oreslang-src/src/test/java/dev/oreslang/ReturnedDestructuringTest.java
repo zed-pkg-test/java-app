@@ -104,7 +104,11 @@ final class ReturnedDestructuringTest {
     void recordReturnSupportsBothObjectDestructureSpellings() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 fnc result(): {foo: int, bar: string} {
-                  return obj{foo: 5, bar: "x"};
+                  struct ResultShape {
+                    foo: int
+                    bar: string
+                  }
+                  return ResultShape{foo: 5, bar: "x"};
                 }
 
                 fnc prefixed(): void {
@@ -133,7 +137,11 @@ final class ReturnedDestructuringTest {
     void recordReturnsAndDestructuresRejectMissingOrWrongMembers() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc broken(): {foo: int, bar: string} {
-                  return obj{foo: 5};
+                  struct ResultShape {
+                    foo: int
+                    bar: string
+                  }
+                  return ResultShape{foo: 5};
                 }
 
                 pub fnc main(): void { return; }
@@ -141,7 +149,11 @@ final class ReturnedDestructuringTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc broken(): {foo: int, bar: string} {
-                  return obj{foo: "wrong", bar: "x"};
+                  struct ResultShape {
+                    foo: int
+                    bar: string
+                  }
+                  return ResultShape{foo: "wrong", bar: "x"};
                 }
 
                 pub fnc main(): void { return; }
@@ -149,7 +161,11 @@ final class ReturnedDestructuringTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc result(): {foo: int, bar: string} {
-                  return obj{foo: 5, bar: "x"};
+                  struct ResultShape {
+                    foo: int
+                    bar: string
+                  }
+                  return ResultShape{foo: 5, bar: "x"};
                 }
 
                 pub fnc main(): void {
@@ -169,7 +185,11 @@ final class ReturnedDestructuringTest {
 
                 @Ret<{bar: string, foo: int}>
                 fnc object(): {foo: int, bar: string} {
-                  return obj{foo: 5, bar: "x"};
+                  struct ResultShape {
+                    foo: int
+                    bar: string
+                  }
+                  return ResultShape{foo: 5, bar: "x"};
                 }
 
                 pub fnc main(): void { return; }
@@ -184,7 +204,11 @@ final class ReturnedDestructuringTest {
                 }
 
                 fnc result(): {foo: int, bar: string} {
-                  return obj{foo: 5, bar: "x"};
+                  struct ResultShape {
+                    foo: int
+                    bar: string
+                  }
+                  return ResultShape{foo: 5, bar: "x"};
                 }
 
                 pub fnc main(): void {
@@ -221,10 +245,18 @@ final class ReturnedDestructuringTest {
     void unionRecordReturnsDestructureWhenEveryAlternativeProvidesRequestedMembers() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 fnc variant(bool flag): {foo: int, bar: string} | {foo: bool, bar: string} {
+                  struct IntCase {
+                    foo: int
+                    bar: string
+                  }
+                  struct BoolCase {
+                    foo: bool
+                    bar: string
+                  }
                   if flag; do
-                    return obj{foo: 3, bar: "number"};
+                    return IntCase{foo: 3, bar: "number"};
                   else
-                    return obj{foo: true, bar: "boolean"};
+                    return BoolCase{foo: true, bar: "boolean"};
                   fi
                 }
 
@@ -256,10 +288,17 @@ final class ReturnedDestructuringTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc variant(bool flag): {foo: int, bar: string} | {foo: bool} {
+                  struct FullCase {
+                    foo: int
+                    bar: string
+                  }
+                  struct ShortCase {
+                    foo: bool
+                  }
                   if flag; do
-                    return obj{foo: 3, bar: "number"};
+                    return FullCase{foo: 3, bar: "number"};
                   else
-                    return obj{foo: true};
+                    return ShortCase{foo: true};
                   fi
                 }
 
@@ -274,7 +313,11 @@ final class ReturnedDestructuringTest {
     void bareDiscardIsRejectedInObjectPatterns() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 fnc result(): {foo: int, bar: string} {
-                  return obj{foo: 5, bar: "x"};
+                  struct ResultShape {
+                    foo: int
+                    bar: string
+                  }
+                  return ResultShape{foo: 5, bar: "x"};
                 }
 
                 pub fnc main(): void {
@@ -336,14 +379,17 @@ final class ReturnedDestructuringTest {
     void returnedTupleAndRecordDestructureAtRuntime() throws Exception {
         String program = """
                 type FixedResult = [int, bool, string];
-                type NamedResult = {foo: int, bar: string};
+                type NamedResult = struct {
+                  foo: int
+                  bar: string
+                };
 
                 fnc fixed(): FixedResult {
                   return [3, true, "yes"];
                 }
 
                 fnc result(): NamedResult {
-                  return obj{foo: 5, bar: "x"};
+                  return NamedResult{foo: 5, bar: "x"};
                 }
 
                 pub fnc main(): void {
