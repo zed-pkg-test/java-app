@@ -200,8 +200,11 @@ public final class CapabilityChecker {
     private void checkType(Ast.TypeRef type, IsolatePolicy policy) {
         if (type == null) return;
 
-        if (type.name().equals("SharedMutex")) {
-            require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex<T>");
+        if (type.name().equals("SharedMutex") || type.name().equals("RwLock")) {
+            require(
+                    policy,
+                    IsolatePolicy.Capability.SHARED_MEMORY,
+                    type.name() + "<T>");
         }
         for (Ast.TypeRef argument : type.arguments()) checkType(argument, policy);
         if (type.isBorrow()) checkType(type.borrowedTarget(), policy);
@@ -275,8 +278,9 @@ public final class CapabilityChecker {
     private void checkExpr(Ast.Expr expr, IsolatePolicy policy) {
         if (expr instanceof Ast.NameExpr n && n.name().equals("print")) {
             require(policy, IsolatePolicy.Capability.STDOUT, "print");
-        } else if (expr instanceof Ast.NameExpr n && n.name().equals("SharedMutex")) {
-            require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex");
+        } else if (expr instanceof Ast.NameExpr n
+                && (n.name().equals("SharedMutex") || n.name().equals("RwLock"))) {
+            require(policy, IsolatePolicy.Capability.SHARED_MEMORY, n.name());
         } else if (expr instanceof Ast.NameExpr n) {
             // Function values can be laundered through locals/callbacks before
             // invocation. Check the referenced body at the point the function
@@ -307,7 +311,10 @@ public final class CapabilityChecker {
                 if (path.startsWith("process.descriptor") || path.equals("process.context_id")) require(policy, IsolatePolicy.Capability.PROCESS_INFO, path);
                 if (path.startsWith("process.share_readonly")) require(policy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, path);
                 if (path.equals("process.gc") || path.startsWith("process.gc.")) require(policy, IsolatePolicy.Capability.GC_CONTROL, path);
-                if (path.equals("SharedMutex") || path.startsWith("SharedMutex.")) require(policy, IsolatePolicy.Capability.SHARED_MEMORY, path);
+                if (path.equals("SharedMutex") || path.startsWith("SharedMutex.")
+                        || path.equals("RwLock") || path.startsWith("RwLock.")) {
+                    require(policy, IsolatePolicy.Capability.SHARED_MEMORY, path);
+                }
                 if (path.startsWith("network.")) require(policy, IsolatePolicy.Capability.NETWORK, path);
                 if (path.startsWith("fs.read")) require(policy, IsolatePolicy.Capability.FILESYSTEM_READ, path);
                 if (path.startsWith("fs.write")) require(policy, IsolatePolicy.Capability.FILESYSTEM_WRITE, path);
