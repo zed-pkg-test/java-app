@@ -1,6 +1,7 @@
 package dev.oreslang;
 
 import dev.oreslang.runtime.ActorRuntime;
+import dev.oreslang.runtime.OresRwLock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -16,32 +17,36 @@ final class SharedPrivateActorIsolationProofTest {
     @Test
     void sharedActorCanShareExplicitStateWhilePrivateActorRemainsConfined() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
-            // Positive control: SHARED actors may coordinate through an explicit SyncCell.
-            ActorRuntime.SyncCell<Integer> sharedCell = runtime.syncCell(10);
+            // Positive control: SHARED actors may explicitly read external
+            // state through an OresRwLock read capability, but cannot write it.
+            OresRwLock<Integer> externalState = new OresRwLock<>(11);
             CountDownLatch sharedTurn = new CountDownLatch(1);
 
-            var shared = runtime.<String>spawnShared(() -> (message, context) -> {
+            var shared = runtime.<OresRwLock<Integer>>spawnShared(() -> (state, context) -> {
                 assertEquals(ActorRuntime.ActorKind.SHARED, context.kind());
                 assertTrue(context.privateMemory().isEmpty());
-                sharedCell.update(value -> value + 1);
+                try (OresRwLock.ReadGuard<Integer> read = state.readLock()) {
+                    assertEquals(11, read.value());
+                }
+                assertThrows(SecurityException.class, state::writeLock);
                 sharedTurn.countDown();
                 context.self().stop();
             });
 
-            shared.send("increment");
+            shared.send(externalState);
             assertTrue(sharedTurn.await(2, TimeUnit.SECONDS));
             assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(shared.failure().isEmpty());
-            assertEquals(11, sharedCell.snapshot());
 
-            // Negative control: a PRIVATE actor may not receive that writable shared handle.
+            // Negative control: a PRIVATE actor may not receive shared-memory
+            // external-state capabilities at all.
             var isolated = runtime.<Object>spawnPrivate(factoryContext -> {
                 assertEquals(ActorRuntime.ActorKind.PRIVATE, factoryContext.kind());
                 assertTrue(factoryContext.privateMemory().isPresent());
                 return (message, context) -> context.self().stop();
             });
 
-            assertThrows(IllegalArgumentException.class, () -> isolated.send(sharedCell));
+            assertThrows(SecurityException.class, () -> isolated.send(externalState));
             isolated.send("ordinary-value");
             assertTrue(isolated.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(isolated.failure().isEmpty());
