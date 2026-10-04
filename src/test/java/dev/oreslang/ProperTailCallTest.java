@@ -96,6 +96,29 @@ final class ProperTailCallTest {
     }
 
     @Test
+    void indirectFncTailCallsDoNotNestTrampolines() throws Exception {
+        String output = run("""
+                fnc apply(Fnc<int, int> callback, int value): int {
+                  return callback(value);
+                }
+
+                fnc down(int n): int {
+                  if n == 0; do
+                    return 0;
+                  else
+                    return apply(down, n - 1);
+                  fi
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(down(50000));
+                }
+                """);
+
+        assertEquals("0", output);
+    }
+
+    @Test
     void conditionalTailPositionAlsoUsesTheTrampoline() throws Exception {
         String output = run("""
                 fnc down(int n): int {
