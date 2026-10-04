@@ -578,8 +578,18 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
+        private static Throwable unwrapFutureFailure(Throwable failure) {
+            Throwable current = failure;
+            while ((current instanceof java.util.concurrent.CompletionException
+                            || current instanceof java.util.concurrent.ExecutionException)
+                    && current.getCause() != null) {
+                current = current.getCause();
+            }
+            return current;
+        }
+
         private static RuntimeException propagateAsyncFailure(Throwable failure) {
-            Throwable unwrapped = OresFuture.unwrap(failure);
+            Throwable unwrapped = unwrapFutureFailure(failure);
             if (unwrapped instanceof RuntimeException runtime) return runtime;
             if (unwrapped instanceof Error error) throw error;
             return new RuntimeException(unwrapped);
