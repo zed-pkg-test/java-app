@@ -1263,6 +1263,7 @@ public final class ActorRuntime implements AutoCloseable {
         private final ScheduledThreadPoolExecutor messageWatchdog;
         private final ActorTimerWheel actorTimerWheel;
         private final Semaphore rootSlots;
+        private final ArrayBlockingQueue<Runnable> rootSchedulerQueue;
         private final AtomicInteger controlCompensatingThreads = new AtomicInteger();
         private final AtomicInteger privateCompensatingThreads = new AtomicInteger();
         private final AtomicInteger sharedCompensatingThreads = new AtomicInteger();
@@ -1319,6 +1320,7 @@ public final class ActorRuntime implements AutoCloseable {
                     namedFactory(prefix + "actor-turn-watchdog-"));
             this.actorTimerWheel = new ActorTimerWheel(prefix + "actor-timer-wheel-");
             this.rootSlots = new Semaphore(rootPermits, true);
+            this.rootSchedulerQueue = new ArrayBlockingQueue<>(readyQueueCapacity, true);
         }
 
         private synchronized void reserveActor(ActorKind kind) {
@@ -1419,6 +1421,67 @@ public final class ActorRuntime implements AutoCloseable {
             }
         }
 
+        /**
+         * Admit one ordinary/root OresScheduler turn onto the CONTROL pool.
+         *
+         * <p>Async root work shares the same rootSlots permits as legacy
+         * executeRootTask(), so scheduler continuations can never consume every
+         * CONTROL carrier and starve supervisors/mailmen. Admission is bounded;
+         * producer/completion threads enqueue and return rather than blocking on
+         * a permit.</p>
+         */
+        void executeControlTask(Runnable task) {
+            Objects.requireNonNull(task, "task");
+            if (controlDispatcher.isShutdown()) {
+                throw new RejectedExecutionException("CONTROL dispatcher is shut down");
+            }
+            if (!rootSchedulerQueue.offer(task)) {
+                throw new RejectedExecutionException(
+                        "root OresScheduler ready queue is full");
+            }
+            pumpRootScheduler();
+        }
+
+        private void pumpRootScheduler() {
+            while (!controlDispatcher.isShutdown()) {
+                if (!rootSlots.tryAcquire()) return;
+
+                Runnable next = rootSchedulerQueue.poll();
+                if (next == null) {
+                    rootSlots.release();
+                    return;
+                }
+
+                submitRootSchedulerTurn(next);
+            }
+        }
+
+        private void submitRootSchedulerTurn(Runnable task) {
+            try {
+                controlDispatcher.execute(() -> {
+                    try {
+                        task.run();
+                    } finally {
+                        rootSlots.release();
+                        pumpRootScheduler();
+                    }
+                });
+            } catch (RejectedExecutionException rejected) {
+                if (controlDispatcher.isShutdown() || messageWatchdog.isShutdown()) {
+                    rootSlots.release();
+                    return;
+                }
+
+                // CONTROL's own bounded queue can be temporarily saturated by
+                // supervisor/mailman work. Keep this logical root slot reserved
+                // and retry without running guest code on the caller thread.
+                messageWatchdog.schedule(
+                        () -> submitRootSchedulerTurn(task),
+                        1L,
+                        TimeUnit.MILLISECONDS);
+            }
+        }
+
         void shutdownNow() {
             controlDispatcher.shutdownNow();
             privateDispatcher.shutdownNow();
@@ -1426,6 +1489,7 @@ public final class ActorRuntime implements AutoCloseable {
             untrustedDispatcher.shutdownNow();
             untrustedWatchdog.shutdownNow();
             messageWatchdog.shutdownNow();
+            rootSchedulerQueue.clear();
             actorTimerWheel.close();
         }
     }
@@ -2008,7 +2072,7 @@ public final class ActorRuntime implements AutoCloseable {
             armRootDeadline();
             if (closed.get()) carrier.interrupt();
             try {
-                turnExecutor.execute(() -> {
+                vm.rootScheduler().runBound(() -> turnExecutor.execute(() -> {
                     try {
                         schedulerSafepoint();
                         completion.complete(task.get());
@@ -2018,7 +2082,7 @@ public final class ActorRuntime implements AutoCloseable {
                         if (failure instanceof ThreadDeath fatal) throw fatal;
                         if (failure instanceof LinkageError fatal) throw fatal;
                     }
-                });
+                }));
             } catch (Throwable failure) {
                 completion.completeExceptionally(failure);
                 if (failure instanceof VirtualMachineError fatal) throw fatal;
@@ -4246,6 +4310,27 @@ public final class ActorRuntime implements AutoCloseable {
                             depth + 1));
             return;
         }
+        if (value instanceof OresRwLock<?> rwLock) {
+            if (target.kind != ActorKind.SHARED) {
+                throw new SecurityException("memory-isolated actors cannot receive OresRwLock<T>");
+            }
+            ActorKind senderKind = currentActorKind();
+            if (senderKind != null && senderKind != ActorKind.SHARED) {
+                throw new SecurityException("memory-isolated actors cannot send OresRwLock<T>");
+            }
+            IsolatePolicy senderPolicy = currentActorPolicy();
+            if (senderPolicy != null) {
+                senderPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "OresRwLock actor send");
+            } else {
+                policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, "OresRwLock host send");
+            }
+            target.policy.require(IsolatePolicy.Capability.SHARED_MEMORY, "OresRwLock actor receive");
+            if (!rwLock.bindToRuntime(this)) {
+                throw new IllegalArgumentException(
+                        "OresRwLock may cross actor mailboxes only within its owning ActorRuntime");
+            }
+            return;
+        }
         if (value instanceof Shared<?> shared) {
             requireMutexTransport(target, shared.value(), visiting, depth + 1);
             return;
@@ -4390,6 +4475,7 @@ public final class ActorRuntime implements AutoCloseable {
             requireOwnedActorRefs(sharedMutex.transportValue(), visiting, depth + 1);
             return;
         }
+        if (value instanceof OresRwLock<?>) return;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
         }
@@ -4448,6 +4534,13 @@ public final class ActorRuntime implements AutoCloseable {
         }
         if (value instanceof OresMutex.Shared<?>) {
             // Runtime affinity is reserved atomically immediately before mailbox admission.
+            return;
+        }
+        if (value instanceof OresRwLock<?> rwLock) {
+            if (!rwLock.ownedBy(this)) {
+                throw new IllegalArgumentException(
+                        "OresRwLock belongs to a different ActorRuntime and cannot cross shared-memory domains");
+            }
             return;
         }
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
@@ -4575,6 +4668,10 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof OresMutex.Shared<?>) {
             throw new IllegalArgumentException("SharedMutex is mutable shared state and cannot be wrapped as Shared");
         }
+        if (value instanceof OresRwLock<?>) {
+            throw new IllegalArgumentException(
+                    "OresRwLock is a live shared capability and cannot be wrapped as Shared");
+        }
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot be wrapped as Shared");
         }
@@ -4637,7 +4734,8 @@ public final class ActorRuntime implements AutoCloseable {
                 || value instanceof ActorRuntime.Recipient<?>
                 || value instanceof Shared<?>
                 || value instanceof SyncCell<?>
-                || value instanceof OresMutex.Shared<?>) {
+                || value instanceof OresMutex.Shared<?>
+                || value instanceof OresRwLock<?>) {
             return;
         }
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
@@ -4713,7 +4811,8 @@ public final class ActorRuntime implements AutoCloseable {
                 || value instanceof Shared<?>
                 || value instanceof SyncCell<?>
                 || value instanceof OresMutex.Lock<?>
-                || value instanceof OresMutex.Guard<?>) {
+                || value instanceof OresMutex.Guard<?>
+                || value instanceof OresRwLock<?>) {
             throw new IllegalArgumentException(
                     "freeze() accepts data values only; live actor/shared capabilities require explicit actor transport");
         }
@@ -4759,6 +4858,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
         if (value instanceof ActorRuntime.SyncCell<?> cell) return cell;
         if (value instanceof OresMutex.Shared<?> sharedMutex) return sharedMutex;
+        if (value instanceof OresRwLock<?> rwLock) return rwLock;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
         }
@@ -4818,6 +4918,9 @@ public final class ActorRuntime implements AutoCloseable {
         }
         if (value instanceof OresMutex.Shared<?>) {
             throw new IllegalArgumentException("private actors cannot receive SharedMutex<T>");
+        }
+        if (value instanceof OresRwLock<?>) {
+            throw new IllegalArgumentException("private actors cannot receive OresRwLock<T>");
         }
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
@@ -4879,6 +4982,7 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof Shared<?>) return requireWithinLimit(48L, limit);
         if (value instanceof ActorRuntime.SyncCell<?>) return requireWithinLimit(64L, limit);
         if (value instanceof OresMutex.Shared<?>) return requireWithinLimit(64L, limit);
+        if (value instanceof OresRwLock<?>) return requireWithinLimit(64L, limit);
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
         }
@@ -4947,6 +5051,7 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof Shared<?>) return 48L;
         if (value instanceof ActorRuntime.SyncCell<?>) return 64L;
         if (value instanceof OresMutex.Shared<?>) return 64L;
+        if (value instanceof OresRwLock<?>) return 64L;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
         }
@@ -5126,6 +5231,7 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof ActorRuntime.Recipient<?>) return 48L;
         if (value instanceof ActorRuntime.SyncCell<?>) return 64L;
         if (value instanceof OresMutex.Shared<?>) return 64L;
+        if (value instanceof OresRwLock<?>) return 64L;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot be frozen");
         }
