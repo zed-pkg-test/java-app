@@ -162,7 +162,8 @@ final class ProjectManifestImportTest {
                             Map.of(),
                             new ByteArrayOutputStream(),
                             new ByteArrayOutputStream()));
-            assertTrue(failure.getMessage().contains("declared int"));
+            assertTrue(failure.getMessage().contains("function wrapped returned String"));
+            assertTrue(failure.getMessage().contains("name=int"));
         }
     }
 
