@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.EnumSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -55,10 +56,16 @@ public final class HotReloadManager implements AutoCloseable {
         /** Trusted reloadable code sharing one JVM/Graal engine. */
         TRUSTED_JIT(false, false),
 
-        /** Trusted code requiring a spawned Graal isolate / strict sandbox boundary. */
-        ISOLATED_JIT(true, false),
+        /**
+         * Trusted isoactor code. It has confined/private actor-memory semantics,
+         * but remains co-resident in the primary Graal isolate.
+         */
+        TRUSTED_ISOACTOR_JIT(false, false),
 
-        /** Adversarial code: spawned Graal isolate, deny-by-default guest authority. */
+        /**
+         * Adversarial code. This is the only JIT domain permitted to cross into
+         * a spawned/subsequent Graal isolate.
+         */
         UNTRUSTED_JIT(true, true),
 
         /** Compatibility mode for AOT/interpreted targets that still reload source/IR. */
@@ -151,10 +158,22 @@ public final class HotReloadManager implements AutoCloseable {
         this.guestPolicy = normalizeGuestPolicy(
                 Objects.requireNonNull(guestPolicy, "guestPolicy"),
                 executionDomain);
-        this.sharedTrustedEngine = executionDomain == ExecutionDomain.TRUSTED_JIT
+        this.sharedTrustedEngine = (executionDomain == ExecutionDomain.TRUSTED_JIT
+                || executionDomain == ExecutionDomain.TRUSTED_ISOACTOR_JIT)
                 ? Engine.newBuilder().build()
                 : null;
-        vm.registerHotReloadManager(this);
+        try {
+            vm.registerHotReloadManager(this);
+        } catch (RuntimeException | Error failure) {
+            if (sharedTrustedEngine != null) {
+                try {
+                    sharedTrustedEngine.close();
+                } catch (RuntimeException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+            }
+            throw failure;
+        }
     }
 
     public IsolatePolicy supervisorPolicy() { return supervisorPolicy; }
@@ -190,14 +209,27 @@ public final class HotReloadManager implements AutoCloseable {
         enforceGenerationQuota(codeUnitId);
 
         long id = PROCESS_GENERATION_SEQUENCE.incrementAndGet();
-        Context.Builder builder = guestPolicy.restrictedContextBuilder(executionProfile)
-                .arguments(
-                        OresLanguage.ID,
-                        vm.bindApplicationArguments(
-                                guestPolicy.applicationArguments(executionProfile)));
-        if (sharedTrustedEngine != null) builder.engine(sharedTrustedEngine);
-        Context context = builder.build();
+        AtomicReference<Generation> boundGeneration = new AtomicReference<>();
+        String generationBindingToken = vm.registerGenerationBinding(() -> {
+            Generation generation = boundGeneration.get();
+            if (generation == null) {
+                throw new IllegalStateException(
+                        "hot-load generation is not ready to admit actors");
+            }
+            return acquireActorLease(generation);
+        });
+
+        Context context = null;
         try {
+            Context.Builder builder = guestPolicy.restrictedContextBuilder(executionProfile)
+                    .arguments(
+                            OresLanguage.ID,
+                            vm.bindApplicationArguments(
+                                    guestPolicy.applicationArguments(executionProfile),
+                                    generationBindingToken));
+            if (sharedTrustedEngine != null) builder.engine(sharedTrustedEngine);
+            context = builder.build();
+
             Source source = Source.newBuilder(OresLanguage.ID, sourceText, codeUnitId)
                     .mimeType(OresLanguage.MIME_TYPE)
                     .buildLiteral();
@@ -210,11 +242,14 @@ public final class HotReloadManager implements AutoCloseable {
                     source,
                     executionProfile,
                     executionDomain,
-                    guestPolicy);
+                    guestPolicy,
+                    generationBindingToken);
             generations.put(id, generation);
+            boundGeneration.set(generation);
             return generation;
-        } catch (RuntimeException failure) {
-            context.close(true);
+        } catch (RuntimeException | Error failure) {
+            vm.unregisterGenerationBinding(generationBindingToken);
+            if (context != null) context.close(true);
             throw failure;
         }
     }
@@ -223,8 +258,10 @@ public final class HotReloadManager implements AutoCloseable {
      * Convenience path for simple callers: stage, start, then atomically activate.
      * If start fails, the previously active generation remains untouched.
      */
-    public synchronized Generation loadAndStart(String name, String sourceText) {
+    public Generation loadAndStart(String name, String sourceText) {
         Generation generation = load(name, sourceText);
+        // Never hold the manager monitor across guest evaluation. Actor startup
+        // may acquire/release generation leases on different carrier threads.
         generation.start();
         activate(generation);
         return generation;
@@ -234,24 +271,30 @@ public final class HotReloadManager implements AutoCloseable {
      * Atomically publishes a successfully started generation for new work.
      * The previous generation for the same code unit starts draining.
      */
-    public synchronized void activate(Generation generation) {
-        ensureOpen();
-        requireOwned(generation);
-        GenerationState state = generation.state();
-        if (state == GenerationState.ACTIVE
-                && activeByCodeUnit.get(generation.codeUnitId()) == generation) {
-            return;
-        }
-        if (state != GenerationState.STARTED) {
-            throw new IllegalStateException(
-                    "generation must be STARTED before activation; current state=" + state);
-        }
+    public void activate(Generation generation) {
+        Generation reclaim = null;
+        synchronized (this) {
+            ensureOpen();
+            requireOwned(generation);
+            GenerationState state = generation.state();
+            if (state == GenerationState.ACTIVE
+                    && activeByCodeUnit.get(generation.codeUnitId()) == generation) {
+                return;
+            }
+            if (state != GenerationState.STARTED) {
+                throw new IllegalStateException(
+                        "generation must be STARTED before activation; current state=" + state);
+            }
 
-        Generation previous = activeByCodeUnit.put(generation.codeUnitId(), generation);
-        generation.transition(GenerationState.STARTED, GenerationState.ACTIVE);
-        active.set(generation);
+            Generation previous = activeByCodeUnit.put(generation.codeUnitId(), generation);
+            generation.transition(GenerationState.STARTED, GenerationState.ACTIVE);
+            active.set(generation);
 
-        if (previous != null && previous != generation) beginDrain(previous);
+            if (previous != null && previous != generation) {
+                reclaim = beginDrainLocked(previous);
+            }
+        }
+        closeDetached(reclaim);
     }
 
     /** Last successfully activated generation, retained for single-unit compatibility. */
@@ -276,6 +319,26 @@ public final class HotReloadManager implements AutoCloseable {
         if (generation == null || generation.state() != GenerationState.ACTIVE) {
             throw new IllegalStateException("no active generation for code unit " + codeUnitId);
         }
+        return acquireActorLease(generation);
+    }
+
+    /**
+     * Internal actor birth pin. Generation startup code may create actors before
+     * activation, and already-running old actors may finish their lifecycle
+     * while the generation is draining. No new actor may be born from a staged,
+     * failed, or closed generation.
+     */
+    private synchronized GenerationLease acquireActorLease(Generation generation) {
+        ensureOpen();
+        requireOwned(generation);
+        GenerationState state = generation.state();
+        if (state != GenerationState.STARTED
+                && state != GenerationState.ACTIVE
+                && state != GenerationState.DRAINING) {
+            throw new IllegalStateException(
+                    "generation " + generation.id()
+                            + " cannot admit an actor while " + state);
+        }
         generation.pins.incrementAndGet();
         return new GenerationLease(this, generation);
     }
@@ -284,14 +347,18 @@ public final class HotReloadManager implements AutoCloseable {
      * Explicit retirement stops new admissions and closes immediately only when
      * no actor/request still pins the generation.
      */
-    public synchronized void retire(long generationId) {
-        if (managerClosed.get()) return;
-        Generation generation = generations.get(generationId);
-        if (generation == null) return;
+    public void retire(long generationId) {
+        Generation reclaim;
+        synchronized (this) {
+            if (managerClosed.get()) return;
+            Generation generation = generations.get(generationId);
+            if (generation == null) return;
 
-        active.compareAndSet(generation, null);
-        activeByCodeUnit.remove(generation.codeUnitId(), generation);
-        beginDrain(generation);
+            active.compareAndSet(generation, null);
+            activeByCodeUnit.remove(generation.codeUnitId(), generation);
+            reclaim = beginDrainLocked(generation);
+        }
+        closeDetached(reclaim);
     }
 
     public synchronized int liveGenerations() { return generations.size(); }
@@ -308,43 +375,81 @@ public final class HotReloadManager implements AutoCloseable {
         return count;
     }
 
-    private synchronized void release(Generation generation) {
-        if (!generations.containsKey(generation.id())) return;
-        int remaining = generation.pins.decrementAndGet();
-        if (remaining < 0) {
-            generation.pins.incrementAndGet();
-            throw new IllegalStateException("generation lease released more than once");
+    private void release(Generation generation) {
+        Generation reclaim = null;
+        synchronized (this) {
+            if (!generations.containsKey(generation.id())) return;
+            int remaining = generation.pins.decrementAndGet();
+            if (remaining < 0) {
+                generation.pins.incrementAndGet();
+                throw new IllegalStateException("generation lease released more than once");
+            }
+            if (remaining == 0
+                    && generation.state() == GenerationState.DRAINING
+                    && !managerClosed.get()) {
+                reclaim = detachForCloseLocked(generation);
+            }
         }
-        if (remaining == 0 && generation.state() == GenerationState.DRAINING) {
-            closeAndForget(generation);
+
+        if (reclaim != null) {
+            Generation detached = reclaim;
+            vm.executeControlMaintenance(() -> closeDetached(detached));
         }
     }
 
-    private synchronized void generationFailed(Generation generation) {
-        if (!generations.containsKey(generation.id())) return;
-        active.compareAndSet(generation, null);
-        activeByCodeUnit.remove(generation.codeUnitId(), generation);
-        generations.remove(generation.id());
-        generation.closeContextAfterFailure();
+    private void generationFailed(Generation generation) {
+        boolean owned;
+        synchronized (this) {
+            owned = generations.get(generation.id()) == generation;
+            if (owned) {
+                active.compareAndSet(generation, null);
+                activeByCodeUnit.remove(generation.codeUnitId(), generation);
+                generations.remove(generation.id());
+            }
+        }
+        if (owned) generation.closeContextAfterFailure();
     }
 
-    private void beginDrain(Generation generation) {
+    /**
+     * Mark one generation draining while holding the manager monitor. If no
+     * leases remain, detach it from routing/ownership maps but close its Graal
+     * Context only after the monitor has been released.
+     */
+    private Generation beginDrainLocked(Generation generation) {
         GenerationState state = generation.state();
-        if (state == GenerationState.CLOSED || state == GenerationState.FAILED) return;
+        if (state == GenerationState.CLOSED || state == GenerationState.FAILED) {
+            return null;
+        }
 
         if (state == GenerationState.STAGED
                 || state == GenerationState.STARTED
                 || state == GenerationState.ACTIVE) {
             generation.state.set(GenerationState.DRAINING);
         }
-        if (generation.pins.get() == 0) closeAndForget(generation);
+        if (generation.pins.get() == 0) {
+            return detachForCloseLocked(generation);
+        }
+        return null;
     }
 
-    private void closeAndForget(Generation generation) {
-        generations.remove(generation.id());
+    private Generation detachForCloseLocked(Generation generation) {
+        // Keep the generation in the ownership map until its Context is
+        // actually closed. If VM shutdown races a queued control-plane cleanup,
+        // manager.close() can still discover and reclaim it.
         active.compareAndSet(generation, null);
         activeByCodeUnit.remove(generation.codeUnitId(), generation);
-        generation.closeContext();
+        return generation;
+    }
+
+    private void closeDetached(Generation generation) {
+        if (generation == null) return;
+        try {
+            generation.closeContext();
+        } finally {
+            synchronized (this) {
+                generations.remove(generation.id(), generation);
+            }
+        }
     }
 
     private void validateStageInput(String codeUnitId, String sourceText) {
@@ -389,16 +494,29 @@ public final class HotReloadManager implements AutoCloseable {
             return noLoaderAuthority;
         }
 
-        // A physically isolated JIT guest must not regain native/reflection/thread
-        // escape hatches merely because its supervisor is trusted.
-        IsolatePolicy isolated = noLoaderAuthority.withoutCapabilities(
+        // Trusted isoactors are memory-confined actors, not adversarial guests.
+        // Keep them in the primary Graal isolate while still stripping ambient
+        // host escape hatches that would defeat actor-memory confinement.
+        IsolatePolicy confined = noLoaderAuthority.withoutCapabilities(
                 IsolatePolicy.Capability.FFI,
                 IsolatePolicy.Capability.NATIVE,
                 IsolatePolicy.Capability.REFLECTION,
                 IsolatePolicy.Capability.THREAD_CREATE,
-                IsolatePolicy.Capability.POLYGLOT).asAdversarial();
+                IsolatePolicy.Capability.POLYGLOT);
 
-        if (!executionDomain.untrusted()) return isolated;
+        if (executionDomain == ExecutionDomain.TRUSTED_ISOACTOR_JIT) {
+            if (confined.adversarial()) {
+                throw new IllegalArgumentException(
+                        "trusted isoactor JIT must use a non-adversarial policy in the primary Graal isolate");
+            }
+            return confined;
+        }
+
+        if (executionDomain != ExecutionDomain.UNTRUSTED_JIT) {
+            throw new IllegalStateException("unexpected hot-load execution domain " + executionDomain);
+        }
+
+        IsolatePolicy isolated = confined.asAdversarial();
 
         // UntrustedActor ambient authority is deny-by-default. Narrow request/
         // response and Recipient capabilities are object capabilities and are not
@@ -426,17 +544,35 @@ public final class HotReloadManager implements AutoCloseable {
     }
 
     @Override
-    public synchronized void close() {
+    public void close() {
         if (!managerClosed.compareAndSet(false, true)) return;
-        RuntimeException failure = null;
-        try {
-            for (Generation generation : generations.values()) generation.closeContext();
+
+        List<Generation> toClose;
+        synchronized (this) {
+            toClose = List.copyOf(generations.values());
             generations.clear();
             activeByCodeUnit.clear();
             active.set(null);
-            if (sharedTrustedEngine != null) sharedTrustedEngine.close();
-        } catch (RuntimeException closeFailure) {
-            failure = closeFailure;
+        }
+
+        RuntimeException failure = null;
+        try {
+            for (Generation generation : toClose) {
+                try {
+                    generation.closeContext();
+                } catch (RuntimeException closeFailure) {
+                    if (failure == null) failure = closeFailure;
+                    else failure.addSuppressed(closeFailure);
+                }
+            }
+            if (sharedTrustedEngine != null) {
+                try {
+                    sharedTrustedEngine.close();
+                } catch (RuntimeException closeFailure) {
+                    if (failure == null) failure = closeFailure;
+                    else failure.addSuppressed(closeFailure);
+                }
+            }
         } finally {
             vm.unregisterHotReloadManager(this);
         }
@@ -463,6 +599,7 @@ public final class HotReloadManager implements AutoCloseable {
         private final ExecutionProfile executionProfile;
         private final ExecutionDomain executionDomain;
         private final IsolatePolicy guestPolicy;
+        private final String generationBindingToken;
         private final AtomicReference<GenerationState> state =
                 new AtomicReference<>(GenerationState.STAGED);
         private final AtomicInteger pins = new AtomicInteger();
@@ -477,7 +614,8 @@ public final class HotReloadManager implements AutoCloseable {
                 Source source,
                 ExecutionProfile executionProfile,
                 ExecutionDomain executionDomain,
-                IsolatePolicy guestPolicy) {
+                IsolatePolicy guestPolicy,
+                String generationBindingToken) {
             this.owner = owner;
             this.id = id;
             this.codeUnitId = codeUnitId;
@@ -487,13 +625,15 @@ public final class HotReloadManager implements AutoCloseable {
             this.executionProfile = executionProfile;
             this.executionDomain = executionDomain;
             this.guestPolicy = guestPolicy;
+            this.generationBindingToken =
+                    Objects.requireNonNull(generationBindingToken, "generationBindingToken");
         }
 
         public long id() { return id; }
         public String codeUnitId() { return codeUnitId; }
         public String sha256() { return sha256; }
-        public Context context() { return context; }
-        public Source source() { return source; }
+        Context context() { return context; }
+        Source source() { return source; }
         public ExecutionProfile executionProfile() { return executionProfile; }
         public ExecutionDomain executionDomain() { return executionDomain; }
         public IsolatePolicy guestPolicy() { return guestPolicy; }
@@ -541,6 +681,7 @@ public final class HotReloadManager implements AutoCloseable {
 
         private void closeContextAfterFailure() {
             if (contextClosed.compareAndSet(false, true)) {
+                owner.vm.unregisterGenerationBinding(generationBindingToken);
                 context.close(true);
             }
         }
@@ -548,6 +689,7 @@ public final class HotReloadManager implements AutoCloseable {
         private void closeContext() {
             if (contextClosed.compareAndSet(false, true)) {
                 state.set(GenerationState.CLOSED);
+                owner.vm.unregisterGenerationBinding(generationBindingToken);
                 context.close(true);
             }
         }
@@ -558,7 +700,8 @@ public final class HotReloadManager implements AutoCloseable {
         }
     }
 
-    public static final class GenerationLease implements AutoCloseable {
+    public static final class GenerationLease
+            implements AutoCloseable, ActorRuntime.ActorGenerationLease {
         private final HotReloadManager owner;
         private final Generation generation;
         private final AtomicBoolean released = new AtomicBoolean();
