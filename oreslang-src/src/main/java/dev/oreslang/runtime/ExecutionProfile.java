@@ -3,14 +3,19 @@ package dev.oreslang.runtime;
 import java.util.Locale;
 
 /**
- * Declares how the Oreslang runtime itself is deployed and whether guest code
- * may be optimized by a JIT. This is deliberately separate from source
- * semantics so the same .ores program can run on server, desktop, Android or
- * iOS profiles.
+ * Declares how the OresVM host/runtime is deployed and whether runtime guest
+ * JIT optimization is available.
+ *
+ * <p>This is deliberately separate from the Oreslang source compilation target.
+ * Mode.AOT means the host/runtime is ahead-of-time deployed (for example as a
+ * Native Image); it does not claim that a loaded .ores program was itself
+ * AOT-compiled. Guest source compilation strategy is modeled by
+ * dev.oreslang.compiler.OresCompiler.CompilationMode.
  */
 public record ExecutionProfile(Mode mode, Platform platform) {
     public enum Mode { AOT, JIT, HYBRID }
     public enum Platform { SERVER, WINDOWS, MACOS, LINUX, ANDROID, IOS }
+    public enum GuestRuntimeMode { INTERPRETED, JIT }
 
     public ExecutionProfile {
         if (mode == null || platform == null) throw new IllegalArgumentException("mode/platform are required");
@@ -28,6 +33,9 @@ public record ExecutionProfile(Mode mode, Platform platform) {
 
     public boolean hostAheadOfTime() { return mode == Mode.AOT || mode == Mode.HYBRID; }
     public boolean guestJitAllowed() { return mode == Mode.JIT || mode == Mode.HYBRID; }
+    public GuestRuntimeMode guestRuntimeMode() {
+        return guestJitAllowed() ? GuestRuntimeMode.JIT : GuestRuntimeMode.INTERPRETED;
+    }
     public boolean supportsSourceHotReload() { return true; }
 
     public static ExecutionProfile parse(String mode, String platform) {
