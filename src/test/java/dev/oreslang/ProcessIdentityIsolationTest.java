@@ -187,6 +187,33 @@ final class ProcessIdentityIsolationTest {
     }
 
     @Test
+    void untrustedActorCannotCreateMemorySlotSingletonEvenThroughRuntimeApi() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<Throwable> observed = new AtomicReference<>();
+
+            ActorRuntime.ActorRef<String> sandbox = runtime.spawnPrivate(
+                    IsolatePolicy.strictFaas(),
+                    factoryContext -> (message, turn) -> {
+                        try {
+                            turn.runtime().singletons().getOrCreate(
+                                    "forbidden",
+                                    ArrayList::new);
+                        } catch (Throwable failure) {
+                            observed.set(failure);
+                        } finally {
+                            done.countDown();
+                            turn.self().stop();
+                        }
+                    });
+
+            sandbox.send("go");
+            assertTrue(done.await(2, TimeUnit.SECONDS));
+            assertInstanceOf(SecurityException.class, observed.get());
+        }
+    }
+
+    @Test
     void singletonHandleCannotBeUsedFromAnotherMemorySlot() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
             MemorySlotSingletonRegistry.Handle<ArrayList<Integer>> main =
