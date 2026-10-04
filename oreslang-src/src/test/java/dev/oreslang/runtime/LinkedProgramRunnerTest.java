@@ -2,7 +2,6 @@ package dev.oreslang.runtime;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.graalvm.polyglot.PolyglotException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -68,8 +67,8 @@ final class LinkedProgramRunnerTest {
                 }
                 """);
 
-        PolyglotException failure = assertThrows(
-                PolyglotException.class,
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class,
                 () -> LinkedProgramRunner.run(
                         entry,
                         IsolatePolicy.developer(),

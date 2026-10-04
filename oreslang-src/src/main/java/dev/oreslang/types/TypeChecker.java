@@ -899,28 +899,11 @@ public final class TypeChecker {
                         return substituteGenerics(pattern, classGenericBindings(field.owner(), field.ownerType()));
                     }
                     List<Ast.MethodDecl> methods = findMethodsByName(klass, member.member(), new LinkedHashSet<>());
-                    if (methods.size() == 1) {
-                        Ast.MethodDecl method = methods.getFirst();
-                        if (!method.genericParameters().isEmpty()) {
-                            throw new IllegalArgumentException(
-                                    "generic method '" + klass.name() + "." + method.name()
-                                            + "' must be specialized by a direct call; polymorphic bound-method values are not supported yet");
-                        }
-                        ResolvedMethod target = findMethodTarget(klass, named, member.member(), method.arity(), new LinkedHashSet<>());
-                        if (target == null) throw new IllegalArgumentException("cannot resolve method owner for '" + member.member() + "'");
-                        Set<String> memberGenerics = new HashSet<>(target.owner().genericParameters());
-                        memberGenerics.addAll(method.genericParameters());
-                        Type signature = callableValueType(
-                                method.parameters(),
-                                method.returnType(),
-                                method.async(),
-                                memberGenerics,
-                                target.ownerType());
-                        return substituteGenerics(
-                                signature,
-                                classGenericBindings(target.owner(), target.ownerType()));
+                    if (!methods.isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "instance method '" + klass.name() + "." + member.member()
+                                        + "' is not a first-class callback value; invoke it directly or wrap the call in an explicit fnc/lambda");
                     }
-                    if (methods.size() > 1) throw new IllegalArgumentException("overloaded method '" + member.member() + "' must be called so arity can select the overload");
                 }
             }
             return Unknown.INSTANCE;

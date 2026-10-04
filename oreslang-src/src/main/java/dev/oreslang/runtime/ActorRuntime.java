@@ -1987,15 +1987,10 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         RootTask<T> rootTask;
-        synchronized (runtimeLifecycleLock) {
-            if (closed.get()) {
-                dispatcherGroup.rootSlots.release();
-                throw new IllegalStateException("actor runtime is closed");
-            }
-            activeRootTasks.incrementAndGet();
-            rootTask = new RootTask<>(task);
-            rootTasks.add(rootTask);
-            rootTask.armRootDeadline();
+        try {
+            rootTask = admitRootTask(task);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
         }
 
         try {
@@ -2050,15 +2045,10 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         RootTask<T> rootTask;
-        synchronized (runtimeLifecycleLock) {
-            if (closed.get()) {
-                dispatcherGroup.rootSlots.release();
-                return OresFuture.failed(new IllegalStateException("actor runtime is closed"));
-            }
-            activeRootTasks.incrementAndGet();
-            rootTask = new RootTask<>(task);
-            rootTasks.add(rootTask);
-            rootTask.armRootDeadline();
+        try {
+            rootTask = admitRootTask(task);
+        } catch (RuntimeException failure) {
+            return OresFuture.failed(failure);
         }
 
         try {
@@ -2067,6 +2057,64 @@ public final class ActorRuntime implements AutoCloseable {
             rootTask.cancelBeforeStart(rejected);
         }
         return rootTask.awaitableCompletion;
+    }
+
+    private <T> RootTask<T> admitRootTask(Supplier<T> task) {
+        synchronized (runtimeLifecycleLock) {
+            if (closed.get()) {
+                dispatcherGroup.rootSlots.release();
+                throw new IllegalStateException("actor runtime is closed");
+            }
+
+            ActorGenerationLease generationLease = null;
+            RootTask<T> rootTask = null;
+            boolean counted = false;
+            try {
+                generationLease = Objects.requireNonNull(
+                        generationLeaseFactory.acquire(),
+                        "root task generation lease factory returned null");
+                rootTask = new RootTask<>(task, generationLease);
+                activeRootTasks.incrementAndGet();
+                counted = true;
+                rootTasks.add(rootTask);
+                rootTask.armRootDeadline();
+                return rootTask;
+            } catch (RuntimeException | Error failure) {
+                if (rootTask != null) {
+                    rootTask.finishRootDeadline();
+                    rootTasks.remove(rootTask);
+                    rootTask.releaseGenerationLeaseAfterAdmissionFailure(failure);
+                } else if (generationLease != null) {
+                    closeGenerationLeaseAfterAdmissionFailure(
+                            generationLease,
+                            failure);
+                }
+                if (counted) {
+                    int remaining = activeRootTasks.decrementAndGet();
+                    if (remaining < 0) {
+                        activeRootTasks.incrementAndGet();
+                        failure.addSuppressed(new IllegalStateException(
+                                "root task lifecycle accounting underflow during admission rollback"));
+                    }
+                    runtimeLifecycleLock.notifyAll();
+                }
+                dispatcherGroup.rootSlots.release();
+                throw failure;
+            }
+        }
+    }
+
+    private static void closeGenerationLeaseAfterAdmissionFailure(
+            ActorGenerationLease lease,
+            Throwable primaryFailure) {
+        try {
+            lease.close();
+        } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+            fatal.addSuppressed(primaryFailure);
+            throw fatal;
+        } catch (Throwable cleanupFailure) {
+            primaryFailure.addSuppressed(cleanupFailure);
+        }
     }
 
     private void releaseRootTask(RootTask<?> rootTask) {
@@ -2081,6 +2129,7 @@ public final class ActorRuntime implements AutoCloseable {
             }
             runtimeLifecycleLock.notifyAll();
         }
+        rootTask.releaseGenerationLease();
     }
 
     private final class RootTask<T> implements Runnable {
@@ -2101,12 +2150,31 @@ public final class ActorRuntime implements AutoCloseable {
         private volatile ScheduledFuture<?> deadlineFuture;
         private final AtomicBoolean compensationClaimed = new AtomicBoolean();
         private final AtomicBoolean deadlineExpired = new AtomicBoolean();
+        private final ActorGenerationLease generationLease;
+        private final AtomicBoolean generationLeaseReleased = new AtomicBoolean();
         private final long deadlineNanos;
 
-        private RootTask(Supplier<T> task) {
+        private RootTask(
+                Supplier<T> task,
+                ActorGenerationLease generationLease) {
             this.task = task;
+            this.generationLease =
+                    Objects.requireNonNull(generationLease, "generationLease");
             this.awaitableCompletion = new OresFuture<>(this::cancelFromAwaitable);
             this.deadlineNanos = rootDeadlineNanos();
+        }
+
+        private void releaseGenerationLease() {
+            if (!generationLeaseReleased.compareAndSet(false, true)) return;
+            generationLease.close();
+        }
+
+        private void releaseGenerationLeaseAfterAdmissionFailure(
+                Throwable primaryFailure) {
+            if (!generationLeaseReleased.compareAndSet(false, true)) return;
+            closeGenerationLeaseAfterAdmissionFailure(
+                    generationLease,
+                    primaryFailure);
         }
 
         private void completeSuccess(T value) {

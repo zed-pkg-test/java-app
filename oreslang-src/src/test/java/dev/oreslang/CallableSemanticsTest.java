@@ -171,6 +171,44 @@ final class CallableSemanticsTest {
                         """)));
     }
 
+
+    @Test
+    void instanceMethodsAreNotImplicitBoundCallbackValues() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Worker as
+                          pub run() => int {
+                            return 1;
+                          }
+                        end
+
+                        fnc bad() => void {
+                          val worker = new Worker();
+                          val callback = worker.run;
+                          return;
+                        }
+                        """)));
+
+        assertTrue(failure.getMessage().contains("not a first-class callback value"));
+    }
+
+    @Test
+    void asyncStaticFncRemainsFirstClassAndReturnsFuture() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Worker
+                  pub static async fnc run() => int {
+                    return 1;
+                  }
+                end
+
+                fnc expose() => Future<int> {
+                  val callback = Worker.run;
+                  return callback();
+                }
+                """)));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "callables.ores")

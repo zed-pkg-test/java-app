@@ -60,7 +60,7 @@ actor_method_decl
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
                   [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
-                  { class_member } "end" ;
+                  "as" { class_member } "end" ;
 
 class_member    = field_decl
                 | method_decl

@@ -763,4 +763,64 @@ final class OresVMTest {
     }
 
 
+    @Test
+    void suspendedRootTaskPinsGenerationUntilLogicalTaskTerminates() throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(1),
+                0,
+                16);
+
+        OresVM vm = OresVM.dedicated(config);
+        AtomicInteger acquired = new AtomicInteger();
+        AtomicInteger released = new AtomicInteger();
+        ActorRuntime runtime = vm.newActorRuntime(
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct(),
+                () -> {
+                    acquired.incrementAndGet();
+                    return released::incrementAndGet;
+                });
+
+        try {
+            OresFuture<Integer> never = new OresFuture<>();
+            CountDownLatch suspensionRequested = new CountDownLatch(1);
+
+            OresFuture<Integer> task = runtime.submitAsyncRootTask(() -> {
+                suspensionRequested.countDown();
+                ActorRuntime.suspendCurrentRootOn(
+                        never,
+                        (value, failure) -> 1);
+                fail("suspension must unwind");
+                return -1;
+            });
+
+            assertTrue(suspensionRequested.await(2, TimeUnit.SECONDS));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (runtime.rootTaskDispatcherStats().activeThreads() != 0
+                    && System.nanoTime() - deadline < 0) {
+                Thread.onSpinWait();
+            }
+
+            assertEquals(1, acquired.get());
+            assertEquals(0, released.get(),
+                    "suspended logical task must keep its generation pinned");
+
+            assertTrue(task.cancel(true));
+            assertThrows(java.util.concurrent.CancellationException.class, task::join);
+
+            runtime.close();
+            assertEquals(1, released.get(),
+                    "generation lease must release exactly once after logical-task termination");
+        } finally {
+            try {
+                runtime.close();
+            } finally {
+                vm.shutdownNow();
+            }
+        }
+    }
+
+
 }
