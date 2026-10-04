@@ -137,4 +137,39 @@ final class OresSchedulerTest {
             assertTrue(result.get(5, TimeUnit.SECONDS));
         }
     }
+    @Test
+    void logicalTaskDomainSurvivesAwaitButIsDistinctPerTask() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(2)) {
+            OresFuture<Integer> gate = new OresFuture<>();
+            AtomicReference<Object> firstDomain = new AtomicReference<>();
+            AtomicReference<Object> resumedDomain = new AtomicReference<>();
+            AtomicReference<Object> secondTaskDomain = new AtomicReference<>();
+            AtomicInteger firstPc = new AtomicInteger();
+
+            OresFuture<Integer> first = scheduler.start(resume -> {
+                if (firstPc.getAndIncrement() == 0) {
+                    firstDomain.set(OresScheduler.currentTaskDomain());
+                    assertNotNull(firstDomain.get());
+                    return OresScheduler.await(gate);
+                }
+                resumedDomain.set(OresScheduler.currentTaskDomain());
+                return OresScheduler.done(1);
+            });
+
+            OresFuture<Integer> second = scheduler.start(resume -> {
+                secondTaskDomain.set(OresScheduler.currentTaskDomain());
+                return OresScheduler.done(2);
+            });
+
+            assertEquals(2, second.get(5, TimeUnit.SECONDS));
+            gate.completeFromRuntime(0);
+            assertEquals(1, first.get(5, TimeUnit.SECONDS));
+
+            assertSame(firstDomain.get(), resumedDomain.get(),
+                    "await/resume must preserve the logical task execution domain");
+            assertNotSame(firstDomain.get(), secondTaskDomain.get(),
+                    "two tasks on one scheduler must not share mutex/borrow ownership");
+        }
+    }
+
 }
