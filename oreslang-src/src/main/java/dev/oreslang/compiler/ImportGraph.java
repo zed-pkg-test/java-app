@@ -26,8 +26,31 @@ final class ImportGraph {
     private ImportGraph() { }
 
     static String resolveImportUnitId(String unitId, Ast.ImportDecl imported, Set<String> available) {
+        return resolveImportUnitId(unitId, imported, available, Map.of());
+    }
+
+    static String resolveImportUnitId(
+            String unitId,
+            Ast.ImportDecl imported,
+            Set<String> available,
+            Map<String, Map<String, String>> importResolutions) {
         ImportRules.validate(imported);
         if (ImportRules.isJavaPath(imported.path())) return null;
+
+        String normalizedUnitId = normalizeUnitId(unitId);
+        String resolved = importResolutions
+                .getOrDefault(normalizedUnitId, Map.of())
+                .get(imported.path());
+        if (resolved != null) {
+            String normalizedResolved = normalizeUnitId(resolved);
+            if (!available.contains(normalizedResolved)) {
+                throw new IllegalArgumentException(
+                        "resolved import '" + imported.path() + "' from '" + unitId
+                                + "' points to source unit that was not supplied: '" + normalizedResolved + "'");
+            }
+            return normalizedResolved;
+        }
+
         String raw = imported.path().replace('\\', '/');
         Path parent = Path.of(unitId).getParent();
         Path candidatePath = raw.startsWith(".")
@@ -49,11 +72,18 @@ final class ImportGraph {
     static Map<String, Set<String>> resolveDependencies(
             Map<String, Ast.Program> programs,
             Set<String> available) {
+        return resolveDependencies(programs, available, Map.of());
+    }
+
+    static Map<String, Set<String>> resolveDependencies(
+            Map<String, Ast.Program> programs,
+            Set<String> available,
+            Map<String, Map<String, String>> importResolutions) {
         LinkedHashMap<String, Set<String>> dependencies = new LinkedHashMap<>();
         for (Map.Entry<String, Ast.Program> entry : programs.entrySet()) {
             LinkedHashSet<String> resolved = new LinkedHashSet<>();
             for (Ast.ImportDecl imported : entry.getValue().imports()) {
-                String target = resolveImportUnitId(entry.getKey(), imported, available);
+                String target = resolveImportUnitId(entry.getKey(), imported, available, importResolutions);
                 if (target != null) resolved.add(target);
             }
             dependencies.put(entry.getKey(), Set.copyOf(resolved));
@@ -62,12 +92,18 @@ final class ImportGraph {
     }
 
     static void validateLinkedImports(Map<String, Ast.Program> programs) {
+        validateLinkedImports(programs, Map.of());
+    }
+
+    static void validateLinkedImports(
+            Map<String, Ast.Program> programs,
+            Map<String, Map<String, String>> importResolutions) {
         Set<String> available = programs.keySet();
         for (Map.Entry<String, Ast.Program> entry : programs.entrySet()) {
             String importer = entry.getKey();
             for (Ast.ImportDecl imported : entry.getValue().imports()) {
-                String targetId = resolveImportUnitId(importer, imported, available);
-                if (targetId == null) continue; // package resolver owns non-relative imports.
+                String targetId = resolveImportUnitId(importer, imported, available, importResolutions);
+                if (targetId == null) continue; // package resolver owns unresolved non-relative imports.
                 Ast.Program target = programs.get(targetId);
                 if (imported.wildcard()) continue;
                 for (String name : imported.names()) {

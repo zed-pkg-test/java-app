@@ -32,6 +32,7 @@ public final class OresEvalRootNode extends RootNode {
     public static final String INIT_ONLY_COMMAND = "__ores_internal_init_only__";
     public static final String MAIN_ONLY_COMMAND = "__ores_internal_main_only__";
     public static final String INVOKE_PUBLIC_COMMAND = "__ores_internal_invoke_public__";
+    public static final String REGISTER_IMPORT_COMMAND = "__ores_internal_register_import__";
 
     private final Ast.Program program;
     private final String codeUnitId;
@@ -58,6 +59,14 @@ public final class OresEvalRootNode extends RootNode {
     @TruffleBoundary
     private Object executeBoundary(OresContext context, Object[] arguments) {
         CapabilityChecker.check(program, context.isolatePolicy());
+        if (arguments.length == 3
+                && REGISTER_IMPORT_COMMAND.equals(arguments[0])
+                && arguments[1] instanceof String importPath
+                && arguments[2] instanceof String targetCodeUnitId) {
+            context.registerLinkedImportResolution(codeUnitId, importPath, targetCodeUnitId);
+            return null;
+        }
+
         Evaluator current = evaluator(context);
         if (isControl(arguments, LINK_ONLY_COMMAND)) {
             current.link();
@@ -1064,6 +1073,9 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private String resolveImportUnitId(String rawPath) {
+            String hostResolved = context.resolvedLinkedImport(codeUnitId, rawPath);
+            if (hostResolved != null) return hostResolved;
+
             String raw = rawPath.replace('\\', '/');
             Path parent = Path.of(codeUnitId).getParent();
             Path candidatePath = raw.startsWith(".")

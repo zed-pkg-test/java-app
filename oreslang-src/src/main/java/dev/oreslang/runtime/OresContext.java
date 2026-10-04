@@ -30,6 +30,7 @@ public final class OresContext implements AutoCloseable {
     private final ExecutionProfile executionProfile;
     private final ReentrantLock adversarialActorTurnLock = new ReentrantLock(true);
     private final Map<String, Object> linkedCodeUnits = new HashMap<>();
+    private final Map<String, Map<String, String>> linkedImportResolutions = new HashMap<>();
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
@@ -132,6 +133,45 @@ public final class OresContext implements AutoCloseable {
         return linkedCodeUnits.containsKey(codeUnitId);
     }
 
+    /**
+     * Registers the host compiler's exact filesystem resolution for one import.
+     * Guest code can only consume these aliases; it does not gain filesystem
+     * access by knowing the resolved target.
+     */
+    public synchronized void registerLinkedImportResolution(
+            String importerCodeUnitId,
+            String importPath,
+            String targetCodeUnitId) {
+        if (importerCodeUnitId == null || importerCodeUnitId.isBlank()) {
+            throw new IllegalArgumentException("importer code unit id cannot be blank");
+        }
+        if (importPath == null || importPath.isBlank()) {
+            throw new IllegalArgumentException("linked import path cannot be blank");
+        }
+        if (targetCodeUnitId == null || targetCodeUnitId.isBlank()) {
+            throw new IllegalArgumentException("target code unit id cannot be blank");
+        }
+
+        Map<String, String> imports = linkedImportResolutions.computeIfAbsent(
+                normalizeCodeUnitId(importerCodeUnitId),
+                ignored -> new HashMap<>());
+        String target = normalizeCodeUnitId(targetCodeUnitId);
+        String previous = imports.putIfAbsent(importPath, target);
+        if (previous != null && !previous.equals(target)) {
+            throw new IllegalStateException(
+                    "conflicting import resolution for '" + importPath + "' in '" + importerCodeUnitId + "'");
+        }
+    }
+
+    public synchronized String resolvedLinkedImport(String importerCodeUnitId, String importPath) {
+        Map<String, String> imports = linkedImportResolutions.get(normalizeCodeUnitId(importerCodeUnitId));
+        return imports == null ? null : imports.get(importPath);
+    }
+
+    private static String normalizeCodeUnitId(String id) {
+        return java.nio.file.Path.of(id).normalize().toString().replace('\\', '/');
+    }
+
     private void executeActorTurn(Runnable turn) {
         boolean serialize = isolatePolicy.adversarial();
         if (serialize) adversarialActorTurnLock.lock();
@@ -166,6 +206,7 @@ public final class OresContext implements AutoCloseable {
         } finally {
             synchronized (this) {
                 linkedCodeUnits.clear();
+                linkedImportResolutions.clear();
             }
             garbageCollector.close();
             output.flush();

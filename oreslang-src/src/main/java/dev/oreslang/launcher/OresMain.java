@@ -3,6 +3,7 @@ package dev.oreslang.launcher;
 import dev.oreslang.compiler.BuildOptions;
 import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.compiler.TreeShaker;
+import dev.oreslang.config.OresProjectConfig;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.LinkedProgramRunner;
@@ -69,13 +70,22 @@ public final class OresMain {
             else throw new IllegalArgumentException("only one .ores or .java source file may be supplied");
         }
 
+        Path path;
         if (filename == null) {
-            System.err.println("usage: oreslang-compiler [--check|--build-analysis] [--define=name=value ...] [--entry=symbol ...] [--strict-isolate] [--mode=aot|jit|hybrid] [--platform=server|windows|macos|linux|android|ios] [--allow=CAP,...] [--allow-host-class=java.util.ArrayList ...] <file.ores|file.java>");
-            System.exit(2);
-            return;
+            OresProjectConfig project = OresProjectConfig.discover(
+                    Path.of("").toAbsolutePath().normalize(),
+                    System.getenv());
+            path = project.mainEntrypoint().orElse(null);
+            if (path == null) {
+                System.err.println("usage: oreslang-compiler [--check|--build-analysis] [--define=name=value ...] [--entry=symbol ...] [--strict-isolate] [--mode=aot|jit|hybrid] [--platform=server|windows|macos|linux|android|ios] [--allow=CAP,...] [--allow-host-class=java.util.ArrayList ...] [file.ores|file.java]");
+                System.err.println("or define [entrypoints].main in " + OresProjectConfig.MANIFEST_NAME);
+                System.exit(2);
+                return;
+            }
+            filename = path.toString();
+        } else {
+            path = Path.of(filename);
         }
-
-        Path path = Path.of(filename);
         if (!Files.isRegularFile(path)) throw new IllegalArgumentException("not a file: " + path);
 
         if (checkOnly && buildAnalysis) {
