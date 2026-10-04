@@ -32,11 +32,16 @@ end
 
 define module app
   pub fnc main(): void {
+    struct Info {
+      name: string
+      stable: bool
+    }
+
     let answer = math.add(40, 2);
     answer = answer + 1;
     val complex z = 3 + 4i;
     val values = arr[answer, 2];
-    val info = obj{name: "oreslang", stable: true};
+    val Info info = Info{name: "oreslang", stable: true};
     [const first, let second] = (values[0], values[1]);
 
     if first == 43, info.stable | false; do
