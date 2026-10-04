@@ -11,10 +11,12 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class ProjectManifestImportTest {
@@ -66,6 +68,42 @@ final class ProjectManifestImportTest {
 
         assertEquals(2, build.units().size());
         assertTrue(out.toString(StandardCharsets.UTF_8).contains("manifest-path"));
+    }
+
+    @Test
+    void importFncRejectsDirectOnlyRoutineAndActorCallableAtLinkValidation() throws Exception {
+        Path app = temp.resolve("fnc-import-contract");
+        Files.createDirectories(app);
+        Path routineUnit = app.resolve("routine.ores");
+        Path actorUnit = app.resolve("actor.ores");
+        Path routineMain = app.resolve("routine-main.ores");
+        Path actorMain = app.resolve("actor-main.ores");
+
+        Files.writeString(routineUnit, """
+                pub routine work(int value): int {
+                  return value + 1;
+                }
+                """);
+        Files.writeString(actorUnit, """
+                pub actor fnc work(int value): int {
+                  return value + 1;
+                }
+                """);
+        Files.writeString(routineMain, """
+                import fnc work from "./routine.ores";
+                pub routine main(): void { return; }
+                """);
+        Files.writeString(actorMain, """
+                import fnc work from "./actor.ores";
+                pub routine main(): void { return; }
+                """);
+
+        for (Path entry : List.of(routineMain, actorMain)) {
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> LinkedProgramRunner.validate(entry));
+            assertTrue(failure.getMessage().contains("does not match an exported declaration"));
+        }
     }
 
     @Test
