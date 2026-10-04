@@ -156,4 +156,55 @@ final class OresFuturesTest {
 
         assertEquals(7, race.join());
     }
+    @Test
+    void raceDetachesLosingFutureWaiterAfterWinnerSettles() throws Exception {
+        OresFuture<Integer> slow = new OresFuture<>();
+        OresFuture<Integer> fast = new OresFuture<>();
+
+        OresFuture<Integer> race = OresFutures.race(List.of(slow, fast));
+        assertTrue(fast.completeFromRuntime(7));
+        assertEquals(7, race.join());
+
+        assertTrue(runtimeWaiters(slow).isEmpty(),
+                "race loser must not retain aggregate callback after winner settles");
+    }
+
+    @Test
+    void allDetachesPendingWaitersAfterEarlyFailure() throws Exception {
+        OresFuture<Integer> pending = new OresFuture<>();
+        OresFuture<Integer> failed = new OresFuture<>();
+
+        OresFuture<List<Integer>> all = OresFutures.all(List.of(pending, failed));
+        assertTrue(failed.failFromRuntime(new IllegalStateException("boom")));
+        assertThrows(CompletionException.class, all::join);
+
+        assertTrue(runtimeWaiters(pending).isEmpty(),
+                "early aggregate failure must detach waiters from pending siblings");
+        assertFalse(pending.isCancelled(),
+                "ordinary child failure must not change sibling cancellation semantics");
+    }
+
+
+    @Test
+    void cancellingHostCompletionStageBridgeDetachesRuntimeWaiter() throws Exception {
+        OresFuture<Integer> source = new OresFuture<>();
+        java.util.concurrent.CompletableFuture<Integer> bridge =
+                source.asCompletionStage().toCompletableFuture();
+
+        assertFalse(runtimeWaiters(source).isEmpty());
+        assertTrue(bridge.cancel(true));
+        assertTrue(runtimeWaiters(source).isEmpty(),
+                "cancelled host bridge must not remain rooted by the Ores Future");
+        assertFalse(source.isCancelled(),
+                "host observation cancellation must not cancel the runtime-owned producer");
+    }
+
+    private static java.util.concurrent.ConcurrentLinkedQueue<?> runtimeWaiters(
+            OresFuture<?> future) throws Exception {
+        var field = OresFuture.class.getDeclaredField("waiters");
+        field.setAccessible(true);
+        return (java.util.concurrent.ConcurrentLinkedQueue<?>) field.get(future);
+    }
+
+
 }

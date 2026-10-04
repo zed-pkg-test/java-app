@@ -398,7 +398,7 @@ final class FutureLanguageTest {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
-                        define class Worker
+                        define class Worker as
                           pub async run() => int {
                             return 1;
                           }

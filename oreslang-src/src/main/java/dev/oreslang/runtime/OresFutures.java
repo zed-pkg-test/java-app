@@ -26,8 +26,12 @@ public final class OresFutures {
 
     public static <T> OresFuture<List<T>> all(List<?> awaitables) {
         List<OresFuture<T>> children = normalize(awaitables, "Futures.all");
-        OresFuture<List<T>> result = new OresFuture<>(
-                () -> children.forEach(child -> child.cancel(true)));
+        AtomicReferenceArray<OresFuture.RuntimeWaiterRegistration> registrations =
+                new AtomicReferenceArray<>(children.size());
+        OresFuture<List<T>> result = new OresFuture<>(() -> {
+            detachRegistrations(registrations);
+            children.forEach(child -> child.cancel(true));
+        });
         if (children.isEmpty()) {
             result.completeFromRuntime(List.of());
             return result;
@@ -38,23 +42,34 @@ public final class OresFutures {
 
         for (int index = 0; index < children.size(); index++) {
             int slot = index;
-            children.get(index).whenCompleteRuntime((value, failure) -> {
-                if (result.isDone()) return;
-                if (failure != null) {
-                    result.failFromRuntime(OresFuture.unwrap(failure));
-                    return;
-                }
-                values.set(slot, value);
-                if (remaining.decrementAndGet() == 0) {
-                    ArrayList<T> ordered = new ArrayList<>(children.size());
-                    for (int i = 0; i < children.size(); i++) {
-                        @SuppressWarnings("unchecked")
-                        T item = (T) values.get(i);
-                        ordered.add(item);
-                    }
-                    result.completeFromRuntime(List.copyOf(ordered));
-                }
-            });
+            OresFuture.RuntimeWaiterRegistration registration =
+                    children.get(index).whenCompleteRuntime((value, failure) -> {
+                        registrations.set(slot, null);
+                        if (result.isDone()) return;
+                        if (failure != null) {
+                            if (result.failFromRuntime(OresFuture.unwrap(failure))) {
+                                detachRegistrations(registrations);
+                            }
+                            return;
+                        }
+                        values.set(slot, value);
+                        if (remaining.decrementAndGet() == 0) {
+                            ArrayList<T> ordered = new ArrayList<>(children.size());
+                            for (int i = 0; i < children.size(); i++) {
+                                @SuppressWarnings("unchecked")
+                                T item = (T) values.get(i);
+                                ordered.add(item);
+                            }
+                            if (result.completeFromRuntime(List.copyOf(ordered))) {
+                                detachRegistrations(registrations);
+                            }
+                        }
+                    });
+            registrations.set(slot, registration);
+            if (result.isDone()) {
+                registration.cancel();
+                registrations.compareAndSet(slot, registration, null);
+            }
         }
         return result;
     }
@@ -66,24 +81,39 @@ public final class OresFutures {
                     new IllegalArgumentException("Futures.race requires at least one future"));
         }
 
-        OresFuture<T> result = new OresFuture<>(
-                () -> children.forEach(child -> child.cancel(true)));
-        for (OresFuture<T> child : children) {
-            child.whenCompleteRuntime((value, failure) -> {
-                if (failure == null) {
-                    result.completeFromRuntime(value);
-                } else {
-                    result.failFromRuntime(OresFuture.unwrap(failure));
-                }
-            });
+        AtomicReferenceArray<OresFuture.RuntimeWaiterRegistration> registrations =
+                new AtomicReferenceArray<>(children.size());
+        OresFuture<T> result = new OresFuture<>(() -> {
+            detachRegistrations(registrations);
+            children.forEach(child -> child.cancel(true));
+        });
+        for (int index = 0; index < children.size(); index++) {
+            int slot = index;
+            OresFuture.RuntimeWaiterRegistration registration =
+                    children.get(index).whenCompleteRuntime((value, failure) -> {
+                        registrations.set(slot, null);
+                        boolean won = failure == null
+                                ? result.completeFromRuntime(value)
+                                : result.failFromRuntime(OresFuture.unwrap(failure));
+                        if (won) detachRegistrations(registrations);
+                    });
+            registrations.set(slot, registration);
+            if (result.isDone()) {
+                registration.cancel();
+                registrations.compareAndSet(slot, registration, null);
+            }
         }
         return result;
     }
 
     public static <T> OresFuture<List<Settled<T>>> allSettled(List<?> awaitables) {
         List<OresFuture<T>> children = normalize(awaitables, "Futures.all_settled");
-        OresFuture<List<Settled<T>>> result = new OresFuture<>(
-                () -> children.forEach(child -> child.cancel(true)));
+        AtomicReferenceArray<OresFuture.RuntimeWaiterRegistration> registrations =
+                new AtomicReferenceArray<>(children.size());
+        OresFuture<List<Settled<T>>> result = new OresFuture<>(() -> {
+            detachRegistrations(registrations);
+            children.forEach(child -> child.cancel(true));
+        });
         if (children.isEmpty()) {
             result.completeFromRuntime(List.of());
             return result;
@@ -95,23 +125,41 @@ public final class OresFutures {
 
         for (int index = 0; index < children.size(); index++) {
             int slot = index;
-            children.get(index).whenCompleteRuntime((value, failure) -> {
-                settled.set(
-                        slot,
-                        new Settled<>(
-                                failure == null ? value : null,
-                                failure == null ? null : OresFuture.unwrap(failure)));
-                if (remaining.decrementAndGet() == 0) {
-                    ArrayList<Settled<T>> ordered =
-                            new ArrayList<>(children.size());
-                    for (int i = 0; i < children.size(); i++) {
-                        ordered.add(settled.get(i));
-                    }
-                    result.completeFromRuntime(List.copyOf(ordered));
-                }
-            });
+            OresFuture.RuntimeWaiterRegistration registration =
+                    children.get(index).whenCompleteRuntime((value, failure) -> {
+                        registrations.set(slot, null);
+                        settled.set(
+                                slot,
+                                new Settled<>(
+                                        failure == null ? value : null,
+                                        failure == null ? null : OresFuture.unwrap(failure)));
+                        if (remaining.decrementAndGet() == 0) {
+                            ArrayList<Settled<T>> ordered =
+                                    new ArrayList<>(children.size());
+                            for (int i = 0; i < children.size(); i++) {
+                                ordered.add(settled.get(i));
+                            }
+                            if (result.completeFromRuntime(List.copyOf(ordered))) {
+                                detachRegistrations(registrations);
+                            }
+                        }
+                    });
+            registrations.set(slot, registration);
+            if (result.isDone()) {
+                registration.cancel();
+                registrations.compareAndSet(slot, registration, null);
+            }
         }
         return result;
+    }
+
+    private static void detachRegistrations(
+            AtomicReferenceArray<OresFuture.RuntimeWaiterRegistration> registrations) {
+        for (int i = 0; i < registrations.length(); i++) {
+            OresFuture.RuntimeWaiterRegistration registration =
+                    registrations.getAndSet(i, null);
+            if (registration != null) registration.cancel();
+        }
     }
 
     @SuppressWarnings("unchecked")

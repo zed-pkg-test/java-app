@@ -244,11 +244,27 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
      * receive the returned stage.
      */
     CompletionStage<T> asCompletionStage() {
+        AtomicReference<RuntimeWaiterRegistration> registrationRef =
+                new AtomicReference<>();
         CompletableFuture<T> bridge = new CompletableFuture<>();
-        whenCompleteRuntime((value, failure) -> {
-            if (failure == null) bridge.complete(value);
-            else bridge.completeExceptionally(failure);
+
+        bridge.whenComplete((ignoredValue, ignoredFailure) -> {
+            RuntimeWaiterRegistration registration =
+                    registrationRef.getAndSet(null);
+            if (registration != null) registration.cancel();
         });
+
+        RuntimeWaiterRegistration registration =
+                whenCompleteRuntime((value, failure) -> {
+                    if (failure == null) bridge.complete(value);
+                    else bridge.completeExceptionally(failure);
+                });
+        registrationRef.set(registration);
+
+        if (bridge.isDone()) {
+            registration.cancel();
+            registrationRef.compareAndSet(registration, null);
+        }
         return bridge;
     }
 
@@ -260,10 +276,16 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
         // winning terminal transition.
         cancelHook.set(null);
 
+        Error fatal = null;
         Waiter<T> waiter;
         while ((waiter = waiters.poll()) != null) {
-            notifyWaiter(waiter, terminal);
+            try {
+                notifyWaiter(waiter, terminal);
+            } catch (VirtualMachineError | ThreadDeath | LinkageError waiterFatal) {
+                if (fatal == null) fatal = waiterFatal;
+            }
         }
+        if (fatal != null) throw fatal;
         return true;
     }
 

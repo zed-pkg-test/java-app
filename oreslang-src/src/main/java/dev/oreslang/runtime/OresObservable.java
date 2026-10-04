@@ -222,29 +222,45 @@ public abstract class OresObservable<T> {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(mapper, "mapper");
 
-        OresFuture<O> result = propagateCancellation
-                ? new OresFuture<>(() -> source.cancel(true))
-                : new OresFuture<>();
+        java.util.concurrent.atomic.AtomicReference<
+                OresFuture.RuntimeWaiterRegistration> registrationRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
 
-        source.whenCompleteRuntime((value, failure) -> {
-            if (result.isDone()) {
-                return;
-            }
-            if (failure != null) {
-                Throwable terminalFailure = OresFuture.unwrap(failure);
-                if (source.isCancelled()) {
-                    result.cancel(true);
-                } else {
-                    result.failFromRuntime(terminalFailure);
-                }
-                return;
-            }
-            try {
-                result.completeFromRuntime(mapper.apply(value));
-            } catch (Throwable mappingFailure) {
-                result.failFromRuntime(mappingFailure);
-            }
+        OresFuture<O> result = new OresFuture<>(() -> {
+            OresFuture.RuntimeWaiterRegistration registration =
+                    registrationRef.getAndSet(null);
+            if (registration != null) registration.cancel();
+            if (propagateCancellation) source.cancel(true);
         });
+
+        OresFuture.RuntimeWaiterRegistration registration =
+                source.whenCompleteRuntime((value, failure) -> {
+                    registrationRef.set(null);
+                    if (result.isDone()) {
+                        return;
+                    }
+                    if (failure != null) {
+                        Throwable terminalFailure = OresFuture.unwrap(failure);
+                        if (source.isCancelled()) {
+                            result.cancel(true);
+                        } else {
+                            result.failFromRuntime(terminalFailure);
+                        }
+                        return;
+                    }
+                    try {
+                        result.completeFromRuntime(mapper.apply(value));
+                    } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+                        throw fatal;
+                    } catch (Throwable mappingFailure) {
+                        result.failFromRuntime(mappingFailure);
+                    }
+                });
+        registrationRef.set(registration);
+        if (result.isDone()) {
+            registration.cancel();
+            registrationRef.compareAndSet(registration, null);
+        }
 
         return result;
     }

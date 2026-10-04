@@ -2008,6 +2008,7 @@ public final class ActorRuntime implements AutoCloseable {
         try {
             return rootTask.completion.get();
         } catch (InterruptedException interrupted) {
+            rootTask.awaitableCompletion.cancel(true);
             Thread.currentThread().interrupt();
             throw new CancellationException("root/main process execution interrupted");
         } catch (ExecutionException failed) {

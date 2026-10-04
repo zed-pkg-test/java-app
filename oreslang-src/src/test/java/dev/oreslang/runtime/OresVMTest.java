@@ -720,4 +720,47 @@ final class OresVMTest {
     }
 
 
+    @Test
+    void interruptingSynchronousRootWaitCancelsLogicalTask() throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(1),
+                0,
+                32);
+
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config);
+        try {
+            CountDownLatch entered = new CountDownLatch(1);
+            AtomicReference<Throwable> callerFailure = new AtomicReference<>();
+
+            Thread caller = Thread.ofPlatform().start(() -> {
+                try {
+                    runtime.executeRootTask(() -> {
+                        entered.countDown();
+                        for (;;) runtime.schedulerSafepoint();
+                    });
+                } catch (Throwable failure) {
+                    callerFailure.set(failure);
+                }
+            });
+
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            caller.interrupt();
+            caller.join(2_000);
+
+            assertFalse(caller.isAlive());
+            assertInstanceOf(
+                    java.util.concurrent.CancellationException.class,
+                    callerFailure.get());
+
+            // Structured cancellation must let teardown observe zero live root
+            // tasks instead of abandoning work after the host waiter exits.
+            runtime.close();
+        } finally {
+            runtime.close();
+        }
+    }
+
+
 }

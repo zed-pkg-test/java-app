@@ -188,8 +188,10 @@ public abstract class OresSubscription<T> {
         }
         try {
             cancelFromRuntime();
+        } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+            throw fatal;
         } catch (RuntimeException | Error ignored) {
-            // Subscription terminal state is already authoritative. Runtime
+            // Subscription terminal state is already authoritative. Ordinary
             // cleanup failure cannot reopen the stream or duplicate teardown.
         }
     }

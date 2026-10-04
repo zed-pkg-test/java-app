@@ -100,6 +100,27 @@ final class OresObservableTest {
     }
 
     @Test
+    void cancellingSharedFutureSubscriptionDetachesWithoutCancellingProducer()
+            throws Exception {
+        OresFuture<Integer> source = new OresFuture<>();
+        OresSubscription<Integer> subscription =
+                OresObservable.fromFuture(source).subscribe();
+
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+        assertTrue(subscription.cancel());
+        assertTrue(pull.isCancelled());
+        assertFalse(source.isCancelled());
+
+        var waitersField = OresFuture.class.getDeclaredField("waiters");
+        waitersField.setAccessible(true);
+        var waiters = (java.util.concurrent.ConcurrentLinkedQueue<?>)
+                waitersField.get(source);
+        assertTrue(
+                waiters.isEmpty(),
+                "cancelled subscription must detach from a shared producer Future");
+    }
+
+    @Test
     void sharedFutureCancellationRemainsCancellationForPulledDemand() {
         OresFuture<Integer> source = new OresFuture<>();
         OresSubscription<Integer> subscription =
@@ -309,4 +330,29 @@ final class OresObservableTest {
                                 || java.util.function.Function.class.isAssignableFrom(type)),
                 "initial rx-ores surface must not run guest callbacks on producer threads");
     }
+    @Test
+    void cancellingSharedFutureSubscriptionDetachesProducerWaiter() throws Exception {
+        OresFuture<Integer> source = new OresFuture<>();
+        OresSubscription<Integer> subscription =
+                OresObservable.fromFuture(source).subscribe();
+
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+        assertFalse(runtimeWaiters(source).isEmpty());
+
+        assertTrue(subscription.cancel());
+        assertThrows(CancellationException.class, pull::join);
+        assertFalse(source.isCancelled(),
+                "detaching a subscriber must not cancel the shared producer");
+        assertTrue(runtimeWaiters(source).isEmpty(),
+                "cancelled subscriber must not stay rooted by a never-settling shared Future");
+    }
+
+    private static java.util.concurrent.ConcurrentLinkedQueue<?> runtimeWaiters(
+            OresFuture<?> future) throws Exception {
+        var field = OresFuture.class.getDeclaredField("waiters");
+        field.setAccessible(true);
+        return (java.util.concurrent.ConcurrentLinkedQueue<?>) field.get(future);
+    }
+
+
 }
