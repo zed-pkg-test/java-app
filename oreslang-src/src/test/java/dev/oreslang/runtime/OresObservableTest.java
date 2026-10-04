@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -122,4 +125,39 @@ final class OresObservableTest {
                                 || java.util.function.Function.class.isAssignableFrom(type)),
                 "initial rx-ores surface must not run guest callbacks on producer threads");
     }
+    @Test
+    void foreignProducerRxCompletionResumesOnlyOnOwningScheduler() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source = new OresFuture<>();
+            OresObservable<Integer> observable = OresObservable.fromFuture(source);
+            AtomicInteger pc = new AtomicInteger();
+            AtomicReference<Thread> producerThread = new AtomicReference<>();
+
+            OresFuture<Integer> consumed = scheduler.start(resume -> {
+                assertSame(scheduler, OresScheduler.current());
+
+                if (pc.getAndIncrement() == 0) {
+                    return OresScheduler.await(observable.first());
+                }
+
+                assertNull(resume.failure());
+                assertEquals(77, resume.value());
+                assertNotSame(
+                        producerThread.get(),
+                        Thread.currentThread(),
+                        "rx producer/completion thread must not execute guest continuation");
+                return OresScheduler.done((Integer) resume.value());
+            });
+
+            Thread producer = Thread.ofPlatform().start(() -> {
+                producerThread.set(Thread.currentThread());
+                source.completeFromRuntime(77);
+            });
+            producer.join();
+
+            assertEquals(77, consumed.get(5, TimeUnit.SECONDS));
+            assertEquals(2, pc.get());
+        }
+    }
+
 }
