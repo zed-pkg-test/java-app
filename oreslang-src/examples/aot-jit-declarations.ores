@@ -1,0 +1,17 @@
+pub interface ValueApi {
+  fnc value() => int;
+}
+
+define class Box implements ValueApi as
+  let int stored;
+
+  pub value() => int {
+    return self.stored;
+  }
+end
+
+pub routine main() => void {
+  val box = new Box(42);
+  stdio.println(box.value());
+  return;
+}
