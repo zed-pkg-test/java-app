@@ -149,7 +149,9 @@ public final class OresContext implements AutoCloseable {
                     "OresScheduler context limit exceeded: " + MAX_USER_SCHEDULERS);
         }
 
-        OresScheduler scheduler = new OresScheduler(parallelism);
+        OresScheduler scheduler = OresScheduler.managed(
+                parallelism,
+                this::executeSchedulerTurn);
         userSchedulers.add(scheduler);
         return scheduler;
     }
@@ -183,6 +185,19 @@ public final class OresContext implements AutoCloseable {
 
     public synchronized boolean hasLinkedCodeUnit(String codeUnitId) {
         return linkedCodeUnits.containsKey(codeUnitId);
+    }
+
+    private void executeSchedulerTurn(Runnable turn) {
+        TruffleContext truffleContext = env.getContext();
+        Object previous = null;
+        boolean entered = false;
+        try {
+            previous = truffleContext.enter(null);
+            entered = true;
+            turn.run();
+        } finally {
+            if (entered) truffleContext.leave(null, previous);
+        }
     }
 
     private void executeActorTurn(Runnable turn) {
