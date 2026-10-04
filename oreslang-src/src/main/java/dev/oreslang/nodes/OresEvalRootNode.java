@@ -100,6 +100,7 @@ public final class OresEvalRootNode extends RootNode {
         CapabilityChecker.check(program, policy);
     }
 
+    @TruffleBoundary
     private Evaluator evaluator(OresContext context) {
         Evaluator current = evaluator;
         if (current != null) return current;
