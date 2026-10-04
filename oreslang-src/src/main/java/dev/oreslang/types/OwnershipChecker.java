@@ -123,6 +123,7 @@ public final class OwnershipChecker {
     }
 
     private void checkStatement(Ast.Stmt stmt, Scope scope, Ast.TypeRef returnType) {
+        if (stmt instanceof Ast.LocalTypeDeclStmt) return;
         if (stmt instanceof Ast.BindingStmt binding) {
             checkBinding(binding, scope);
             return;
@@ -379,9 +380,9 @@ public final class OwnershipChecker {
             checkExpr(member.receiver(), scope, false);
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
             if (concreteReceiver != null
-                    && concreteReceiver.name().equals("DynamicStruct")
-                    && concreteReceiver.arguments().size() == 1) {
-                Ast.TypeRef valueType = concreteReceiver.arguments().getFirst();
+                    && concreteReceiver.name().equals("Map")
+                    && concreteReceiver.arguments().size() == 2) {
+                Ast.TypeRef valueType = concreteReceiver.arguments().get(1);
                 return new ValueInfo(valueType, kindOfType(valueType), null);
             }
             Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
@@ -450,24 +451,17 @@ public final class OwnershipChecker {
             }
             return new ValueInfo(Ast.TypeRef.inferred(), copy ? ValueKind.COPY : ValueKind.MOVE_ONLY, null);
         }
-        if (expr instanceof Ast.ObjectExpr object) {
-            boolean dynamic = false;
-            for (Ast.ObjectField field : object.fields()) {
-                if (field.isDynamic()) {
-                    dynamic = true;
-                    ValueInfo key = checkExpr(field.dynamicName(), scope, false);
-                    if (containsMutexGuardType(key.type)) {
-                        throw error("dynamic object keys cannot contain MutexGuard");
-                    }
-                }
+        if (expr instanceof Ast.StructExpr struct) {
+            for (Ast.ObjectField field : struct.fields()) {
                 ValueInfo info = checkExpr(field.value(), scope, true);
-                if (containsMutexGuardType(info.type)) throw error("MutexGuard cannot be stored in an object/map");
+                if (containsMutexGuardType(info.type)) {
+                    throw error("MutexGuard cannot be stored in a struct");
+                }
             }
-            return new ValueInfo(
-                    dynamic ? new Ast.TypeRef("DynamicStruct", List.of(Ast.TypeRef.inferred()), false)
-                            : Ast.TypeRef.simple("obj"),
-                    ValueKind.MOVE_ONLY,
-                    null);
+            return new ValueInfo(struct.type(), ValueKind.MOVE_ONLY, null);
+        }
+        if (expr instanceof Ast.ObjectExpr) {
+            throw error("obj{} is shelved; use a fixed struct or Map<K,V>");
         }
         if (expr instanceof Ast.LambdaExpr lambda) return checkLambda(lambda, scope, null);
         return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
@@ -1154,6 +1148,7 @@ public final class OwnershipChecker {
             return state == null ? Ast.TypeRef.inferred() : state.type;
         }
         if (expr instanceof Ast.NewExpr created) return created.type();
+        if (expr instanceof Ast.StructExpr struct) return struct.type();
         if (expr instanceof Ast.UnaryExpr unary) {
             Ast.TypeRef operand = syntacticType(unary.operand(), scope);
             if (unary.operator().equals("&") || unary.operator().equals("&mut")) {
@@ -1369,9 +1364,11 @@ public final class OwnershipChecker {
     private Ast.TypeRef collectionElementType(Ast.TypeRef type) {
         if (type == null) return Ast.TypeRef.inferred();
         Ast.TypeRef concrete = type.isBorrow() ? type.borrowedTarget() : type;
-        if ((concrete.name().equals("Array") || concrete.name().equals("List")
-                || concrete.name().equals("DynamicStruct")) && concrete.arguments().size() == 1) {
+        if ((concrete.name().equals("Array") || concrete.name().equals("List")) && concrete.arguments().size() == 1) {
             return concrete.arguments().getFirst();
+        }
+        if (concrete.name().equals("Map") && concrete.arguments().size() == 2) {
+            return concrete.arguments().get(1);
         }
         if (concrete.isTupleType() && !concrete.arguments().isEmpty()) {
             Ast.TypeRef first = concrete.arguments().getFirst();
@@ -1394,8 +1391,8 @@ public final class OwnershipChecker {
                 Ast.TypeRef member = concrete.recordMembers().get(name);
                 if (member != null) return member;
             }
-            if (concrete.name().equals("DynamicStruct") && concrete.arguments().size() == 1) {
-                return concrete.arguments().getFirst();
+            if (concrete.name().equals("Map") && concrete.arguments().size() == 2) {
+                return concrete.arguments().get(1);
             }
             Ast.ClassDecl klass = findClass(concrete.name());
             if (klass != null) {
