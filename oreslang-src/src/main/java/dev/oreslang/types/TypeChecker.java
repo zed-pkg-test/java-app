@@ -1549,6 +1549,12 @@ public final class TypeChecker {
         if (type.name().equals("Awaitable") && type.arguments().size() == 1) {
             return type.arguments().getFirst();
         }
+        if (type.name().equals("Future") && type.arguments().size() == 1) {
+            return type.arguments().getFirst();
+        }
+        if (type.name().equals("ActorSpawn") && type.arguments().size() == 1) {
+            return new Named("ActorRef", List.of());
+        }
 
         Ast.ClassDecl klass = findClass(type.name());
         if (klass != null) {

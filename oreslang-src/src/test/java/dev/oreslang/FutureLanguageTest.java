@@ -313,4 +313,20 @@ final class FutureLanguageTest {
     }
 
 
+    @Test
+    void futureIsNominallyAssignableToAwaitable() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc consume(Awaitable<int> value) => int {
+                    return await value;
+                  }
+
+                  fnc pass(Future<int> value) => int {
+                    return consume(value);
+                  }
+                end
+                """)));
+    }
+
+
 }
