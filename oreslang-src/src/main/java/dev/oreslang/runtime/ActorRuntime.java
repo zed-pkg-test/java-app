@@ -1546,6 +1546,7 @@ public final class ActorRuntime implements AutoCloseable {
     private final DispatcherConfig dispatcherConfig;
     private final TurnExecutor turnExecutor;
     private final OresVM vm;
+    private final OresScheduler rootScheduler;
     private final ActorGenerationLeaseFactory generationLeaseFactory;
     private final RuntimePlacement runtimePlacement;
     private final DispatcherGroup dispatcherGroup;
@@ -1723,6 +1724,12 @@ public final class ActorRuntime implements AutoCloseable {
         this.privateRejectedTurns = dispatcherGroup.privateRejectedTurns;
         this.sharedRejectedTurns = dispatcherGroup.sharedRejectedTurns;
         this.untrustedRejectedTurns = dispatcherGroup.untrustedRejectedTurns;
+
+        int rootParallelism = Math.max(1, dispatcherConfig.controlParallelism() - 1);
+        this.rootScheduler = OresScheduler.runtimeOwned(
+                "ores-root-" + Integer.toHexString(System.identityHashCode(this)),
+                rootParallelism,
+                this::executeRootSchedulerTurn);
     }
 
     public IsolatePolicy policyCeiling() { return policyCeiling; }
@@ -1731,6 +1738,33 @@ public final class ActorRuntime implements AutoCloseable {
     RuntimePlacement runtimePlacement() { return runtimePlacement; }
     public boolean usesProcessSharedDispatchers() { return vm.processVm(); }
     public int maxActors() { return dispatcherConfig.maxActors(); }
+
+    /**
+     * Implicit scheduler for ordinary async Oreslang tasks in this runtime.
+     * Its physical carriers come from VM CONTROL, but every turn re-enters this
+     * runtime's owning Truffle context through TurnExecutor.
+     */
+    public OresScheduler rootScheduler() {
+        if (closed.get()) throw new IllegalStateException("actor runtime is closed");
+        return rootScheduler;
+    }
+
+    private void executeRootSchedulerTurn(Runnable turn) {
+        Objects.requireNonNull(turn, "turn");
+        dispatcherGroup.executeControlTask(() -> {
+            ACTOR_CARRIER.set(Boolean.TRUE);
+            CURRENT_ROOT_RUNTIME.set(ActorRuntime.this);
+            try {
+                turnExecutor.execute(() -> {
+                    schedulerSafepoint();
+                    turn.run();
+                });
+            } finally {
+                CURRENT_ROOT_RUNTIME.remove();
+                ACTOR_CARRIER.remove();
+            }
+        });
+    }
 
     /**
      * Define one runtime-owned actor group. The group always owns exactly one
@@ -2072,7 +2106,7 @@ public final class ActorRuntime implements AutoCloseable {
             armRootDeadline();
             if (closed.get()) carrier.interrupt();
             try {
-                vm.rootScheduler().runBound(() -> turnExecutor.execute(() -> {
+                rootScheduler.runBound(() -> turnExecutor.execute(() -> {
                     try {
                         schedulerSafepoint();
                         completion.complete(task.get());
@@ -5312,6 +5346,7 @@ public final class ActorRuntime implements AutoCloseable {
         for (RootTask<?> rootTask : List.copyOf(rootTasks)) {
             rootTask.cancelFromRuntimeClose();
         }
+        if (firstClose) rootScheduler.close();
 
         if (firstClose && ownsVm) {
             // Dedicated/test runtimes own their complete VM scheduler set.
