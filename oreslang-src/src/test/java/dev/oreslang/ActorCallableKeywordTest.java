@@ -77,7 +77,7 @@ final class ActorCallableKeywordTest {
                   return;
                 }
 
-                pub routine main() => void {
+                pub async routine main() => void {
                   val add = spawn add_one(41);
                   stdio.stdout.write(await add.result);
                   stdio.stdout.write(":");
