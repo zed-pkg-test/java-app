@@ -42,7 +42,7 @@ final class MutexLanguageTest {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class, () -> TypeChecker.check(program));
         assertTrue(error.getMessage().contains(
-                "actor code cannot use blocking SharedMutex.lock"));
+                "actor code cannot acquire or mutate external SharedMutex"));
     }
 
     @Test
@@ -61,23 +61,26 @@ final class MutexLanguageTest {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class, () -> TypeChecker.check(program));
         assertTrue(error.getMessage().contains(
-                "actor code cannot use blocking SharedMutex.with_lock"));
+                "actor code cannot acquire or mutate external SharedMutex"));
     }
 
     @Test
-    void actorCodeMayUseNonblockingSharedMutexOperations() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                pub shared actor fnc try_worker(SharedMutex<int> mutex) => void {
-                  val maybe_guard = mutex.try_lock();
-                  stdio.println(mutex.is_poisoned());
-                  return;
-                }
-
-                pub shared actor fnc async_worker(SharedMutex<int> mutex) => void {
-                  val future_guard = mutex.lock_async();
-                  return;
-                }
-                """)));
+    void actorCodeRejectsNonblockingAndAsyncSharedMutexOperationsToo() {
+        for (String operation : java.util.List.of(
+                "mutex.try_lock()",
+                "mutex.lock_async()",
+                "mutex.is_poisoned()")) {
+            IllegalArgumentException error = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> TypeChecker.check(Parser.parse("""
+                            pub shared actor fnc worker(SharedMutex<int> mutex) => void {
+                              val denied = %s;
+                              return;
+                            }
+                            """.formatted(operation))));
+            assertTrue(error.getMessage().contains(
+                    "actor code cannot acquire or mutate external SharedMutex"));
+        }
     }
 
     @Test
@@ -415,7 +418,7 @@ final class MutexLanguageTest {
                 """);
 
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(program));
-        assertTrue(error.getMessage().contains("cannot await while holding a MutexGuard"));
+        assertTrue(error.getMessage().contains("cannot await while holding a lock guard"));
     }
 
     @Test
@@ -462,7 +465,7 @@ final class MutexLanguageTest {
                 """);
 
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(program));
-        assertTrue(error.getMessage().contains("cannot await while holding a MutexGuard"));
+        assertTrue(error.getMessage().contains("cannot await while holding a lock guard"));
     }
 
     @Test
@@ -948,7 +951,7 @@ final class MutexLanguageTest {
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(awaitProgram));
         assertTrue(awaitError.getMessage().contains(
-                "cannot await while holding a MutexGuard"));
+                "cannot await while holding a lock guard"));
 
         var returnProgram = Parser.parse("""
                 define module model
