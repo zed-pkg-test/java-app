@@ -193,7 +193,7 @@ final class UntrustedActorSandboxTest {
                             1024),
                     null,
                     context -> (message, turn) -> {
-                        turn.runtime().spawnPrivate(child -> (ignored, childTurn) -> { });
+                        turn.spawnPrivate(child -> (ignored, childTurn) -> { });
                     });
 
             ref.send("run");
