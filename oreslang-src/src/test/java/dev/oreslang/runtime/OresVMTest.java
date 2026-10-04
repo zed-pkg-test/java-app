@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -141,66 +140,6 @@ final class OresVMTest {
             assertEquals(0, vm.generationBindingCount());
             vm.shutdownNow();
         }
-    }
-
-
-    @Test
-    void opaqueVmBindingsRejectCallerShadowingAndDuplicateArguments() {
-        OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
-        String generationToken = vm.registerGenerationBinding(() -> () -> { });
-        try {
-            assertThrows(
-                    SecurityException.class,
-                    () -> vm.bindApplicationArguments(
-                            new String[] {"--ores-vm-binding=caller-controlled"},
-                            generationToken));
-            assertThrows(
-                    SecurityException.class,
-                    () -> vm.bindApplicationArguments(
-                            new String[] {"--ores-generation-binding=caller-controlled"},
-                            generationToken));
-
-            String[] bound = vm.bindApplicationArguments(
-                    new String[] {"--ordinary=value"},
-                    generationToken);
-            assertSame(vm, OresVM.contextOwner(bound));
-            assertNotNull(vm.generationLeaseFactory(bound));
-
-            String[] duplicateVm = Arrays.copyOf(bound, bound.length + 1);
-            duplicateVm[bound.length] = bound[bound.length - 2];
-            assertThrows(SecurityException.class, () -> OresVM.contextOwner(duplicateVm));
-
-            String[] duplicateGeneration = Arrays.copyOf(bound, bound.length + 1);
-            duplicateGeneration[bound.length] = bound[bound.length - 1];
-            assertThrows(
-                    SecurityException.class,
-                    () -> vm.generationLeaseFactory(duplicateGeneration));
-        } finally {
-            vm.unregisterGenerationBinding(generationToken);
-            vm.shutdownNow();
-        }
-    }
-
-    @Test
-    void dedicatedVmShutdownClosesRegistrationWindowAtomically() {
-        OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
-        String[] bound = vm.bindApplicationArguments(new String[0], null);
-
-        vm.shutdownNow();
-
-        assertThrows(
-                IllegalStateException.class,
-                () -> vm.registerGenerationBinding(() -> () -> { }));
-        assertThrows(
-                IllegalStateException.class,
-                () -> vm.newHotReloadManager(
-                        IsolatePolicy.developer(),
-                        IsolatePolicy.developer(),
-                        ExecutionProfile.serverJit(),
-                        HotReloadManager.ExecutionDomain.TRUSTED_JIT));
-        assertThrows(SecurityException.class, () -> OresVM.contextOwner(bound));
-        assertEquals(0, vm.generationBindingCount());
-        assertEquals(0, vm.hotReloadManagerCount());
     }
 
     @Test

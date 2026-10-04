@@ -37,9 +37,7 @@ final class GarbageCollectionLanguageTest {
                 """, "actor-gc-outside-actor.ores").mimeType(OresLanguage.MIME_TYPE).build();
         try (Context context = Context.newBuilder(OresLanguage.ID).allowAllAccess(false).build()) {
             PolyglotException error = assertThrows(PolyglotException.class, () -> context.eval(source));
-            assertTrue(
-                    error.getMessage().contains("mailbox context"),
-                    () -> "expected admission-time mailbox denial, got: " + error.getMessage());
+            assertTrue(error.getMessage().contains("actor.gc() requires execution inside an actor"));
         }
     }
 

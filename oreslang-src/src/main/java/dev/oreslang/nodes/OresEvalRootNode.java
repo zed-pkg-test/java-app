@@ -11,6 +11,7 @@ import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.OresFutures;
+import dev.oreslang.runtime.OresFuture;
 import dev.oreslang.runtime.ActorRuntime;
 
 import java.nio.file.Path;
@@ -544,21 +545,42 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.AwaitExpr awaited) {
                 Object value = eval(awaited.expression(), env);
-                CompletionStage<?> stage = null;
                 if (value instanceof ActorRuntime.ActorSpawn<?, ?> spawn) {
-                    stage = spawn.ready();
-                } else if (value instanceof CompletionStage<?> futureValue) {
-                    stage = futureValue;
+                    value = spawn.ready();
                 }
-                if (stage != null) {
-                    var future = stage.toCompletableFuture();
-                    if (ActorRuntime.inActorExecution() && !future.isDone()) {
+
+                if (value instanceof OresFuture<?> future) {
+                    // Source actor await must never resume inline, including for
+                    // an already-settled Future. The stackless source-frame
+                    // lowerer replaces this recursive-evaluator path with
+                    // ActorContext.suspendOn(...).
+                    if (ActorRuntime.inActorExecution()) {
                         throw new IllegalStateException(
-                                "await would block an actor dispatcher carrier; actor continuation lowering must suspend/resume the mailbox turn");
+                                "source await inside an actor requires continuation lowering; "
+                                        + "the recursive evaluator must not block or inline-resume an actor carrier");
                     }
                     if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
                         throw new IllegalStateException(
-                                "await would block an adversarial serialized root context; continuation lowering must suspend/resume before awaiting actor readiness/result");
+                                "await would block an adversarial serialized root context; "
+                                        + "continuation lowering must suspend/resume before awaiting readiness/result");
+                    }
+                    return future.join();
+                }
+
+                // Compatibility boundary for host/legacy async primitives such
+                // as the current mutex implementation. Normalize their
+                // completion policy before exposing them as an Ores Future.
+                if (value instanceof CompletionStage<?> stage) {
+                    OresFuture<?> future = OresFuture.from(stage);
+                    if (ActorRuntime.inActorExecution()) {
+                        throw new IllegalStateException(
+                                "source await inside an actor requires continuation lowering; "
+                                        + "host stages are normalized to OresFuture before suspension");
+                    }
+                    if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
+                        throw new IllegalStateException(
+                                "await would block an adversarial serialized root context; "
+                                        + "continuation lowering must suspend/resume before awaiting a host stage");
                     }
                     return future.join();
                 }
@@ -650,6 +672,24 @@ public final class OresEvalRootNode extends RootNode {
                         return ref.isAlive();
                     };
                     default -> throw new IllegalArgumentException("unknown ActorRef member " + name);
+                };
+            }
+            if (receiver instanceof OresFuture<?> future) {
+                return switch (name) {
+                    case "is_done" -> (Invokable) args -> {
+                        requireZero(args, "Future.is_done");
+                        return future.isDone();
+                    };
+                    case "is_cancelled" -> (Invokable) args -> {
+                        requireZero(args, "Future.is_cancelled");
+                        return future.isCancelled();
+                    };
+                    case "cancel" -> (Invokable) args -> {
+                        requireZero(args, "Future.cancel");
+                        return future.cancel(true);
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown Future member " + name + "; use await to obtain its value");
                 };
             }
             if (receiver instanceof CompletionStage<?> stage) {
@@ -1433,7 +1473,8 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>
-                    || value instanceof CompletionStage<?> || value instanceof Invokable) {
+                    || value instanceof OresFuture<?> || value instanceof CompletionStage<?>
+                    || value instanceof Invokable) {
                 return false;
             }
 
@@ -1520,21 +1561,21 @@ public final class OresEvalRootNode extends RootNode {
             return OresFutures.race(requireFutures(args, "Futures.race"));
         }
 
-        @SuppressWarnings("unchecked")
-        private static List<CompletionStage<Object>> requireFutures(
+        private static List<Object> requireFutures(
                 List<Object> args,
                 String operation) {
             requireOne(args, operation);
             if (!(args.getFirst() instanceof List<?> values)) {
                 throw new IllegalArgumentException(operation + " expects a list of Future values");
             }
-            ArrayList<CompletionStage<Object>> futures = new ArrayList<>(values.size());
+            ArrayList<Object> futures = new ArrayList<>(values.size());
             for (Object value : values) {
-                if (!(value instanceof CompletionStage<?> stage)) {
+                if (!(value instanceof OresFuture<?>)
+                        && !(value instanceof CompletionStage<?>)) {
                     throw new IllegalArgumentException(
                             operation + " expects every list element to be a Future");
                 }
-                futures.add((CompletionStage<Object>) stage);
+                futures.add(value);
             }
             return List.copyOf(futures);
         }

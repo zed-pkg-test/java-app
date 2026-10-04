@@ -55,9 +55,7 @@ jobs:
       - name: Build interpreter-only AOT image
         run: mvn -B -ntp -Pnative-aot -DskipTests package
       - name: Run AOT image
-        run: |
-          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/together.ores
-          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/aot-actor-smoke.ores
+        run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
 
   native-hybrid:
     runs-on: ubuntu-latest

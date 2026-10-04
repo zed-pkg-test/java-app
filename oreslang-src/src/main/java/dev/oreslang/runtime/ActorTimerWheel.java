@@ -76,7 +76,8 @@ final class ActorTimerWheel implements AutoCloseable {
     private final AtomicLong currentTick = new AtomicLong();
     private final AtomicLong pending = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final ScheduledThreadPoolExecutor driver;
+    private final ThreadFactory driverThreadFactory;
+    private volatile ScheduledThreadPoolExecutor driver;
 
     @SuppressWarnings("unchecked")
     ActorTimerWheel(String threadPrefix) {
@@ -105,20 +106,19 @@ final class ActorTimerWheel implements AutoCloseable {
         this.slots = (ConcurrentLinkedQueue<TimerTask>[]) new ConcurrentLinkedQueue<?>[wheelSize];
         for (int i = 0; i < wheelSize; i++) slots[i] = new ConcurrentLinkedQueue<>();
 
-        ThreadFactory factory = task -> {
+        this.driverThreadFactory = task -> {
             Thread thread = new Thread(task, threadPrefix + "1");
             thread.setDaemon(true);
             return thread;
         };
-        this.driver = new ScheduledThreadPoolExecutor(1, factory);
-        this.driver.setRemoveOnCancelPolicy(true);
-        this.driver.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
-        this.driver.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
-        this.driver.scheduleAtFixedRate(
-                this::advanceOneTick,
-                tickNanos,
-                tickNanos,
-                TimeUnit.NANOSECONDS);
+
+        // Do not create or start a driver thread here. ActorTimerWheel is owned
+        // by the process OresVM, which is itself a static runtime-kernel object.
+        // Eager scheduling from this constructor would let GraalVM Native Image
+        // capture a live build-host timer thread in the image heap.
+        //
+        // The first actual timer lazily starts the single driver instead.
+        this.driver = null;
     }
 
     Handle schedule(Duration delay, Runnable callback) {
@@ -126,6 +126,10 @@ final class ActorTimerWheel implements AutoCloseable {
         Objects.requireNonNull(callback, "callback");
         if (delay.isNegative()) throw new IllegalArgumentException("timer delay cannot be negative");
         if (closed.get()) throw new IllegalStateException("timer wheel is closed");
+
+        // Starting the driver is itself side-effectful (it creates a host
+        // thread), so defer it until there is real timer work.
+        ensureDriver();
 
         long delayNanos;
         try {
@@ -152,6 +156,42 @@ final class ActorTimerWheel implements AutoCloseable {
 
     long currentTick() {
         return currentTick.get();
+    }
+
+    boolean driverStarted() {
+        return driver != null;
+    }
+
+    private synchronized ScheduledThreadPoolExecutor ensureDriver() {
+        if (closed.get()) {
+            throw new IllegalStateException("timer wheel is closed");
+        }
+
+        ScheduledThreadPoolExecutor existing = driver;
+        if (existing != null) return existing;
+
+        ScheduledThreadPoolExecutor created =
+                new ScheduledThreadPoolExecutor(1, driverThreadFactory);
+        created.setRemoveOnCancelPolicy(true);
+        created.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        created.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+
+        // Publish before scheduling. close() synchronizes on the same monitor,
+        // so once the periodic task can create a worker the executor is already
+        // reachable for shutdown.
+        driver = created;
+        try {
+            created.scheduleAtFixedRate(
+                    this::advanceOneTick,
+                    tickNanos,
+                    tickNanos,
+                    TimeUnit.NANOSECONDS);
+        } catch (RuntimeException | Error failure) {
+            driver = null;
+            created.shutdownNow();
+            throw failure;
+        }
+        return created;
     }
 
     private void advanceOneTick() {
@@ -198,7 +238,14 @@ final class ActorTimerWheel implements AutoCloseable {
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        driver.shutdownNow();
+
+        ScheduledThreadPoolExecutor existing;
+        synchronized (this) {
+            existing = driver;
+            driver = null;
+        }
+        if (existing != null) existing.shutdownNow();
+
         for (ConcurrentLinkedQueue<TimerTask> slot : slots) {
             TimerTask task;
             while ((task = slot.poll()) != null) task.cancel();

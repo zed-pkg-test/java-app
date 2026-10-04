@@ -82,7 +82,7 @@ public final class CapabilityChecker {
                 require(effective, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor fnc " + fn.name());
             }
             checkCallableTypes(fn.parameters(), fn.returnType(), effective);
-            checkStatements(fn.body(), effective, fn.actorKind() != Ast.ActorKind.NONE);
+            checkStatements(fn.body(), effective);
         } finally {
             callableStack.remove(fn);
         }
@@ -128,7 +128,7 @@ public final class CapabilityChecker {
         try {
             checkType(method.explicitReceiverType(), policy);
             checkCallableTypes(method.parameters(), method.returnType(), policy);
-            checkStatements(method.body(), policy, false);
+            checkStatements(method.body(), policy);
         } finally {
             methodStack.remove(method);
         }
@@ -143,10 +143,7 @@ public final class CapabilityChecker {
                         require(actorPolicy, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor fnc " + fn.name());
                     }
                     checkCallableTypes(fn.parameters(), fn.returnType(), actorPolicy);
-                    checkStatements(
-                            fn.body(),
-                            actorPolicy,
-                            fn.actorKind() != Ast.ActorKind.NONE);
+                    checkStatements(fn.body(), actorPolicy);
                 } else if (declaration instanceof Ast.ClassDecl klass) {
                     IsolatePolicy actorPolicy = actorPolicy(klass.actorKind(), policy);
                     if (klass.actorKind() == Ast.ActorKind.SHARED) {
@@ -156,15 +153,12 @@ public final class CapabilityChecker {
                     for (Ast.TypeRef iface : klass.interfaces()) checkType(iface, actorPolicy);
                     for (Ast.FieldDecl field : klass.fields()) {
                         checkType(field.type(), actorPolicy);
-                        if (field.initializer() != null) checkExpr(field.initializer(), actorPolicy, false);
+                        if (field.initializer() != null) checkExpr(field.initializer(), actorPolicy);
                     }
                     for (Ast.MethodDecl method : klass.methods()) {
                         checkType(method.explicitReceiverType(), actorPolicy);
                         checkCallableTypes(method.parameters(), method.returnType(), actorPolicy);
-                        checkStatements(
-                                method.body(),
-                                actorPolicy,
-                                klass.actorKind() != Ast.ActorKind.NONE && !method.isStatic());
+                        checkStatements(method.body(), actorPolicy);
                     }
                 } else if (declaration instanceof Ast.InterfaceDecl iface) {
                     for (Ast.TypeRef parent : iface.parents()) checkType(parent, policy);
@@ -177,7 +171,7 @@ public final class CapabilityChecker {
                     }
                 } else if (declaration instanceof Ast.FieldDecl field) {
                     checkType(field.type(), policy);
-                    if (field.initializer() != null) checkExpr(field.initializer(), policy, false);
+                    if (field.initializer() != null) checkExpr(field.initializer(), policy);
                 } else if (declaration instanceof Ast.TypeAliasDecl alias) {
                     checkType(alias.target(), policy);
                 }
@@ -189,17 +183,9 @@ public final class CapabilityChecker {
         return switch (kind) {
             case PRIVATE -> parent.withoutCapabilities(
                     IsolatePolicy.Capability.SHARED_MEMORY,
-                    IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                    IsolatePolicy.Capability.GC_CONTROL,
-                    IsolatePolicy.Capability.FFI,
-                    IsolatePolicy.Capability.NATIVE,
-                    IsolatePolicy.Capability.REFLECTION,
-                    IsolatePolicy.Capability.THREAD_CREATE,
-                    IsolatePolicy.Capability.POLYGLOT);
-            case SHARED -> parent.withoutCapabilities(
-                    IsolatePolicy.Capability.GC_CONTROL);
+                    IsolatePolicy.Capability.ACTOR_SHARE_READONLY);
             case UNTRUSTED -> IsolatePolicy.untrustedActor();
-            case NONE -> parent;
+            default -> parent;
         };
     }
 
@@ -236,7 +222,7 @@ public final class CapabilityChecker {
                 for (Ast.TypeRef iface : klass.interfaces()) checkType(iface, policy);
                 for (Ast.FieldDecl field : klass.fields()) {
                     checkType(field.type(), policy);
-                    if (field.initializer() != null) checkExpr(field.initializer(), policy, false);
+                    if (field.initializer() != null) checkExpr(field.initializer(), policy);
                 }
                 // An object stored in a private actor is itself an authority
                 // carrier. Its instance methods must therefore be admissible
@@ -246,10 +232,7 @@ public final class CapabilityChecker {
                     if (method.isStatic()) continue;
                     checkType(method.explicitReceiverType(), policy);
                     checkCallableTypes(method.parameters(), method.returnType(), policy);
-                    checkStatements(
-                            method.body(),
-                            policy,
-                            klass.actorKind() != Ast.ActorKind.NONE && !method.isStatic());
+                    checkStatements(method.body(), policy);
                 }
             } finally {
                 typeExpansionStack.remove(klass);
@@ -257,203 +240,104 @@ public final class CapabilityChecker {
         }
     }
 
-    private void checkStatements(
-            List<Ast.Stmt> statements,
-            IsolatePolicy policy,
-            boolean actorMailboxContext) {
+    private void checkStatements(List<Ast.Stmt> statements, IsolatePolicy policy) {
         for (Ast.Stmt stmt : statements) {
             if (stmt instanceof Ast.BindingStmt s) {
                 checkType(s.declaredType(), policy);
-                checkExpr(s.initializer(), policy, actorMailboxContext);
+                checkExpr(s.initializer(), policy);
             }
-            else if (stmt instanceof Ast.DestructureStmt s) {
-                checkExpr(s.initializer(), policy, actorMailboxContext);
-            }
-            else if (stmt instanceof Ast.ReturnStmt s && s.value() != null) {
-                checkExpr(s.value(), policy, actorMailboxContext);
-            }
-            else if (stmt instanceof Ast.ExprStmt s) {
-                checkExpr(s.expression(), policy, actorMailboxContext);
-            }
-            else if (stmt instanceof Ast.DeferStmt s) {
-                checkExpr(s.expression(), policy, actorMailboxContext);
-            }
+            else if (stmt instanceof Ast.DestructureStmt s) checkExpr(s.initializer(), policy);
+            else if (stmt instanceof Ast.ReturnStmt s && s.value() != null) checkExpr(s.value(), policy);
+            else if (stmt instanceof Ast.ExprStmt s) checkExpr(s.expression(), policy);
+            else if (stmt instanceof Ast.DeferStmt s) checkExpr(s.expression(), policy);
             else if (stmt instanceof Ast.IfStmt s) {
                 for (Ast.IfBranch b : s.branches()) {
-                    checkExpr(b.condition(), policy, actorMailboxContext);
-                    checkStatements(b.body(), policy, actorMailboxContext);
+                    checkExpr(b.condition(), policy);
+                    checkStatements(b.body(), policy);
                 }
-                checkStatements(s.elseBody(), policy, actorMailboxContext);
+                checkStatements(s.elseBody(), policy);
             } else if (stmt instanceof Ast.TryStmt s) {
-                checkStatements(s.body(), policy, actorMailboxContext);
-                checkStatements(s.catchBody(), policy, actorMailboxContext);
-                checkStatements(s.finallyBody(), policy, actorMailboxContext);
+                checkStatements(s.body(), policy);
+                checkStatements(s.catchBody(), policy);
+                checkStatements(s.finallyBody(), policy);
             } else if (stmt instanceof Ast.ForOfStmt s) {
-                checkExpr(s.iterable(), policy, actorMailboxContext);
-                checkStatements(s.body(), policy, actorMailboxContext);
+                checkExpr(s.iterable(), policy);
+                checkStatements(s.body(), policy);
             } else if (stmt instanceof Ast.ForStmt s) {
-                if (s.initializer() != null) {
-                    checkStatements(List.of(s.initializer()), policy, actorMailboxContext);
-                }
-                if (s.condition() != null) {
-                    checkExpr(s.condition(), policy, actorMailboxContext);
-                }
-                if (s.update() != null) {
-                    checkExpr(s.update(), policy, actorMailboxContext);
-                }
-                checkStatements(s.body(), policy, actorMailboxContext);
+                if (s.initializer() != null) checkStatements(List.of(s.initializer()), policy);
+                if (s.condition() != null) checkExpr(s.condition(), policy);
+                if (s.update() != null) checkExpr(s.update(), policy);
+                checkStatements(s.body(), policy);
             }
         }
     }
 
-    private void checkExpr(
-            Ast.Expr expr,
-            IsolatePolicy policy,
-            boolean actorMailboxContext) {
+    private void checkExpr(Ast.Expr expr, IsolatePolicy policy) {
         if (expr instanceof Ast.NameExpr n && n.name().equals("print")) {
             require(policy, IsolatePolicy.Capability.STDOUT, "print");
         } else if (expr instanceof Ast.NameExpr n && n.name().equals("SharedMutex")) {
             require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex");
         } else if (expr instanceof Ast.NameExpr n) {
+            // Function values can be laundered through locals/callbacks before
+            // invocation. Check the referenced body at the point the function
+            // enters the actor's value graph, not only for direct call syntax.
             Ast.FunctionDecl referenced = findFunction(n.name());
             if (referenced != null) checkReferencedFunction(referenced, policy);
         }
-        else if (expr instanceof Ast.CallExpr call) {
-            String directPath = memberPath(call.callee());
-            if ("actor.gc".equals(directPath)) {
-                if (!actorMailboxContext) {
-                    throw new SecurityException(
-                            "actor.gc() requires a live actor mailbox context");
-                }
-                if (!call.arguments().isEmpty()) {
-                    throw new SecurityException("actor.gc() takes no arguments");
-                }
-                return;
-            }
-
-            String target = directPath;
+        else if (expr instanceof Ast.CallExpr c) {
+            String target = memberPath(c.callee());
             if (target != null) {
                 Ast.FunctionDecl fn = findFunction(target);
                 if (fn != null) checkReferencedFunction(fn, policy);
             }
-            Ast.MethodDecl staticMethod =
-                    findStaticMethod(call.callee(), call.arguments().size());
+            Ast.MethodDecl staticMethod = findStaticMethod(c.callee(), c.arguments().size());
             if (staticMethod != null) checkReferencedMethod(staticMethod, policy);
-            checkExpr(call.callee(), policy, actorMailboxContext);
-            for (Ast.Expr arg : call.arguments()) {
-                checkExpr(arg, policy, actorMailboxContext);
-            }
-        } else if (expr instanceof Ast.MemberExpr member) {
-            String path = memberPath(member);
+            checkExpr(c.callee(), policy);
+            for (Ast.Expr arg : c.arguments()) checkExpr(arg, policy);
+        } else if (expr instanceof Ast.MemberExpr m) {
+            String path = memberPath(m);
             if (path != null) {
-                if (path.equals("actor.gc")) {
-                    throw new SecurityException(
-                            "actor.gc is a mailbox-turn capability and cannot be extracted; "
-                                    + "call actor.gc() directly");
-                }
-
+                // Qualified module function values have the same laundering
+                // risk as unqualified function values.
                 Ast.FunctionDecl referenced = findFunction(path);
                 if (referenced != null) checkReferencedFunction(referenced, policy);
-                Ast.MethodDecl staticValue = findUniqueStaticMethodValue(member);
+                Ast.MethodDecl staticValue = findUniqueStaticMethodValue(m);
                 if (staticValue != null) checkReferencedMethod(staticValue, policy);
-                if (path.startsWith("stdio.") || path.equals("stdio")) {
-                    require(policy, IsolatePolicy.Capability.STDOUT, path);
-                }
-                if (path.startsWith("process.descriptor") || path.equals("process.context_id")) {
-                    require(policy, IsolatePolicy.Capability.PROCESS_INFO, path);
-                }
-                if (path.startsWith("process.share_readonly")) {
-                    require(policy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, path);
-                }
-                if (path.equals("process.gc") || path.startsWith("process.gc.")) {
-                    require(policy, IsolatePolicy.Capability.GC_CONTROL, path);
-                }
-                if (path.equals("SharedMutex") || path.startsWith("SharedMutex.")) {
-                    require(policy, IsolatePolicy.Capability.SHARED_MEMORY, path);
-                }
-                if (path.startsWith("network.")) {
-                    require(policy, IsolatePolicy.Capability.NETWORK, path);
-                }
-                if (path.startsWith("fs.read")) {
-                    require(policy, IsolatePolicy.Capability.FILESYSTEM_READ, path);
-                }
-                if (path.startsWith("fs.write")) {
-                    require(policy, IsolatePolicy.Capability.FILESYSTEM_WRITE, path);
-                }
-                if (path.startsWith("env.")) {
-                    require(policy, IsolatePolicy.Capability.ENVIRONMENT, path);
-                }
-                if (path.startsWith("ffi.")) {
-                    require(policy, IsolatePolicy.Capability.FFI, path);
-                }
-                if (path.startsWith("polyglot.")) {
-                    require(policy, IsolatePolicy.Capability.POLYGLOT, path);
-                }
-                if (path.startsWith("thread.")) {
-                    require(policy, IsolatePolicy.Capability.THREAD_CREATE, path);
-                }
-                if (path.startsWith("process.spawn")) {
-                    require(policy, IsolatePolicy.Capability.CHILD_PROCESS, path);
-                }
+                if (path.startsWith("stdio.") || path.equals("stdio")) require(policy, IsolatePolicy.Capability.STDOUT, path);
+                if (path.startsWith("process.descriptor") || path.equals("process.context_id")) require(policy, IsolatePolicy.Capability.PROCESS_INFO, path);
+                if (path.startsWith("process.share_readonly")) require(policy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, path);
+                if (path.equals("process.gc") || path.startsWith("process.gc.")) require(policy, IsolatePolicy.Capability.GC_CONTROL, path);
+                if (path.equals("SharedMutex") || path.startsWith("SharedMutex.")) require(policy, IsolatePolicy.Capability.SHARED_MEMORY, path);
+                if (path.startsWith("network.")) require(policy, IsolatePolicy.Capability.NETWORK, path);
+                if (path.startsWith("fs.read")) require(policy, IsolatePolicy.Capability.FILESYSTEM_READ, path);
+                if (path.startsWith("fs.write")) require(policy, IsolatePolicy.Capability.FILESYSTEM_WRITE, path);
+                if (path.startsWith("env.")) require(policy, IsolatePolicy.Capability.ENVIRONMENT, path);
+                if (path.startsWith("ffi.")) require(policy, IsolatePolicy.Capability.FFI, path);
+                if (path.startsWith("polyglot.")) require(policy, IsolatePolicy.Capability.POLYGLOT, path);
+                if (path.startsWith("thread.")) require(policy, IsolatePolicy.Capability.THREAD_CREATE, path);
+                if (path.startsWith("process.spawn")) require(policy, IsolatePolicy.Capability.CHILD_PROCESS, path);
             }
-            checkExpr(member.receiver(), policy, actorMailboxContext);
-        } else if (expr instanceof Ast.BinaryExpr binary) {
-            checkExpr(binary.left(), policy, actorMailboxContext);
-            checkExpr(binary.right(), policy, actorMailboxContext);
+            checkExpr(m.receiver(), policy);
+        } else if (expr instanceof Ast.BinaryExpr e) { checkExpr(e.left(), policy); checkExpr(e.right(), policy); }
+        else if (expr instanceof Ast.UnaryExpr e) checkExpr(e.operand(), policy);
+        else if (expr instanceof Ast.AssignExpr e) {
+            checkExpr(e.target(), policy);
+            checkExpr(e.value(), policy);
         }
-        else if (expr instanceof Ast.UnaryExpr unary) {
-            checkExpr(unary.operand(), policy, actorMailboxContext);
+        else if (expr instanceof Ast.ConditionalExpr e) { checkExpr(e.condition(), policy); checkExpr(e.whenTrue(), policy); checkExpr(e.whenFalse(), policy); }
+        else if (expr instanceof Ast.IndexExpr e) { checkExpr(e.receiver(), policy); checkExpr(e.index(), policy); }
+        else if (expr instanceof Ast.NewExpr e) {
+            checkType(e.type(), policy);
+            for (Ast.Expr a : e.arguments()) checkExpr(a, policy);
         }
-        else if (expr instanceof Ast.AssignExpr assignment) {
-            checkExpr(assignment.target(), policy, actorMailboxContext);
-            checkExpr(assignment.value(), policy, actorMailboxContext);
-        }
-        else if (expr instanceof Ast.ConditionalExpr conditional) {
-            checkExpr(conditional.condition(), policy, actorMailboxContext);
-            checkExpr(conditional.whenTrue(), policy, actorMailboxContext);
-            checkExpr(conditional.whenFalse(), policy, actorMailboxContext);
-        }
-        else if (expr instanceof Ast.IndexExpr indexed) {
-            checkExpr(indexed.receiver(), policy, actorMailboxContext);
-            checkExpr(indexed.index(), policy, actorMailboxContext);
-        }
-        else if (expr instanceof Ast.NewExpr created) {
-            checkType(created.type(), policy);
-            for (Ast.Expr arg : created.arguments()) {
-                checkExpr(arg, policy, actorMailboxContext);
-            }
-        }
-        else if (expr instanceof Ast.AwaitExpr awaited) {
-            checkExpr(awaited.expression(), policy, actorMailboxContext);
-        }
-        else if (expr instanceof Ast.SpawnExpr spawned) {
-            checkExpr(spawned.call(), policy, actorMailboxContext);
-        }
-        else if (expr instanceof Ast.ListExpr list) {
-            for (Ast.Expr item : list.elements()) {
-                checkExpr(item, policy, actorMailboxContext);
-            }
-        }
-        else if (expr instanceof Ast.TupleExpr tuple) {
-            for (Ast.Expr item : tuple.elements()) {
-                checkExpr(item, policy, actorMailboxContext);
-            }
-        }
-        else if (expr instanceof Ast.ObjectExpr object) {
-            for (Ast.ObjectField field : object.fields()) {
-                checkExpr(field.value(), policy, actorMailboxContext);
-            }
-        }
-        else if (expr instanceof Ast.LambdaExpr lambda) {
-            // A closure is a distinct executable value. It never inherits
-            // mailbox-only authority merely because it was created in an actor
-            // turn; actor.gc must remain a direct actor entry/method syscall.
-            if (lambda.expressionBody() != null) {
-                checkExpr(lambda.expressionBody(), policy, false);
-            }
-            if (lambda.blockBody() != null) {
-                checkStatements(lambda.blockBody(), policy, false);
-            }
+        else if (expr instanceof Ast.AwaitExpr e) checkExpr(e.expression(), policy);
+        else if (expr instanceof Ast.SpawnExpr e) checkExpr(e.call(), policy);
+        else if (expr instanceof Ast.ListExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
+        else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
+        else if (expr instanceof Ast.ObjectExpr e) for (Ast.ObjectField f : e.fields()) checkExpr(f.value(), policy);
+        else if (expr instanceof Ast.LambdaExpr e) {
+            if (e.expressionBody() != null) checkExpr(e.expressionBody(), policy);
+            if (e.blockBody() != null) checkStatements(e.blockBody(), policy);
         }
     }
 

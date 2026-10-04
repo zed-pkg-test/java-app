@@ -162,18 +162,7 @@ public final class HotReloadManager implements AutoCloseable {
                 || executionDomain == ExecutionDomain.TRUSTED_ISOACTOR_JIT)
                 ? Engine.newBuilder().build()
                 : null;
-        try {
-            vm.registerHotReloadManager(this);
-        } catch (RuntimeException | Error failure) {
-            if (sharedTrustedEngine != null) {
-                try {
-                    sharedTrustedEngine.close();
-                } catch (RuntimeException closeFailure) {
-                    failure.addSuppressed(closeFailure);
-                }
-            }
-            throw failure;
-        }
+        vm.registerHotReloadManager(this);
     }
 
     public IsolatePolicy supervisorPolicy() { return supervisorPolicy; }
@@ -361,28 +350,18 @@ public final class HotReloadManager implements AutoCloseable {
         closeDetached(reclaim);
     }
 
-    public synchronized int liveGenerations() {
-        int count = 0;
-        for (Generation generation : generations.values()) {
-            if (isLiveState(generation.state())) count++;
-        }
-        return count;
-    }
+    public synchronized int liveGenerations() { return generations.size(); }
 
     public synchronized int liveGenerations(String codeUnitId) {
         int count = 0;
         for (Generation generation : generations.values()) {
             if (generation.codeUnitId().equals(codeUnitId)
-                    && isLiveState(generation.state())) {
+                    && generation.state() != GenerationState.CLOSED
+                    && generation.state() != GenerationState.FAILED) {
                 count++;
             }
         }
         return count;
-    }
-
-    private static boolean isLiveState(GenerationState state) {
-        return state != GenerationState.CLOSED
-                && state != GenerationState.FAILED;
     }
 
     private void release(Generation generation) {

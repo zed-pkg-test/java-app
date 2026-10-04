@@ -27,7 +27,7 @@ final class ActorGroupRuntime<Out> {
             java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final AtomicInteger actorCount = new AtomicInteger();
     private final AtomicLong nextSequence = new AtomicLong();
-    private final Object lifecycleLock = new Object();
+    private final Object outboxAdmissionLock = new Object();
     private final AtomicBoolean scheduled = new AtomicBoolean();
     private final AtomicBoolean stopped = new AtomicBoolean();
     private final AtomicReference<Thread> executionLease = new AtomicReference<>();
@@ -83,7 +83,7 @@ final class ActorGroupRuntime<Out> {
     }
 
     void reserveActor() {
-        synchronized (lifecycleLock) {
+        while (true) {
             if (stopped.get()) {
                 throw new IllegalStateException("actor group " + id + " is stopped");
             }
@@ -94,43 +94,33 @@ final class ActorGroupRuntime<Out> {
                                 + ": current=" + current
                                 + " max=" + policy.maxActors());
             }
-            actorCount.incrementAndGet();
+            if (actorCount.compareAndSet(current, current + 1)) return;
         }
     }
 
     void commitActor(ActorRuntime.ActorId actorId) {
         Objects.requireNonNull(actorId, "actorId");
-        synchronized (lifecycleLock) {
-            if (stopped.get()) {
-                decrementReservedActor("actor-group reservation accounting underflow");
-                throw new IllegalStateException("actor group " + id + " is stopped");
-            }
-            if (!actors.add(actorId)) {
-                decrementReservedActor("actor-group reservation accounting underflow");
-                throw new IllegalStateException(
-                        "actor " + actorId + " is already registered in group " + id);
-            }
+        if (!actors.add(actorId)) {
+            actorCount.decrementAndGet();
+            throw new IllegalStateException(
+                    "actor " + actorId + " is already registered in group " + id);
         }
     }
 
     void abortActorReservation() {
-        synchronized (lifecycleLock) {
-            decrementReservedActor("actor-group reservation accounting underflow");
+        int remaining = actorCount.decrementAndGet();
+        if (remaining < 0) {
+            actorCount.incrementAndGet();
+            throw new IllegalStateException("actor-group reservation accounting underflow");
         }
     }
 
     void removeActor(ActorRuntime.ActorId actorId) {
-        synchronized (lifecycleLock) {
-            if (!actors.remove(actorId)) return;
-            decrementReservedActor("actor-group membership accounting underflow");
-        }
-    }
-
-    private void decrementReservedActor(String underflowMessage) {
+        if (!actors.remove(actorId)) return;
         int remaining = actorCount.decrementAndGet();
         if (remaining < 0) {
             actorCount.incrementAndGet();
-            throw new IllegalStateException(underflowMessage);
+            throw new IllegalStateException("actor-group membership accounting underflow");
         }
     }
 
@@ -141,15 +131,15 @@ final class ActorGroupRuntime<Out> {
     @SuppressWarnings("unchecked")
     void emit(ActorRuntime.ActorRef<?> sender, Object output) {
         Objects.requireNonNull(sender, "sender");
-        synchronized (lifecycleLock) {
-            if (stopped.get()) {
-                throw new IllegalStateException("actor group " + id + " is stopped");
-            }
-            if (!actors.contains(sender.id())) {
-                throw new SecurityException(
-                        "actor " + sender.id() + " is not a member of actor group " + id);
-            }
+        if (stopped.get()) {
+            throw new IllegalStateException("actor group " + id + " is stopped");
+        }
+        if (!actors.contains(sender.id())) {
+            throw new SecurityException(
+                    "actor " + sender.id() + " is not a member of actor group " + id);
+        }
 
+        synchronized (outboxAdmissionLock) {
             long sequence = nextSequence.getAndIncrement();
             ActorMail<Out> mail = new ActorMail<>(
                     sender.id(),
@@ -172,11 +162,6 @@ final class ActorGroupRuntime<Out> {
             runtime.executeActorGroupMailman(this::runMailmanQuantum);
         } catch (RuntimeException failure) {
             scheduled.set(false);
-            // Submission failure means this group cannot currently guarantee
-            // delivery of already-admitted mail. Stop and clear rather than
-            // leaving ghost mail that could be delivered after the caller saw
-            // a failed send.
-            stop();
             throw failure;
         }
     }
@@ -225,10 +210,8 @@ final class ActorGroupRuntime<Out> {
     }
 
     void stop() {
-        synchronized (lifecycleLock) {
-            if (!stopped.compareAndSet(false, true)) return;
-            outbox.clear();
-        }
+        if (!stopped.compareAndSet(false, true)) return;
+        outbox.clear();
     }
 
     int outboxSize() {

@@ -50,8 +50,12 @@ public final class LinkedProgramRunner {
         // context is built/entered; RootNode must never hop threads after entry.
         ActorRuntime.executeProcessRoot(policy, () -> {
             Context.Builder builder = policy.restrictedContextBuilder(executionProfile);
-            if (out != null) builder.out(out);
-            if (err != null) builder.err(err);
+            // Graal's UNTRUSTED sandbox rejects the JVM's standard streams even
+            // when they were explicitly supplied to Builder.out/err. Wrap host
+            // streams in a non-closing forwarding stream so the sandbox sees a
+            // redirected sink while the CLI can still surface guest output.
+            if (out != null) builder.out(sandboxSafeOutput(out));
+            if (err != null) builder.err(sandboxSafeOutput(err));
 
             try (Context context = builder.build()) {
                 LinkedHashMap<String, Value> parsedUnits = new LinkedHashMap<>();
@@ -92,6 +96,33 @@ public final class LinkedProgramRunner {
         });
 
         return build;
+    }
+
+    static OutputStream sandboxSafeOutput(OutputStream target) {
+        if (target == null) throw new NullPointerException("target");
+        return new OutputStream() {
+            @Override
+            public void write(int value) throws IOException {
+                target.write(value);
+            }
+
+            @Override
+            public void write(byte[] bytes, int offset, int length) throws IOException {
+                target.write(bytes, offset, length);
+            }
+
+            @Override
+            public void flush() throws IOException {
+                target.flush();
+            }
+
+            @Override
+            public void close() throws IOException {
+                // Context ownership must never close System.out/System.err or a
+                // caller-owned embedding stream. Flush is sufficient.
+                target.flush();
+            }
+        };
     }
 
     private static void collectRelativeImportClosure(

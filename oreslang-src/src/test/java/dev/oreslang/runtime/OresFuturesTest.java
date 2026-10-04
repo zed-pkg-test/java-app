@@ -68,6 +68,62 @@ final class OresFuturesTest {
     }
 
     @Test
+    void oresFutureDoesNotExposeCompletionStageCallbackSurface() {
+        assertFalse(
+                java.util.concurrent.CompletionStage.class.isAssignableFrom(
+                        OresFuture.class));
+        assertFalse(
+                java.util.Arrays.stream(OresFuture.class.getMethods())
+                        .anyMatch(method -> method.getName().equals("thenApply")
+                                || method.getName().equals("thenAccept")
+                                || method.getName().equals("thenRun")),
+                "guest-visible OresFuture must not inherit producer-thread callback APIs");
+    }
+
+    @Test
+    void runtimeWaiterIsDeliveredExactlyOnceWhenRegistrationRacesCompletion()
+            throws Exception {
+        for (int attempt = 0; attempt < 200; attempt++) {
+            OresFuture<Integer> future = new OresFuture<>();
+            java.util.concurrent.CountDownLatch start =
+                    new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicInteger callbacks =
+                    new java.util.concurrent.atomic.AtomicInteger();
+
+            Thread registrar = Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                future.whenCompleteRuntime((value, failure) -> {
+                    assertNull(failure);
+                    assertEquals(7, value);
+                    callbacks.incrementAndGet();
+                });
+            });
+            Thread completer = Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                future.completeFromRuntime(7);
+            });
+
+            start.countDown();
+            registrar.join();
+            completer.join();
+
+            assertEquals(7, future.get(1, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(1, callbacks.get(),
+                    "completion/registration race must not duplicate a waiter");
+        }
+    }
+
+    @Test
     void raceCompletesWithFirstCompletion() {
         CompletableFuture<Integer> slow = new CompletableFuture<>();
         CompletableFuture<Integer> fast = new CompletableFuture<>();

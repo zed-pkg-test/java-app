@@ -70,21 +70,23 @@ final class OresVM {
     private final UUID vmId = UUID.randomUUID();
     private final String contextBindingToken = UUID.randomUUID().toString();
     private final ActorRuntime.DispatcherGroup dispatchers;
+    private final BlockingIoExecutor blockingIo;
     private final boolean processVm;
     private final Set<HotReloadManager> hotReloadManagers = ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.ConcurrentMap<
             String, ActorRuntime.ActorGenerationLeaseFactory> generationBindings =
             new ConcurrentHashMap<>();
     private final AtomicBoolean shutdown = new AtomicBoolean();
-    private final Object lifecycleLock = new Object();
 
     private OresVM(
             ActorRuntime.DispatcherConfig config,
             String threadPrefix,
             boolean processVm) {
+        String prefix = Objects.requireNonNull(threadPrefix, "threadPrefix");
         this.dispatchers = new ActorRuntime.DispatcherGroup(
                 Objects.requireNonNull(config, "config"),
-                Objects.requireNonNull(threadPrefix, "threadPrefix"));
+                prefix);
+        this.blockingIo = new BlockingIoExecutor(prefix);
         this.processVm = processVm;
         VM_BINDINGS.put(contextBindingToken, this);
     }
@@ -105,7 +107,13 @@ final class OresVM {
      * generation and is never exposed through the Oreslang guest API.
      */
     static OresVM contextOwner(String[] applicationArguments) {
-        String token = singleInternalArgument(applicationArguments, VM_BINDING_ARG);
+        String token = null;
+        for (String argument : applicationArguments) {
+            if (argument.startsWith(VM_BINDING_ARG)) {
+                token = argument.substring(VM_BINDING_ARG.length());
+                break;
+            }
+        }
         if (token == null) return process();
 
         OresVM vm = VM_BINDINGS.get(token);
@@ -119,55 +127,44 @@ final class OresVM {
             String[] baseArguments,
             String generationBindingToken) {
         Objects.requireNonNull(baseArguments, "baseArguments");
-        synchronized (lifecycleLock) {
-            ensureRunning();
-            for (String argument : baseArguments) {
-                if (argument.startsWith(VM_BINDING_ARG)
-                        || argument.startsWith(GENERATION_BINDING_ARG)) {
-                    throw new SecurityException(
-                            "application arguments may not use reserved Oreslang VM binding prefixes");
-                }
+        ensureRunning();
+        int extra = generationBindingToken == null ? 1 : 2;
+        String[] bound = java.util.Arrays.copyOf(baseArguments, baseArguments.length + extra);
+        bound[baseArguments.length] = VM_BINDING_ARG + contextBindingToken;
+        if (generationBindingToken != null) {
+            if (!generationBindings.containsKey(generationBindingToken)) {
+                throw new SecurityException("unknown Oreslang generation binding");
             }
-
-            int extra = generationBindingToken == null ? 1 : 2;
-            String[] bound = java.util.Arrays.copyOf(baseArguments, baseArguments.length + extra);
-            bound[baseArguments.length] = VM_BINDING_ARG + contextBindingToken;
-            if (generationBindingToken != null) {
-                if (!generationBindings.containsKey(generationBindingToken)) {
-                    throw new SecurityException("unknown Oreslang generation binding");
-                }
-                bound[baseArguments.length + 1] =
-                        GENERATION_BINDING_ARG + generationBindingToken;
-            }
-            return bound;
+            bound[baseArguments.length + 1] =
+                    GENERATION_BINDING_ARG + generationBindingToken;
         }
+        return bound;
     }
 
     String registerGenerationBinding(
             ActorRuntime.ActorGenerationLeaseFactory leaseFactory) {
         Objects.requireNonNull(leaseFactory, "leaseFactory");
-        synchronized (lifecycleLock) {
-            ensureRunning();
-            String token;
-            do {
-                token = UUID.randomUUID().toString();
-            } while (generationBindings.putIfAbsent(token, leaseFactory) != null);
-            return token;
-        }
+        ensureRunning();
+        String token;
+        do {
+            token = UUID.randomUUID().toString();
+        } while (generationBindings.putIfAbsent(token, leaseFactory) != null);
+        return token;
     }
 
     void unregisterGenerationBinding(String token) {
-        if (token == null) return;
-        synchronized (lifecycleLock) {
-            generationBindings.remove(token);
-        }
+        if (token != null) generationBindings.remove(token);
     }
 
     ActorRuntime.ActorGenerationLeaseFactory generationLeaseFactory(
             String[] applicationArguments) {
-        String token = singleInternalArgument(
-                applicationArguments,
-                GENERATION_BINDING_ARG);
+        String token = null;
+        for (String argument : applicationArguments) {
+            if (argument.startsWith(GENERATION_BINDING_ARG)) {
+                token = argument.substring(GENERATION_BINDING_ARG.length());
+                break;
+            }
+        }
         if (token == null) return null;
 
         ActorRuntime.ActorGenerationLeaseFactory factory =
@@ -177,26 +174,6 @@ final class OresVM {
                     "invalid or retired Oreslang generation binding");
         }
         return factory;
-    }
-
-    private static String singleInternalArgument(
-            String[] applicationArguments,
-            String prefix) {
-        Objects.requireNonNull(applicationArguments, "applicationArguments");
-        String value = null;
-        for (String argument : applicationArguments) {
-            Objects.requireNonNull(argument, "application argument");
-            if (!argument.startsWith(prefix)) continue;
-            String candidate = argument.substring(prefix.length());
-            if (candidate.isBlank()) {
-                throw new SecurityException("empty reserved Oreslang VM binding argument");
-            }
-            if (value != null) {
-                throw new SecurityException("duplicate reserved Oreslang VM binding argument");
-            }
-            value = candidate;
-        }
-        return value;
     }
 
     UUID id() {
@@ -266,9 +243,9 @@ final class OresVM {
     }
 
     /**
-     * VM-owned hot loader. Trusted shared actors and trusted isoactors remain
-     * in the primary Graal isolate; only untrusted generations use a spawned
-     * Graal isolate. Loader authority remains control-plane only.
+     * VM-owned hot loader. Trusted generations may share the main Graal engine;
+     * isolated/untrusted generations are created through their sandboxed
+     * Context policy. Loader authority remains control-plane only.
      */
     HotReloadManager newHotReloadManager(
             IsolatePolicy supervisorPolicy,
@@ -286,29 +263,20 @@ final class OresVM {
 
     void registerHotReloadManager(HotReloadManager manager) {
         Objects.requireNonNull(manager, "manager");
-        synchronized (lifecycleLock) {
-            ensureRunning();
-            hotReloadManagers.add(manager);
-        }
+        ensureRunning();
+        hotReloadManagers.add(manager);
     }
 
     void unregisterHotReloadManager(HotReloadManager manager) {
-        if (manager == null) return;
-        synchronized (lifecycleLock) {
-            hotReloadManagers.remove(manager);
-        }
+        if (manager != null) hotReloadManagers.remove(manager);
     }
 
     int hotReloadManagerCount() {
-        synchronized (lifecycleLock) {
-            return hotReloadManagers.size();
-        }
+        return hotReloadManagers.size();
     }
 
     int generationBindingCount() {
-        synchronized (lifecycleLock) {
-            return generationBindings.size();
-        }
+        return generationBindings.size();
     }
 
     ActorRuntime.DispatcherGroup dispatcherGroup() {
@@ -321,6 +289,34 @@ final class OresVM {
         // physical CONTROL pool is stopped. Let already-owned cleanup drain.
         dispatchers.executeControlMaintenance(
                 Objects.requireNonNull(task, "task"));
+    }
+
+    /**
+     * Run a trusted blocking Java host call without occupying an Ores carrier.
+     * The returned OresFuture is the only completion capability handed back to
+     * scheduler/runtime code.
+     */
+    <T> OresFuture<T> submitJavaBlocking(
+            java.util.concurrent.Callable<? extends T> operation) {
+        ensureRunning();
+        return blockingIo.submitJava(
+                Objects.requireNonNull(operation, "operation"));
+    }
+
+    /**
+     * Run JNI/FFM/unknown native blocking work on the bounded native executor.
+     * Saturation fails the Future rather than running on the caller/carrier.
+     */
+    <T> OresFuture<T> submitNativeBlocking(
+            java.util.concurrent.Callable<? extends T> operation) {
+        ensureRunning();
+        return blockingIo.submitNative(
+                Objects.requireNonNull(operation, "operation"));
+    }
+
+    BlockingIoExecutor blockingIoExecutorForTesting() {
+        ensureRunning();
+        return blockingIo;
     }
 
     private void ensureRunning() {
@@ -338,18 +334,10 @@ final class OresVM {
             throw new IllegalStateException(
                     "the process Oreslang VM is host-owned and cannot be shut down by a context");
         }
-
-        List<HotReloadManager> managers;
-        synchronized (lifecycleLock) {
-            if (!shutdown.compareAndSet(false, true)) return;
-            // Registration and shutdown share this lock, so once shutdown is
-            // visible no manager or generation binding can slip in after this
-            // ownership snapshot.
-            managers = List.copyOf(hotReloadManagers);
-        }
+        if (!shutdown.compareAndSet(false, true)) return;
 
         RuntimeException firstFailure = null;
-        for (HotReloadManager manager : managers) {
+        for (HotReloadManager manager : List.copyOf(hotReloadManagers)) {
             try {
                 manager.close();
             } catch (RuntimeException failure) {
@@ -357,13 +345,10 @@ final class OresVM {
                 else firstFailure.addSuppressed(failure);
             }
         }
-
-        synchronized (lifecycleLock) {
-            generationBindings.clear();
-            hotReloadManagers.clear();
-            VM_BINDINGS.remove(contextBindingToken, this);
-        }
+        generationBindings.clear();
+        blockingIo.close();
         dispatchers.shutdownNow();
+        VM_BINDINGS.remove(contextBindingToken, this);
 
         if (firstFailure != null) throw firstFailure;
     }

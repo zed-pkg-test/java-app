@@ -149,7 +149,7 @@ public final class ActorRuntime implements AutoCloseable {
         return CURRENT_MAILMAN_RUNTIME.get() != null;
     }
 
-    static ActorRuntime currentRootRuntime() {
+    public static ActorRuntime currentRootRuntime() {
         return CURRENT_ROOT_RUNTIME.get();
     }
 
@@ -163,7 +163,7 @@ public final class ActorRuntime implements AutoCloseable {
         return current == null ? null : current.policy();
     }
 
-    static ActorRuntime currentActorRuntime() {
+    public static ActorRuntime currentActorRuntime() {
         ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
         return current == null ? null : current.runtime();
     }
@@ -2683,7 +2683,21 @@ public final class ActorRuntime implements AutoCloseable {
          * blocks the carrier and never runs the continuation inline, even when
          * the stage is already complete.
          */
-        void suspendOn(CompletionStage<?> awaited, ActorContinuation continuation);
+        /**
+         * Preferred Oreslang suspension ABI. OresFuture completion is
+         * runtime-owned and exposes no guest callback execution surface.
+         */
+        void suspendOn(OresFuture<?> awaited, ActorContinuation continuation);
+
+        /**
+         * Host-interop compatibility adapter. The stage is immediately
+         * normalized into an OresFuture before suspension.
+         */
+        default void suspendOn(
+                CompletionStage<?> awaited,
+                ActorContinuation continuation) {
+            suspendOn(OresFuture.from(awaited), continuation);
+        }
 
         /**
          * Schedule actor-local work for a later scheduler turn. nextTick work is
@@ -2802,7 +2816,7 @@ public final class ActorRuntime implements AutoCloseable {
             this.ref = Objects.requireNonNull(ref);
             this.result = Objects.requireNonNull(result);
             this.done = new OresFuture<>(() -> result.cancel(true));
-            result.whenComplete((value, failure) -> {
+            result.whenCompleteRuntime((value, failure) -> {
                 if (failure == null) {
                     done.completeFromRuntime(Boolean.TRUE);
                 } else {
@@ -2843,42 +2857,13 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private void requireCallerRuntimeAffinity(String operation) {
-        ActorRuntime actorCaller = currentActorRuntime();
-        if (actorCaller != null && actorCaller != this) {
+        ActorRuntime caller = currentActorRuntime();
+        if (caller == null) caller = currentRootRuntime();
+        if (caller == null) caller = CURRENT_MAILMAN_RUNTIME.get();
+        if (caller != null && caller != this) {
             throw new SecurityException(
-                    "actor execution cannot " + operation + " through another ActorRuntime");
+                    "guest execution cannot " + operation + " through another ActorRuntime");
         }
-
-        ActorRuntime mailmanCaller = CURRENT_MAILMAN_RUNTIME.get();
-        if (mailmanCaller != null && mailmanCaller != this) {
-            throw new SecurityException(
-                    "mailman execution cannot " + operation + " through another ActorRuntime");
-        }
-
-        ActorRuntime rootCaller = currentRootRuntime();
-        if (rootCaller == null || rootCaller == this) return;
-
-        // Root/main work is physically owned by the OresVM CONTROL scheduler,
-        // while each OresContext owns a distinct logical ActorRuntime registry.
-        // The official launcher therefore enters a context from a lightweight
-        // root runtime attached to the same VM. Permit that bridge only when
-        // physical VM identity matches and the context runtime cannot widen the
-        // root/control policy. Actor and mailman callers above remain exact-
-        // runtime only.
-        if (rootCaller.vm != this.vm
-                || !policyContains(rootCaller.policyCeiling, this.policyCeiling)) {
-            throw new SecurityException(
-                    "root/control execution cannot " + operation
-                            + " through an unrelated or more-privileged ActorRuntime");
-        }
-    }
-
-    private static boolean policyContains(IsolatePolicy ceiling, IsolatePolicy candidate) {
-        if (!ceiling.capabilities().containsAll(candidate.capabilities())) return false;
-        if (candidate.maxHeapBytes() > ceiling.maxHeapBytes()) return false;
-        if (candidate.maxMailboxMessages() > ceiling.maxMailboxMessages()) return false;
-        if (candidate.maxWallTime().compareTo(ceiling.maxWallTime()) > 0) return false;
-        return !ceiling.adversarial() || candidate.adversarial();
     }
 
     private static void requireSupervisorContext(String operation) {
@@ -3374,26 +3359,6 @@ public final class ActorRuntime implements AutoCloseable {
                         IsolatePolicy.Capability.SHARED_MEMORY,
                         IsolatePolicy.Capability.ACTOR_SHARE_READONLY)
                 : policy;
-
-        // Memory-isolated PRIVATE actors are co-resident with the VM/JVM but
-        // must not receive host escape hatches that can pierce confinement.
-        // Keep this runtime rule aligned with CapabilityChecker and the
-        // TRUSTED_ISOACTOR_JIT hot-loader policy: same process/isolate does not
-        // imply permission to reflect into runtime state, create threads, enter
-        // another polyglot language, or reach native/FFI memory.
-        if (kind == ActorKind.PRIVATE) {
-            effectivePolicy = effectivePolicy.withoutCapabilities(
-                    IsolatePolicy.Capability.FFI,
-                    IsolatePolicy.Capability.NATIVE,
-                    IsolatePolicy.Capability.REFLECTION,
-                    IsolatePolicy.Capability.THREAD_CREATE,
-                    IsolatePolicy.Capability.POLYGLOT);
-        }
-
-        // Whole-process GC is control-plane authority. Every actor kind,
-        // including shared actors, is confined to actor-local collection.
-        effectivePolicy = effectivePolicy.withoutCapabilities(
-                IsolatePolicy.Capability.GC_CONTROL);
         if (kind == ActorKind.UNTRUSTED) {
             effectivePolicy = restrictUntrustedPolicy(effectivePolicy, untrustedLimits);
             effectivePolicy = intersectUntrustedWithRuntimeCeiling(effectivePolicy);
@@ -3643,7 +3608,6 @@ public final class ActorRuntime implements AutoCloseable {
                 IsolatePolicy.Capability.PROCESS_INFO,
                 IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
                 IsolatePolicy.Capability.SHARED_MEMORY,
-                IsolatePolicy.Capability.GC_CONTROL,
                 IsolatePolicy.Capability.NETWORK,
                 IsolatePolicy.Capability.FILESYSTEM_READ,
                 IsolatePolicy.Capability.FILESYSTEM_WRITE,
@@ -5995,7 +5959,7 @@ public final class ActorRuntime implements AutoCloseable {
             schedule();
         }
 
-        private void suspendOn(CompletionStage<?> awaited, ActorContinuation continuation) {
+        private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {
             Objects.requireNonNull(awaited, "awaited");
             Objects.requireNonNull(continuation, "continuation");
             if (currentActor.get() != this) {
@@ -6008,7 +5972,7 @@ public final class ActorRuntime implements AutoCloseable {
 
             logicalTurnSuspended = true;
             try {
-                awaited.whenComplete((value, failure) -> enqueueContinuation(
+                awaited.whenCompleteRuntime((value, failure) -> enqueueContinuation(
                         readyContinuations,
                         new ContinuationEnvelope(
                                 continuation,
@@ -6197,7 +6161,7 @@ public final class ActorRuntime implements AutoCloseable {
                         return Optional.ofNullable(outboundHttp);
                     }
                     @Override public void suspendOn(
-                            CompletionStage<?> awaited,
+                            OresFuture<?> awaited,
                             ActorContinuation continuation) {
                         ActorCell.this.suspendOn(awaited, continuation);
                     }

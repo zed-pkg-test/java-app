@@ -38,12 +38,6 @@ runtime-internal.
 Host/embedder APIs remain an explicit privileged escape hatch, analogous to
 Java JNI/FFM or Go unsafe; they are not part of the safe Oreslang guest model.
 
-Private/isoactor confinement is enforced twice: the static capability pass and
-the runtime spawn path both remove FFI, native-memory authority, reflection,
-guest-created threads, and polyglot access even when a more privileged
-supervisor policy grants them. This prevents a trusted-but-confined actor from
-using a co-resident JVM escape hatch to reach OresVM or another actor's memory.
-
 ## Four scheduler domains
 
 The VM owns exactly four guest/control execution pools:
@@ -283,21 +277,6 @@ OresVM
     ├── Graal isolate placement
     └── timer/watchdog/reactor services
 ```
-
-## Read-only shared binary/data invariant
-
-Shared readonly data follows the same core rule as BEAM-style shared binaries:
-actors may share immutable data, not mutable backing storage.
-
-The current implementation freezes/copies mutable containers, including Java
-arrays, before publication. Callers never receive a writable backing
-`byte[]`/`ByteBuffer` for a shared readonly value, and private actors receive
-an isolated copy rather than retaining the shared wrapper.
-
-A future zero-copy optimization for large binaries may use runtime-owned shared
-backing plus reference counting, but it must expose only read-only views, must
-not leak native pointers or mutable buffers, and must preserve actor/runtime
-ownership checks.
 
 ## Remaining work
 

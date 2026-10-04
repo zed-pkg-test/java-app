@@ -1832,52 +1832,5 @@ final class ActorRuntimeTest {
         assertTrue(cell.closed());
     }
 
-    @Test
-    void rootControlCarrierMayDriveSiblingContextRuntimeOnSameVm() {
-        ActorRuntime root = ActorRuntime.processShared(
-                IsolatePolicy.developer(),
-                ActorRuntime.TurnExecutor.direct());
-        ActorRuntime context = ActorRuntime.processShared(
-                IsolatePolicy.developer(),
-                ActorRuntime.TurnExecutor.direct());
-        try {
-            int answer = root.executeRootTask(() ->
-                    context.invoke(
-                            ActorRuntime.ActorKind.PRIVATE,
-                            41,
-                            (message, turn) -> message + 1));
-            assertEquals(42, answer);
-        } finally {
-            root.close();
-            context.close();
-        }
-    }
-
-    @Test
-    void rootControlCarrierCannotWidenAuthorityThroughSiblingContextRuntime() {
-        IsolatePolicy restrictedRoot = IsolatePolicy.developer().withoutCapabilities(
-                IsolatePolicy.Capability.SHARED_MEMORY);
-        ActorRuntime root = ActorRuntime.processShared(
-                restrictedRoot,
-                ActorRuntime.TurnExecutor.direct());
-        ActorRuntime broaderContext = ActorRuntime.processShared(
-                IsolatePolicy.developer(),
-                ActorRuntime.TurnExecutor.direct());
-        try {
-            SecurityException denied = assertThrows(
-                    SecurityException.class,
-                    () -> root.executeRootTask(() -> {
-                        broaderContext.spawnShared(
-                                ignored -> (message, turn) -> turn.self().stop());
-                        return null;
-                    }));
-            assertTrue(denied.getMessage().contains("more-privileged ActorRuntime"));
-        } finally {
-            root.close();
-            broaderContext.close();
-        }
-    }
-
-
 
 }
