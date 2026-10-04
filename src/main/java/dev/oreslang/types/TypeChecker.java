@@ -762,32 +762,74 @@ public final class TypeChecker {
                     if (candidates.size() == 1) {
                         Map.Entry<String, Type> candidate = candidates.getFirst();
                         int genericArity = Integer.parseInt(candidate.getKey().substring(prefix.length()));
-                        if (call.typeArgumentsPresent() && call.typeArguments().size() != genericArity) {
-                            throw new IllegalArgumentException(
-                                    "structural method " + member.member() + " expects "
-                                            + genericArity + " explicit type argument(s), got "
-                                            + call.typeArguments().size());
-                        }
                         if (!(candidate.getValue() instanceof Function fn)) {
                             throw new IllegalArgumentException(
                                     "structural method contract for '" + member.member() + "' is not callable");
                         }
-                        if (genericArity == 0) {
-                            for (int i = 0; i < fn.parameters().size(); i++) {
-                                validateLambdaArgument(
-                                        call.arguments().get(i), fn.parameters().get(i), env, generics, self);
-                                requireAssignable(
-                                        typeOf(call.arguments().get(i), env, generics, self),
-                                        fn.parameters().get(i),
-                                        "argument " + (i + 1));
-                            }
-                            return fn.result();
+
+                        String label = "structural method " + member.member();
+                        Set<String> canonicalGenerics = new LinkedHashSet<>();
+                        for (int i = 0; i < genericArity; i++) {
+                            canonicalGenerics.add("$callable" + i);
                         }
-                        // Generic structural method contracts carry canonical
-                        // placeholders rather than declaration-local generic names.
-                        // Arity is checked above; full generic inference remains a
-                        // declaration-backed operation.
-                        return Unknown.INSTANCE;
+
+                        Map<String, Type> bindings = new HashMap<>();
+                        Set<String> fixedBindings = new HashSet<>();
+                        if (call.typeArgumentsPresent() && !call.typeArguments().isEmpty()) {
+                            if (call.typeArguments().size() != genericArity) {
+                                throw new IllegalArgumentException(
+                                        label + " expects " + genericArity
+                                                + " explicit type argument(s), got "
+                                                + call.typeArguments().size());
+                            }
+                            for (int i = 0; i < genericArity; i++) {
+                                String genericName = "$callable" + i;
+                                bindings.put(
+                                        genericName,
+                                        resolve(call.typeArguments().get(i), generics, self));
+                                fixedBindings.add(genericName);
+                            }
+                        } else if (call.typeArgumentsPresent() && genericArity == 0) {
+                            throw new IllegalArgumentException(
+                                    label + " is not generic and cannot be called with <>");
+                        }
+
+                        List<Type> actuals = new ArrayList<>(call.arguments().size());
+                        for (int i = 0; i < call.arguments().size(); i++) {
+                            Type actual = typeOf(call.arguments().get(i), env, generics, self);
+                            actuals.add(actual);
+                            inferGenericBindings(
+                                    fn.parameters().get(i),
+                                    actual,
+                                    bindings,
+                                    fixedBindings,
+                                    label);
+                        }
+
+                        Set<String> unbound = new HashSet<>(canonicalGenerics);
+                        unbound.removeAll(bindings.keySet());
+                        for (int i = 0; i < call.arguments().size(); i++) {
+                            Type expected = substituteGenerics(fn.parameters().get(i), bindings);
+                            if (containsGenericNamed(expected, unbound)) {
+                                throw new IllegalArgumentException(
+                                        "cannot infer all generic parameters for "
+                                                + label + " from argument " + (i + 1));
+                            }
+                            validateLambdaArgument(
+                                    call.arguments().get(i), expected, env, generics, self);
+                            requireAssignable(
+                                    actuals.get(i),
+                                    expected,
+                                    "argument " + (i + 1));
+                        }
+
+                        Type result = substituteGenerics(fn.result(), bindings);
+                        if (containsGenericNamed(result, unbound)) {
+                            throw new IllegalArgumentException(
+                                    "cannot infer generic return type for " + label
+                                            + "; provide explicit type arguments or an inferable value parameter");
+                        }
+                        return result;
                     }
                 }
 

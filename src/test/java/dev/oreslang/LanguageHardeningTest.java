@@ -216,6 +216,55 @@ final class LanguageHardeningTest {
     }
 
     @Test
+    void genericStructuralMethodsInferAndSpecializeWithoutUnknownEscape() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module model
+                  define interface GenericApi
+                    fnc identity<T>(T value) => T;
+                  end
+
+                  fnc infer(@Structural GenericApi api): int {
+                    return api.identity(41);
+                  }
+
+                  fnc explicit(@Structural GenericApi api): int {
+                    return api.identity<int>(41);
+                  }
+                end
+                """)));
+
+        IllegalArgumentException explicitMismatch = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface GenericApi
+                            fnc identity<T>(T value) => T;
+                          end
+
+                          fnc bad(@Structural GenericApi api): int {
+                            return api.identity<int>("wrong");
+                          }
+                        end
+                        """)));
+        assertTrue(explicitMismatch.getMessage().contains("argument 1"));
+
+        IllegalArgumentException inferredReturnMismatch = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface GenericApi
+                            fnc identity<T>(T value) => T;
+                          end
+
+                          fnc bad(@Structural GenericApi api): int {
+                            return api.identity("wrong");
+                          }
+                        end
+                        """)));
+        assertTrue(inferredReturnMismatch.getMessage().contains("return expression"));
+    }
+
+    @Test
     void moduleAdherenceRejectsMissingExports() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module contracts
