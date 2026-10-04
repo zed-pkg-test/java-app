@@ -22,7 +22,7 @@ The language is intentionally opinionated:
 - lexical closures with persistent captured environments;
 - affine ownership, move checking, `&T` / `&mut T` borrows, immutable-by-default parameters, and `Type mut name` owned-mutation syntax;
 - hot reload creates a fresh versioned guest context/generation without requiring FFI or dynamic native libraries;
-- direct method calls reuse shared class method definitions; extracted method values bind their receiver safely without rebinding `self`;
+- direct instance-method calls reuse shared class method definitions; instance methods are not implicit callback values, so callback use requires an explicit `fnc`/lambda wrapper, while compatible `static fnc` values remain first-class;
 - multiple named modules may appear in one source file;
 - explicit `return` statements;
 - generics, tuples, arrays, complex numbers, futures/`await`, lambdas, `defer`, and `try/catch/finally` are language-level features.

@@ -406,6 +406,20 @@ val responses = await Futures.all([first, second]);
   permit is not considered free merely because guest code requested
   cancellation; the underlying host operation must actually finish.
 
+Ordinary `async fnc` work is scheduled as a logical task on OresVM's
+dedicated **ROOT_TASK** carrier domain. It does not create an OS/JVM thread,
+does not run on the CONTROL or actor pools, and may resume on a different
+ROOT_TASK carrier after `await`. Future/timer/I/O completion threads only make
+the captured continuation runnable; they never execute guest continuation code
+inline. Even an already-settled Future still crosses this scheduler boundary.
+
+The linked multi-file launcher currently fails closed on `async main`. A
+launcher-owned Graal Context must remain alive for the complete logical lifetime
+of main, including every suspended continuation. Until structured Context/CPS
+lifecycle lowering owns that lifetime end-to-end, use a synchronous launcher
+entrypoint that starts/awaits supported work explicitly rather than allowing
+the launcher to close a Context underneath a still-running async main.
+
 For actor code, `await` is a **suspension point, never a carrier-thread
 blocking point**. Compiler backends must lower an incomplete actor await to a
 resumable continuation: the carrier returns to its dispatcher, the actor's

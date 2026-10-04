@@ -175,23 +175,25 @@ final class IsolationHotReloadTest {
     }
 
     @Test
-    void extractedMethodValueKeepsReceiverAndSelfCannotBeRebound() throws Exception {
-        String output = run("""
-                define class Box as
-                  val int value;
+    void extractedInstanceMethodIsRejectedAndSelfCannotBeRebound() {
+        IllegalArgumentException boundMethodFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          val int value;
 
-                  pub get() => int {
-                    return self.value;
-                  }
-                end
+                          pub get() => int {
+                            return self.value;
+                          }
+                        end
 
-                pub routine main() => void {
-                  val box = new Box(17);
-                  val Fnc<int> callback = box.get;
-                  stdio.stdout.write(callback())
-                }
-                """);
-        assertEquals("17", output);
+                        pub routine main() => void {
+                          val box = new Box(17);
+                          val Fnc<int> callback = box.get;
+                          return;
+                        }
+                        """)));
+        assertTrue(boundMethodFailure.getMessage().contains("not a first-class callback value"));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define class Box as

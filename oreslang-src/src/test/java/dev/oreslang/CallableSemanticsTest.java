@@ -196,7 +196,7 @@ final class CallableSemanticsTest {
     @Test
     void asyncStaticFncRemainsFirstClassAndReturnsFuture() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define class Worker
+                define class Worker as
                   pub static async fnc run() => int {
                     return 1;
                   }

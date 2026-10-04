@@ -771,30 +771,77 @@ public final class TypeChecker {
                         validateMutexCallback(lambda, named.arguments().getFirst(), env, generics, self);
                         return Primitive.VOID;
                     }
-                    Ast.ClassDecl klass = findClass(named.name());
-                    if (klass != null) {
-                        ResolvedMethod target = findMethodTarget(klass, named, member.member(), call.arguments().size(), new LinkedHashSet<>());
-                        if (target == null) throw new IllegalArgumentException("no method '" + member.member() + "' with arity " + call.arguments().size() + " on " + named.name());
-                        Ast.MethodDecl method = target.method();
-                        Ast.ClassDecl owner = target.owner();
-                        Named ownerType = target.ownerType();
-                        validateCallTypeArgumentMarker(call, method.genericParameters(), "method " + owner.name() + "." + method.name());
-                        List<String> callableGenerics = new ArrayList<>(owner.genericParameters());
-                        callableGenerics.addAll(method.genericParameters());
-                        String label = "method " + owner.name() + "." + method.name();
-                        Map<String, Type> bindings = new HashMap<>(classGenericBindings(owner, ownerType));
-                        bindings.putAll(explicitGenericBindings(method.genericParameters(), call.typeArguments(), generics, self, label));
-                        return asyncCallResult(
-                                method.async(),
-                                checkGenericCallable(
-                                        callableGenerics,
-                                        method.parameters(),
-                                        method.returnType(),
-                                        call.arguments(),
-                                        env, generics, self,
-                                        ownerType,
-                                        bindings,
+                    Type builtinMutexCall = builtinMutexMember(named, member.member());
+                    if (builtinMutexCall instanceof Function builtinFunction) {
+                        if (call.typeArgumentsPresent()) {
+                            throw new IllegalArgumentException(
+                                    "mutex runtime methods do not accept call-site type arguments");
+                        }
+                        if (builtinFunction.parameters().size() != call.arguments().size()) {
+                            throw new IllegalArgumentException(
+                                    "call arity mismatch for " + member.member());
+                        }
+                        for (int i = 0; i < builtinFunction.parameters().size(); i++) {
+                            validateLambdaArgument(
+                                    call.arguments().get(i),
+                                    builtinFunction.parameters().get(i),
+                                    env,
+                                    generics,
+                                    self);
+                            requireAssignable(
+                                    typeOf(call.arguments().get(i), env, generics, self),
+                                    builtinFunction.parameters().get(i),
+                                    "argument " + (i + 1));
+                        }
+                        return builtinFunction.result();
+                    }
+
+                    Type directReceiver = unwrapMutexGuard(named);
+                    if (directReceiver instanceof Named directNamed) {
+                        Ast.ClassDecl klass = findClass(directNamed.name());
+                        if (klass != null) {
+                            ResolvedMethod target = findMethodTarget(
+                                    klass,
+                                    directNamed,
+                                    member.member(),
+                                    call.arguments().size(),
+                                    new LinkedHashSet<>());
+                            if (target != null) {
+                                Ast.MethodDecl method = target.method();
+                                Ast.ClassDecl owner = target.owner();
+                                Named ownerType = target.ownerType();
+                                validateCallTypeArgumentMarker(
+                                        call,
+                                        method.genericParameters(),
+                                        "method " + owner.name() + "." + method.name());
+                                List<String> callableGenerics =
+                                        new ArrayList<>(owner.genericParameters());
+                                callableGenerics.addAll(method.genericParameters());
+                                String label =
+                                        "method " + owner.name() + "." + method.name();
+                                Map<String, Type> bindings =
+                                        new HashMap<>(classGenericBindings(owner, ownerType));
+                                bindings.putAll(explicitGenericBindings(
+                                        method.genericParameters(),
+                                        call.typeArguments(),
+                                        generics,
+                                        self,
                                         label));
+                                return asyncCallResult(
+                                        method.async(),
+                                        checkGenericCallable(
+                                                callableGenerics,
+                                                method.parameters(),
+                                                method.returnType(),
+                                                call.arguments(),
+                                                env,
+                                                generics,
+                                                self,
+                                                ownerType,
+                                                bindings,
+                                                label));
+                            }
+                        }
                     }
                 }
             }

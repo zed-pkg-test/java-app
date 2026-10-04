@@ -253,16 +253,18 @@ final class OresFuturesTest {
     }
 
     @Test
-    void hostCancellationExceptionFailureIsNotMisclassifiedAsCancellation() {
+    void hostCompletableFutureCancellationStateIsAuthoritative() {
         CompletableFuture<Integer> host = new CompletableFuture<>();
         OresFuture<Integer> ores = OresFuture.from(host);
 
         host.completeExceptionally(
-                new java.util.concurrent.CancellationException("domain failure"));
+                new java.util.concurrent.CancellationException("host cancellation"));
 
-        assertFalse(ores.isCancelled());
-        CompletionException failure = assertThrows(CompletionException.class, ores::join);
-        assertInstanceOf(java.util.concurrent.CancellationException.class, failure.getCause());
+        assertTrue(host.isCancelled(),
+                "CompletableFuture itself classifies CancellationException terminal state as cancelled");
+        assertTrue(ores.isCancelled(),
+                "interop must preserve the host Future's structured cancellation state");
+        assertThrows(java.util.concurrent.CancellationException.class, ores::join);
     }
 
     @Test
