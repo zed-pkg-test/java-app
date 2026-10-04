@@ -51,16 +51,17 @@ final class ModulesNamespacesCallableSemanticsTest {
     }
 
     @Test
-    void routineIsNonRecursiveButFncMayRecurse() {
-        IllegalArgumentException routineError = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        routine boot(): void {
-                          boot();
-                          return;
-                        }
-                        """)));
-        assertTrue(routineError.getMessage().contains("routine"));
+    void routineAndFncMayBothRecurse() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                routine boot(bool finished): void {
+                  if finished; do
+                    return;
+                  else
+                    boot(true);
+                    return;
+                  fi
+                }
+                """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 fnc countdown(int n): int {
