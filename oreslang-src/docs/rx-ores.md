@@ -82,6 +82,48 @@ So the first runtime API deliberately exposes no public Java
 after the compiler/runtime can bind the operator lambda to an Ores task or actor
 continuation.
 
+## Core library, explicit linking, and executable size
+
+rx-ores is a **core Oreslang library**, but it is not an implicit prelude
+dependency and must not be retained by applications that do not use it.
+
+The canonical source-level dependency is an explicit Unix-style core import:
+
+```ores
+import module rx from "std/rx";
+```
+
+The build/link contract is:
+
+1. there is no automatic `std/rx` import;
+2. resolving `std/rx` creates the RX dependency edge;
+3. no RX import means no RX source/operator unit enters the application link
+   graph;
+4. Oreslang's language-level reachability/tree-shaking pass runs over the
+   linked graph before per-application JVM/native emission;
+5. GraalVM Native Image may then perform its own closed-world reachability, so
+   the Java runtime substrate below has no retention edge when RX is absent;
+6. a minimized JVM application bundle should likewise include the optional RX
+   runtime/support payload only when the linked graph requires it.
+
+This is deliberately **not** reflective runtime plugin loading. Runtime dynamic
+loading would make AOT reasoning worse. The preferred model is explicit import
+plus static/lazy linking and reachability elimination.
+
+The Oreslang toolchain distribution may ship rx-ores so `std/rx` is always
+available to import. Shipping it with the compiler is separate from bundling it
+into a user's application executable.
+
+The native substrate in this draft is intentionally not registered eagerly by
+an OresVM/global runtime singleton. Source lowering and the standard-library
+linker should be the only path that makes RX runtime support reachable.
+
+Operators should also remain granular. `std/rx` is the small pull/Future
+nucleus; operators and adapters should live in separate units such as
+`std/rx/operators/map`, `std/rx/operators/filter`, and
+`std/rx/async`. A convenience `std/rx/all` may intentionally aggregate them
+for users who want a batteries-included dependency.
+
 ## Intended Oreslang surface
 
 The source-level shape should stay library-first rather than requiring special

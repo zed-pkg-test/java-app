@@ -20,6 +20,14 @@ import java.util.function.Function;
  * scheduler domain, not on whichever timer/I/O/JNI thread happens to settle a
  * Future. Higher-order operators will be enabled once source lowering can bind
  * those lambdas to resumable Ores tasks safely.</p>
+ *
+ * <p><strong>Linking boundary:</strong> rx-ores is a core library, not an
+ * implicit runtime dependency. Base OresVM/runtime initialization must not
+ * eagerly register or instantiate this class merely to advertise RX support.
+ * The standard-library linker/source lowering should make the RX runtime
+ * reachable only for programs that explicitly import the RX core library.
+ * This keeps closed-world AOT reachability capable of removing the entire RX
+ * substrate from applications that do not use it.</p>
  */
 public abstract class OresObservable<T> {
 
