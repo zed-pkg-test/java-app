@@ -207,7 +207,7 @@ final class OresVMTest {
     void onlyUntrustedHotLoadDomainUsesSpawnedGraalIsolate() {
         assertFalse(HotReloadManager.ExecutionDomain.TRUSTED_JIT.spawnedIsolate());
         assertFalse(HotReloadManager.ExecutionDomain.TRUSTED_ISOACTOR_JIT.spawnedIsolate());
-        assertFalse(HotReloadManager.ExecutionDomain.AOT_INTERPRETED.spawnedIsolate());
+        assertFalse(HotReloadManager.ExecutionDomain.NATIVE_HOST_INTERPRETED_GUEST.spawnedIsolate());
         assertTrue(HotReloadManager.ExecutionDomain.UNTRUSTED_JIT.spawnedIsolate());
         assertTrue(HotReloadManager.ExecutionDomain.UNTRUSTED_JIT.untrusted());
     }

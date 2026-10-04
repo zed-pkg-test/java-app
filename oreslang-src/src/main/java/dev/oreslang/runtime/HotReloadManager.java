@@ -68,8 +68,11 @@ public final class HotReloadManager implements AutoCloseable {
          */
         UNTRUSTED_JIT(true, true),
 
-        /** Compatibility mode for AOT/interpreted targets that still reload source/IR. */
-        AOT_INTERPRETED(false, false);
+        /**
+         * Native/AOT-compiled host runtime executing Oreslang source/IR through
+         * the interpreter. This is deliberately NOT "AOT-compiled Oreslang".
+         */
+        NATIVE_HOST_INTERPRETED_GUEST(false, false);
 
         private final boolean spawnedIsolate;
         private final boolean untrusted;
@@ -81,7 +84,7 @@ public final class HotReloadManager implements AutoCloseable {
 
         public boolean spawnedIsolate() { return spawnedIsolate; }
         public boolean untrusted() { return untrusted; }
-        public boolean jit() { return this != AOT_INTERPRETED; }
+        public boolean jit() { return this != NATIVE_HOST_INTERPRETED_GUEST; }
     }
 
     public enum GenerationState {
@@ -119,7 +122,7 @@ public final class HotReloadManager implements AutoCloseable {
                 executionProfile,
                 executionProfile.guestJitAllowed()
                         ? (policy.adversarial() ? ExecutionDomain.UNTRUSTED_JIT : ExecutionDomain.TRUSTED_JIT)
-                        : ExecutionDomain.AOT_INTERPRETED);
+                        : ExecutionDomain.NATIVE_HOST_INTERPRETED_GUEST);
     }
 
     /**
@@ -500,7 +503,7 @@ public final class HotReloadManager implements AutoCloseable {
                 requested.withoutCapabilities(IsolatePolicy.Capability.HOT_CODE_LOAD);
 
         if (executionDomain == ExecutionDomain.TRUSTED_JIT
-                || executionDomain == ExecutionDomain.AOT_INTERPRETED) {
+                || executionDomain == ExecutionDomain.NATIVE_HOST_INTERPRETED_GUEST) {
             return noLoaderAuthority;
         }
 
