@@ -618,9 +618,7 @@ public final class TypeChecker {
         }
         if (expr instanceof Ast.CallExpr call) {
             if (call.callee() instanceof Ast.NameExpr name
-                    && name.name().equals("init")
-                    && env.lookup("init") == null
-                    && functionOwners.keySet().stream().anyMatch(fn -> fn.name().equals("init"))) {
+                    && name.name().equals("init")) {
                 throw new IllegalArgumentException(
                         "init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
             }
