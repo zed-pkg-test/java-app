@@ -121,12 +121,14 @@ final class SecureJitHotReloadDomainTest {
             lease.close();
 
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
-            while (!first.closed() && System.nanoTime() < deadline) {
+            while ((!first.closed() || hot.liveGenerations() != 1)
+                    && System.nanoTime() < deadline) {
                 Thread.sleep(1);
             }
             assertTrue(first.closed(),
-                    "control-plane generation reclamation must complete after the final lease release");
-            assertEquals(1, hot.liveGenerations());
+                    "control-plane generation closure must complete after the final lease release");
+            assertEquals(1, hot.liveGenerations(),
+                    "control-plane reclamation must remove the closed generation from ownership maps");
             assertEquals(HotReloadManager.GenerationState.ACTIVE, second.state());
         }
     }
