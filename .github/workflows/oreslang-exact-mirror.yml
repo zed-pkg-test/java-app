@@ -43,6 +43,16 @@ jobs:
           ./target/ores-aot examples/showcase.ores
           ./target/ores-aot examples/together.ores
           ./target/ores-aot examples/aot-jit-declarations.ores
+      - name: Compare arity-overload semantics across JIT and AOT
+        run: |
+          expected='base0|base1|base2|static0|static1|base0|child1|base2|static0|static1'
+          jit_output="$(mvn -q -DskipTests exec:java -Dexec.args="examples/aot-jit-declarations.ores" 2>/dev/null | grep -F 'base0|' | tail -n 1)"
+          aot_output="$(./target/ores-aot examples/aot-jit-declarations.ores 2>/dev/null | grep -F 'base0|' | tail -n 1)"
+          printf 'jit: %s\n' "$jit_output"
+          printf 'aot: %s\n' "$aot_output"
+          test "$jit_output" = "$expected"
+          test "$aot_output" = "$expected"
+          test "$jit_output" = "$aot_output"
       - name: Build Oreslang AOT native executable
         run: mvn -B -ntp -Pnative-aot -DskipTests package
       - name: Smoke test AOT native executable
