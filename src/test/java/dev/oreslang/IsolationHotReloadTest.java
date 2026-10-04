@@ -169,7 +169,24 @@ final class IsolationHotReloadTest {
     }
 
     @Test
-    void extractedMethodValueKeepsReceiverAndSelfCannotBeRebound() throws Exception {
+    void instanceMethodValuesRequireExplicitLambdaAndSelfCannotBeRebound() throws Exception {
+        IllegalArgumentException extracted = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          val int value;
+
+                          pub get(): int {
+                            return self.value;
+                          }
+                        end
+
+                        fnc bad(Box box): void {
+                          val Fnc<int> callback = box.get;
+                        }
+                        """)));
+        assertTrue(extracted.getMessage().contains("direct-call-only"));
+
         String output = run("""
                 define class Box as
                   val int value;
@@ -181,7 +198,9 @@ final class IsolationHotReloadTest {
 
                 pub routine main(): void {
                   val box = new Box(17);
-                  val Fnc<int> callback = box.get;
+                  val Fnc<int> callback = || -> {
+                    return box.get();
+                  };
                   stdio.stdout.write(callback())
                 }
                 """);
