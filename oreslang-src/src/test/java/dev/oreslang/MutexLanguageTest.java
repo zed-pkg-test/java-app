@@ -614,6 +614,64 @@ final class MutexLanguageTest {
     }
 
     @Test
+    void guardedMethodCannotReturnMoveOnlyState() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define class Child as
+                            pub val int value = 1;
+                          end
+
+                          define class Holder as
+                            pub child() => Child {
+                              return new Child();
+                            }
+                          end
+                        end
+
+                        define module app
+                          fnc bad() => void {
+                            val mutex = Mutex.new(new Holder());
+                            val guard = mutex.lock();
+                            val escaped = guard.child();
+                            stdio.println(escaped);
+                            return;
+                          }
+                        end
+                        """)));
+
+        assertTrue(failure.getMessage().contains("cannot return move-only state"));
+    }
+
+    @Test
+    void guardedAsyncMethodCannotEscapeProtectedState() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define class Counter as
+                            pub async refresh() => int {
+                              return 7;
+                            }
+                          end
+                        end
+
+                        define module app
+                          fnc bad() => void {
+                            val mutex = Mutex.new(new Counter());
+                            val guard = mutex.lock();
+                            val pending = guard.refresh();
+                            stdio.println(pending);
+                            return;
+                          }
+                        end
+                        """)));
+
+        assertTrue(failure.getMessage().contains("cannot escape protected mutex state"));
+    }
+
+    @Test
     void withLockProtectedBorrowCannotMoveOrReturnState() {
         var moved = Parser.parse("""
                 define module model

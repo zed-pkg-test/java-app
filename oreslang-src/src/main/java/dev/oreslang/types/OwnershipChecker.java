@@ -645,16 +645,27 @@ public final class OwnershipChecker {
             }
             ValueInfo receiverInfo = checkExpr(member.receiver(), scope, false);
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
-            Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
+            boolean protectedReceiver = false;
+            if (member.receiver() instanceof Ast.NameExpr receiverName) {
+                VarState receiverState = scope.lookup(receiverName.name());
+                protectedReceiver =
+                        receiverState != null && isScopedMutexReceiver(receiverState);
+            }
+            if (isMutexGuardType(concreteReceiver)) {
+                concreteReceiver = concreteReceiver.arguments().getFirst();
+            }
+            Ast.ClassDecl klass = concreteReceiver == null
+                    ? null
+                    : findClass(concreteReceiver.name());
             ResolvedMethod target = klass == null ? null
-                    : findMethodTarget(klass, concreteReceiver, member.member(), call.arguments().size(), new LinkedHashSet<>());
+                    : findMethodTarget(
+                            klass,
+                            concreteReceiver,
+                            member.member(),
+                            call.arguments().size(),
+                            new LinkedHashSet<>());
             if (target != null) {
                 Ast.MethodDecl method = target.method();
-                boolean protectedReceiver = false;
-                if (member.receiver() instanceof Ast.NameExpr receiverName) {
-                    VarState receiverState = scope.lookup(receiverName.name());
-                    protectedReceiver = receiverState != null && isScopedMutexReceiver(receiverState);
-                }
                 Map<String, Ast.TypeRef> ownerBindings = genericBindings(
                         target.owner().genericParameters(), target.ownerType().arguments());
                 List<String> allGenerics = new ArrayList<>(target.owner().genericParameters());
@@ -663,6 +674,10 @@ public final class OwnershipChecker {
                         allGenerics, method.genericParameters(),
                         method.parameters(), method.returnType(), call, scope, ownerBindings);
                 checkArguments(call.arguments(), signature.parameters(), scope, "method " + method.name());
+                if (method.async() && protectedReceiver) {
+                    throw error("async method '" + target.owner().name() + "." + method.name()
+                            + "' cannot escape protected mutex state across a scheduler boundary");
+                }
                 if (method.async()) {
                     consumeAsyncReceiver(
                             member.receiver(),
