@@ -253,6 +253,29 @@ final class CallableSemanticsTest {
         assertEquals("5:8", output);
     }
 
+    @Test
+    void localCallableBindingShadowsTopLevelDeclarationForDirectCalls() throws Exception {
+        String output = run("""
+                fnc value(): int {
+                  return 1;
+                }
+
+                fnc invoke(Fnc<int> value): int {
+                  return value();
+                }
+
+                pub routine main(): void {
+                  val Fnc<int> local = || -> {
+                    return 7;
+                  };
+                  stdio.stdout.write(invoke(local));
+                  return;
+                }
+                """);
+
+        assertEquals("7", output);
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "callables.ores")

@@ -76,6 +76,43 @@ final class LanguageHardeningTest {
     }
 
     @Test
+    void directOnlyRoutineStillParticipatesInModuleCallableContracts() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module contracts
+                  define interface Api
+                    fnc ping(int value) => int;
+                  end
+                end
+
+                @AdheresTo(contracts.Api)
+                define module service
+                  pub routine ping(int value): int {
+                    return value + 1;
+                  }
+                end
+
+                fnc callDirectly(): int {
+                  return service.ping(41);
+                }
+                """)));
+
+        IllegalArgumentException extracted = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module service
+                          pub routine ping(int value): int {
+                            return value + 1;
+                          }
+                        end
+
+                        fnc bad(): void {
+                          val Fnc<int, int> callback = service.ping;
+                        }
+                        """)));
+        assertTrue(extracted.getMessage().contains("direct-call-only"));
+    }
+
+    @Test
     void moduleAdherenceRejectsMissingExports() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module contracts
