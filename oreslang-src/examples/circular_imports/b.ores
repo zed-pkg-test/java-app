@@ -4,8 +4,8 @@ pub fnc b_value(): String {
   return "B";
 }
 
-fnc init(): void {
-  stdio.stdout.write("init-b:");
+pub fnc startup_b(): void {
+  stdio.stdout.write("startup-b:");
   stdio.stdout.write(a_value());
   stdio.stdout.write("|");
   return;
