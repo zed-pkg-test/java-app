@@ -135,11 +135,6 @@ public final class Parser {
         List<Ast.Annotation> annotations = parseAnnotations();
         Modifiers modifiers = parseModifiers();
 
-        if (startsClassOrModuleDeclaration()) {
-            throw error(peek(),
-                    "class and module declarations must be file top-level; nested declarations are not allowed");
-        }
-
         if (match(INIT)) {
             if (!annotations.isEmpty()
                     || modifiers.visibility != Ast.Visibility.PRIVATE
@@ -211,10 +206,6 @@ public final class Parser {
         while (!check(END) && !check(EOF)) {
             List<Ast.Annotation> annotations = parseAnnotations();
             Modifiers mods = parseModifiers();
-            if (startsClassOrModuleDeclaration()) {
-                throw error(peek(),
-                        "class and module declarations must be file top-level; nested declarations are not allowed");
-            }
             if (check(INIT)) {
                 throw error(peek(), "classes cannot declare init routine; use constructor(...) for instance initialization");
             }
@@ -630,10 +621,6 @@ public final class Parser {
     }
 
     private Ast.Stmt parseStatement() {
-        if (startsClassOrModuleDeclaration()) {
-            throw error(peek(),
-                    "class and module declarations must be file top-level; nested declarations are not allowed");
-        }
         if (isBindingKind(peek().type())) return parseBindingStatement();
         if (check(LBRACKET) && looksLikeDestructure()) return parseDestructure();
         if (match(RETURN)) {
@@ -1036,21 +1023,6 @@ public final class Parser {
     private boolean isFieldDeclarationStart() {
         if (check(IDENT) && checkNext(COLON)) return true;
         return isBindingKind(peek().type());
-    }
-
-    private boolean startsClassOrModuleDeclaration() {
-        int i = current;
-        while (i < tokens.size() && isDeclarationModifier(tokens.get(i).type())) i++;
-        if (i >= tokens.size() || tokens.get(i).type() != DEFINE) return false;
-        i++;
-        while (i < tokens.size() && isDeclarationModifier(tokens.get(i).type())) i++;
-        if (i >= tokens.size()) return false;
-        Token.Type type = tokens.get(i).type();
-        return type == CLASS || type == MODULE;
-    }
-
-    private boolean isDeclarationModifier(Token.Type type) {
-        return type == PUB || type == PRIVATE || type == ASYNC || type == STATIC || type == ABSTRACT;
     }
 
     private boolean match(Token.Type... types) {

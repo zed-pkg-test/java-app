@@ -387,6 +387,9 @@ public final class OwnershipChecker {
             Ast.ClassDecl klass = classOfReceiver(member.receiver(), scope);
             Ast.MethodDecl method = klass == null ? null : findMethod(klass, member.member(), call.arguments().size(), new LinkedHashSet<>());
             if (method != null) {
+                if (AnnotationExpander.isGeneratedFromJsonSetter(method)) {
+                    ensureMutableReceiver(member.receiver(), scope, "generated @FromJson setter '" + method.name() + "'");
+                }
                 checkArguments(call.arguments(), method.parameters(), scope, "method " + method.name());
                 return new ValueInfo(method.returnType(), kindOfType(method.returnType()), null);
             }
