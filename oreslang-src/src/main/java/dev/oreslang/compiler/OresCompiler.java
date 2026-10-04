@@ -52,13 +52,25 @@ public final class OresCompiler {
     }
 
     /** One statically declared build/link symbol. */
-    public record DeclarationSymbol(String qualifiedName, DeclarationKind kind) {
+    public record DeclarationSymbol(
+            String qualifiedName,
+            DeclarationKind kind,
+            int callableArity) {
         public DeclarationSymbol {
             if (qualifiedName == null || qualifiedName.isBlank()) {
                 throw new IllegalArgumentException("declaration qualifiedName cannot be blank");
             }
             Objects.requireNonNull(kind, "kind");
+            if (callableArity < -1) {
+                throw new IllegalArgumentException("callableArity must be -1 or non-negative");
+            }
         }
+
+        public DeclarationSymbol(String qualifiedName, DeclarationKind kind) {
+            this(qualifiedName, kind, -1);
+        }
+
+        public boolean callable() { return callableArity >= 0; }
     }
 
     /** Deterministic closed-world declaration inventory. */
@@ -68,7 +80,16 @@ public final class OresCompiler {
         }
 
         public boolean contains(String qualifiedName, DeclarationKind kind) {
-            return symbols.contains(new DeclarationSymbol(qualifiedName, kind));
+            return symbols.stream().anyMatch(symbol ->
+                    symbol.qualifiedName().equals(qualifiedName)
+                            && symbol.kind() == kind);
+        }
+
+        public boolean containsCallable(
+                String qualifiedName,
+                DeclarationKind kind,
+                int arity) {
+            return symbols.contains(new DeclarationSymbol(qualifiedName, kind, arity));
         }
     }
 
@@ -183,11 +204,12 @@ public final class OresCompiler {
             Ast.Decl declaration) {
 
         if (declaration instanceof Ast.FunctionDecl fn) {
-            addSymbol(
+            addCallableSymbol(
                     symbols,
                     identities,
                     qualify(prefix, fn.name()),
-                    DeclarationKind.FUNCTION);
+                    DeclarationKind.FUNCTION,
+                    fn.parameters().size());
             return;
         }
 
@@ -204,11 +226,12 @@ public final class OresCompiler {
             }
 
             for (Ast.MethodDecl method : klass.methods()) {
-                addSymbol(
+                addCallableSymbol(
                         symbols,
                         identities,
                         qualify(className, method.name()),
-                        DeclarationKind.CLASS_METHOD);
+                        DeclarationKind.CLASS_METHOD,
+                        method.arity());
             }
             return;
         }
@@ -223,11 +246,12 @@ public final class OresCompiler {
 
             for (Ast.InterfaceMember member : iface.members()) {
                 if (member instanceof Ast.InterfaceFunctionDecl function) {
-                    addSymbol(
+                    addCallableSymbol(
                             symbols,
                             identities,
                             qualify(interfaceName, function.name()),
-                            DeclarationKind.INTERFACE_FUNCTION);
+                            DeclarationKind.INTERFACE_FUNCTION,
+                            function.parameters().size());
                 } else if (member instanceof Ast.InterfaceFieldDecl field) {
                     addSymbol(
                             symbols,
@@ -298,6 +322,21 @@ public final class OresCompiler {
                             + qualifiedName + " (" + kind + ")");
         }
         symbols.add(new DeclarationSymbol(qualifiedName, kind));
+    }
+
+    private static void addCallableSymbol(
+            List<DeclarationSymbol> symbols,
+            Set<String> identities,
+            String qualifiedName,
+            DeclarationKind kind,
+            int arity) {
+        String identity = kind.name() + ":" + qualifiedName + "/" + arity;
+        if (!identities.add(identity)) {
+            throw new IllegalArgumentException(
+                    "duplicate static callable declaration in compilation manifest: "
+                            + qualifiedName + "/" + arity + " (" + kind + ")");
+        }
+        symbols.add(new DeclarationSymbol(qualifiedName, kind, arity));
     }
 
     private static String qualify(String prefix, String name) {

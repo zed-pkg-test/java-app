@@ -23,6 +23,10 @@ final class AotJitCompilationContractTest {
                 read(): int {
                   return self.value;
                 }
+
+                read(int delta): int {
+                  return self.value + delta;
+                }
               end
             end
 
@@ -69,12 +73,24 @@ final class AotJitCompilationContractTest {
         assertTrue(declarations.contains(
                 "domain.Box.read",
                 OresCompiler.DeclarationKind.CLASS_METHOD));
+        assertTrue(declarations.containsCallable(
+                "domain.Box.read",
+                OresCompiler.DeclarationKind.CLASS_METHOD,
+                0));
+        assertTrue(declarations.containsCallable(
+                "domain.Box.read",
+                OresCompiler.DeclarationKind.CLASS_METHOD,
+                1));
         assertTrue(declarations.contains(
                 "app",
                 OresCompiler.DeclarationKind.MODULE));
         assertTrue(declarations.contains(
                 "app.main",
                 OresCompiler.DeclarationKind.FUNCTION));
+        assertTrue(declarations.containsCallable(
+                "app.main",
+                OresCompiler.DeclarationKind.FUNCTION,
+                0));
     }
 
     @Test
