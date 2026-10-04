@@ -244,7 +244,11 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - Source namespaces are flat: namespace a.b; is illegal.
    - Modules are flat: module names are single identifiers and modules may not
      contain modules.
-   - fnc declarations may recurse; routines may not participate in a call cycle.
+   - fnc and routine declarations may recurse. Tail-call eligibility is
+     independent of callable kind and also applies to lambda bodies.
+   - fnc declarations are reifiable first-class callable values; routine
+     declarations are direct-call-only and cannot be stored, returned, or
+     passed as callbacks without an explicit wrapping lambda.
    - nlex on a fnc/routine is a capture barrier inherited by lambdas created
      inside it; an explicit nlex lambda establishes the same barrier.
    - nlex blocks activation-local captures only. Module members, imports,
@@ -252,9 +256,12 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - nlex may qualify an actor fnc as an additional capture-free guarantee;
      actor classes and actor/class methods do not accept nlex.
    - fnc and routine declarations do not overload.
-   - instance methods may overload only when arity differs.
-   - class-level functions use "static fnc"; they have no self receiver and are
-     dispatched through the class namespace, never through an instance.
+   - instance methods may overload only when arity differs. Instance, actor,
+     nominal-interface, and structural-contract methods are direct-call-only and
+     are never implicitly reified as bound method values; use an explicit lambda
+     when a callback must call a method.
+   - class-level functions use "static fnc"; they have no self receiver, are
+     dispatched through the class namespace, and are reifiable when unambiguous.
    - "=>" belongs to named callable return declarations.
    - "->" belongs to function types and lambdas.
    - Unqualified "actor" declarations are private actors; "shared actor" opts
