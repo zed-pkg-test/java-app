@@ -11,7 +11,10 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -29,8 +32,13 @@ public final class OresContext implements AutoCloseable {
     private final AtomicLong schedulerSafepoints = new AtomicLong();
     private final IsolatePolicy isolatePolicy;
     private final ExecutionProfile executionProfile;
+    private static final int MAX_USER_SCHEDULERS = 32;
+    private static final int MAX_USER_SCHEDULER_PARALLELISM = 64;
+
     private final ReentrantLock adversarialActorTurnLock = new ReentrantLock(true);
     private final Map<String, Object> linkedCodeUnits = new HashMap<>();
+    private final Set<OresScheduler> userSchedulers = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger userSchedulerCount = new AtomicInteger();
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
@@ -116,6 +124,45 @@ public final class OresContext implements AutoCloseable {
     public long schedulerSafepoints() { return schedulerSafepoints.get(); }
 
     /**
+     * Create a managed ordinary-task scheduler. This is a runtime-managed
+     * concurrency primitive, not authority to create arbitrary guest threads.
+     */
+    public OresScheduler createUserScheduler(int parallelism) {
+        if (ActorRuntime.inActorExecution()) {
+            throw new SecurityException(
+                    "actors cannot create OresScheduler instances; actor work remains on its owning actor scheduler");
+        }
+        if (isolatePolicy.adversarial()) {
+            throw new SecurityException(
+                    "adversarial contexts cannot create custom OresScheduler pools");
+        }
+        if (parallelism <= 0 || parallelism > MAX_USER_SCHEDULER_PARALLELISM) {
+            throw new IllegalArgumentException(
+                    "OresScheduler parallelism must be between 1 and "
+                            + MAX_USER_SCHEDULER_PARALLELISM);
+        }
+
+        int count = userSchedulerCount.incrementAndGet();
+        if (count > MAX_USER_SCHEDULERS) {
+            userSchedulerCount.decrementAndGet();
+            throw new IllegalStateException(
+                    "OresScheduler context limit exceeded: " + MAX_USER_SCHEDULERS);
+        }
+
+        OresScheduler scheduler = new OresScheduler(parallelism);
+        userSchedulers.add(scheduler);
+        return scheduler;
+    }
+
+    public void closeUserScheduler(OresScheduler scheduler) {
+        if (scheduler == null) return;
+        if (userSchedulers.remove(scheduler)) {
+            userSchedulerCount.decrementAndGet();
+        }
+        scheduler.close();
+    }
+
+    /**
      * Host-managed cross-file link registry. Guest imports may only observe
      * units that the host has explicitly loaded into this context; import
      * syntax never grants filesystem access.
@@ -185,6 +232,16 @@ public final class OresContext implements AutoCloseable {
 
     @Override
     public void close() {
+        Throwable schedulerFailure = null;
+        for (OresScheduler scheduler : Set.copyOf(userSchedulers)) {
+            try {
+                closeUserScheduler(scheduler);
+            } catch (Throwable failure) {
+                if (schedulerFailure == null) schedulerFailure = failure;
+                else schedulerFailure.addSuppressed(failure);
+            }
+        }
+
         try {
             actors.closeFromSupervisor();
         } finally {
@@ -193,6 +250,12 @@ public final class OresContext implements AutoCloseable {
             }
             garbageCollector.close();
             output.flush();
+        }
+
+        if (schedulerFailure != null) {
+            if (schedulerFailure instanceof RuntimeException runtime) throw runtime;
+            if (schedulerFailure instanceof Error error) throw error;
+            throw new IllegalStateException("failed to close user OresScheduler", schedulerFailure);
         }
     }
 }
