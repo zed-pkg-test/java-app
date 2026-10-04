@@ -31,15 +31,20 @@ Observable<T>
 A `next()` call admits at most one item. This gives us real backpressure before
 we add a larger demand protocol.
 
-There may be only one outstanding `next()` per subscription.
+There may be only one outstanding `next()` per subscription. The demand slot
+is not released until the exposed pull Future itself has reached a terminal
+state; source completion alone is not enough to admit a second pull.
 
 A pull settles with either:
 
 - `NEXT(value)`;
-- `COMPLETE`; or
-- a failed Future for the stream error path.
+- `COMPLETE`;
+- a failed Future for the stream error path; or
+- a cancelled Future for structured cancellation.
 
-Errors are not encoded as ordinary values.
+Errors are not encoded as ordinary values, and cancellation is not demoted into
+an ordinary stream failure. A cancelled producer, a cancelled pull, and an
+explicitly cancelled subscription remain distinguishable runtime states.
 
 ## Scheduler invariant
 
@@ -58,6 +63,18 @@ producer
 ```
 
 This is the same invariant already used by actor `await`.
+
+## Callable discipline for higher-order operators
+
+When higher-order operators land, their guest callable arguments are first-class
+`fnc` values or anonymous lambdas. A `routine` is intentionally not a callback
+value, and an instance method is not implicitly converted into a bound callback.
+A compatible static function/method may be passed where the callable type
+matches.
+
+For actor-owned pipelines, captured actor state does not weaken the scheduler
+rule above. A producer thread settles a Future; the owning actor continuation is
+re-enqueued; only that actor turn executes the `fnc`/lambda.
 
 ## Why callback-style subscribe is not in the first patch
 
@@ -113,6 +130,13 @@ plus static/lazy linking and reachability elimination.
 The Oreslang toolchain distribution may ship rx-ores so `std/rx` is always
 available to import. Shipping it with the compiler is separate from bundling it
 into a user's application executable.
+
+For Native Image, the no-RX path is directly tested: a no-RX Oreslang executable
+must not retain the `OresObservable`, `OresSubscription`, or
+`OresNotification` runtime type names. The current development Maven/JAR
+artifact is still monolithic and therefore physically contains these Java
+classes; selective/minimized JVM application packaging remains linker/emitter
+work and must not be claimed as implemented yet.
 
 The native substrate in this draft is intentionally not registered eagerly by
 an OresVM/global runtime singleton. Source lowering and the standard-library
@@ -213,6 +237,10 @@ downstream subscription cancel
   -> release buffers/resources
   -> stop future production
 ```
+
+The subscription substrate owns the terminal transition and invokes its runtime
+cleanup hook at most once across explicit cancellation, source completion,
+source failure, invalid source pulls, and cancellation/completion races.
 
 As with ordinary Ores Futures, cancellation is a request to underlying host work,
 not proof that an uncooperative host call has stopped.
