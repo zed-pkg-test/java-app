@@ -2720,6 +2720,26 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
+     * Compiler/runtime ABI for a one-shot actor callable whose source frame may
+     * suspend one or more times. The invocation must eventually complete or
+     * fail the supplied result exactly once. Calling ActorContext.suspendOn()
+     * unwinds the current carrier turn without completing this result.
+     */
+    @FunctionalInterface
+    public interface SuspendingInvocation<M, R> {
+        void run(
+                M message,
+                ActorContext<M> context,
+                InvocationCompletion<R> completion) throws Exception;
+    }
+
+    public interface InvocationCompletion<R> {
+        void complete(R value);
+        void fail(Throwable failure);
+        boolean isDone();
+    }
+
+    /**
      * Compiler-facing actor constructor. The actor context is available before
      * state initialization, so private actor fields can reserve/allocate in the
      * actor's confined memory slice rather than being captured from the caller.
@@ -3553,6 +3573,24 @@ public final class ActorRuntime implements AutoCloseable {
             ActorKind kind,
             M message,
             Invocation<M, R> invocation) {
+        Objects.requireNonNull(invocation, "invocation");
+        return spawnSuspendingInvocation(
+                kind,
+                message,
+                (delivered, context, completion) ->
+                        completion.complete(invocation.run(delivered, context)));
+    }
+
+    /**
+     * Stackless compiler lowering target for source actor callables containing
+     * await. The source frame owns its continuation state; this runtime owns
+     * mailbox admission, actor-lease resumption, lifecycle, and final result
+     * publication.
+     */
+    public <M, R> ActorSpawn<M, R> spawnSuspendingInvocation(
+            ActorKind kind,
+            M message,
+            SuspendingInvocation<M, R> invocation) {
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(invocation, "invocation");
         requireCallerRuntimeAffinity("spawn actor callables");
@@ -3562,6 +3600,8 @@ public final class ActorRuntime implements AutoCloseable {
         AtomicReference<R> invocationValue = new AtomicReference<>();
         AtomicReference<Throwable> invocationFailure = new AtomicReference<>();
         AtomicBoolean invocationReturned = new AtomicBoolean();
+        AtomicBoolean terminalSignalled = new AtomicBoolean();
+
         OresFuture<R> completion = new OresFuture<>(() -> {
             ActorRef<M> ref = spawnedRef.get();
             if (ref != null && ref.isAlive()) {
@@ -3573,41 +3613,88 @@ public final class ActorRuntime implements AutoCloseable {
             }
         });
 
+        final class ResultSink implements InvocationCompletion<R> {
+            @Override
+            public void complete(R value) {
+                if (!terminalSignalled.compareAndSet(false, true)) {
+                    throw new IllegalStateException(
+                            "actor invocation result completed more than once");
+                }
+                @SuppressWarnings("unchecked")
+                R frozen = (R) freeze(value);
+                invocationValue.set(frozen);
+                invocationReturned.set(true);
+                stopActor();
+            }
+
+            @Override
+            public void fail(Throwable failure) {
+                Objects.requireNonNull(failure, "failure");
+                if (!terminalSignalled.compareAndSet(false, true)) return;
+                invocationFailure.compareAndSet(null, failure);
+                stopActor();
+            }
+
+            @Override
+            public boolean isDone() {
+                return terminalSignalled.get();
+            }
+
+            private void stopActor() {
+                ActorRef<M> ref = spawnedRef.get();
+                if (ref != null && ref.isAlive()) {
+                    try {
+                        ref.stop();
+                    } catch (IllegalStateException ignored) {
+                        // Actor finalization already won the race.
+                    }
+                }
+            }
+        }
+
+        ResultSink resultSink = new ResultSink();
+
         ActorRef<M> ref = spawnInternal(
                 kind,
                 policy,
                 factoryContext -> (delivered, turnContext) -> {
                     try {
-                        @SuppressWarnings("unchecked")
-                        R frozen = (R) freeze(invocation.run(delivered, turnContext));
-                        invocationValue.set(frozen);
-                        invocationReturned.set(true);
+                        invocation.run(delivered, turnContext, resultSink);
+                        if (!resultSink.isDone()) {
+                            IllegalStateException incomplete =
+                                    new IllegalStateException(
+                                            "suspending actor invocation returned without "
+                                                    + "completion or ActorContext.suspendOn()");
+                            resultSink.fail(incomplete);
+                            throw incomplete;
+                        }
+                    } catch (ActorTurnSuspendedSignal suspended) {
+                        // Normal compiler/runtime control transfer. The live
+                        // frame is already captured by the continuation.
+                        throw suspended;
                     } catch (VirtualMachineError fatal) {
-                        invocationFailure.compareAndSet(null, fatal);
+                        resultSink.fail(fatal);
                         throw fatal;
                     } catch (ThreadDeath fatal) {
-                        invocationFailure.compareAndSet(null, fatal);
+                        resultSink.fail(fatal);
                         throw fatal;
                     } catch (LinkageError fatal) {
-                        invocationFailure.compareAndSet(null, fatal);
+                        resultSink.fail(fatal);
                         throw fatal;
                     } catch (Exception failure) {
-                        invocationFailure.compareAndSet(null, failure);
+                        resultSink.fail(failure);
                         throw failure;
                     } catch (Error failure) {
-                        invocationFailure.compareAndSet(null, failure);
+                        resultSink.fail(failure);
                         throw failure;
-                    } finally {
-                        turnContext.self().stop();
                     }
                 },
                 true);
         spawnedRef.set(ref);
         ActorSpawn<M, R> spawn = new ActorSpawn<>(ref, completion);
 
-        // Do not publish a source-level actor result until the actor has fully
-        // finalized and its carrier has left the Truffle context. Otherwise a
-        // root awaiting result() can race Context.close() with the actor turn.
+        // Publish a source actor result only after the actor has fully finalized
+        // and its carrier has left the Truffle context.
         ref.finalization().whenComplete((ignored, finalizationFailure) -> {
             if (completion.isDone()) return;
             Throwable failure = invocationFailure.get();
