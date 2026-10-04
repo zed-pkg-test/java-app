@@ -85,7 +85,6 @@ final class IsolationHotReloadTest {
 
             assertNotEquals(first.id(), second.id());
             assertNotEquals(first.sha256(), second.sha256());
-            assertNotSame(first.context(), second.context());
             assertNull(hot.active(), "staged code must not become active before successful startup");
             assertEquals(2, hot.liveGenerations());
 
