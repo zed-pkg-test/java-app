@@ -258,7 +258,7 @@ final class ActorRuntimeTest {
         try (ActorRuntime runtime = new ActorRuntime()) {
             ActorRuntime.SyncCell<Integer> cell = runtime.syncCell(0);
             var ref = runtime.<Object>spawnPrivate(() -> (message, context) -> { });
-            assertThrows(IllegalArgumentException.class, () -> ref.send(cell));
+            assertThrows(SecurityException.class, () -> ref.send(cell));
         }
     }
 
@@ -479,7 +479,7 @@ final class ActorRuntimeTest {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var cell = runtime.syncCell(0);
             var ref = runtime.<Object>spawnPrivate(() -> (message, context) -> { });
-            assertThrows(IllegalArgumentException.class,
+            assertThrows(SecurityException.class,
                     () -> ref.send(Map.of("nested", List.of(cell))));
         }
     }
