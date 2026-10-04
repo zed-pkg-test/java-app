@@ -84,7 +84,7 @@ User classes may implement the same contract:
 ```ores
 define class ReadyValue implements Awaitable<int> as
   pub get_awaited() => Future<int> {
-    return Future.from_callback(|cb| -> {
+    return Future.from_callback<int>(|cb| -> {
       cb.resolve(42);
       return;
     });
@@ -109,7 +109,7 @@ A single-shot callback API can be turned into an Ores Future without granting
 the callback producer authority to run Oreslang continuations:
 
 ```ores
-val future = Future.from_callback(|cb| -> {
+val future = Future.from_callback<int>(|cb| -> {
   legacy_api(cb);
   return;
 });

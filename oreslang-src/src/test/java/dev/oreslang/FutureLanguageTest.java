@@ -99,7 +99,7 @@ final class FutureLanguageTest {
                 define module app
                   define class ReadyValue implements Awaitable<int> as
                     pub get_awaited() => Future<int> {
-                      return Future.from_callback(|cb| -> {
+                      return Future.from_callback<int>(|cb| -> {
                         cb.resolve(42);
                         return;
                       });
@@ -136,7 +136,7 @@ final class FutureLanguageTest {
                 define module app
                   define class ReadyValue implements Awaitable<int> as
                     pub get_awaited() => Future<int> {
-                      return Future.from_callback(|cb| -> {
+                      return Future.from_callback<int>(|cb| -> {
                         cb.resolve(40);
                         return;
                       });
@@ -145,11 +145,11 @@ final class FutureLanguageTest {
 
                   pub async routine main() => void {
                     val base = await new ReadyValue();
-                    val first = Future.from_callback(|cb| -> {
+                    val first = Future.from_callback<int>(|cb| -> {
                       cb.resolve(base + 1);
                       return;
                     });
-                    val second = first.attach_callback(|value, cb| -> {
+                    val second = first.attach_callback<int>(|value, cb| -> {
                       cb.resolve(value + 1);
                       return;
                     });
