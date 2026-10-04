@@ -22,7 +22,7 @@ final class CircularImportInitializationTest {
     Path tempDir;
 
     @Test
-    void twoFilesMayImportEachOtherAndInitRunsOnlyAfterBothAreLinked() throws Exception {
+    void twoFilesMayImportEachOtherAndOnlyMainRunsAutomatically() throws Exception {
         Path a = tempDir.resolve("a.ores");
         Path b = tempDir.resolve("b.ores");
 
@@ -34,9 +34,7 @@ final class CircularImportInitializationTest {
                 }
 
                 fnc init(): void {
-                  stdio.stdout.write("init-a:");
-                  stdio.stdout.write(b_value());
-                  stdio.stdout.write("|");
+                  stdio.stdout.write("SHOULD-NOT-RUN");
                   return;
                 }
 
@@ -56,9 +54,7 @@ final class CircularImportInitializationTest {
                 }
 
                 fnc init(): void {
-                  stdio.stdout.write("init-b:");
-                  stdio.stdout.write(a_value());
-                  stdio.stdout.write("|");
+                  stdio.stdout.write("SHOULD-NOT-RUN");
                   return;
                 }
                 """);
@@ -72,34 +68,40 @@ final class CircularImportInitializationTest {
                 output,
                 error);
 
-        assertEquals("init-a:B|init-b:A|main:AB", output.toString(StandardCharsets.UTF_8));
+        assertEquals("main:AB", output.toString(StandardCharsets.UTF_8));
 
         List<List<String>> groups = build.initializationGroups();
-        assertEquals(1, groups.size(), "the A<->B cycle should form one initialization barrier");
+        assertEquals(1, groups.size(), "the A<->B cycle should still form one linked SCC");
         assertEquals(2, groups.getFirst().size());
         assertTrue(groups.getFirst().contains(a.toAbsolutePath().normalize().toString().replace('\\', '/')));
         assertTrue(groups.getFirst().contains(b.toAbsolutePath().normalize().toString().replace('\\', '/')));
     }
 
     @Test
-    void initHookHasAClosedLifecycleSignature() {
+    void initIsAnOrdinaryCallableNameWithNoLifecycleSignature() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc init(): void { return; }
-                pub routine main(): void { return; }
+                pub fnc init(int value): int {
+                  return value + 1;
+                }
+
+                pub routine main(): void {
+                  val result = init(41);
+                  stdio.println(result);
+                  return;
+                }
                 """)));
 
-        IllegalArgumentException withArgs = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc init(int value): void { return; }
-                        """)));
-        assertTrue(withArgs.getMessage().contains("init hook"));
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module lifecycle as
+                  pub fnc init(String value): String {
+                    return value;
+                  }
+                end
 
-        IllegalArgumentException publicInit = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        pub fnc init(): void { return; }
-                        """)));
-        assertTrue(publicInit.getMessage().contains("init hook"));
+                pub routine main(): void {
+                  val result = lifecycle.init("explicit");
+                  return;
+                }
+                """)));
     }
 }
