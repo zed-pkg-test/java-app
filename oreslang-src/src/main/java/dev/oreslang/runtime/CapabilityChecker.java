@@ -191,8 +191,10 @@ public final class CapabilityChecker {
                     IsolatePolicy.Capability.SHARED_MEMORY,
                     IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
                     IsolatePolicy.Capability.GC_CONTROL);
+            case SHARED -> parent.withoutCapabilities(
+                    IsolatePolicy.Capability.GC_CONTROL);
             case UNTRUSTED -> IsolatePolicy.untrustedActor();
-            default -> parent;
+            case NONE -> parent;
         };
     }
 
