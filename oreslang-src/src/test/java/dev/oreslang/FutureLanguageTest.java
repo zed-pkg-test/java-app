@@ -79,6 +79,106 @@ final class FutureLanguageTest {
     }
 
     @Test
+    void awaitRejectsKnownNonAwaitableValues() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          async fnc bad() => int {
+                            return await 123;
+                          }
+                        end
+                        """)));
+
+        assertTrue(failure.getMessage().contains("Awaitable"));
+    }
+
+    @Test
+    void sourceClassMayImplementAwaitableContract() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class ReadyValue implements Awaitable<int> as
+                    pub get_awaited() => Future<int> {
+                      return Future.from_callback(|cb| -> {
+                        cb.resolve(42);
+                        return;
+                      });
+                    }
+                  end
+
+                  async fnc read() => int {
+                    return await new ReadyValue();
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void malformedAwaitableImplementationIsRejected() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          define class Broken implements Awaitable<int> as
+                            pub get_awaited() => int {
+                              return 42;
+                            }
+                          end
+                        end
+                        """)));
+
+        assertTrue(failure.getMessage().contains("does not implement interface"));
+    }
+
+    @Test
+    void callbackFutureAndAwaitableClassRunThroughLanguageRuntime() throws Exception {
+        String program = """
+                define module app
+                  define class ReadyValue implements Awaitable<int> as
+                    pub get_awaited() => Future<int> {
+                      return Future.from_callback(|cb| -> {
+                        cb.resolve(40);
+                        return;
+                      });
+                    }
+                  end
+
+                  pub async routine main() => void {
+                    val base = await new ReadyValue();
+                    val first = Future.from_callback(|cb| -> {
+                      cb.resolve(base + 1);
+                      return;
+                    });
+                    val second = first.attach_callback(|value, cb| -> {
+                      cb.resolve(value + 1);
+                      return;
+                    });
+                    val answer = await second;
+                    stdio.println(answer);
+                    return;
+                  }
+                end
+                """;
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(
+                        OresLanguage.ID,
+                        program,
+                        "awaitable-callback.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("42"));
+    }
+
+    @Test
     void futuresAllRunsThroughLanguageRuntimeWithoutBlockingRootCarrier() throws Exception {
         String program = """
                 pub async routine main() => void {
