@@ -4,6 +4,7 @@ import dev.oreslang.parser.Parser;
 import dev.oreslang.types.TypeChecker;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
+import org.graalvm.polyglot.Value;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -257,6 +258,58 @@ final class FutureLanguageTest {
                   }
                 end
                 """)));
+    }
+
+
+    @Test
+    void asyncFunctionProducesRuntimeFutureAndCanBeAwaitedByHostEmbedder() throws Exception {
+        String program = """
+                pub async fnc work() => int {
+                  return 42;
+                }
+
+                pub fnc main() => int {
+                  return await work();
+                }
+                """;
+
+        Source source = Source.newBuilder(OresLanguage.ID, program, "async-runtime.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .build()) {
+            Value result = context.eval(source);
+            assertEquals(42, result.asInt());
+        }
+    }
+
+    @Test
+    void asyncGetAwaitConstructsARealRuntimeFuture() throws Exception {
+        String program = """
+                define class LazyValue implements Awaitable<int> as
+                  pub async getAwait() => int {
+                    return 42;
+                  }
+                end
+
+                pub fnc main() => int {
+                  val value = new LazyValue();
+                  return await value;
+                }
+                """;
+
+        Source source = Source.newBuilder(OresLanguage.ID, program, "async-awaitable-runtime.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .build()) {
+            Value result = context.eval(source);
+            assertEquals(42, result.asInt());
+        }
     }
 
 

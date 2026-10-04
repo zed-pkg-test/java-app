@@ -199,6 +199,10 @@ public final class OresEvalRootNode extends RootNode {
                         "actor callable '" + fn.name()
                                 + "' cannot be invoked directly; use spawn " + fn.name() + "(...)");
             }
+            if (fn.async()) {
+                return context.submitAsyncTask(
+                        () -> callFunctionBody(fn, normalized));
+            }
             return callFunctionBody(fn, normalized);
         }
 
@@ -270,6 +274,15 @@ public final class OresEvalRootNode extends RootNode {
 
         private Object callMethod(OresObject receiver, Ast.MethodDecl method, List<?> args) {
             if (args.size() != method.parameters().size()) throw new IllegalArgumentException("method " + method.name() + " arity mismatch");
+            if (method.async()) {
+                List<?> captured = List.copyOf(args);
+                return context.submitAsyncTask(
+                        () -> callMethodBody(receiver, method, captured));
+            }
+            return callMethodBody(receiver, method, args);
+        }
+
+        private Object callMethodBody(OresObject receiver, Ast.MethodDecl method, List<?> args) {
             Env env = new Env(null);
             if (!method.isStatic()) env.define("self", receiver, Ast.BindingKind.VAL);
             for (int i = 0; i < method.parameters().size(); i++) {
@@ -279,7 +292,12 @@ public final class OresEvalRootNode extends RootNode {
             try {
                 executeBlock(method.body(), env);
                 return null;
-            } catch (ReturnSignal signal) { return shapeReturnedValue(method.returnType(), signal.value, "method " + method.name()); }
+            } catch (ReturnSignal signal) {
+                return shapeReturnedValue(
+                        method.returnType(),
+                        signal.value,
+                        "method " + method.name());
+            }
         }
 
         private void executeBlock(List<Ast.Stmt> statements, Env parent) {
@@ -861,6 +879,15 @@ public final class OresEvalRootNode extends RootNode {
         private Object callStaticFunction(Ast.ClassDecl klass, Ast.MethodDecl fn, List<?> args) {
             if (!fn.isStatic()) throw new IllegalArgumentException("not a static class function: " + klass.name() + "." + fn.name());
             if (args.size() != fn.parameters().size()) throw new IllegalArgumentException("static function " + fn.name() + " arity mismatch");
+            if (fn.async()) {
+                List<?> captured = List.copyOf(args);
+                return context.submitAsyncTask(
+                        () -> callStaticFunctionBody(klass, fn, captured));
+            }
+            return callStaticFunctionBody(klass, fn, args);
+        }
+
+        private Object callStaticFunctionBody(Ast.ClassDecl klass, Ast.MethodDecl fn, List<?> args) {
             Env env = new Env(null);
             for (int i = 0; i < fn.parameters().size(); i++) {
                 Ast.Param param = fn.parameters().get(i);
@@ -869,7 +896,12 @@ public final class OresEvalRootNode extends RootNode {
             try {
                 executeBlock(fn.body(), env);
                 return null;
-            } catch (ReturnSignal signal) { return shapeReturnedValue(fn.returnType(), signal.value, "static function " + fn.name()); }
+            } catch (ReturnSignal signal) {
+                return shapeReturnedValue(
+                        fn.returnType(),
+                        signal.value,
+                        "static function " + klass.name() + "." + fn.name());
+            }
         }
 
         /**
@@ -1112,12 +1144,6 @@ public final class OresEvalRootNode extends RootNode {
                             "Awaitable class '" + object.klass.name()
                                     + "' has no getAwait() method at runtime");
                 }
-                if (method.async()) {
-                    throw new IllegalStateException(
-                            "async Awaitable.getAwait() requires async callable/continuation lowering; "
-                                    + "the recursive evaluator must not execute it synchronously");
-                }
-
                 Object projected = callMethod(object, method, List.of());
                 if (projected instanceof OresFuture<?> future) return future;
                 if (projected instanceof CompletionStage<?> stage) {

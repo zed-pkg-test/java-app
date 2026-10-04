@@ -66,6 +66,17 @@ public final class OresContext implements AutoCloseable {
     public PrintWriter output() { return output; }
     public ActorRuntime actors() { return actors; }
     public RuntimeGarbageCollector garbageCollector() { return garbageCollector; }
+
+    /**
+     * Compiler/runtime async-call lowering. The returned Future is the logical
+     * task identity; the task executes on the VM-owned ROOT_TASK scheduler.
+     */
+    public <T> OresFuture<T> submitAsyncTask(
+            java.util.function.Supplier<T> task) {
+        return actors.submitAsyncRootTask(
+                java.util.Objects.requireNonNull(task, "task"));
+    }
+
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
     public ExecutionProfile executionProfile() { return executionProfile; }

@@ -187,11 +187,14 @@ Important invariants:
 - AOT lowering can resolve the projection statically; no dynamic plugin lookup
   is required.
 
-The recursive reference evaluator can execute a synchronous `getAwait()`
-projection today. An async `getAwait()` is type/effect-correct but intentionally
-fails closed in that evaluator until general async-call/CPS lowering can preserve
-its suspended frame. The scheduler/Future ABI underneath is already the same
-one the lowerer will target.
+The recursive reference evaluator now schedules ordinary async callables,
+including `async getAwait()`, as real logical ROOT_TASK executions and returns
+their Ores Future. A non-suspending async hook therefore works end-to-end today.
+
+If the async hook itself reaches a nested source `await` while running on an
+Ores carrier, that nested suspension still fails closed until general
+stackless/CPS source-frame lowering can preserve the evaluator frame. The
+scheduler/Future ABI underneath is already the same one that lowerer targets.
 
 ## Await
 
