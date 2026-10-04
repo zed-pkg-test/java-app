@@ -210,10 +210,9 @@ public final class TypeChecker {
     }
 
     private void checkFunction(String module, Ast.FunctionDecl fn) {
-        if (module.equals(Parser.ROOT_MODULE) && fn.name().equals("init")) {
+        if (fn.name().equals("init")) {
             Ast.TypeRef initReturn = fn.returnType();
-            if (fn.kind() != Ast.CallableKind.FNC
-                    || fn.visibility() != Ast.Visibility.PRIVATE
+            if (fn.visibility() != Ast.Visibility.PRIVATE
                     || fn.async()
                     || fn.nonLexical()
                     || fn.actorKind() != Ast.ActorKind.NONE
@@ -224,7 +223,8 @@ public final class TypeChecker {
                     || !initReturn.arguments().isEmpty()
                     || initReturn.inferArguments()) {
                 throw new IllegalArgumentException(
-                        "file init hook must be exactly 'fnc init() => void' (private, synchronous, non-actor, non-generic)");
+                        "init hook must be a private synchronous non-actor non-generic zero-arity "
+                                + "fnc/routine returning void");
             }
         }
         if (fn.name().equals("main") && fn.actorKind() != Ast.ActorKind.NONE) {
@@ -617,6 +617,20 @@ public final class TypeChecker {
             };
         }
         if (expr instanceof Ast.CallExpr call) {
+            if (call.callee() instanceof Ast.NameExpr name
+                    && name.name().equals("init")
+                    && env.lookup("init") == null
+                    && functionOwners.keySet().stream().anyMatch(fn -> fn.name().equals("init"))) {
+                throw new IllegalArgumentException(
+                        "init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
+            }
+            if (call.callee() instanceof Ast.MemberExpr member
+                    && member.member().equals("init")
+                    && member.receiver() instanceof Ast.NameExpr namespace
+                    && modules.containsKey(namespace.name())) {
+                throw new IllegalArgumentException(
+                        "module init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
+            }
             if (call.callee() instanceof Ast.NameExpr functionName) {
                 Ast.FunctionDecl target = findFunction(functionName.name());
                 if (target != null) {
