@@ -179,6 +179,11 @@ public final class CapabilityChecker {
                         policy,
                         IsolatePolicy.Capability.PROCESS_GLOBAL,
                         "global module " + module.name());
+            } else if (module.storage() == Ast.ModuleStorage.SINGLETON) {
+                require(
+                        policy,
+                        IsolatePolicy.Capability.SINGLETON_STATE,
+                        "singleton module " + module.name());
             }
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.FunctionDecl fn) {
@@ -267,6 +272,9 @@ public final class CapabilityChecker {
         }
         if (type.name().equals("GlobalRef")) {
             require(policy, IsolatePolicy.Capability.PROCESS_GLOBAL, "GlobalRef<T>");
+        }
+        if (type.name().equals("SingletonRef")) {
+            require(policy, IsolatePolicy.Capability.SINGLETON_STATE, "SingletonRef<T>");
         }
         String javaClass = javaImports.get(type.name());
         if (javaClass != null) {
