@@ -143,10 +143,26 @@ public final class OresCompiler {
             String source,
             IsolatePolicy policy,
             CompilationMode mode) {
+        return validateProgramForCompilation(
+                parseAndTypeCheck(source),
+                policy,
+                mode);
+    }
+
+    /**
+     * Validate an already parsed/type-checked program. Incremental/multi-file
+     * compilation uses this overload so every code unit participates in the
+     * exact same JIT/AOT declaration and capability contract.
+     */
+    public static CompilationUnit validateProgramForCompilation(
+            Ast.Program program,
+            IsolatePolicy policy,
+            CompilationMode mode) {
+        Objects.requireNonNull(program, "program");
         Objects.requireNonNull(policy, "policy");
         Objects.requireNonNull(mode, "mode");
 
-        Ast.Program program = validateForIsolate(source, policy);
+        CapabilityChecker.check(program, policy);
         DeclarationManifest manifest = declarationManifest(program);
 
         if (mode == CompilationMode.AOT) {
@@ -160,6 +176,12 @@ public final class OresCompiler {
             String source,
             IsolatePolicy policy) {
         return validateForCompilation(source, policy, CompilationMode.AOT);
+    }
+
+    public static CompilationUnit validateProgramForAot(
+            Ast.Program program,
+            IsolatePolicy policy) {
+        return validateProgramForCompilation(program, policy, CompilationMode.AOT);
     }
 
     /**

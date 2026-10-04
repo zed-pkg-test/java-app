@@ -34,6 +34,12 @@ interface/trait requirements.
 
 Instances and ordinary data remain dynamic.
 
+Lexically local type declarations are also compatible with AOT when they are
+compile-time-only declarations: the compiler hoists/resolves them independent
+of whether a branch/loop executes and gives them stable hidden lexical
+identities. Entering runtime control flow must never be the event that creates a
+type.
+
 The language must not permit runtime class/module/namespace/interface/trait/
 struct definition, monkey patching, adding fields or methods after compilation,
 runtime subclass synthesis, or attaching traits to already-created runtime
@@ -115,6 +121,21 @@ code with statically generated dictionaries/witness tables.
 Reflection/typeof may inspect metadata emitted for statically known
 declarations. They must not define new types, add members, arbitrarily load new
 classes, or generate runtime proxies/types.
+
+## Mixed Java source
+
+Oreslang's `java { ... }` declarations and `do java { ... }` execution
+islands are source-known and can be AOT-compatible, but only if their generated
+Java classes are compiled and linked during the external AOT build.
+
+The current JIT/source runner intentionally uses `javax.tools.JavaCompiler`
+and `URLClassLoader` at runtime. Whole-program AOT admission therefore rejects
+mixed Java source until the AOT backend has a build-time mixed-Java lowering
+step. A Native Image must never fall back to runtime Java class generation.
+
+Imports of already-known Java classes are a separate case: an AOT backend may
+retain them when their class names and required reflection/reachability metadata
+are statically emitted into the artifact.
 
 ## Hot loading
 

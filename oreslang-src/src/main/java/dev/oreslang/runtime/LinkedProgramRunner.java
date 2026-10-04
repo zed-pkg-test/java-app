@@ -3,6 +3,7 @@ package dev.oreslang.runtime;
 import dev.oreslang.OresLanguage;
 import dev.oreslang.ast.Ast;
 import dev.oreslang.compiler.IncrementalCompiler;
+import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.config.OresProjectConfig;
 import dev.oreslang.imports.ImportRules;
 import dev.oreslang.interop.MixedInteropBridge;
@@ -26,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -60,6 +62,75 @@ public final class LinkedProgramRunner {
         Map<String, Ast.Program> programs = parsePrograms(sources);
         try (MixedJavaCompiler.Compilation ignored = MixedJavaCompiler.compile(new ArrayList<>(units.values()), programs)) {
             return build;
+        }
+    }
+
+    /**
+     * Whole-program closed-world admission for a future true Oreslang AOT
+     * backend. This walks the same path-derived import closure as execution and
+     * inventories every linked Oreslang code unit before machine-code emission.
+     *
+     * <p>Mixed Java source islands are statically present, but the current
+     * implementation compiles them with javax.tools.JavaCompiler and loads them
+     * through URLClassLoader at runtime. Until the AOT builder precompiles and
+     * links those generated classes, fail closed instead of pretending that
+     * runtime class generation is Native-Image compatible.
+     */
+    public static AotValidationResult validateForAot(
+            Path entryFile,
+            IsolatePolicy policy) throws IOException {
+        return validateForAot(entryFile, policy, System.getenv());
+    }
+
+    public static AotValidationResult validateForAot(
+            Path entryFile,
+            IsolatePolicy policy,
+            Map<String, String> environment) throws IOException {
+        Objects.requireNonNull(policy, "policy");
+        Objects.requireNonNull(environment, "environment");
+
+        Path entry = entryFile.toAbsolutePath().normalize();
+        if (!Files.isRegularFile(entry)) {
+            throw new IllegalArgumentException("not a file: " + entry);
+        }
+
+        OresProjectConfig projectConfig = OresProjectConfig.discover(entry, environment);
+        LinkedHashMap<String, MixedSourceUnit> units = new LinkedHashMap<>();
+        LinkedHashMap<String, Map<String, String>> importResolutions = new LinkedHashMap<>();
+        collectImportClosure(entry, units, projectConfig, importResolutions);
+        ensureJavaEntryContainsOres(entry, units);
+
+        if (units.values().stream().anyMatch(MixedSourceUnit::hasJavaSource)) {
+            throw new IllegalArgumentException(
+                    "true Oreslang AOT requires java { ... } / do java { ... } islands "
+                            + "to be precompiled and linked during the build; runtime "
+                            + "JavaCompiler/URLClassLoader class generation is not AOT-compatible");
+        }
+
+        Map<String, String> sources = oresSources(units);
+        IncrementalCompiler.BuildResult build =
+                new IncrementalCompiler().compile(sources, importResolutions);
+
+        LinkedHashMap<String, OresCompiler.DeclarationManifest> manifests =
+                new LinkedHashMap<>();
+        List<String> ids = new ArrayList<>(build.units().keySet());
+        ids.sort(String::compareTo);
+        for (String id : ids) {
+            IncrementalCompiler.CompiledUnit unit = build.units().get(id);
+            OresCompiler.CompilationUnit validated =
+                    OresCompiler.validateProgramForAot(unit.program(), policy);
+            manifests.put(id, validated.declarations());
+        }
+
+        return new AotValidationResult(build, Map.copyOf(manifests));
+    }
+
+    public record AotValidationResult(
+            IncrementalCompiler.BuildResult build,
+            Map<String, OresCompiler.DeclarationManifest> declarationsByUnit) {
+        public AotValidationResult {
+            Objects.requireNonNull(build, "build");
+            declarationsByUnit = Map.copyOf(declarationsByUnit);
         }
     }
 

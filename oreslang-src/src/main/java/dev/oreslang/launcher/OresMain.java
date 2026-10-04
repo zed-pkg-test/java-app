@@ -28,6 +28,7 @@ public final class OresMain {
     public static void main(String[] args) throws Exception {
         boolean strict = false;
         boolean checkOnly = false;
+        boolean aotCheck = false;
         boolean buildAnalysis = false;
         List<String> buildDefines = new ArrayList<>();
         Set<String> buildEntryPoints = new LinkedHashSet<>();
@@ -40,6 +41,7 @@ public final class OresMain {
         for (String arg : args) {
             if (arg.equals("--strict-isolate")) strict = true;
             else if (arg.equals("--check")) checkOnly = true;
+            else if (arg.equals("--check-aot")) aotCheck = true;
             else if (arg.equals("--build-analysis")) buildAnalysis = true;
             else if (arg.startsWith("--define=")) {
                 String raw = arg.substring("--define=".length()).trim();
@@ -77,7 +79,7 @@ public final class OresMain {
                     System.getenv());
             path = project.mainEntrypoint().orElse(null);
             if (path == null) {
-                System.err.println("usage: oreslang-compiler [--check|--build-analysis] [--define=name=value ...] [--entry=symbol ...] [--strict-isolate] [--mode=aot|jit|hybrid] [--platform=server|windows|macos|linux|android|ios] [--allow=CAP,...] [--allow-host-class=java.util.ArrayList ...] [file.ores|file.java]");
+                System.err.println("usage: oreslang-compiler [--check|--check-aot|--build-analysis] [--define=name=value ...] [--entry=symbol ...] [--strict-isolate] [--mode=aot|jit|hybrid] [--platform=server|windows|macos|linux|android|ios] [--allow=CAP,...] [--allow-host-class=java.util.ArrayList ...] [file.ores|file.java]");
                 System.err.println("or define [entrypoints].main in " + OresProjectConfig.MANIFEST_NAME);
                 System.exit(2);
                 return;
@@ -88,8 +90,10 @@ public final class OresMain {
         }
         if (!Files.isRegularFile(path)) throw new IllegalArgumentException("not a file: " + path);
 
-        if (checkOnly && buildAnalysis) {
-            throw new IllegalArgumentException("--check and --build-analysis are mutually exclusive");
+        int analysisModes = (checkOnly ? 1 : 0) + (aotCheck ? 1 : 0) + (buildAnalysis ? 1 : 0);
+        if (analysisModes > 1) {
+            throw new IllegalArgumentException(
+                    "--check, --check-aot and --build-analysis are mutually exclusive");
         }
 
         if (buildAnalysis) {
@@ -113,6 +117,11 @@ public final class OresMain {
             throw new IllegalArgumentException("--define/--entry require --build-analysis until the artifact build command is wired");
         }
 
+        IsolatePolicy policy = strict ? IsolatePolicy.strictFaas() : IsolatePolicy.developer();
+        if (!additionalCapabilities.isEmpty()) {
+            policy = policy.withCapabilities(additionalCapabilities.toArray(IsolatePolicy.Capability[]::new));
+        }
+
         if (checkOnly) {
             try {
                 LinkedProgramRunner.validate(path);
@@ -123,12 +132,25 @@ public final class OresMain {
             return;
         }
 
-        ExecutionProfile profile = ExecutionProfile.parse(mode, platform);
-        IsolatePolicy policy = strict ? IsolatePolicy.strictFaas() : IsolatePolicy.developer();
-        if (!additionalCapabilities.isEmpty()) {
-            policy = policy.withCapabilities(additionalCapabilities.toArray(IsolatePolicy.Capability[]::new));
+        if (aotCheck) {
+            try {
+                LinkedProgramRunner.AotValidationResult result =
+                        LinkedProgramRunner.validateForAot(path, policy);
+                System.out.println("AOT-compatible Oreslang units:");
+                result.declarationsByUnit().keySet().stream()
+                        .sorted()
+                        .forEach(unit -> System.out.println(
+                                "  " + unit + " ("
+                                        + result.declarationsByUnit().get(unit).symbols().size()
+                                        + " static declarations)"));
+            } catch (Exception error) {
+                System.err.println(formatCheckDiagnostic(path, error));
+                System.exit(1);
+            }
+            return;
         }
 
+        ExecutionProfile profile = ExecutionProfile.parse(mode, platform);
         LinkedProgramRunner.run(path, policy, profile, allowedHostClasses, System.out, System.err);
     }
 
