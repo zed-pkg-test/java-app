@@ -699,7 +699,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (receiver instanceof OresObject object) {
                 if (object.fields.containsKey(name)) return object.fields.get(name);
-                return new BoundMethod(object.owner, object, name);
+                return new BoundMethod(object, name);
             }
             if (receiver instanceof Map<?, ?> map) {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
@@ -846,24 +846,27 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         /**
-         * Go-style method value: one shared method definition per class plus a
-         * tiny (receiver, method-name) pair only when a method is extracted as
-         * a first-class callback. Direct receiver.method(...) calls allocate no
-         * bound-method object.
+         * Go-style method value: method code remains shared in the class method
+         * table.  Extraction materializes only the receiver identity plus the
+         * statically known method-name family; callback arity selects the same
+         * closed-world CallableSelector slot used by direct calls.
+         *
+         * <p>Direct receiver.method(...) calls bypass this object entirely, so
+         * ordinary method invocation has no bound-method allocation.  An AOT
+         * backend may lower a non-escaping value to a register/stack "fat
+         * pointer" (receiver + resolved slot) instead of heap allocating it.
          */
         private static final class BoundMethod implements Invokable {
-            private final Evaluator owner;
             private final OresObject receiver;
             private final String methodName;
 
-            private BoundMethod(Evaluator owner, OresObject receiver, String methodName) {
-                this.owner = owner;
+            private BoundMethod(OresObject receiver, String methodName) {
                 this.receiver = receiver;
                 this.methodName = methodName;
             }
 
             @Override public Object call(List<Object> arguments) {
-                return owner.invokeMethod(receiver, methodName, arguments);
+                return receiver.owner.invokeMethod(receiver, methodName, arguments);
             }
         }
 

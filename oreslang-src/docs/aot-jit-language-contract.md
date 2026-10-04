@@ -223,10 +223,78 @@ This is directly AOT-compatible:
 - no runtime type inspection, reflection, dynamic class generation, or overload
   search by parameter value type is required.
 
-An overloaded bound method cannot be extracted as an untyped first-class value,
-because doing so would discard the arity needed to select the slot. It must be
-called directly (or later be explicitly disambiguated by a function type if the
-language adds that feature).
+## Receiver binding and first-class method values
+
+Method code is stored once per class declaration. Creating an object does **not**
+copy or bind new method bodies into the object.
+
+A direct call:
+
+```ores
+box.pick(1);
+```
+
+lowers conceptually to a shared method-table call with the receiver supplied as
+a hidden first argument:
+
+```text
+invoke(instance$pick$arity1, box, 1)
+```
+
+The source-level parameter count and overload selector do not include that
+hidden receiver. Direct calls do not allocate a closure or bound-method object.
+
+A first-class method value is also supported:
+
+```ores
+val (() -> int) callback = box.pick;
+doWork(self.pick);
+```
+
+It is a small **bound method value**, conceptually a fat pointer containing
+receiver identity plus shared method identity/slot information. It never
+contains a cloned copy of the method code and `self` is never dynamically
+rebound to the caller.
+
+For the interpreter/reference runtime, the compact representation may retain
+`(receiver, method-name family)` and use callback arity to choose the already
+closed-world `CallableSelector` slot. An AOT backend may lower the same value
+to `(receiver pointer, resolved code/vtable slot)`. A non-escaping bound method
+may be stack/register allocated or eliminated by escape analysis; an escaping
+one may require a small callable object. The language guarantee is **shared
+method code**, not zero bytes of receiver state—some value must remember which
+object is `self`.
+
+Overloaded method extraction uses contextual function typing. If the expected
+callback type supplies a unique arity, that arity selects the same slot as a
+direct call:
+
+```ores
+fnc doWork((() -> int) callback) => int {
+  return callback();
+}
+
+define class Box as
+  pub pick() => int { return 1; }
+  pub pick(int value) => int { return value; }
+
+  pub run() => int {
+    return doWork(self.pick); // selects instance$pick$arity0
+  }
+end
+```
+
+An overloaded method still cannot be extracted as an **untyped** first-class
+value, because no arity is available:
+
+```ores
+val callback = box.pick; // compile-time error when pick is overloaded
+```
+
+Generic method values remain direct-call-only until Oreslang has an explicit
+method-value specialization surface. This keeps method values deterministic for
+AOT while leaving JIT free to inline, devirtualize, and eliminate their small
+runtime carrier when possible.
 
 ## JIT versus AOT
 

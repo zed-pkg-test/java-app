@@ -1039,6 +1039,10 @@ public final class TypeChecker {
             validateLambdaAgainstExpected(lambda, fn, env, generics, self);
             return fn;
         }
+        if (expr instanceof Ast.MemberExpr member && expected instanceof Function fn) {
+            Type contextual = contextualCallableMemberType(member, fn, env, generics, self);
+            if (contextual != null) return contextual;
+        }
         if (expr instanceof Ast.ListExpr list) {
             if (expected instanceof Tuple) {
                 return new Tuple(list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList());
@@ -1049,6 +1053,89 @@ public final class TypeChecker {
             }
         }
         return typeOf(expr, env, generics, self);
+    }
+
+    /**
+     * Resolve a first-class class callable using the function type supplied by
+     * its context.  This is what makes doWork(self.someMethod) AOT-safe even
+     * when someMethod is overloaded: the expected callback arity selects the
+     * same closed-world CallableSelector slot that a direct call would use.
+     *
+     * <p>No runtime parameter types participate in selection.  Generic method
+     * values remain intentionally unsupported until Oreslang has an explicit
+     * method-value specialization surface.
+     */
+    private Type contextualCallableMemberType(
+            Ast.MemberExpr member,
+            Function expected,
+            Env env,
+            Set<String> generics,
+            Type self) {
+        Type receiver = typeOf(member.receiver(), env, generics, self);
+        Type normalized = deref(unwrapMutexGuard(receiver));
+        int arity = expected.parameters().size();
+
+        if (normalized instanceof ClassNamespace classNamespace) {
+            Ast.ClassDecl klass = findClass(classNamespace.className());
+            if (klass == null) return null;
+            Ast.MethodDecl fn = findStaticFunction(
+                    klass, member.member(), arity, new LinkedHashSet<>());
+            if (fn == null) {
+                if (!findStaticFunctionsByName(klass, member.member(), new LinkedHashSet<>()).isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "no overload of static function '" + klass.name() + "." + member.member()
+                                    + "' matches callback arity " + arity);
+                }
+                return null;
+            }
+            if (!fn.genericParameters().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "generic static function '" + klass.name() + "." + fn.name()
+                                + "' must be specialized by a direct call; polymorphic function values are not supported yet");
+            }
+            return functionType(fn.parameters(), fn.returnType(), Set.of(), null);
+        }
+
+        if (normalized instanceof Named named) {
+            Ast.ClassDecl klass = findClass(named.name());
+            if (klass == null) return null;
+
+            // Runtime member lookup gives fields precedence over methods.
+            if (findFieldTarget(klass, named, member.member(), new LinkedHashSet<>()) != null) {
+                return null;
+            }
+
+            ResolvedMethod target = findMethodTarget(
+                    klass, named, member.member(), arity, new LinkedHashSet<>());
+            if (target == null) {
+                if (!findMethodsByName(klass, member.member(), new LinkedHashSet<>()).isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "no overload of method '" + klass.name() + "." + member.member()
+                                    + "' matches callback arity " + arity);
+                }
+                return null;
+            }
+
+            Ast.MethodDecl method = target.method();
+            if (!method.genericParameters().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "generic method '" + target.owner().name() + "." + method.name()
+                                + "' must be specialized by a direct call; polymorphic bound-method values are not supported yet");
+            }
+
+            Set<String> memberGenerics = new HashSet<>(target.owner().genericParameters());
+            memberGenerics.addAll(method.genericParameters());
+            Type signature = functionType(
+                    method.parameters(),
+                    method.returnType(),
+                    memberGenerics,
+                    target.ownerType());
+            return substituteGenerics(
+                    signature,
+                    classGenericBindings(target.owner(), target.ownerType()));
+        }
+
+        return null;
     }
 
     private void defineDestructureBinding(Env env, Ast.DestructureBinding binding, Type type) {
@@ -2174,7 +2261,8 @@ public final class TypeChecker {
         List<Type> patterns = params.stream().map(p -> resolveParam(p, unique, callableSelf)).toList();
 
         for (int i = 0; i < arguments.size(); i++) {
-            Type actual = typeOf(arguments.get(i), env, callerGenerics, callerSelf);
+            Type actual = typeOfAgainstExpected(
+                    arguments.get(i), patterns.get(i), env, callerGenerics, callerSelf);
             inferGenericBindings(patterns.get(i), actual, bindings, fixedBindings, label);
         }
         Set<String> unbound = new HashSet<>(unique);
@@ -2186,7 +2274,10 @@ public final class TypeChecker {
                 throw new IllegalArgumentException("cannot infer all generic parameters for " + label + " from argument " + (i + 1));
             }
             validateLambdaArgument(arguments.get(i), expected, env, callerGenerics, callerSelf);
-            requireAssignable(typeOf(arguments.get(i), env, callerGenerics, callerSelf), expected, "argument " + (i + 1));
+            requireAssignable(
+                    typeOfAgainstExpected(arguments.get(i), expected, env, callerGenerics, callerSelf),
+                    expected,
+                    "argument " + (i + 1));
         }
 
         Type result = substituteGenerics(resolve(returnRef, unique, callableSelf), bindings);

@@ -204,7 +204,7 @@ final class ArityOverloadAotTest {
     }
 
     @Test
-    void overloadedMethodValueMustBeCalledDirectlySoArityIsKnown() {
+    void overloadedMethodValueStillNeedsContextWhenArityIsUnknown() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
@@ -221,5 +221,76 @@ final class ArityOverloadAotTest {
                         """)));
 
         assertTrue(failure.getMessage().contains("must be called so arity can select the overload"));
+    }
+
+    @Test
+    void expectedFunctionTypeBindsOverloadedMethodValueAndSelfWithoutCloningMethodCode() throws Exception {
+        String program = """
+                pub fnc call0((() -> int) callback) => int {
+                  return callback();
+                }
+
+                pub fnc call1(((int) -> int) callback) => int {
+                  return callback(5);
+                }
+
+                define class Box as
+                  val int base;
+
+                  pub pick() => int {
+                    return self.base;
+                  }
+
+                  pub pick(int delta) => int {
+                    return self.base + delta;
+                  }
+
+                  pub via_self0() => int {
+                    return call0(self.pick);
+                  }
+
+                  pub via_self1() => int {
+                    return call1(self.pick);
+                  }
+                end
+
+                pub routine main() => void {
+                  val left = new Box(10);
+                  val right = new Box(20);
+                  val typed = new Box(30);
+
+                  stdio.println(call0(left.pick));
+                  stdio.println(call1(right.pick));
+
+                  val (() -> int) callback = typed.pick;
+                  stdio.println(callback());
+
+                  stdio.println(new Box(40).via_self0());
+                  stdio.println(new Box(50).via_self1());
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse(program)));
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "bound-method-values.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = IsolatePolicy.developer()
+                .restrictedContextBuilder(ExecutionProfile.serverJit())
+                .out(out)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertEquals("""
+                10
+                25
+                30
+                40
+                55
+                """, out.toString(StandardCharsets.UTF_8));
     }
 }
