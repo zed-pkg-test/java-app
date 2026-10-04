@@ -52,6 +52,16 @@ public final class ActorFactoryCatalog {
         }
     }
 
+    /**
+     * Generation-scoped descriptor for a compiler-generated persistent actor
+     * constructor.
+     *
+     * <p>{@code inputType} names the generated hidden protocol-envelope ABI
+     * (the closed tagged union of all public actor methods), not a privileged
+     * source-level {@code receive(In)} method. {@code outputType} describes the
+     * group's emitted-output contract when one exists. The ABI digest covers
+     * the complete public protocol/constructor/domain contract.</p>
+     */
     public record Descriptor(
             FactoryKey key,
             ActorRuntime.ActorKind actorKind,
@@ -63,8 +73,8 @@ public final class ActorFactoryCatalog {
         public Descriptor {
             Objects.requireNonNull(key, "key");
             Objects.requireNonNull(actorKind, "actorKind");
-            inputType = requirePart(inputType, "actor factory input type");
-            outputType = requirePart(outputType, "actor factory output type");
+            inputType = requirePart(inputType, "actor hidden protocol ABI type");
+            outputType = requirePart(outputType, "actor group output type");
             abiDigest = requirePart(abiDigest, "actor factory ABI digest");
             if (codeGeneration < 0) {
                 throw new IllegalArgumentException("codeGeneration must be >= 0");

@@ -2808,6 +2808,17 @@ public final class ActorRuntime implements AutoCloseable {
         void suspendOn(OresFuture<?> awaited, ActorContinuation continuation);
 
         /**
+         * Compiler-lowering hook for a typed actor protocol method that
+         * suspended and later reaches its logical return point.
+         *
+         * <p>This is runtime reply plumbing, not a source-language capability.
+         * It is valid only while resuming the suspended mailbox envelope for a
+         * typed protocol request. Ordinary actor messages, timers, next-tick
+         * callbacks, and unsuspended protocol calls are rejected.</p>
+         */
+        void completeProtocolTurn(Object result);
+
+        /**
          * Host-interop compatibility adapter. The stage is immediately
          * normalized into an OresFuture before suspension.
          */
@@ -3102,8 +3113,8 @@ public final class ActorRuntime implements AutoCloseable {
 
     /**
      * Compiler/interpreter lowering target for persistent source-level SHARED
-     * actor classes. Guest code never receives this factory; actor-owned state
-     * is created after the runtime has installed the actor context.
+     * actor classes. Source actor state is created only after the actor context
+     * is installed; guest code receives only the ActorRef mailbox capability.
      */
     public <M> ActorRef<M> spawnSourceSharedActor(BehaviorFactory<M> behaviorFactory) {
         Objects.requireNonNull(behaviorFactory, "behaviorFactory");
@@ -6217,6 +6228,46 @@ public final class ActorRuntime implements AutoCloseable {
             schedule();
         }
 
+        private void completeProtocolTurn(Object result) {
+            if (currentActor.get() != this) {
+                throw new IllegalStateException(
+                        "protocol completion is only valid inside the owning actor turn");
+            }
+            MessageEnvelope envelope = suspendedInboxEnvelope;
+            if (envelope == null || envelope.protocolRequest() == null) {
+                throw new IllegalStateException(
+                        "protocol completion requires a suspended typed actor request");
+            }
+
+            ProtocolRequest protocol = envelope.protocolRequest();
+            if (protocol.reply().isDone()) {
+                // A caller may cancel its observation Future while the actor
+                // continues executing. Cancellation never grants authority to
+                // interrupt or rewind the actor turn.
+                if (protocol.reply().isCancelled()) return;
+                throw new IllegalStateException(
+                        "typed actor protocol reply was already completed");
+            }
+
+            validateMessageGraph(result);
+            requireOwnedActorRefs(result, new IdentityHashMap<>(), 0);
+            requireOwnedSharedHandles(result, new IdentityHashMap<>(), 0);
+            Object preparedReply = freezeForTransport(result);
+            if (!protocol.reply().completeFromRuntime(preparedReply)) {
+                throw new IllegalStateException(
+                        "typed actor protocol reply lost its exactly-once completion race");
+            }
+        }
+
+        private void failSuspendedProtocolTurn(Throwable failure) {
+            MessageEnvelope envelope = suspendedInboxEnvelope;
+            if (envelope == null || envelope.protocolRequest() == null) return;
+            ProtocolRequest protocol = envelope.protocolRequest();
+            if (!protocol.reply().isDone()) {
+                protocol.reply().failFromRuntime(failure);
+            }
+        }
+
         private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {
             Objects.requireNonNull(awaited, "awaited");
             Objects.requireNonNull(continuation, "continuation");
@@ -6423,6 +6474,9 @@ public final class ActorRuntime implements AutoCloseable {
                             ActorContinuation continuation) {
                         ActorCell.this.suspendOn(awaited, continuation);
                     }
+                    @Override public void completeProtocolTurn(Object result) {
+                        ActorCell.this.completeProtocolTurn(result);
+                    }
                     @Override public void nextTick(ActorContinuation continuation) {
                         ActorCell.this.nextTick(continuation);
                     }
@@ -6479,6 +6533,9 @@ public final class ActorRuntime implements AutoCloseable {
                                 context);
                     } catch (ActorTurnSuspendedSignal suspended) {
                         suspendedAgain = true;
+                    } catch (Throwable failure) {
+                        failSuspendedProtocolTurn(failure);
+                        throw failure;
                     } finally {
                         disarmMessageDeadline(continuationDeadline);
                         if (!suspendedAgain) closeSuspendedInboxEnvelope();

@@ -76,52 +76,54 @@ final class ActorCapabilityIsolationTest {
 
     @Test
     void privateActorCannotLaunderSharedMemoryThroughOrdinaryHelperFunction() {
-        Ast.Program program = TypeChecker.check(Parser.parse("""
-                fnc build_shared() => void {
-                  val shared = SharedMutex.new(1);
-                  stdio.println(shared);
-                  return;
-                }
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc build_shared() => void {
+                          val shared = SharedMutex.new(1);
+                          stdio.println(shared);
+                          return;
+                        }
 
-                isoactor PrivateWorker {
-                  pub receive(int message): void {
-                    build_shared();
-                    return;
-                  }
-                }
-                """));
+                        isoactor PrivateWorker {
+                          pub receive(message: int): void {
+                            build_shared();
+                            return;
+                          }
+                        }
+                        """)));
 
-        SecurityException error = assertThrows(
-                SecurityException.class,
-                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
-
-        assertTrue(error.getMessage().contains("SHARED_MEMORY"));
+        assertTrue(
+                error.getMessage().contains("external shared mutable state")
+                        || error.getMessage().contains("SharedMutex"),
+                error.getMessage());
     }
 
     @Test
     void privateActorCannotLaunderSharedMemoryThroughStaticClassHelper() {
-        Ast.Program program = TypeChecker.check(Parser.parse("""
-                define class Helpers as
-                  pub static fnc build_shared() => void {
-                    val shared = SharedMutex.new(1);
-                    stdio.println(shared);
-                    return;
-                  }
-                end
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Helpers as
+                          pub static fnc build_shared() => void {
+                            val shared = SharedMutex.new(1);
+                            stdio.println(shared);
+                            return;
+                          }
+                        end
 
-                isoactor PrivateWorker {
-                  pub receive(int message): void {
-                    Helpers.build_shared();
-                    return;
-                  }
-                }
-                """));
+                        isoactor PrivateWorker {
+                          pub receive(message: int): void {
+                            Helpers.build_shared();
+                            return;
+                          }
+                        }
+                        """)));
 
-        SecurityException error = assertThrows(
-                SecurityException.class,
-                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
-
-        assertTrue(error.getMessage().contains("SHARED_MEMORY"));
+        assertTrue(
+                error.getMessage().contains("external shared mutable state")
+                        || error.getMessage().contains("SharedMutex"),
+                error.getMessage());
     }
 
     @Test
@@ -318,17 +320,18 @@ final class ActorCapabilityIsolationTest {
 
     @Test
     void invalidOreslangPrivateActorSharingFixtureIsRejected() throws Exception {
-        String source = Files.readString(Path.of("examples/private-actor-sharing-invalid.ores"));
-        Ast.Program program = TypeChecker.check(Parser.parse(source));
+        String source = Files.readString(
+                Path.of("examples/private-actor-sharing-invalid.ores"));
 
-        SecurityException error = assertThrows(
-                SecurityException.class,
-                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse(source)));
 
         assertTrue(
-                error.getMessage().contains("SHARED_MEMORY")
-                        || error.getMessage().contains("ACTOR_SHARE_READONLY"));
+                error.getMessage().contains("external shared mutable state")
+                        || error.getMessage().contains("SharedMutex")
+                        || error.getMessage().contains("RwLock"),
+                error.getMessage());
     }
-
 
 }

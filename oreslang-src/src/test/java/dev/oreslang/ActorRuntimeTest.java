@@ -9,7 +9,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,6 +43,129 @@ final class ActorRuntimeTest {
             assertEquals(42, runtime.invokeSourceProtocol(ref, "read", List.of())
                     .get(2, TimeUnit.SECONDS));
             assertTrue(ref.isAlive());
+        }
+    }
+
+    @Test
+    void suspendedTypedProtocolCompletesReplyOnlyAfterContinuationReturn() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CompletableFuture<Integer> gate = new CompletableFuture<>();
+            CountDownLatch suspended = new CountDownLatch(1);
+
+            var ref = runtime.spawnSourceSharedProtocolActor(factoryContext ->
+                    (method, arguments, turnContext) -> {
+                        if (!method.equals("wait")) {
+                            throw new IllegalArgumentException("unexpected method " + method);
+                        }
+                        suspended.countDown();
+                        turnContext.suspendOn(gate, (value, failure, resumeContext) -> {
+                            assertNull(failure);
+                            resumeContext.completeProtocolTurn(value);
+                        });
+                        throw new AssertionError("suspendOn must unwind the current actor turn");
+                    });
+
+            var reply = runtime.invokeSourceProtocol(ref, "wait", List.of());
+            assertTrue(suspended.await(2, TimeUnit.SECONDS));
+            assertFalse(reply.isDone());
+
+            gate.complete(42);
+
+            assertEquals(42, reply.get(2, TimeUnit.SECONDS));
+            assertTrue(ref.isAlive());
+        }
+    }
+
+    @Test
+    void suspendedTypedProtocolPropagatesContinuationFailureToReply() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CompletableFuture<Integer> gate = new CompletableFuture<>();
+            CountDownLatch suspended = new CountDownLatch(1);
+
+            var ref = runtime.spawnSourceSharedProtocolActor(factoryContext ->
+                    (method, arguments, turnContext) -> {
+                        suspended.countDown();
+                        turnContext.suspendOn(gate, (value, failure, resumeContext) -> {
+                            throw new IllegalStateException("protocol-resume-boom");
+                        });
+                        throw new AssertionError("suspendOn must unwind the current actor turn");
+                    });
+
+            var reply = runtime.invokeSourceProtocol(ref, "wait", List.of());
+            assertTrue(suspended.await(2, TimeUnit.SECONDS));
+            gate.complete(1);
+
+            ExecutionException failure = assertThrows(
+                    ExecutionException.class,
+                    () -> reply.get(2, TimeUnit.SECONDS));
+            assertEquals("protocol-resume-boom", failure.getCause().getMessage());
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (ref.isAlive() && System.nanoTime() < deadline) Thread.sleep(2);
+            assertFalse(ref.isAlive(), "unhandled protocol continuation failure is fail-stop");
+        }
+    }
+
+    @Test
+    void cancellingProtocolReplyDoesNotCancelOrRewindActorTurn() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CompletableFuture<Integer> gate = new CompletableFuture<>();
+            CountDownLatch suspended = new CountDownLatch(1);
+            CountDownLatch resumed = new CountDownLatch(1);
+
+            var ref = runtime.spawnSourceSharedProtocolActor(factoryContext ->
+                    (method, arguments, turnContext) -> {
+                        suspended.countDown();
+                        turnContext.suspendOn(gate, (value, failure, resumeContext) -> {
+                            resumed.countDown();
+                            resumeContext.completeProtocolTurn(value);
+                        });
+                        throw new AssertionError("suspendOn must unwind the current actor turn");
+                    });
+
+            var reply = runtime.invokeSourceProtocol(ref, "wait", List.of());
+            assertTrue(suspended.await(2, TimeUnit.SECONDS));
+            assertTrue(reply.cancel(true));
+
+            gate.complete(7);
+
+            assertTrue(resumed.await(2, TimeUnit.SECONDS));
+            assertTrue(reply.isCancelled());
+            assertTrue(ref.isAlive(),
+                    "cancelling an observation Future must not kill the actor or rewind its turn");
+        }
+    }
+
+    @Test
+    void protocolInvocationRejectsForeignRuntimeActorRefs() {
+        try (ActorRuntime owner = new ActorRuntime();
+             ActorRuntime foreign = new ActorRuntime()) {
+            var ref = owner.spawnSourceSharedProtocolActor(factoryContext ->
+                    (method, arguments, turnContext) -> 1);
+
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> foreign.invokeSourceProtocol(ref, "read", List.of()));
+
+            assertTrue(failure.getMessage().contains("different ActorRuntime"));
+            assertTrue(ref.isAlive());
+        }
+    }
+
+    @Test
+    void rawMessagesFailClosedAgainstTypedSourceProtocolDispatcher() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var ref = runtime.spawnSourceSharedProtocolActor(factoryContext ->
+                    (method, arguments, turnContext) -> 1);
+
+            ref.send("raw-message");
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (ref.isAlive() && System.nanoTime() < deadline) Thread.sleep(2);
+
+            assertFalse(ref.isAlive());
+            assertTrue(ref.failure().orElseThrow().getMessage()
+                    .contains("cannot receive raw mailbox messages"));
         }
     }
 

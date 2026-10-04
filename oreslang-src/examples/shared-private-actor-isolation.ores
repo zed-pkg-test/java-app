@@ -1,5 +1,3 @@
-import fnc {actor_label} from "./actor-isolation-support.ores";
-
 // SHARED actor:
 // - executes in the shared-actor scheduler pool
 // - owns its mutable fields behind one serialized mailbox receiver
@@ -23,10 +21,6 @@ shared actor SharedCounter {
   private current(): int {
     return self.value;
   }
-
-  private actor_kind(): String {
-    return actor_label(true);
-  }
 }
 
 // PRIVATE / isolated actor:
@@ -46,10 +40,6 @@ isoactor PrivateCounter {
 
   private current(): int {
     return self.value;
-  }
-
-  private actor_kind(): String {
-    return actor_label(false);
   }
 }
 
