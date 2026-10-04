@@ -152,8 +152,8 @@ final class ProjectManifestImportTest {
                 """);
 
         for (Path entry : List.of(namedMain, wildcardMain)) {
-            IllegalArgumentException failure = assertThrows(
-                    IllegalArgumentException.class,
+            PolyglotException failure = assertThrows(
+                    PolyglotException.class,
                     () -> LinkedProgramRunner.run(
                             entry,
                             IsolatePolicy.developer(),
