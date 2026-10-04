@@ -22,6 +22,13 @@ public final class Parser {
     }
 
     public Ast.Program parseProgram() {
+        String namespace = null;
+        if (match(NAMESPACE)) {
+            namespace = consume(IDENT, "expected flat namespace name").lexeme();
+            if (check(DOT)) throw error(peek(), "namespaces cannot be nested or dotted");
+            consume(SEMICOLON, "namespace declaration must end with ';'");
+        }
+
         List<Ast.ImportDecl> imports = new ArrayList<>();
         while (match(IMPORT)) imports.add(parseImport());
 
@@ -32,30 +39,11 @@ public final class Parser {
             List<Ast.Annotation> annotations = parseAnnotations();
             Modifiers modifiers = parseModifiers();
 
-            if (match(DEFINE, DECLARE)) {
-                Token declarationKeyword = previous();
-                boolean declare = declarationKeyword.type() == DECLARE;
+            if (match(DEFINE)) {
                 if (modifiers.shared) {
                     throw error(previous(), "'shared' must modify an actor declaration; use 'shared actor <Name>'");
                 }
-
-                boolean afterDefineAbstract = false;
-                if (!declare) afterDefineAbstract = match(ABSTRACT);
-
-                if (match(NAMESPACE)) {
-                    if (modifiers.visibility != Ast.Visibility.PRIVATE || modifiers.async || modifiers.nonLexical
-                            || modifiers.isStatic || modifiers.isAbstract || modifiers.shared || afterDefineAbstract) {
-                        throw error(previous(), "namespaces do not accept function/class modifiers");
-                    }
-                    modules.add(parseNamespace(annotations));
-                    continue;
-                }
-
-                if (declare) {
-                    throw error(declarationKeyword,
-                            "'declare' is reserved; it is currently valid only as 'declare namespace <Name> as ...'");
-                }
-
+                boolean afterDefineAbstract = match(ABSTRACT);
                 if (match(MODULE)) {
                     if (modifiers.visibility != Ast.Visibility.PRIVATE || modifiers.async || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
                         throw error(previous(), "modules do not accept function/class modifiers");
@@ -73,27 +61,22 @@ public final class Parser {
                     rootDeclarations.add(parseInterface(modifiers.visibility));
                     continue;
                 }
-                throw error(previous(), "expected namespace, module, class, or interface after 'define'");
-            }
-
-            if (check(NAMESPACE)) {
-                throw error(peek(),
-                        "namespace is a static type container; use 'define namespace <Name> as ... end' "
-                                + "or 'declare namespace <Name> as { ... }'");
+                throw error(previous(), "expected module, class, or interface after 'define'");
             }
 
             Ast.Decl declaration = parseDeclarationAfterModifiers(annotations, modifiers);
-            if (declaration == null) throw error(peek(), "expected module, namespace, or top-level declaration");
+            if (declaration == null) throw error(peek(), "expected module or top-level declaration");
+            if (declaration instanceof Ast.FieldDecl) {
+                throw error(previous(), "file/root bindings are forbidden; put static data inside a named module");
+            }
             rootDeclarations.add(declaration);
         }
 
         if (!rootDeclarations.isEmpty()) {
             modules.add(new Ast.ModuleDecl(ROOT_MODULE, List.of(), rootDeclarations));
         }
-        if (modules.isEmpty()) throw error(peek(), "a source file must define at least one module, namespace, or top-level declaration");
-        // Code-unit/package identity is path-derived. namespace is no longer a
-        // file-header alias for package identity.
-        return new Ast.Program(null, imports, modules);
+        if (modules.isEmpty()) throw error(peek(), "a source file must define at least one module or top-level declaration");
+        return new Ast.Program(namespace, imports, modules);
     }
 
     private Ast.ImportDecl parseImport() {
@@ -112,10 +95,9 @@ public final class Parser {
                 throw error(peek(), "function imports use 'import fnc', not 'import fn'");
             }
             if (match(MODULE)) kind = Ast.ImportKind.MODULE;
-            else if (match(NAMESPACE)) kind = Ast.ImportKind.NAMESPACE;
             else if (match(CLASS)) kind = Ast.ImportKind.CLASS;
             else if (match(FNC)) kind = Ast.ImportKind.FUNCTION;
-            else throw error(peek(), "expected module, namespace, class, fnc, or * after import");
+            else throw error(peek(), "expected module, class, fnc, or * after import");
 
             if (match(STAR)) {
                 wildcard = true;
@@ -154,66 +136,11 @@ public final class Parser {
     private Ast.ModuleDecl parseModule(List<Ast.Annotation> annotations) {
         String name = consume(IDENT, "expected flat module name").lexeme();
         if (check(DOT)) throw error(peek(), "modules cannot be nested or dotted");
+        match(AS); // canonical prose-friendly form: define module Foo as ... end
         List<Ast.Decl> declarations = new ArrayList<>();
         while (!check(END) && !check(EOF)) declarations.add(parseModuleMember());
         consume(END, "expected 'end' to close module " + name);
         return new Ast.ModuleDecl(name, annotations, declarations);
-    }
-
-    private Ast.ModuleDecl parseNamespace(List<Ast.Annotation> annotations) {
-        String name = consume(IDENT, "expected flat namespace name").lexeme();
-        if (check(DOT)) throw error(peek(), "namespaces cannot be nested or dotted");
-        consume(AS, "expected 'as' after namespace name");
-
-        boolean braceStyle = match(LBRACE);
-        Token.Type terminator = braceStyle ? RBRACE : END;
-        List<Ast.Decl> declarations = new ArrayList<>();
-        while (!check(terminator) && !check(EOF)) declarations.add(parseNamespaceMember());
-        consume(terminator, braceStyle
-                ? "expected '}' to close namespace " + name
-                : "expected 'end' to close namespace " + name);
-        return new Ast.ModuleDecl(name, Ast.ContainerKind.NAMESPACE, annotations, declarations);
-    }
-
-    private Ast.Decl parseNamespaceMember() {
-        List<Ast.Annotation> annotations = parseAnnotations();
-        Modifiers modifiers = parseModifiers();
-
-        if (match(DECLARE)) {
-            throw error(previous(), "namespaces cannot be nested; 'declare' is only valid at source top level");
-        }
-
-        if (match(DEFINE)) {
-            if (modifiers.shared) {
-                throw error(previous(), "'shared' is not valid on a namespace type declaration");
-            }
-            boolean isAbstract = match(ABSTRACT);
-            if (match(CLASS)) {
-                if (modifiers.async || modifiers.nonLexical || modifiers.isStatic) {
-                    throw error(previous(), "namespace classes do not accept callable modifiers");
-                }
-                return parseClass(modifiers.isAbstract || isAbstract);
-            }
-            if (match(INTERFACE)) {
-                if (modifiers.async || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || isAbstract) {
-                    throw error(previous(), "namespace interfaces do not accept callable/class modifiers");
-                }
-                return parseInterface(modifiers.visibility);
-            }
-            if (check(MODULE) || check(NAMESPACE)) {
-                throw error(peek(), "modules and namespaces are flat and cannot be nested");
-            }
-            throw error(previous(), "a namespace may define only classes or interfaces with 'define'");
-        }
-
-        if (modifiers.shared || modifiers.async || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
-            throw error(peek(), "namespace type declarations do not accept callable/runtime modifiers");
-        }
-        if (match(INTERFACE)) return parseInterface(modifiers.visibility);
-        if (match(TYPE)) return parseTypeAlias();
-
-        throw error(peek(),
-                "namespace members must be type declarations: class, abstract class, interface, or type alias");
     }
 
     private Ast.Decl parseModuleMember() {
@@ -225,9 +152,6 @@ public final class Parser {
                 throw error(previous(), "'shared' must modify an actor declaration; use 'shared actor <Name>'");
             }
             boolean afterDefineAbstract = match(ABSTRACT);
-            if (match(MODULE, NAMESPACE)) {
-                throw error(previous(), "modules and namespaces are flat and cannot be nested");
-            }
             if (match(CLASS)) {
                 if (modifiers.nonLexical) throw error(previous(), "'nlex' applies only to fnc, routine, or lambda");
                 return parseClass(modifiers.isAbstract || afterDefineAbstract);
@@ -270,6 +194,7 @@ public final class Parser {
         if (match(ROUTINE)) return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE);
         if (modifiers.nonLexical) throw error(peek(), "'nlex' applies only to fnc, routine, or lambda");
         if (match(INTERFACE)) return parseInterface(modifiers.visibility);
+        if (match(STRUCT)) return parseStructAlias();
         if (match(TYPE)) return parseTypeAlias();
         if (isBindingKind(peek().type())) return parseModuleBinding(annotations, modifiers.visibility);
         return null;
@@ -297,7 +222,7 @@ public final class Parser {
             Ast.TypeRef returnType = parseTypeRef();
             List<Ast.Stmt> body = parseBlock();
             return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.nonLexical, actorKind,
-                    generics, params, returnType, annotations, body);
+                    generics, exposeLocalStructParams(params, body), exposeLocalStructType(returnType, body), annotations, body);
         }
 
         consume(LPAREN, "expected '(' after callable name or '=' for lambda-style declaration");
@@ -306,8 +231,8 @@ public final class Parser {
         consume(RPAREN, "expected ')' after parameters");
         Ast.TypeRef returnType = parseReturnType(annotations);
         List<Ast.Stmt> body = parseBlock();
-        return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.nonLexical, actorKind, generics, params,
-                returnType, annotations, body);
+        return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.nonLexical, actorKind, generics,
+                exposeLocalStructParams(params, body), exposeLocalStructType(returnType, body), annotations, body);
     }
 
     private Ast.ClassDecl parseClass(boolean isAbstract) {
@@ -516,7 +441,53 @@ public final class Parser {
             body = List.of();
         } else body = parseBlock();
         return new Ast.MethodDecl(name, mods.visibility, mods.isStatic, mods.isAbstract, mods.async,
-                receiverType, generics, params, returnType, annotations, body);
+                receiverType, generics, exposeLocalStructParams(params, body), exposeLocalStructType(returnType, body), annotations, body);
+    }
+
+    private List<Ast.Param> exposeLocalStructParams(List<Ast.Param> params, List<Ast.Stmt> body) {
+        return params.stream()
+                .map(param -> new Ast.Param(
+                        exposeLocalStructType(param.type(), body),
+                        param.name(),
+                        param.structural(),
+                        param.mutable()))
+                .toList();
+    }
+
+    private Ast.TypeRef exposeLocalStructType(Ast.TypeRef ref, List<Ast.Stmt> body) {
+        java.util.LinkedHashMap<String, Ast.TypeAliasDecl> locals = new java.util.LinkedHashMap<>();
+        for (Ast.Stmt stmt : body) {
+            if (stmt instanceof Ast.LocalTypeDeclStmt local
+                    && local.declaration() instanceof Ast.TypeAliasDecl alias
+                    && alias.target().isRecordType()) {
+                locals.put(alias.name(), alias);
+            }
+        }
+        return exposeLocalStructType(ref, locals, new java.util.HashSet<>());
+    }
+
+    private Ast.TypeRef exposeLocalStructType(
+            Ast.TypeRef ref,
+            java.util.Map<String, Ast.TypeAliasDecl> locals,
+            java.util.Set<String> resolving) {
+        Ast.TypeAliasDecl alias = locals.get(ref.name());
+        if (alias != null && ref.arguments().isEmpty() && !ref.inferArguments()) {
+            if (!resolving.add(alias.name())) {
+                throw error(peek(), "local struct/type alias cycle involving '" + alias.name() + "'");
+            }
+            try {
+                return exposeLocalStructType(alias.target(), locals, resolving);
+            } finally {
+                resolving.remove(alias.name());
+            }
+        }
+        if (ref.arguments().isEmpty()) return ref;
+        return new Ast.TypeRef(
+                ref.name(),
+                ref.arguments().stream()
+                        .map(arg -> exposeLocalStructType(arg, locals, new java.util.HashSet<>(resolving)))
+                        .toList(),
+                ref.inferArguments());
     }
 
     private String parseMethodName() {
@@ -535,9 +506,38 @@ public final class Parser {
         String name = consume(IDENT, "expected type alias name").lexeme();
         List<String> generics = parseGenericParameters();
         consume(EQUAL, "expected '=' in type alias");
-        Ast.TypeRef target = parseTypeRef();
-        consumeStatementTerminator("type alias should end with ';'");
+        boolean inlineStruct = match(STRUCT);
+        Ast.TypeRef target = inlineStruct ? parseAnonymousStructType() : parseTypeRef();
+        if (inlineStruct) match(SEMICOLON);
+        else consumeStatementTerminator("type alias should end with ';'");
         return new Ast.TypeAliasDecl(name, generics, target);
+    }
+
+    private Ast.TypeAliasDecl parseStructAlias() {
+        String name = consume(IDENT, "expected struct name").lexeme();
+        if (check(LT)) {
+            throw error(peek(), "generic struct declarations are not implemented yet; use a generic type alias");
+        }
+        Ast.TypeRef target = parseAnonymousStructType();
+        match(SEMICOLON);
+        return new Ast.TypeAliasDecl(name, List.of(), target);
+    }
+
+    private Ast.TypeRef parseAnonymousStructType() {
+        consume(LBRACE, "expected '{' after struct");
+        java.util.LinkedHashMap<String, Ast.TypeRef> fields = new java.util.LinkedHashMap<>();
+        while (!check(RBRACE) && !check(EOF)) {
+            String field = consume(IDENT, "expected struct field name").lexeme();
+            consume(COLON, "expected ':' after struct field name");
+            Ast.TypeRef fieldType = parseTypeRef();
+            if (fields.putIfAbsent(field, fieldType) != null) {
+                throw error(previous(), "duplicate struct field '" + field + "'");
+            }
+            match(COMMA);
+            match(SEMICOLON);
+        }
+        consume(RBRACE, "expected '}' after struct fields");
+        return Ast.TypeRef.recordType(fields);
     }
 
     private List<Ast.Annotation> parseAnnotations() {
@@ -857,6 +857,12 @@ public final class Parser {
     }
 
     private Ast.Stmt parseStatement() {
+        if (match(STRUCT)) return new Ast.LocalTypeDeclStmt(parseStructAlias());
+        if (match(TYPE)) return new Ast.LocalTypeDeclStmt(parseTypeAlias());
+        if (match(INTERFACE)) return new Ast.LocalTypeDeclStmt(parseInterface(Ast.Visibility.PRIVATE));
+        if (check(CLASS) || check(MODULE) || check(NAMESPACE) || check(DEFINE)) {
+            throw error(peek(), "class, module, and namespace declarations are top-level only");
+        }
         if (isBindingKind(peek().type()) && looksLikePrefixedDestructure()) {
             Ast.BindingKind inherited = parseBindingKind();
             return parseDestructure(check(LBRACKET) ? Ast.DestructureKind.SEQUENCE : Ast.DestructureKind.OBJECT, inherited);
@@ -1313,7 +1319,7 @@ public final class Parser {
             case IDENT,
                     DEFINE, CLASS, MODULE, NAMESPACE, IMPORT, FROM, AS, EXTENDS, IMPLEMENTS,
                     TRY, CATCH, FINALLY, END, FI, IF, DO, ELSE, THEN,
-                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, ACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, YIELD, SUPER, ELSEIF, SWITCH, TYPE, TYPEOF,
+                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, ACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, YIELD, SUPER, ELSEIF, SWITCH, TYPE, TYPEOF, STRUCT,
                     INTERFACE, IMPL, ABSTRACT, VOID, STATIC, PUB, PRIVATE, STRUCTURAL, RETURN, DEFER,
                     VAL, CONST, LET, MUT, SELF, TRUE, FALSE, NULL, OBJ, ARR -> true;
             default -> false;
@@ -1339,7 +1345,11 @@ public final class Parser {
                 && reservedCallableNameFollowedByInvocation(current)) {
             return new Ast.NameExpr(advance().lexeme());
         }
-        if (match(IDENT)) return new Ast.NameExpr(previous().lexeme());
+        if (match(IDENT)) {
+            String name = previous().lexeme();
+            if (match(LBRACE)) return parseStructLiteral(Ast.TypeRef.simple(name));
+            return new Ast.NameExpr(name);
+        }
         if (match(NEW)) {
             Ast.TypeRef type = parseTypeRef();
             consume(LPAREN, "expected '(' after new type");
@@ -1347,7 +1357,9 @@ public final class Parser {
             consume(RPAREN, "expected ')' after constructor arguments");
             return new Ast.NewExpr(type, args);
         }
-        if (match(OBJ)) return parseObjectLiteral();
+        if (match(OBJ)) {
+            throw error(previous(), "obj{} is shelved; declare a struct for fixed shape or use Map<K,V> for dynamic keys");
+        }
         if (match(ARR)) {
             consume(LBRACKET, "expected '[' after arr");
             List<Ast.Expr> items = parseArgumentsUntil(RBRACKET);
@@ -1379,6 +1391,21 @@ public final class Parser {
             return new Ast.ListExpr(items);
         }
         throw error(peek(), "expected expression");
+    }
+
+    private Ast.StructExpr parseStructLiteral(Ast.TypeRef type) {
+        List<Ast.ObjectField> fields = new ArrayList<>();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        while (!check(RBRACE) && !check(EOF)) {
+            String key = consumeStaticObjectKeyName("expected struct field name");
+            consume(COLON, "expected ':' after struct field name");
+            Ast.Expr value = parseExpression();
+            if (!seen.add(key)) throw error(previous(), "duplicate struct field '" + key + "'");
+            fields.add(Ast.ObjectField.named(key, value));
+            if (!match(COMMA)) match(SEMICOLON);
+        }
+        consume(RBRACE, "expected '}' after struct literal");
+        return new Ast.StructExpr(type, fields);
     }
 
     private Ast.ObjectExpr parseObjectLiteral() {
