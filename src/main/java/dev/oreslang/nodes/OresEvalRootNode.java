@@ -637,6 +637,16 @@ public final class OresEvalRootNode extends RootNode {
                     if (receiver instanceof ModuleFacade module) {
                         return module.owner().invokeModuleFunction(module.module(), methodCall.member(), args);
                     }
+                    if (receiver instanceof OresMutex.Guard<?> guard
+                            && !methodCall.member().equals("release")
+                            && !methodCall.member().equals("is_released")
+                            && guard.value() instanceof OresObject object) {
+                        Ast.MethodDecl method = object.owner.findMethod(
+                                object.klass, methodCall.member(), args.size(), new LinkedHashSet<>());
+                        if (method != null) {
+                            return object.owner.callMethod(object, method, args);
+                        }
+                    }
                     if (receiver instanceof ImportedNamespace namespace) {
                         return namespace.owner().invokeImportedCallable(namespace.kind(), methodCall.member(), args);
                     }
