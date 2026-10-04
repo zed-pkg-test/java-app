@@ -16,7 +16,6 @@ final class CallableSemanticsTest {
     @Test
     void namespaceModulesMainFncRoutineAndLambdaCompose() throws Exception {
         String output = run("""
-                namespace demo;
 
                 define module math
                   pub fnc factorial(int n): int {
@@ -101,7 +100,6 @@ final class CallableSemanticsTest {
     @Test
     void contextualLambdaTypesSupportTheDemoProgram() throws Exception {
         String output = run("""
-                namespace nlex_demo;
 
                 type IntFn = typeof fnc(int value) => int;
 
