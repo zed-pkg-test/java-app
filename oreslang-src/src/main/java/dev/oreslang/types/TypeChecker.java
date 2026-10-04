@@ -112,6 +112,12 @@ public final class TypeChecker {
     }
 
     private void validate(Ast.Program program) {
+        // Validate closed-world overload slots before shape construction so a
+        // same-name/same-arity declaration is diagnosed as an overload error
+        // rather than as an incidental structural member conflict.
+        for (Ast.ClassDecl klass : classOwners.keySet()) validateLocalCallableSelectors(klass);
+        for (Ast.InterfaceDecl iface : interfaceOwners.keySet()) validateLocalInterfaceSelectors(iface);
+
         for (Ast.ClassDecl klass : classOwners.keySet()) classShape(klass, new LinkedHashSet<>());
         for (Ast.InterfaceDecl iface : interfaceOwners.keySet()) interfaceShape(iface, Set.copyOf(iface.genericParameters()), new LinkedHashSet<>());
 
@@ -256,6 +262,34 @@ public final class TypeChecker {
         }
     }
 
+    private void validateLocalCallableSelectors(Ast.ClassDecl klass) {
+        Set<CallableSelector> selectors = new HashSet<>();
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            if (!selectors.add(selector)) {
+                String label = method.isStatic() ? "static function" : "method";
+                throw new IllegalArgumentException(
+                        label + " '" + klass.name() + "." + method.name()
+                                + "' already has arity " + method.arity()
+                                + "; class callables may overload only by arity within their own static/instance namespace");
+            }
+        }
+    }
+
+    private void validateLocalInterfaceSelectors(Ast.InterfaceDecl iface) {
+        Set<CallableSelector> selectors = new HashSet<>();
+        for (Ast.InterfaceMember member : iface.members()) {
+            if (!(member instanceof Ast.InterfaceFunctionDecl fn)) continue;
+            CallableSelector selector = CallableSelector.instance(fn.name(), fn.parameters().size());
+            if (!selectors.add(selector)) {
+                throw new IllegalArgumentException(
+                        "duplicate interface method '" + iface.name() + "." + fn.name()
+                                + "' with arity " + fn.parameters().size()
+                                + "; interface callables may overload only by arity");
+            }
+        }
+    }
+
     private void checkClass(String module, Ast.ClassDecl klass) {
         Set<String> classGenerics = uniqueGenerics(klass.genericParameters(), "class " + klass.name());
         Type self = nominalClassType(klass);
@@ -284,15 +318,6 @@ public final class TypeChecker {
             }
         }
 
-        Set<CallableSelector> localMethodSignatures = new HashSet<>();
-        for (Ast.MethodDecl method : klass.methods()) {
-            CallableSelector selector = CallableSelector.of(method);
-            if (!localMethodSignatures.add(selector)) {
-                String label = method.isStatic() ? "static function" : "method";
-                throw new IllegalArgumentException(label + " '" + klass.name() + "." + method.name() + "' already has arity " + method.arity()
-                        + "; class callables may overload only by arity within their own static/instance namespace");
-            }
-        }
         // Every effective (kind, name, arity) slot must have one statically
         // determined implementation. This is the vtable/static-table contract
         // shared by AOT and JIT. Multiple-inheritance collisions require the
