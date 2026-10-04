@@ -142,7 +142,11 @@ final class IsolationHotReloadTest {
                 }
 
                 pub routine main(): void {
-                  val branded = obj{marker: "brand", markerBrand: "marking/branding"};
+                  struct Branded {
+                    marker: 'brand'
+                    markerBrand: 'marking/branding'
+                  }
+                  val Branded branded = Branded{marker: "brand", markerBrand: "marking/branding"};
                   first(branded);
                   second(branded);
                   third(branded);
@@ -161,7 +165,10 @@ final class IsolationHotReloadTest {
                 fnc nominal(Foo y): void { return; }
 
                 pub routine main(): void {
-                  val branded = obj{marker: "brand"};
+                  struct Branded {
+                    marker: 'brand'
+                  }
+                  val Branded branded = Branded{marker: "brand"};
                   nominal(branded);
                   return;
                 }
