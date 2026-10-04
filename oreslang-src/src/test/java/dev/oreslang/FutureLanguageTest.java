@@ -17,12 +17,12 @@ final class FutureLanguageTest {
     void futuresAllRaceAndStateMethodsTypeCheck() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc collect(Future<int> first, Future<int> second) => List<int> {
+                  async fnc collect(Future<int> first, Future<int> second) => List<int> {
                     val both = Futures.all([first, second]);
                     return await both;
                   }
 
-                  fnc fastest(Future<int> first, Future<int> second) => int {
+                  async fnc fastest(Future<int> first, Future<int> second) => int {
                     return await Futures.race([first, second]);
                   }
 
@@ -81,7 +81,7 @@ final class FutureLanguageTest {
     @Test
     void futuresAllRunsThroughLanguageRuntimeWithoutBlockingRootCarrier() throws Exception {
         String program = """
-                pub routine main() => void {
+                pub async routine main() => void {
                   val first_mutex = Mutex.new(1);
                   val second_mutex = Mutex.new(2);
                   val first = first_mutex.lock_async();
