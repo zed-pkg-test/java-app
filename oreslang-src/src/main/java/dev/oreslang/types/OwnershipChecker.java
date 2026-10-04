@@ -243,6 +243,12 @@ public final class OwnershipChecker {
             scope.define(binding.name(), placeholder);
         }
 
+        if (isRwGuardValueCall(binding.initializer(), scope)) {
+            throw error(
+                    "RwLock guard value is a lexical read-only view and cannot be bound; "
+                            + "use guard.value() inline while the guard is live");
+        }
+
         ValueInfo value;
         if (binding.initializer() instanceof Ast.UnaryExpr unary && (unary.operator().equals("&") || unary.operator().equals("&mut"))) {
             boolean mutableBorrow = unary.operator().equals("&mut");
@@ -441,7 +447,7 @@ public final class OwnershipChecker {
         }
         if (expr instanceof Ast.AwaitExpr awaited) {
             if (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard()) {
-                throw error("cannot await while holding a MutexGuard; release the guard before suspension");
+                throw error("cannot await while holding a lock guard; release the guard before suspension");
             }
             ValueInfo awaitedValue = checkExpr(awaited.expression(), scope, consuming);
             if (awaitedValue.type.name().equals("Future") && awaitedValue.type.arguments().size() == 1) {
@@ -483,7 +489,9 @@ public final class OwnershipChecker {
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
         if (call.callee() instanceof Ast.MemberExpr factoryCall
                 && factoryCall.receiver() instanceof Ast.NameExpr factory
-                && (factory.name().equals("Mutex") || factory.name().equals("SharedMutex"))
+                && (factory.name().equals("Mutex")
+                        || factory.name().equals("SharedMutex")
+                        || factory.name().equals("RwLock"))
                 && factoryCall.member().equals("new")
                 && call.arguments().size() == 1) {
             ValueInfo owned = checkExpr(call.arguments().getFirst(), scope, true);
@@ -495,7 +503,8 @@ public final class OwnershipChecker {
                 throw error(factory.name() + ".new cannot hide a guard-bearing value");
             }
             Ast.TypeRef mutexType = new Ast.TypeRef(factory.name(), List.of(owned.type), false);
-            return new ValueInfo(mutexType, factory.name().equals("SharedMutex") ? ValueKind.COPY : ValueKind.MOVE_ONLY, null);
+            boolean sharedHandle = factory.name().equals("SharedMutex") || factory.name().equals("RwLock");
+            return new ValueInfo(mutexType, sharedHandle ? ValueKind.COPY : ValueKind.MOVE_ONLY, null);
         }
 
         if (call.callee() instanceof Ast.NameExpr name
@@ -527,7 +536,10 @@ public final class OwnershipChecker {
                         fn.genericParameters(), fn.genericParameters(),
                         fn.parameters(), fn.returnType(), call, scope, Map.of());
                 checkArguments(call.arguments(), signature.parameters(), scope, "function " + fn.name());
-                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                Ast.TypeRef result = fn.async()
+                        ? new Ast.TypeRef("Future", List.of(signature.result()), false)
+                        : signature.result();
+                return new ValueInfo(result, kindOfType(result), null);
             }
         }
 
@@ -543,7 +555,10 @@ public final class OwnershipChecker {
                         signature.parameters(),
                         scope,
                         "function " + namespace.name() + "." + qualified.member());
-                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                Ast.TypeRef result = fn.async()
+                        ? new Ast.TypeRef("Future", List.of(signature.result()), false)
+                        : signature.result();
+                return new ValueInfo(result, kindOfType(result), null);
             }
         }
 
@@ -569,7 +584,10 @@ public final class OwnershipChecker {
                             signature.parameters(),
                             scope,
                             "static function " + staticClass.name() + "." + staticFunction.name());
-                    return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                    Ast.TypeRef result = staticFunction.async()
+                            ? new Ast.TypeRef("Future", List.of(signature.result()), false)
+                            : signature.result();
+                    return new ValueInfo(result, kindOfType(result), null);
                 }
             }
 
@@ -578,6 +596,61 @@ public final class OwnershipChecker {
                 if (receiverState != null) {
                     requireUsable(receiverState, receiverName.name(), false);
                     Ast.TypeRef receiverType = receiverState.type;
+                    if (receiverType.name().equals("RwLock")
+                            && receiverType.arguments().size() == 1) {
+                        Ast.TypeRef element = receiverType.arguments().getFirst();
+                        if (member.member().equals("read_lock") && call.arguments().isEmpty()) {
+                            return new ValueInfo(
+                                    new Ast.TypeRef("RwReadGuard", List.of(element), false),
+                                    ValueKind.MOVE_ONLY,
+                                    null);
+                        }
+                        if (member.member().equals("try_read_lock") && call.arguments().isEmpty()) {
+                            Ast.TypeRef guard = new Ast.TypeRef("RwReadGuard", List.of(element), false);
+                            return new ValueInfo(
+                                    new Ast.TypeRef("Option", List.of(guard), false),
+                                    ValueKind.MOVE_ONLY,
+                                    null);
+                        }
+                        if (member.member().equals("write_lock") && call.arguments().isEmpty()) {
+                            return new ValueInfo(
+                                    new Ast.TypeRef("RwWriteGuard", List.of(element), false),
+                                    ValueKind.MOVE_ONLY,
+                                    null);
+                        }
+                        if (member.member().equals("try_write_lock") && call.arguments().isEmpty()) {
+                            Ast.TypeRef guard = new Ast.TypeRef("RwWriteGuard", List.of(element), false);
+                            return new ValueInfo(
+                                    new Ast.TypeRef("Option", List.of(guard), false),
+                                    ValueKind.MOVE_ONLY,
+                                    null);
+                        }
+                    }
+                    if (isRwGuardType(receiverType)) {
+                        Ast.TypeRef element = receiverType.arguments().getFirst();
+                        if (member.member().equals("value") && call.arguments().isEmpty()) {
+                            if (isCopyType(element)) {
+                                return new ValueInfo(element, ValueKind.COPY, null);
+                            }
+                            return new ValueInfo(
+                                    Ast.TypeRef.borrowed(element, false),
+                                    ValueKind.IMM_BORROW,
+                                    receiverState);
+                        }
+                        if (receiverType.name().equals("RwWriteGuard")
+                                && member.member().equals("replace")
+                                && call.arguments().size() == 1) {
+                            checkExpr(call.arguments().getFirst(), scope, true);
+                            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
+                        }
+                        if (member.member().equals("release") && call.arguments().isEmpty()) {
+                            move(receiverState, receiverName.name());
+                            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
+                        }
+                        if (member.member().equals("is_released") && call.arguments().isEmpty()) {
+                            return new ValueInfo(Ast.TypeRef.simple("bool"), ValueKind.COPY, null);
+                        }
+                    }
                     if ((receiverType.name().equals("Mutex") || receiverType.name().equals("SharedMutex"))
                             && receiverType.arguments().size() == 1) {
                         Ast.TypeRef element = receiverType.arguments().getFirst();
@@ -655,7 +728,10 @@ public final class OwnershipChecker {
                     throw error("method '" + target.owner().name() + "." + method.name()
                             + "' cannot return move-only state through a mutex guard/critical-section borrow");
                 }
-                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                Ast.TypeRef result = method.async()
+                        ? new Ast.TypeRef("Future", List.of(signature.result()), false)
+                        : signature.result();
+                return new ValueInfo(result, kindOfType(result), null);
             }
         }
 
@@ -1425,7 +1501,7 @@ public final class OwnershipChecker {
         return switch (type.name()) {
             case "i8","i16","i32","i64","u8","u16","u32","u64","int","uint","bigint",
                     "f32","f64","float","decimal","complex64","complex128","complex",
-                    "bool","Bool","string","String","void","ActorId","SharedMutex","OptionUnwrapError" -> true;
+                    "bool","Bool","string","String","void","ActorId","SharedMutex","RwLock","OptionUnwrapError" -> true;
             case "Option" -> type.arguments().size() == 1 && isCopyType(type.arguments().getFirst());
             case "Result" -> type.arguments().size() == 2
                     && isCopyType(type.arguments().get(0))
@@ -1440,7 +1516,33 @@ public final class OwnershipChecker {
     }
 
     private static boolean isMutexGuardType(Ast.TypeRef type) {
-        return type != null && !type.isBorrow() && type.name().equals("MutexGuard") && type.arguments().size() == 1;
+        return type != null
+                && !type.isBorrow()
+                && type.arguments().size() == 1
+                && (type.name().equals("MutexGuard")
+                        || type.name().equals("RwReadGuard")
+                        || type.name().equals("RwWriteGuard"));
+    }
+
+    private static boolean isRwGuardType(Ast.TypeRef type) {
+        return type != null
+                && !type.isBorrow()
+                && type.arguments().size() == 1
+                && (type.name().equals("RwReadGuard") || type.name().equals("RwWriteGuard"));
+    }
+
+    private boolean isRwGuardValueCall(Ast.Expr expr, Scope scope) {
+        if (!(expr instanceof Ast.CallExpr call)
+                || !call.arguments().isEmpty()
+                || !(call.callee() instanceof Ast.MemberExpr member)
+                || !member.member().equals("value")
+                || !(member.receiver() instanceof Ast.NameExpr receiver)) {
+            return false;
+        }
+        VarState state = scope.lookup(receiver.name());
+        return state != null
+                && isRwGuardType(state.type)
+                && !isCopyType(state.type.arguments().getFirst());
     }
 
     private static boolean containsMutexGuardType(Ast.TypeRef type) {
