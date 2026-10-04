@@ -76,38 +76,6 @@ final class OresSchedulerTest {
     }
 
     @Test
-    void completedAwaitMayReuseSameCarrierButAlwaysGetsFreshDispatch() throws Exception {
-        try (OresScheduler scheduler = new OresScheduler(1)) {
-            OresFuture<Integer> completed = OresFuture.completed(7);
-            AtomicInteger pc = new AtomicInteger();
-            AtomicReference<Thread> firstCarrier = new AtomicReference<>();
-            AtomicReference<Long> firstDispatch = new AtomicReference<>();
-
-            OresFuture<Integer> result = scheduler.start(resume -> {
-                if (pc.getAndIncrement() == 0) {
-                    firstCarrier.set(Thread.currentThread());
-                    firstDispatch.set(OresScheduler.currentDispatchId());
-                    assertNotEquals(0L, firstDispatch.get().longValue());
-                    return OresScheduler.await(completed);
-                }
-
-                // A one-thread pool guarantees physical carrier reuse. The
-                // logical scheduler dispatch must nevertheless be new.
-                assertSame(firstCarrier.get(), Thread.currentThread());
-                assertNotEquals(
-                        firstDispatch.get().longValue(),
-                        OresScheduler.currentDispatchId(),
-                        "await must unwind and re-enter through a fresh scheduler dispatch");
-                assertEquals(7, resume.value());
-                return OresScheduler.done(8);
-            });
-
-            assertEquals(8, result.get(5, TimeUnit.SECONDS));
-            assertEquals(2, pc.get());
-        }
-    }
-
-    @Test
     void oneFutureMayResumeWaitersOnDifferentSchedulers() throws Exception {
         try (OresScheduler left = new OresScheduler(1);
              OresScheduler right = new OresScheduler(1)) {
@@ -169,39 +137,4 @@ final class OresSchedulerTest {
             assertTrue(result.get(5, TimeUnit.SECONDS));
         }
     }
-    @Test
-    void logicalTaskDomainSurvivesAwaitButIsDistinctPerTask() throws Exception {
-        try (OresScheduler scheduler = new OresScheduler(2)) {
-            OresFuture<Integer> gate = new OresFuture<>();
-            AtomicReference<Object> firstDomain = new AtomicReference<>();
-            AtomicReference<Object> resumedDomain = new AtomicReference<>();
-            AtomicReference<Object> secondTaskDomain = new AtomicReference<>();
-            AtomicInteger firstPc = new AtomicInteger();
-
-            OresFuture<Integer> first = scheduler.start(resume -> {
-                if (firstPc.getAndIncrement() == 0) {
-                    firstDomain.set(OresScheduler.currentTaskDomain());
-                    assertNotNull(firstDomain.get());
-                    return OresScheduler.await(gate);
-                }
-                resumedDomain.set(OresScheduler.currentTaskDomain());
-                return OresScheduler.done(1);
-            });
-
-            OresFuture<Integer> second = scheduler.start(resume -> {
-                secondTaskDomain.set(OresScheduler.currentTaskDomain());
-                return OresScheduler.done(2);
-            });
-
-            assertEquals(2, second.get(5, TimeUnit.SECONDS));
-            gate.completeFromRuntime(0);
-            assertEquals(1, first.get(5, TimeUnit.SECONDS));
-
-            assertSame(firstDomain.get(), resumedDomain.get(),
-                    "await/resume must preserve the logical task execution domain");
-            assertNotSame(firstDomain.get(), secondTaskDomain.get(),
-                    "two tasks on one scheduler must not share mutex/borrow ownership");
-        }
-    }
-
 }

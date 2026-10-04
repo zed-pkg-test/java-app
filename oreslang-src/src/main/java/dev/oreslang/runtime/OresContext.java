@@ -11,10 +11,7 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -32,15 +29,8 @@ public final class OresContext implements AutoCloseable {
     private final AtomicLong schedulerSafepoints = new AtomicLong();
     private final IsolatePolicy isolatePolicy;
     private final ExecutionProfile executionProfile;
-    private static final int MAX_USER_SCHEDULERS = 32;
-    private static final int MAX_USER_SCHEDULER_PARALLELISM = 64;
-    private static final int MAX_USER_SCHEDULER_CARRIERS = 256;
-
     private final ReentrantLock adversarialActorTurnLock = new ReentrantLock(true);
     private final Map<String, Object> linkedCodeUnits = new HashMap<>();
-    private final Set<OresScheduler> userSchedulers = ConcurrentHashMap.newKeySet();
-    private final AtomicInteger userSchedulerCount = new AtomicInteger();
-    private final AtomicInteger userSchedulerCarriers = new AtomicInteger();
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
@@ -126,68 +116,6 @@ public final class OresContext implements AutoCloseable {
     public long schedulerSafepoints() { return schedulerSafepoints.get(); }
 
     /**
-     * Create a managed ordinary-task scheduler. This is a runtime-managed
-     * concurrency primitive, not authority to create arbitrary guest threads.
-     */
-    public OresScheduler createUserScheduler(int parallelism) {
-        if (ActorRuntime.inActorExecution()) {
-            throw new SecurityException(
-                    "actors cannot create OresScheduler instances; actor work remains on its owning actor scheduler");
-        }
-        if (isolatePolicy.adversarial()) {
-            throw new SecurityException(
-                    "adversarial contexts cannot create custom OresScheduler pools");
-        }
-        if (parallelism <= 0 || parallelism > MAX_USER_SCHEDULER_PARALLELISM) {
-            throw new IllegalArgumentException(
-                    "OresScheduler parallelism must be between 1 and "
-                            + MAX_USER_SCHEDULER_PARALLELISM);
-        }
-
-        int count = userSchedulerCount.incrementAndGet();
-        if (count > MAX_USER_SCHEDULERS) {
-            userSchedulerCount.decrementAndGet();
-            throw new IllegalStateException(
-                    "OresScheduler context limit exceeded: " + MAX_USER_SCHEDULERS);
-        }
-
-        int carriers = userSchedulerCarriers.addAndGet(parallelism);
-        if (carriers > MAX_USER_SCHEDULER_CARRIERS) {
-            userSchedulerCarriers.addAndGet(-parallelism);
-            userSchedulerCount.decrementAndGet();
-            throw new IllegalStateException(
-                    "OresScheduler context carrier limit exceeded: "
-                            + MAX_USER_SCHEDULER_CARRIERS);
-        }
-
-        try {
-            OresScheduler scheduler = OresScheduler.managed(
-                    parallelism,
-                    this::executeSchedulerTurn);
-            userSchedulers.add(scheduler);
-            return scheduler;
-        } catch (RuntimeException | Error failure) {
-            userSchedulerCarriers.addAndGet(-parallelism);
-            userSchedulerCount.decrementAndGet();
-            throw failure;
-        }
-    }
-
-    public void closeUserScheduler(OresScheduler scheduler) {
-        if (scheduler == null) return;
-        if (userSchedulers.remove(scheduler)) {
-            userSchedulerCount.decrementAndGet();
-            int remaining = userSchedulerCarriers.addAndGet(-scheduler.parallelism());
-            if (remaining < 0) {
-                userSchedulerCarriers.addAndGet(scheduler.parallelism());
-                throw new IllegalStateException(
-                        "OresScheduler carrier accounting underflow");
-            }
-        }
-        scheduler.close();
-    }
-
-    /**
      * Host-managed cross-file link registry. Guest imports may only observe
      * units that the host has explicitly loaded into this context; import
      * syntax never grants filesystem access.
@@ -208,19 +136,6 @@ public final class OresContext implements AutoCloseable {
 
     public synchronized boolean hasLinkedCodeUnit(String codeUnitId) {
         return linkedCodeUnits.containsKey(codeUnitId);
-    }
-
-    private void executeSchedulerTurn(Runnable turn) {
-        TruffleContext truffleContext = env.getContext();
-        Object previous = null;
-        boolean entered = false;
-        try {
-            previous = truffleContext.enter(null);
-            entered = true;
-            turn.run();
-        } finally {
-            if (entered) truffleContext.leave(null, previous);
-        }
     }
 
     private void executeActorTurn(Runnable turn) {
@@ -270,16 +185,6 @@ public final class OresContext implements AutoCloseable {
 
     @Override
     public void close() {
-        Throwable schedulerFailure = null;
-        for (OresScheduler scheduler : Set.copyOf(userSchedulers)) {
-            try {
-                closeUserScheduler(scheduler);
-            } catch (Throwable failure) {
-                if (schedulerFailure == null) schedulerFailure = failure;
-                else schedulerFailure.addSuppressed(failure);
-            }
-        }
-
         try {
             actors.closeFromSupervisor();
         } finally {
@@ -288,12 +193,6 @@ public final class OresContext implements AutoCloseable {
             }
             garbageCollector.close();
             output.flush();
-        }
-
-        if (schedulerFailure != null) {
-            if (schedulerFailure instanceof RuntimeException runtime) throw runtime;
-            if (schedulerFailure instanceof Error error) throw error;
-            throw new IllegalStateException("failed to close user OresScheduler", schedulerFailure);
         }
     }
 }

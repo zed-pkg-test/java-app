@@ -80,7 +80,7 @@ final class UntrustedActorSandboxTest {
                 untrusted actor Sandbox {
                   let int counter = 0;
 
-                  pub fnc run() => void {
+                  pub receive(int message): void {
                     self.counter = self.counter + 1;
                     return;
                   }
@@ -107,7 +107,7 @@ final class UntrustedActorSandboxTest {
     void untrustedSourceHasNoAmbientFilesystemNetworkOrFfiAuthority() {
         Ast.Program program = Parser.parse("""
                 untrusted actor Sandbox {
-                  pub fnc run() => void {
+                  pub receive(int message): void {
                     fs.read("/tmp/secret");
                     return;
                   }

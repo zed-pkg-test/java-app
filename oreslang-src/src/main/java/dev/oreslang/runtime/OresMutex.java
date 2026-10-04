@@ -20,13 +20,10 @@ import java.util.function.Function;
 /**
  * Oreslang synchronization primitives.
  *
- * <p>{@link Local} is a logical-execution-domain mutex. It deliberately does
- * not use a JVM lock: the creating semantic execution domain owns it and
- * recursive acquisition is rejected. Actor ownership follows the stable actor
- * execution domain; ordinary async ownership follows the stable OresScheduler
- * task domain, so either may migrate JVM worker threads without changing mutex
- * ownership. Outside actors/scheduler tasks, the current host Thread is the
- * local domain. {@link Shared} is an explicit same-process
+ * <p>{@link Local} is an actor/private-domain mutex. It deliberately does not
+ * use a JVM lock: the creating semantic execution domain owns it and recursive
+ * acquisition is rejected. Shared actors may migrate JVM worker threads without
+ * changing that domain. {@link Shared} is an explicit same-process
  * shared-memory capability backed by a JVM synchronizer with poisoning and
  * acquire/release ordering.</p>
  */
@@ -198,10 +195,10 @@ public final class OresMutex {
     }
 
     /**
-     * Logical-execution-domain mutex. There is no host lock and therefore no
-     * blocking path. Ownership follows the actor execution domain or ordinary
-     * OresScheduler task domain, not the transient JVM worker Thread. Outside
-     * actor/scheduler execution, Thread identity is used as the local domain.
+     * Actor/private-domain mutex. There is no host lock and therefore no
+     * blocking path. Ownership follows the actor execution domain, not the
+     * transient JVM worker Thread. Outside actor execution, Thread identity is
+     * used as the local domain.
      */
     public static final class Local<T> implements Lock<T> {
         private final T value;

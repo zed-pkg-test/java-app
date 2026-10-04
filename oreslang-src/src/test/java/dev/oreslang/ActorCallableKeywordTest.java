@@ -31,10 +31,12 @@ final class ActorCallableKeywordTest {
 
                 actor SharedBox {
                   let int value = 1;
+                  pub receive(int message): void { return; }
                 }
 
                 isoactor PrivateBox {
                   let int value = 1;
+                  pub receive(int message): void { return; }
                 }
                 """);
 
@@ -77,7 +79,7 @@ final class ActorCallableKeywordTest {
                   return;
                 }
 
-                pub async routine main() => void {
+                pub routine main() => void {
                   val add = spawn add_one(41);
                   stdio.stdout.write(await add.result);
                   stdio.stdout.write(":");

@@ -8,6 +8,8 @@ import dev.oreslang.types.OwnershipChecker;
 import dev.oreslang.types.TypeChecker;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ParserTest {
@@ -22,7 +24,7 @@ final class ParserTest {
 
         assertDoesNotThrow(() -> Parser.parse("""
                 shared actor Worker {
-                  pub receive_message(int message) => void {
+                  pub receive(int message) => void {
                     val shared = message;
                     stdio.println(shared);
                     return;
@@ -111,7 +113,7 @@ final class ParserTest {
                 shared actor Account {
                   let balance = 100;
 
-                  pub fnc receive_message(int amount) => void {
+                  pub receive(amount: int): void {
                     self.balance = self.balance - amount;
                     return;
                   }
@@ -123,41 +125,256 @@ final class ParserTest {
 
         assertEquals(Ast.ActorKind.SHARED, actor.actorKind());
         assertEquals("Account", actor.name());
-        assertEquals("receive_message", actor.methods().getFirst().name());
+        assertEquals("receive", actor.methods().getFirst().name());
 
         Ast.Program typed = TypeChecker.check(program);
         assertDoesNotThrow(() -> OwnershipChecker.check(typed));
     }
 
     @Test
-    void sharedActorRejectsMultipleOrNonMailboxPublicMethods() {
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                shared actor Bad {
-                  pub fnc read() => int { return 1; }
-                }
-                """));
+    void actorRequiresOnePublicReceiveAndConcreteRefsUseSend() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                define actor Worker as
+                  let int count = 0;
 
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                shared actor Bad {
-                  pub fnc receive_message(int value) => void { return; }
-                  pub fnc receive_message(String value) => void { return; }
-                }
-                """));
+                  constructor(initial: int) {
+                    self.count = initial;
+                  }
 
-        assertDoesNotThrow(() -> Parser.parse("""
-                shared actor Good {
-                  let count = 0;
-
-                  private helper() => int {
+                  private current(): int {
                     return self.count;
                   }
 
-                  pub receive_message(int value) => void {
+                  pub receive(m: int): void {
+                    self.count = self.count + m;
+                    return;
+                  }
+                end
+
+                fnc exercise() -> void {
+                  val worker = spawn Worker(1);
+                  worker.send(2);
+                  return;
+                }
+                """));
+
+        Ast.ClassDecl actor =
+                (Ast.ClassDecl) program.modules().getFirst().declarations().getFirst();
+        assertEquals(Ast.ActorKind.SHARED, actor.actorKind());
+        assertEquals(
+                List.of("constructor", "current", "receive"),
+                actor.methods().stream().map(Ast.MethodDecl::name).toList());
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor Bad as
+                  pub receive(m: int): void { return; }
+                  pub reset(): void { return; }
+                end
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Bad as
+                  pub receive(m: int): int { return m; }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Bad as
+                  pub receive(state: SharedMutex<int>): void { return; }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Worker as
+                  pub receive(m: int): void { return; }
+                end
+
+                fnc bad() -> void {
+                  val worker = spawn Worker();
+                  worker.receive(1);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void classExtendingIntrinsicActorNormalizesAndKeepsProtocolTypes() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                define class Worker extends Actor<int, void, WorkerError> as
+                  let int count = 0;
+
+                  pub receive(m: int): void {
+                    self.count = self.count + m;
+                    return;
+                  }
+                end
+                """));
+
+        Ast.ClassDecl actor =
+                (Ast.ClassDecl) program.modules().getFirst().declarations().getFirst();
+        assertEquals(Ast.ActorKind.SHARED, actor.actorKind());
+        assertTrue(actor.parents().isEmpty(),
+                "compiler-intrinsic Actor base normalizes into actorKind");
+        assertEquals(3, actor.actorProtocolTypes().size());
+        assertEquals("int", actor.actorProtocolTypes().getFirst().name());
+        assertEquals("receive", actor.methods().getLast().name());
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define class Bad extends Actor<String, void, WorkerError> as
+                  pub receive(m: int): void { return; }
+                end
+                """)));
+    }
+
+    @Test
+    void actorClassSpawnUsesConstructorThenMailboxSend() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define actor Worker as
+                  let int count = 0;
+
+                  constructor(initial: int) {
+                    self.count = initial;
+                  }
+
+                  private helper(): int {
+                    return self.count;
+                  }
+
+                  pub receive(value: int): void {
                     self.count = self.count + value;
                     return;
                   }
+                end
+
+                fnc exercise() -> void {
+                  val worker = spawn Worker(1);
+                  worker.send(2);
+                  return;
                 }
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Worker as
+                  constructor() {
+                    val f = Futures.completed(1);
+                    await f;
+                  }
+
+                  pub receive(value: int): void { return; }
+                end
+                """)));
+    }
+
+    @Test
+    void actorInheritancePreservesIsolationAndReceiveContract() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define actor Parent as
+                  pub receive(value: int): void { return; }
+                end
+
+                define actor Child extends Parent as
+                  pub receive(value: int): void { return; }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                isoactor Parent {
+                  pub receive(value: int): void { return; }
+                }
+
+                shared actor Child extends Parent {
+                  pub receive(value: int): void { return; }
+                }
+                """)));
+    }
+
+    @Test
+    void actorImportAliasesAndEntrySyntaxParseWithoutDefaultExports() {
+        Ast.Program imports = Parser.parse("""
+                import actor Foo from "../../actor-mod";
+                import actor (Bar as B) from "../../actor-mod";
+                import actor {Baz: Zed} from "../../actor-mod";
+                import * as X from "../../actor-mod";
+                import entry as Plugin from "../../actor-mod";
+
+                fnc main() -> void { return; }
+                """);
+
+        assertEquals(Ast.ImportKind.ACTOR, imports.imports().get(0).kind());
+        assertEquals("B", imports.imports().get(1).localName("Bar"));
+        assertEquals("Zed", imports.imports().get(2).localName("Baz"));
+        assertEquals(Ast.ImportKind.ALL, imports.imports().get(3).kind());
+        assertEquals("X", imports.imports().get(3).namespace());
+        assertEquals(Ast.ImportKind.ENTRY, imports.imports().get(4).kind());
+        assertEquals("Plugin", imports.imports().get(4).localName("$entry$"));
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define actor Worker as
+                  pub receive(m: int): void { return; }
+                end
+
+                export entry Worker;
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor Worker as
+                  pub receive(m: int): void { return; }
+                end
+
+                export default Worker;
                 """));
+    }
+
+    @Test
+    void actorClassRejectsStaticEscapeHatchesAndReservedIntrinsicNames() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor Bad as
+                  private static fnc helper() => int { return 1; }
+                end
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define class Actor as
+                end
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor IsoActor as
+                end
+                """));
+    }
+
+    @Test
+    void actorReceiveCannotReceiveOrAcquireWritableSharedMutexState() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Bad as
+                  pub receive(SharedMutex<int> state): void {
+                    return;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Bad as
+                  private mutate(): void {
+                    val state = SharedMutex.new(1);
+                    return;
+                  }
+
+                  pub receive(int message): void { return; }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Bad as
+                  private mutate(SharedMutex<int> state): void {
+                    val guard = state.try_lock();
+                    return;
+                  }
+
+                  pub receive(int message): void { return; }
+                end
+                """)));
     }
 
     @Test
@@ -224,8 +441,8 @@ final class ParserTest {
                 shared actor Account {
                   let int balance = 100;
 
-                  pub fnc receive_message() => int {
-                    return self.balance;
+                  pub receive(int message): void {
+                    return;
                   }
                 }
 
@@ -261,70 +478,39 @@ final class ParserTest {
 
 
     @Test
-    void actorSelfAndMutableActorStateCannotEscapeMailboxTurn() {
-        assertThrows(IllegalArgumentException.class, () -> {
-            Ast.Program typed = TypeChecker.check(Parser.parse("""
-                    shared actor Account {
-                      let balance = 100;
+    void actorReceiveCannotReturnActorState() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                shared actor Account {
+                  let int balance = 100;
 
-                      pub fnc receive_message() => Account {
-                        return self;
-                      }
-                    }
-                    """));
-            OwnershipChecker.check(typed);
-        });
+                  pub receive(int message): Account {
+                    return self;
+                  }
+                }
+                """));
 
-        assertThrows(IllegalArgumentException.class, () -> {
-            Ast.Program typed = TypeChecker.check(Parser.parse("""
-                    shared actor Account {
-                      let balance = 100;
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                shared actor Account {
+                  let Array<int> items = [1, 2, 3];
 
-                      pub fnc receive_message() => &mut Account {
-                        return &mut self;
-                      }
-                    }
-                    """));
-            OwnershipChecker.check(typed);
-        });
-
-        assertThrows(IllegalArgumentException.class, () -> {
-            Ast.Program typed = TypeChecker.check(Parser.parse("""
-                    shared actor Account {
-                      let balance = 100;
-
-                      pub fnc receive_message() => &mut Account {
-                        val alias = &mut self;
-                        return alias;
-                      }
-                    }
-                    """));
-            OwnershipChecker.check(typed);
-        });
-
-        assertThrows(IllegalArgumentException.class, () -> {
-            Ast.Program typed = TypeChecker.check(Parser.parse("""
-                    shared actor Account {
-                      let Array<int> items = [1, 2, 3];
-
-                      pub fnc receive_message() => Array<int> {
-                        return self.items;
-                      }
-                    }
-                    """));
-            OwnershipChecker.check(typed);
-        });
+                  pub receive(int message): Array<int> {
+                    return self.items;
+                  }
+                }
+                """));
     }
 
     @Test
-    void actorMayReturnCopyLikeStateButCannotPassSelfBorrowToOrdinaryFunction() {
+    void actorMayReadAndMutateOwnedStateButCannotLeakSelfBorrow() {
         assertDoesNotThrow(() -> {
             Ast.Program typed = TypeChecker.check(Parser.parse("""
                     shared actor Account {
                       let balance = 100;
 
-                      pub fnc receive_message() => int {
-                        return self.balance;
+                      pub receive(int delta): void {
+                        val current = self.balance;
+                        self.balance = current + delta;
+                        return;
                       }
                     }
                     """));
@@ -340,8 +526,9 @@ final class ParserTest {
                     shared actor Account {
                       let balance = 100;
 
-                      pub fnc receive_message() => int {
-                        return inspect(&self);
+                      pub receive(int message): void {
+                        val observed = inspect(&self);
+                        return;
                       }
                     }
                     """));
@@ -355,11 +542,13 @@ final class ParserTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 shared actor Parent {
                   let value = 1;
+                  pub receive(int message): void { return; }
                 }
 
                 shared actor Child extends Parent {
-                  pub fnc receive_message() => int {
-                    return self.value;
+                  pub receive(int message): void {
+                    self.value = self.value + message;
+                    return;
                   }
                 }
                 """)));
@@ -367,18 +556,22 @@ final class ParserTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 isoactor Parent {
                   let value = 1;
+                  pub receive(int message): void { return; }
                 }
 
                 shared actor Child extends Parent {
+                  pub receive(int message): void { return; }
                 }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 shared actor Child extends Object {
                   let value = 1;
+                  pub receive(int message): void { return; }
                 }
                 """)));
     }
+
 
 
 

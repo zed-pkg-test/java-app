@@ -5,14 +5,19 @@ namespace_decl  = "namespace" IDENT ";" ;
 
 import_decl     = "import" import_spec "from" STRING_LITERAL ";" ;
 import_spec     = "*" "as" IDENT
+                | "entry" [ "as" ] IDENT
                 | "module" import_names
                 | "class" import_names
+                | "actor" import_names
                 | "fnc" import_names ;
-import_names    = IDENT
-                | "{" IDENT { "," IDENT } "}"
+import_names    = import_name
+                | "{" import_name { "," import_name } "}"
+                | "(" import_name { "," import_name } ")"
                 | "*" "as" IDENT ;
+import_name     = IDENT [ ( "as" | ":" ) IDENT ] ;
 
-top_level_item  = annotated_module_decl
+top_level_item  = entry_export_decl
+                | annotated_module_decl
                 | actor_decl
                 | actor_callable_decl
                 | callable_decl
@@ -20,6 +25,8 @@ top_level_item  = annotated_module_decl
                 | interface_decl
                 | type_decl
                 | binding_decl ;
+
+entry_export_decl = "export" "entry" IDENT ";" ;
 
 annotated_module_decl = { annotation } "define" "module" IDENT
                         { module_member } "end" ;
@@ -35,7 +42,6 @@ module_member   = actor_decl
 visibility      = [ "pub" | "private" ] ;
 callable_modifier = "abstract" | "async" | "nlex" ;
 method_modifier   = "abstract" | "async" ;
-actor_method_modifier = "abstract" ;
 
 callable_decl   = { annotation } visibility { callable_modifier } callable_kind IDENT [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
@@ -48,20 +54,40 @@ actor_callable_decl
 actor_decl      = visibility [ "shared" | "untrusted" ] "actor" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
                   [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
+                  actor_body
+                | "isoactor" IDENT [ generic_params ]
+                  [ "extends" type_ref { "," type_ref } ]
+                  [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
+                  actor_body
+                | "define" [ "shared" ] "actor" IDENT [ generic_params ]
+                  [ "extends" type_ref { "," type_ref } ]
+                  [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
+                  actor_body
+                | "define" "isoactor" IDENT [ generic_params ]
+                  [ "extends" type_ref { "," type_ref } ]
+                  [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
+                  actor_body
+                | "define" "untrusted" "actor" IDENT [ generic_params ]
+                  [ "extends" type_ref { "," type_ref } ]
+                  [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
                   actor_body ;
 actor_body      = "{" { actor_member } "}"
-                | { actor_member } "end" ;
+                | "as" { actor_member } "end" ;
 actor_member    = field_decl
-                | actor_method_decl
-                | static_function_decl ;
+                | actor_method_decl ;
 actor_method_decl
-                = { annotation } visibility { actor_method_modifier } [ "fnc" ] method_name [ generic_params ]
-                  method_head return_spec block ;
+                = { annotation } visibility [ "fnc" ] method_name [ generic_params ]
+                  method_head method_return_spec block ;
+(* Semantic rule: every concrete actor exposes exactly one public
+   receive(message): void method. OresVM owns the actual mailbox loop and calls
+   receive once per actor turn. All other actor methods are private helpers.
+   External code enqueues through ActorRef.send(message); receive is not directly
+   callable through ActorRef. Actor classes do not declare static functions. *)
 
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
                   [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
-                  { class_member } "end" ;
+                  "as" { class_member } "end" ;
 
 class_member    = field_decl
                 | method_decl
@@ -70,7 +96,7 @@ class_member    = field_decl
 field_decl      = visibility binding_kind type_ref IDENT [ "=" expression ] stmt_terminator ;
 
 method_decl     = { annotation } visibility { method_modifier } method_name [ generic_params ]
-                  method_head return_spec ( block | stmt_terminator ) ;
+                  method_head method_return_spec ( block | stmt_terminator ) ;
 method_name     = IDENT | "[" "Symbol" "." IDENT "]" ;
 method_head     = "(" [ explicit_receiver | param_list ] ")" [ "(" [ param_list ] ")" ] ;
 explicit_receiver = "self" type_ref ;
@@ -89,17 +115,19 @@ interface_decl  = visibility "interface" IDENT [ generic_params ]
 interface_body  = "{" { interface_member } "}"
                 | { interface_member } "end" ;
 
-interface_member= "fnc" IDENT [ generic_params ] "(" [ param_list ] ")" return_spec member_terminator
+interface_member= "fnc" IDENT [ generic_params ] "(" [ param_list ] ")" method_return_spec member_terminator
                 | IDENT ":" type_ref member_terminator
                 | [ binding_kind ] type_ref IDENT member_terminator ;
 
 type_decl       = "type" IDENT [ generic_params ] "=" type_ref stmt_terminator ;
 
 annotation      = "@" IDENT [ "<" [ type_args ] ">" | "(" [ type_args ] ")" ] ;
-return_spec     = [ "=>" type_ref ] ;
+return_spec     = [ ( ":" | "->" | "=>" ) type_ref ] ;
+method_return_spec = [ ( ":" | "->" | "=>" ) type_ref ] ;
 generic_params  = "<" IDENT { "," IDENT } ">" ;
 param_list      = param { "," param } ;
 param           = type_ref [ "mut" ] IDENT
+                | IDENT ":" type_ref [ "mut" ]
                 | "@Structural" type_ref [ "mut" ] IDENT
                 | IDENT "structural" type_ref [ "mut" ] ;
 
@@ -207,8 +235,8 @@ record_type_field
                 = ( IDENT | STRING_LITERAL ) ":" type_ref ;
 alias_marker    = "type" named_type ;
 named_type      = qualified_name [ "<" [ type_args ] ">" ] ;
-function_type   = "typeof" "fnc" "(" [ function_type_params ] ")" "->" type_ref
-                | "(" [ function_type_params ] ")" "->" type_ref ;
+function_type   = "typeof" "fnc" "(" [ function_type_params ] ")" ( "=>" | "->" ) type_ref
+                | "(" [ function_type_params ] ")" ( "=>" | "->" ) type_ref ;
 grouped_type    = "(" type_ref ")" ;
 function_type_params
                 = function_type_param { "," function_type_param } ;
@@ -250,14 +278,31 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - instance methods may overload only when arity differs.
    - class-level functions use "static fnc"; they have no self receiver and are
      dispatched through the class namespace, never through an instance.
-   - "=>" belongs to named callable return declarations.
-   - "->" belongs to function types and lambdas.
-   - Unqualified "actor" declarations are private actors; "shared actor" opts
-     into the SHARED_MEMORY execution domain; "untrusted actor" opts into the
-     adversarial, memory-isolated, hard-budgeted sandbox domain. "shared" and
-     "untrusted" are mutually exclusive.
-   - Actor fields are private mailbox-owned state; public actor API is exposed
-     through actor methods/messages rather than public mutable fields.
+   - Callable declarations canonically use ": T" or "-> T" for their
+     return type. Historical "=> T" callable returns remain parser-compatible
+     only during migration.
+   - "=>" is the canonical type-level function arrow. Historical "->" function
+     types remain parser-compatible during migration. Lambdas and executable
+     control-flow branches use "->".
+   - Unqualified "actor" declarations are SHARED-domain actors; "isoactor" is
+     the confined/private actor-memory domain; "untrusted actor" is the
+     adversarial, memory-isolated, hard-budgeted sandbox domain.
+   - "define actor X as ... end" and "define class X extends Actor as ... end"
+     normalize to the same ClassDecl actor semantics. Actor/IsoActor/
+     UntrustedActor are compiler-intrinsic bases, not ordinary library classes.
+   - Actor fields are private mailbox-owned state. Every concrete actor has
+     exactly one public receive(message): void method; all other actor methods
+     are private helpers. OresVM owns the persistent mailbox loop, invokes
+     receive once per serialized actor turn, and external code sends through
+     ActorRef.send(message). receive is never a direct ActorRef call.
+   - Compiler-intrinsic Actor/IsoActor/UntrustedActor bases accept either no
+     protocol arguments or exactly <Message, Reply, Error>; when present, the
+     receive parameter type must exactly match Message.
+   - Actor constructors are runtime-only, non-public, non-static, non-generic,
+     non-suspending, and return void.
+   - Actor isolation is an ownership/effect rule rather than @Pure or nlex:
+     actor code may mutate self-owned/fresh state and explicit capabilities, but
+     may not mutate arbitrary caller/global/external mutable state.
    - Actor inheritance must preserve actor isolation kind.
    - In a destructure pattern, an explicit binding kind propagates to subsequent
      unqualified names until another binding kind appears. A leading binding

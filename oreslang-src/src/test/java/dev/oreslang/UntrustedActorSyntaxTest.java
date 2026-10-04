@@ -18,9 +18,9 @@ final class UntrustedActorSyntaxTest {
                 untrusted actor RequestHandler {
                   let requests = 0;
 
-                  pub fnc handle(int value) => int {
+                  pub receive(int value): void {
                     self.requests = self.requests + 1;
-                    return value;
+                    return;
                   }
                 }
                 """);
@@ -76,7 +76,7 @@ final class UntrustedActorSyntaxTest {
     void untrustedActorSourceCannotSelfGrantFilesystemAuthority() {
         Ast.Program program = Parser.parse("""
                 untrusted actor RequestHandler {
-                  pub fnc handle() => void {
+                  pub receive(int message): void {
                     fs.write("out.txt", "nope");
                     return;
                   }

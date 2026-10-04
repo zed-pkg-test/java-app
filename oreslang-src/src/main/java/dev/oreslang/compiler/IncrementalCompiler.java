@@ -151,6 +151,13 @@ public final class IncrementalCompiler {
         if (decl instanceof Ast.ClassDecl klass) {
             abi.append(klass.actorKind()).append(" class ").append(klass.name());
             appendGenerics(abi, klass.genericParameters());
+            if (!klass.actorProtocolTypes().isEmpty()) {
+                abi.append(" actor-protocol<");
+                for (Ast.TypeRef protocolType : klass.actorProtocolTypes()) {
+                    abi.append(typeRef(protocolType)).append(',');
+                }
+                abi.append('>');
+            }
             abi.append(" extends ");
             for (Ast.TypeRef parent : klass.parents()) abi.append(typeRef(parent)).append(',');
             abi.append(" implements ");
@@ -170,6 +177,10 @@ public final class IncrementalCompiler {
                 appendParams(abi, method.parameters());
                 abi.append("=>").append(typeRef(method.returnType())).append('\n');
             }
+            return;
+        }
+        if (decl instanceof Ast.EntryExportDecl entry) {
+            abi.append("entry ").append(entry.name()).append('\n');
             return;
         }
         if (decl instanceof Ast.InterfaceDecl iface) {

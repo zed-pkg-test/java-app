@@ -35,17 +35,8 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class OresScheduler implements AutoCloseable {
     private static final AtomicLong NEXT_ID = new AtomicLong();
-    private static final AtomicLong NEXT_DISPATCH_ID = new AtomicLong();
     private static final ThreadLocal<OresScheduler> CURRENT = new ThreadLocal<>();
-    private static final ThreadLocal<Long> CURRENT_DISPATCH_ID = new ThreadLocal<>();
-    private static final ThreadLocal<Object> CURRENT_TASK_DOMAIN = new ThreadLocal<>();
-    private static final ThreadLocal<Boolean> SCHEDULER_CARRIER = new ThreadLocal<>();
     private static final int DEFAULT_QUEUE_CAPACITY = 65_536;
-
-    @FunctionalInterface
-    interface TurnExecutor {
-        void execute(Runnable turn);
-    }
 
     /** One compiler-generated async state-machine turn. */
     @FunctionalInterface
@@ -87,7 +78,6 @@ public final class OresScheduler implements AutoCloseable {
     private final int parallelism;
     private final Executor executor;
     private final ExecutorService ownedExecutor;
-    private final TurnExecutor turnExecutor;
     private final Set<TaskRunner<?>> tasks = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -96,17 +86,10 @@ public final class OresScheduler implements AutoCloseable {
      * threads and a bounded ready queue.
      */
     public OresScheduler(int parallelism) {
-        this(parallelism, DEFAULT_QUEUE_CAPACITY, Runnable::run);
+        this(parallelism, DEFAULT_QUEUE_CAPACITY);
     }
 
     public OresScheduler(int parallelism, int queueCapacity) {
-        this(parallelism, queueCapacity, Runnable::run);
-    }
-
-    private OresScheduler(
-            int parallelism,
-            int queueCapacity,
-            TurnExecutor turnExecutor) {
         if (parallelism <= 0) {
             throw new IllegalArgumentException("scheduler parallelism must be positive");
         }
@@ -116,20 +99,11 @@ public final class OresScheduler implements AutoCloseable {
 
         this.name = "ores-user-scheduler-" + NEXT_ID.incrementAndGet();
         this.parallelism = parallelism;
-        this.turnExecutor = Objects.requireNonNull(turnExecutor, "turnExecutor");
 
-        AtomicInteger carrierId = new AtomicInteger();
-        ThreadFactory factory = task -> Thread.ofPlatform()
+        ThreadFactory factory = Thread.ofPlatform()
                 .daemon(true)
-                .name(name + "-carrier-" + carrierId.getAndIncrement())
-                .unstarted(() -> {
-                    SCHEDULER_CARRIER.set(Boolean.TRUE);
-                    try {
-                        task.run();
-                    } finally {
-                        SCHEDULER_CARRIER.remove();
-                    }
-                });
+                .name(name + "-carrier-", 0)
+                .factory();
         ThreadPoolExecutor pool = new ThreadPoolExecutor(
                 parallelism,
                 parallelism,
@@ -155,7 +129,6 @@ public final class OresScheduler implements AutoCloseable {
         this.parallelism = parallelism;
         this.executor = Objects.requireNonNull(executor, "executor");
         this.ownedExecutor = ownedExecutor;
-        this.turnExecutor = Runnable::run;
     }
 
     /**
@@ -167,24 +140,6 @@ public final class OresScheduler implements AutoCloseable {
             int parallelism,
             Executor executor) {
         return new OresScheduler(name, parallelism, executor, null);
-    }
-
-    /**
-     * Context-owned scheduler with private carriers. Each guest turn is wrapped
-     * by the owning language context before scheduler binding is installed.
-     */
-    static OresScheduler managed(
-            int parallelism,
-            TurnExecutor turnExecutor) {
-        return new OresScheduler(
-                parallelism,
-                DEFAULT_QUEUE_CAPACITY,
-                turnExecutor);
-    }
-
-    /** True only on private carriers owned by user-created OresSchedulers. */
-    public static boolean isSchedulerCarrierThread() {
-        return Boolean.TRUE.equals(SCHEDULER_CARRIER.get());
     }
 
     public String name() {
@@ -211,28 +166,6 @@ public final class OresScheduler implements AutoCloseable {
                     "operation requires an executing OresScheduler task");
         }
         return scheduler;
-    }
-
-    /**
-     * Stable logical execution-domain token for the currently running
-     * scheduler task, or {@code null} outside a scheduler task.
-     *
-     * <p>The token survives await/resume carrier migration and is intentionally
-     * distinct for concurrent tasks sharing the same OresScheduler.</p>
-     */
-    public static Object currentTaskDomain() {
-        return CURRENT_TASK_DOMAIN.get();
-    }
-
-    /**
-     * Identifier for the current scheduler dispatch turn, or {@code 0} outside
-     * an OresScheduler dispatch. A continuation resumed after {@code await}
-     * always observes a different dispatch id, even when the scheduler chooses
-     * the same physical carrier thread immediately.
-     */
-    public static long currentDispatchId() {
-        Long id = CURRENT_DISPATCH_ID.get();
-        return id == null ? 0L : id;
     }
 
     public static <T> Step<T> done(T value) {
@@ -288,17 +221,10 @@ public final class OresScheduler implements AutoCloseable {
         Objects.requireNonNull(turn, "turn");
         ensureOpen();
         OresScheduler prior = CURRENT.get();
-        Long priorDispatch = CURRENT_DISPATCH_ID.get();
         CURRENT.set(this);
-        CURRENT_DISPATCH_ID.set(NEXT_DISPATCH_ID.incrementAndGet());
         try {
             turn.run();
         } finally {
-            if (priorDispatch == null) {
-                CURRENT_DISPATCH_ID.remove();
-            } else {
-                CURRENT_DISPATCH_ID.set(priorDispatch);
-            }
             if (prior == null) {
                 CURRENT.remove();
             } else {
@@ -307,17 +233,9 @@ public final class OresScheduler implements AutoCloseable {
         }
     }
 
-    private void executeTurn(Runnable turn, Runnable afterTurn) {
-        Objects.requireNonNull(turn, "turn");
-        Objects.requireNonNull(afterTurn, "afterTurn");
+    private void executeTurn(Runnable turn) {
         ensureOpen();
-        executor.execute(() -> {
-            try {
-                turnExecutor.execute(() -> runBound(turn));
-            } finally {
-                afterTurn.run();
-            }
-        });
+        executor.execute(() -> runBound(turn));
     }
 
     private void ensureOpen() {
@@ -338,18 +256,6 @@ public final class OresScheduler implements AutoCloseable {
 
         if (ownedExecutor != null) {
             ownedExecutor.shutdownNow();
-            if (CURRENT.get() != this) {
-                try {
-                    if (!ownedExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                        throw new IllegalStateException(
-                                "OresScheduler " + name + " carriers did not terminate");
-                    }
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw new java.util.concurrent.CancellationException(
-                            "interrupted while closing OresScheduler " + name);
-                }
-            }
         }
     }
 
@@ -365,8 +271,6 @@ public final class OresScheduler implements AutoCloseable {
         private final AtomicBoolean executing = new AtomicBoolean();
         private final AtomicReference<Resume> pendingResume =
                 new AtomicReference<>(Resume.initialResume());
-        private final AtomicReference<TerminalOutcome<T>> terminalOutcome =
-                new AtomicReference<>();
         private final OresFuture<T> completion;
 
         private TaskRunner(Task<T> task) {
@@ -383,7 +287,7 @@ public final class OresScheduler implements AutoCloseable {
 
         private void enqueueTurn() {
             try {
-                executeTurn(this::runTurn, this::afterCarrierTurn);
+                executeTurn(this::runTurn);
             } catch (RuntimeException | Error rejected) {
                 failTerminal(rejected);
                 throw rejected;
@@ -398,8 +302,6 @@ public final class OresScheduler implements AutoCloseable {
                 return;
             }
 
-            Object priorTaskDomain = CURRENT_TASK_DOMAIN.get();
-            CURRENT_TASK_DOMAIN.set(this);
             try {
                 Resume resume = pendingResume.getAndSet(null);
                 if (resume == null) {
@@ -436,24 +338,9 @@ public final class OresScheduler implements AutoCloseable {
                 failTerminal(new IllegalStateException(
                         "unknown OresScheduler task step " + step.getClass().getName()));
             } finally {
-                if (priorTaskDomain == null) {
-                    CURRENT_TASK_DOMAIN.remove();
-                } else {
-                    CURRENT_TASK_DOMAIN.set(priorTaskDomain);
-                }
+                executing.set(false);
+                scheduleReadyResume();
             }
-        }
-
-        /**
-         * Runs only after the scheduler binding has been removed and the
-         * carrier has completely unwound the logical guest turn. Publishing a
-         * task Future earlier can let a host close its Polyglot Context while
-         * this carrier is still executing guest continuation code.
-         */
-        private void afterCarrierTurn() {
-            executing.set(false);
-            publishTerminalIfReady();
-            scheduleReadyResume();
         }
 
         private void armAwait(OresFuture<?> awaited) {
@@ -499,10 +386,8 @@ public final class OresScheduler implements AutoCloseable {
             if (!phase.compareAndSet(RUNNING, TERMINAL)) {
                 return;
             }
-            terminalOutcome.set(new TerminalSuccess<>(value));
             tasks.remove(this);
-            // afterCarrierTurn() publishes only after the carrier has fully
-            // unwound runBound(...).
+            completion.completeFromRuntime(value);
         }
 
         private void failTerminal(Throwable failure) {
@@ -513,23 +398,8 @@ public final class OresScheduler implements AutoCloseable {
                 if (observed == TERMINAL) return;
             } while (!phase.compareAndSet(observed, TERMINAL));
 
-            terminalOutcome.compareAndSet(null, new TerminalFailure<>(failure));
             tasks.remove(this);
-            if (!executing.get()) {
-                publishTerminalIfReady();
-            }
-        }
-
-        private void publishTerminalIfReady() {
-            if (phase.get() != TERMINAL || completion.isDone()) return;
-            TerminalOutcome<T> outcome = terminalOutcome.get();
-            if (outcome instanceof TerminalSuccess<?> success) {
-                @SuppressWarnings("unchecked")
-                T value = (T) success.value();
-                completion.completeFromRuntime(value);
-            } else if (outcome instanceof TerminalFailure<?> failure) {
-                completion.failFromRuntime(failure.failure());
-            }
+            completion.failFromRuntime(failure);
         }
 
         private void failBeforeStart(Throwable failure) {
@@ -548,18 +418,6 @@ public final class OresScheduler implements AutoCloseable {
 
         private void cancelFromSchedulerClose() {
             completion.cancel(false);
-        }
-    }
-
-    private sealed interface TerminalOutcome<T>
-            permits TerminalSuccess, TerminalFailure { }
-
-    private record TerminalSuccess<T>(T value) implements TerminalOutcome<T> { }
-
-    private record TerminalFailure<T>(Throwable failure)
-            implements TerminalOutcome<T> {
-        private TerminalFailure {
-            Objects.requireNonNull(failure, "failure");
         }
     }
 }

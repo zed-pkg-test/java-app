@@ -21,7 +21,7 @@ final class ActorSpawnLanguageTest {
                   return value;
                 }
 
-                pub async routine main() => void {
+                pub routine main() => void {
                   val pending = spawn worker(1);
                   val ready = await spawn worker(2);
                   return;
@@ -98,7 +98,7 @@ final class ActorSpawnLanguageTest {
                   return value;
                 }
 
-                pub async routine main() => void {
+                pub routine main() => void {
                   val pending = spawn worker(1);
                   val ready = await pending;
                   val id = ready.id;
@@ -114,7 +114,7 @@ final class ActorSpawnLanguageTest {
                           return value;
                         }
 
-                        pub async routine main() => void {
+                        pub routine main() => void {
                           val ready = await spawn worker(1);
                           val denied = ready.mailbox;
                           return;
@@ -130,7 +130,7 @@ final class ActorSpawnLanguageTest {
                   return value + 1;
                 }
 
-                pub async routine main() => void {
+                pub routine main() => void {
                   val pending = spawn compute(41);
                   val answer = await pending.result;
                   return;
@@ -145,7 +145,7 @@ final class ActorSpawnLanguageTest {
                   return value + 1;
                 }
 
-                pub async routine main() => void {
+                pub routine main() => void {
                   val pending = spawn add_one(41);
                   val ready = await pending.ready;
                   val answer = await pending.result;

@@ -14,15 +14,39 @@ public final class Ast {
         public Program(List<ModuleDecl> modules) { this(null, List.of(), modules); }
     }
 
-    public enum ImportKind { MODULE, CLASS, FUNCTION, ALL }
+    public enum ImportKind { MODULE, CLASS, ACTOR, FUNCTION, ENTRY, ALL }
 
     public record ImportDecl(
             ImportKind kind,
             List<String> names,
             boolean wildcard,
             String namespace,
-            String path) {
-        public ImportDecl { names = List.copyOf(names); }
+            String path,
+            java.util.Map<String, String> aliases) {
+        public ImportDecl {
+            names = List.copyOf(names);
+            aliases = java.util.Map.copyOf(aliases);
+        }
+
+        public ImportDecl(
+                ImportKind kind,
+                List<String> names,
+                boolean wildcard,
+                String namespace,
+                String path) {
+            this(kind, names, wildcard, namespace, path, java.util.Map.of());
+        }
+
+        public String localName(String importedName) {
+            return aliases.getOrDefault(importedName, importedName);
+        }
+
+        public String importedName(String localName) {
+            for (String importedName : names) {
+                if (localName(importedName).equals(localName)) return importedName;
+            }
+            return null;
+        }
     }
 
     public record ModuleDecl(String name, List<Annotation> annotations, List<Decl> declarations) {
@@ -33,7 +57,16 @@ public final class Ast {
         public ModuleDecl(String name, List<Decl> declarations) { this(name, List.of(), declarations); }
     }
 
-    public sealed interface Decl permits FunctionDecl, ClassDecl, InterfaceDecl, FieldDecl, TypeAliasDecl { }
+    public sealed interface Decl permits FunctionDecl, ClassDecl, InterfaceDecl, FieldDecl, TypeAliasDecl, EntryExportDecl { }
+
+    /**
+     * One explicit hot-load/plugin entry point for a code unit.
+     *
+     * This is intentionally distinct from JavaScript-style default exports:
+     * ordinary imports remain named/namespace imports, while loaders may resolve
+     * this single entry without knowing its source declaration name.
+     */
+    public record EntryExportDecl(String name) implements Decl { }
 
     public enum Visibility { PRIVATE, PUBLIC }
     public enum CallableKind { FNC, ROUTINE }
@@ -160,22 +193,38 @@ public final class Ast {
             List<TypeRef> parents,
             List<TypeRef> interfaces,
             List<FieldDecl> fields,
-            List<MethodDecl> methods) implements Decl {
+            List<MethodDecl> methods,
+            List<TypeRef> actorProtocolTypes) implements Decl {
         public ClassDecl {
             genericParameters = List.copyOf(genericParameters);
             parents = List.copyOf(parents);
             interfaces = List.copyOf(interfaces);
             fields = List.copyOf(fields);
             methods = List.copyOf(methods);
+            actorProtocolTypes = List.copyOf(actorProtocolTypes);
         }
+
+        public ClassDecl(
+                String name,
+                boolean isAbstract,
+                ActorKind actorKind,
+                List<String> genericParameters,
+                List<TypeRef> parents,
+                List<TypeRef> interfaces,
+                List<FieldDecl> fields,
+                List<MethodDecl> methods) {
+            this(name, isAbstract, actorKind, genericParameters, parents, interfaces, fields, methods, List.of());
+        }
+
         public ClassDecl(String name, boolean isAbstract, List<String> genericParameters,
                          List<TypeRef> parents, List<TypeRef> interfaces,
                          List<FieldDecl> fields, List<MethodDecl> methods) {
-            this(name, isAbstract, ActorKind.NONE, genericParameters, parents, interfaces, fields, methods);
+            this(name, isAbstract, ActorKind.NONE, genericParameters, parents, interfaces, fields, methods, List.of());
         }
+
         public ClassDecl(String name, boolean isAbstract, List<String> genericParameters,
                          List<FieldDecl> fields, List<MethodDecl> methods) {
-            this(name, isAbstract, ActorKind.NONE, genericParameters, List.of(), List.of(), fields, methods);
+            this(name, isAbstract, ActorKind.NONE, genericParameters, List.of(), List.of(), fields, methods, List.of());
         }
     }
 
@@ -359,29 +408,13 @@ public final class Ast {
         public ObjectExpr { fields = List.copyOf(fields); }
     }
 
-    public record LambdaExpr(
-            List<Param> parameters,
-            Expr expressionBody,
-            List<Stmt> blockBody,
-            boolean async,
-            boolean nonLexical) implements Expr {
+    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) implements Expr {
         public LambdaExpr {
             parameters = List.copyOf(parameters);
             blockBody = blockBody == null ? null : List.copyOf(blockBody);
         }
-
-        /** Backwards-compatible constructor for synchronous lexical lambdas. */
         public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody) {
-            this(parameters, expressionBody, blockBody, false, false);
-        }
-
-        /** Backwards-compatible constructor for synchronous lambdas with nlex. */
-        public LambdaExpr(
-                List<Param> parameters,
-                Expr expressionBody,
-                List<Stmt> blockBody,
-                boolean nonLexical) {
-            this(parameters, expressionBody, blockBody, false, nonLexical);
+            this(parameters, expressionBody, blockBody, false);
         }
     }
 }

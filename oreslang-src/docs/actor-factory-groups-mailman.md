@@ -25,12 +25,12 @@ A concrete actor class may satisfy this protocol structurally.
 The behavior has exactly one public inbox ingress:
 
 ```ores
-receive_message(In message): void
+compiler-generated mailbox dispatch over the actor's public protocol methods
 ```
 
 For shared actors, every other actor method and every mutable field is private to the behavior. The runtime never dispatches arbitrary public methods.
 
-`Out` is the actor's typed outgoing-mail contract. The actor may emit zero or more `Out` values during a turn; these are appended to its ActorGroup outbox and are not returned from `receive_message`.
+`Out` is the actor's typed outgoing-mail contract. The actor may emit zero or more `Out` values during a turn; these are appended to its ActorGroup outbox and are not returned from the hidden dispatcher.
 
 A no-output actor uses `ActorBehavior<In, void>`.
 
@@ -48,7 +48,7 @@ end
 shared actor Counter
   let int value;
 
-  pub receive_message(Increment msg): void {
+  pub receive(Increment msg): void {
     self.value = self.value + msg.amount;
     emit CounterChanged(self.value);
     return;
@@ -107,7 +107,7 @@ The actor factory executes later on the target actor dispatcher. READY is publis
 - factory execution completes successfully;
 - the returned value satisfies `ActorBehavior<In, Out>`;
 - the behavior is rooted as actor-owned state;
-- the single `receive_message(In): void` ingress is installed;
+- the single hidden mailbox dispatcher for the public typed protocol is installed;
 - group/mailman routing is attached.
 
 Startup failure fails `ready` and `done`, tears down the actor, releases its group/generation/quota leases, and never publishes a usable ActorRef.
@@ -279,7 +279,7 @@ Compiler:
 - reject direct calls to actor factories;
 - reject `spawn` of non-actor callables;
 - require actor factory return type to satisfy `ActorBehavior<In, Out>`;
-- require exactly one public `receive_message(In): void` on a concrete behavior;
+- require at least one public monomorphic actor protocol method on a concrete behavior;
 - reject additional public shared-actor methods/fields;
 - derive `ActorSpawn<In, Out>` from the factory return type;
 - type `await spawn` as `ActorRef<In>`;

@@ -65,7 +65,7 @@ A shared actor may declare:
 
 - private state;
 - private helper methods;
-- exactly one public instance ingress named `receive_message`.
+- one runtime-owned mailbox ingress generated from the actor's public typed protocol methods.
 
 All external interaction goes through the actor reference/mailbox. Public static
 helpers and additional public methods are rejected.

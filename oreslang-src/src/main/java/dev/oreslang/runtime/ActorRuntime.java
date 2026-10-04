@@ -206,10 +206,7 @@ public final class ActorRuntime implements AutoCloseable {
 
     public static Object currentExecutionDomain() {
         ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
-        if (current != null) return current.executionDomain();
-
-        Object taskDomain = OresScheduler.currentTaskDomain();
-        return taskDomain != null ? taskDomain : Thread.currentThread();
+        return current == null ? Thread.currentThread() : current.executionDomain();
     }
 
     /**
@@ -1549,7 +1546,6 @@ public final class ActorRuntime implements AutoCloseable {
     private final DispatcherConfig dispatcherConfig;
     private final TurnExecutor turnExecutor;
     private final OresVM vm;
-    private final OresScheduler rootScheduler;
     private final ActorGenerationLeaseFactory generationLeaseFactory;
     private final RuntimePlacement runtimePlacement;
     private final DispatcherGroup dispatcherGroup;
@@ -1727,12 +1723,6 @@ public final class ActorRuntime implements AutoCloseable {
         this.privateRejectedTurns = dispatcherGroup.privateRejectedTurns;
         this.sharedRejectedTurns = dispatcherGroup.sharedRejectedTurns;
         this.untrustedRejectedTurns = dispatcherGroup.untrustedRejectedTurns;
-
-        int rootParallelism = Math.max(1, dispatcherConfig.controlParallelism() - 1);
-        this.rootScheduler = OresScheduler.runtimeOwned(
-                "ores-root-" + Integer.toHexString(System.identityHashCode(this)),
-                rootParallelism,
-                this::executeRootSchedulerTurn);
     }
 
     public IsolatePolicy policyCeiling() { return policyCeiling; }
@@ -1741,33 +1731,6 @@ public final class ActorRuntime implements AutoCloseable {
     RuntimePlacement runtimePlacement() { return runtimePlacement; }
     public boolean usesProcessSharedDispatchers() { return vm.processVm(); }
     public int maxActors() { return dispatcherConfig.maxActors(); }
-
-    /**
-     * Implicit scheduler for ordinary async Oreslang tasks in this runtime.
-     * Its physical carriers come from VM CONTROL, but every turn re-enters this
-     * runtime's owning Truffle context through TurnExecutor.
-     */
-    public OresScheduler rootScheduler() {
-        if (closed.get()) throw new IllegalStateException("actor runtime is closed");
-        return rootScheduler;
-    }
-
-    private void executeRootSchedulerTurn(Runnable turn) {
-        Objects.requireNonNull(turn, "turn");
-        dispatcherGroup.executeControlTask(() -> {
-            ACTOR_CARRIER.set(Boolean.TRUE);
-            CURRENT_ROOT_RUNTIME.set(ActorRuntime.this);
-            try {
-                turnExecutor.execute(() -> {
-                    schedulerSafepoint();
-                    turn.run();
-                });
-            } finally {
-                CURRENT_ROOT_RUNTIME.remove();
-                ACTOR_CARRIER.remove();
-            }
-        });
-    }
 
     /**
      * Define one runtime-owned actor group. The group always owns exactly one
@@ -2109,7 +2072,7 @@ public final class ActorRuntime implements AutoCloseable {
             armRootDeadline();
             if (closed.get()) carrier.interrupt();
             try {
-                rootScheduler.runBound(() -> turnExecutor.execute(() -> {
+                vm.rootScheduler().runBound(() -> turnExecutor.execute(() -> {
                     try {
                         schedulerSafepoint();
                         completion.complete(task.get());
@@ -2723,26 +2686,6 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Compiler/runtime ABI for a one-shot actor callable whose source frame may
-     * suspend one or more times. The invocation must eventually complete or
-     * fail the supplied result exactly once. Calling ActorContext.suspendOn()
-     * unwinds the current carrier turn without completing this result.
-     */
-    @FunctionalInterface
-    public interface SuspendingInvocation<M, R> {
-        void run(
-                M message,
-                ActorContext<M> context,
-                InvocationCompletion<R> completion) throws Exception;
-    }
-
-    public interface InvocationCompletion<R> {
-        void complete(R value);
-        void fail(Throwable failure);
-        boolean isDone();
-    }
-
-    /**
      * Compiler-facing actor constructor. The actor context is available before
      * state initialization, so private actor fields can reserve/allocate in the
      * actor's confined memory slice rather than being captured from the caller.
@@ -2929,7 +2872,7 @@ public final class ActorRuntime implements AutoCloseable {
      * readiness future completes only after behavior initialization has
      * succeeded; the result future tracks the one-shot actor callable itself.
      */
-    public final class ActorSpawn<M, R> implements Awaitable<ActorRef<M>> {
+    public final class ActorSpawn<M, R> {
         private final ActorRef<M> ref;
         private final OresFuture<R> result;
         private final OresFuture<Boolean> done;
@@ -2948,10 +2891,6 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         public ActorId id() { return ref.id(); }
-
-        @Override
-        public OresFuture<ActorRef<M>> getAwaited() { return ready(); }
-
         public OresFuture<ActorRef<M>> ready() { return ref.readiness(); }
         public OresFuture<Boolean> done() { return done; }
         public OresFuture<R> result() { return result; }
@@ -3106,6 +3045,37 @@ public final class ActorRuntime implements AutoCloseable {
 
     public <M> ActorRef<M> spawnShared(BehaviorFactory<M> behaviorFactory) {
         return spawn(ActorKind.SHARED, defaultSpawnPolicy(), behaviorFactory);
+    }
+
+    /**
+     * Compiler/interpreter-only lowering target for persistent source-level
+     * shared actor classes. The factory may capture compiler/runtime-owned
+     * declaration state, but guest code never receives the factory or mutable
+     * actor object. PRIVATE/UNTRUSTED source actor classes require their
+     * isolation-aware lowering and must not use this trusted shared-state path.
+     */
+    public <M> ActorRef<M> spawnSourceSharedActor(BehaviorFactory<M> behaviorFactory) {
+        Objects.requireNonNull(behaviorFactory, "behaviorFactory");
+        requireCallerRuntimeAffinity("spawn source shared actor classes");
+        return spawnInternal(
+                ActorKind.SHARED,
+                defaultSpawnPolicy(),
+                behaviorFactory,
+                true);
+    }
+
+    /**
+     * Apply the same ownership/sendability validation used by shared actor
+     * transport before constructor data is captured by compiler/runtime state.
+     * This preserves ActorRef/OresRwLock capabilities from this runtime while
+     * deeply freezing ordinary data.
+     */
+    public Object prepareSourceSharedActorInput(Object value) {
+        requireCallerRuntimeAffinity("prepare source actor constructor input");
+        validateMessageGraph(value);
+        requireOwnedActorRefs(value, new IdentityHashMap<>(), 0);
+        requireOwnedSharedHandles(value, new IdentityHashMap<>(), 0);
+        return freezeForTransport(value);
     }
 
     public <M> ActorRef<M> spawnShared(
@@ -3580,24 +3550,6 @@ public final class ActorRuntime implements AutoCloseable {
             ActorKind kind,
             M message,
             Invocation<M, R> invocation) {
-        Objects.requireNonNull(invocation, "invocation");
-        return spawnSuspendingInvocation(
-                kind,
-                message,
-                (delivered, context, completion) ->
-                        completion.complete(invocation.run(delivered, context)));
-    }
-
-    /**
-     * Stackless compiler lowering target for source actor callables containing
-     * await. The source frame owns its continuation state; this runtime owns
-     * mailbox admission, actor-lease resumption, lifecycle, and final result
-     * publication.
-     */
-    public <M, R> ActorSpawn<M, R> spawnSuspendingInvocation(
-            ActorKind kind,
-            M message,
-            SuspendingInvocation<M, R> invocation) {
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(invocation, "invocation");
         requireCallerRuntimeAffinity("spawn actor callables");
@@ -3607,8 +3559,6 @@ public final class ActorRuntime implements AutoCloseable {
         AtomicReference<R> invocationValue = new AtomicReference<>();
         AtomicReference<Throwable> invocationFailure = new AtomicReference<>();
         AtomicBoolean invocationReturned = new AtomicBoolean();
-        AtomicBoolean terminalSignalled = new AtomicBoolean();
-
         OresFuture<R> completion = new OresFuture<>(() -> {
             ActorRef<M> ref = spawnedRef.get();
             if (ref != null && ref.isAlive()) {
@@ -3620,88 +3570,41 @@ public final class ActorRuntime implements AutoCloseable {
             }
         });
 
-        final class ResultSink implements InvocationCompletion<R> {
-            @Override
-            public void complete(R value) {
-                if (!terminalSignalled.compareAndSet(false, true)) {
-                    throw new IllegalStateException(
-                            "actor invocation result completed more than once");
-                }
-                @SuppressWarnings("unchecked")
-                R frozen = (R) freeze(value);
-                invocationValue.set(frozen);
-                invocationReturned.set(true);
-                stopActor();
-            }
-
-            @Override
-            public void fail(Throwable failure) {
-                Objects.requireNonNull(failure, "failure");
-                if (!terminalSignalled.compareAndSet(false, true)) return;
-                invocationFailure.compareAndSet(null, failure);
-                stopActor();
-            }
-
-            @Override
-            public boolean isDone() {
-                return terminalSignalled.get();
-            }
-
-            private void stopActor() {
-                ActorRef<M> ref = spawnedRef.get();
-                if (ref != null && ref.isAlive()) {
-                    try {
-                        ref.stop();
-                    } catch (IllegalStateException ignored) {
-                        // Actor finalization already won the race.
-                    }
-                }
-            }
-        }
-
-        ResultSink resultSink = new ResultSink();
-
         ActorRef<M> ref = spawnInternal(
                 kind,
                 policy,
                 factoryContext -> (delivered, turnContext) -> {
                     try {
-                        invocation.run(delivered, turnContext, resultSink);
-                        if (!resultSink.isDone()) {
-                            IllegalStateException incomplete =
-                                    new IllegalStateException(
-                                            "suspending actor invocation returned without "
-                                                    + "completion or ActorContext.suspendOn()");
-                            resultSink.fail(incomplete);
-                            throw incomplete;
-                        }
-                    } catch (ActorTurnSuspendedSignal suspended) {
-                        // Normal compiler/runtime control transfer. The live
-                        // frame is already captured by the continuation.
-                        throw suspended;
+                        @SuppressWarnings("unchecked")
+                        R frozen = (R) freeze(invocation.run(delivered, turnContext));
+                        invocationValue.set(frozen);
+                        invocationReturned.set(true);
                     } catch (VirtualMachineError fatal) {
-                        resultSink.fail(fatal);
+                        invocationFailure.compareAndSet(null, fatal);
                         throw fatal;
                     } catch (ThreadDeath fatal) {
-                        resultSink.fail(fatal);
+                        invocationFailure.compareAndSet(null, fatal);
                         throw fatal;
                     } catch (LinkageError fatal) {
-                        resultSink.fail(fatal);
+                        invocationFailure.compareAndSet(null, fatal);
                         throw fatal;
                     } catch (Exception failure) {
-                        resultSink.fail(failure);
+                        invocationFailure.compareAndSet(null, failure);
                         throw failure;
                     } catch (Error failure) {
-                        resultSink.fail(failure);
+                        invocationFailure.compareAndSet(null, failure);
                         throw failure;
+                    } finally {
+                        turnContext.self().stop();
                     }
                 },
                 true);
         spawnedRef.set(ref);
         ActorSpawn<M, R> spawn = new ActorSpawn<>(ref, completion);
 
-        // Publish a source actor result only after the actor has fully finalized
-        // and its carrier has left the Truffle context.
+        // Do not publish a source-level actor result until the actor has fully
+        // finalized and its carrier has left the Truffle context. Otherwise a
+        // root awaiting result() can race Context.close() with the actor turn.
         ref.finalization().whenComplete((ignored, finalizationFailure) -> {
             if (completion.isDone()) return;
             Throwable failure = invocationFailure.get();
@@ -5440,7 +5343,6 @@ public final class ActorRuntime implements AutoCloseable {
         for (RootTask<?> rootTask : List.copyOf(rootTasks)) {
             rootTask.cancelFromRuntimeClose();
         }
-        if (firstClose) rootScheduler.close();
 
         if (firstClose && ownsVm) {
             // Dedicated/test runtimes own their complete VM scheduler set.

@@ -19,7 +19,7 @@ final class ActorCapabilityIsolationTest {
     void privateActorStaticallyDeniesReadonlySharingEvenUnderDeveloperPolicy() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 isoactor PrivateWorker {
-                  pub fnc attempt_share() => void {
+                  pub receive(int message): void {
                     val shared = process.share_readonly(arr[1, 2, 3]);
                     stdio.println(shared);
                     return;
@@ -41,6 +41,8 @@ final class ActorCapabilityIsolationTest {
 
                 isoactor PrivateWorker {
                   let SharedInt hidden;
+
+                  pub receive(int message): void { return; }
                 }
                 """));
 
@@ -60,6 +62,8 @@ final class ActorCapabilityIsolationTest {
 
                 isoactor PrivateWorker {
                   let SharedBox hidden;
+
+                  pub receive(int message): void { return; }
                 }
                 """));
 
@@ -80,7 +84,7 @@ final class ActorCapabilityIsolationTest {
                 }
 
                 isoactor PrivateWorker {
-                  pub fnc run() => void {
+                  pub receive(int message): void {
                     build_shared();
                     return;
                   }
@@ -106,7 +110,7 @@ final class ActorCapabilityIsolationTest {
                 end
 
                 isoactor PrivateWorker {
-                  pub fnc run() => void {
+                  pub receive(int message): void {
                     Helpers.build_shared();
                     return;
                   }
@@ -133,6 +137,8 @@ final class ActorCapabilityIsolationTest {
 
                 isoactor PrivateWorker {
                   let Helper helper;
+
+                  pub receive(int message): void { return; }
                 }
                 """));
 
@@ -154,6 +160,8 @@ final class ActorCapabilityIsolationTest {
 
                 shared actor SharedWorker {
                   let SharedBox state;
+
+                  pub receive(int message): void { return; }
                 }
                 """));
 
@@ -174,6 +182,8 @@ final class ActorCapabilityIsolationTest {
 
                 isoactor PrivateWorker {
                   let Node root;
+
+                  pub receive(int message): void { return; }
                 }
                 """));
 
@@ -235,7 +245,7 @@ final class ActorCapabilityIsolationTest {
                 }
 
                 isoactor PrivateWorker {
-                  pub fnc run() => void {
+                  pub receive(int message): void {
                     val callback = build_shared;
                     callback();
                     return;
@@ -262,7 +272,7 @@ final class ActorCapabilityIsolationTest {
                 end
 
                 isoactor PrivateWorker {
-                  pub fnc run() => void {
+                  pub receive(int message): void {
                     val callback = helpers.expose;
                     callback();
                     return;
@@ -290,7 +300,7 @@ final class ActorCapabilityIsolationTest {
                 end
 
                 isoactor PrivateWorker {
-                  pub fnc run() => void {
+                  pub receive(int message): void {
                     val callback = Helpers.build_shared;
                     callback();
                     return;

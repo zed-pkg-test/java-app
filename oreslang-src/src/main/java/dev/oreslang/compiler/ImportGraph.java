@@ -84,10 +84,20 @@ final class ImportGraph {
     }
 
     private static int exportedMatches(Ast.Program program, Ast.ImportKind kind, String name) {
+        if (kind == Ast.ImportKind.ENTRY) {
+            int entries = 0;
+            for (Ast.ModuleDecl module : program.modules()) {
+                for (Ast.Decl decl : module.declarations()) {
+                    if (decl instanceof Ast.EntryExportDecl) entries++;
+                }
+            }
+            return entries;
+        }
+
         int matches = 0;
         for (Ast.ModuleDecl module : program.modules()) {
             if (kind == Ast.ImportKind.MODULE) {
-                if (module.name().equals(name)) matches++;
+                if (module.name().equals(name) && !module.name().equals("__root__")) matches++;
                 continue;
             }
             for (Ast.Decl decl : module.declarations()) {
@@ -98,6 +108,12 @@ final class ImportGraph {
                     matches++;
                 } else if (kind == Ast.ImportKind.CLASS
                         && decl instanceof Ast.ClassDecl klass
+                        && klass.actorKind() == Ast.ActorKind.NONE
+                        && klass.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.ACTOR
+                        && decl instanceof Ast.ClassDecl klass
+                        && klass.actorKind() != Ast.ActorKind.NONE
                         && klass.name().equals(name)) {
                     matches++;
                 } else if (kind == Ast.ImportKind.ALL) {

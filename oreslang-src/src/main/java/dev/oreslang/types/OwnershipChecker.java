@@ -243,12 +243,6 @@ public final class OwnershipChecker {
             scope.define(binding.name(), placeholder);
         }
 
-        if (isRwGuardValueCall(binding.initializer(), scope)) {
-            throw error(
-                    "RwLock guard value is a lexical read-only view and cannot be bound; "
-                            + "use guard.value() inline while the guard is live");
-        }
-
         ValueInfo value;
         if (binding.initializer() instanceof Ast.UnaryExpr unary && (unary.operator().equals("&") || unary.operator().equals("&mut"))) {
             boolean mutableBorrow = unary.operator().equals("&mut");
@@ -394,6 +388,10 @@ public final class OwnershipChecker {
             if (concreteReceiver != null && concreteReceiver.name().equals("ActorRef")) {
                 return switch (member.member()) {
                     case "id" -> new ValueInfo(Ast.TypeRef.simple("ActorId"), ValueKind.COPY, null);
+                    case "is_alive" -> new ValueInfo(
+                            new Ast.TypeRef("Fnc", List.of(Ast.TypeRef.simple("bool")), false),
+                            ValueKind.COPY,
+                            null);
                     default -> new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
                 };
             }
@@ -443,11 +441,32 @@ public final class OwnershipChecker {
                     throw error("MutexGuard cannot cross an actor spawn boundary");
                 }
             }
+
+            Ast.ClassDecl actorClass = null;
+            String protocolName = null;
+            Ast.Expr callee = spawned.call().callee();
+            if (callee instanceof Ast.NameExpr name) {
+                actorClass = findClass(name.name());
+                protocolName = actorClass == null ? null : name.name();
+            } else if (callee instanceof Ast.MemberExpr member
+                    && member.receiver() instanceof Ast.NameExpr namespace) {
+                String qualified = namespace.name() + "." + member.member();
+                actorClass = findClass(qualified);
+                protocolName = actorClass == null ? null : qualified;
+            }
+            if (actorClass != null && actorClass.actorKind() != Ast.ActorKind.NONE) {
+                List<Ast.TypeRef> actorArguments = actorClass.genericParameters().isEmpty()
+                        ? List.of()
+                        : spawned.call().typeArguments();
+                Ast.TypeRef protocol = new Ast.TypeRef(protocolName, actorArguments, false);
+                Ast.TypeRef actorRef = new Ast.TypeRef("ActorRef", List.of(protocol), false);
+                return new ValueInfo(actorRef, ValueKind.COPY, null);
+            }
             return new ValueInfo(Ast.TypeRef.simple("ActorSpawn"), ValueKind.MOVE_ONLY, null);
         }
         if (expr instanceof Ast.AwaitExpr awaited) {
             if (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard()) {
-                throw error("cannot await while holding a lock guard; release the guard before suspension");
+                throw error("cannot await while holding a MutexGuard; release the guard before suspension");
             }
             ValueInfo awaitedValue = checkExpr(awaited.expression(), scope, consuming);
             if (awaitedValue.type.name().equals("Future") && awaitedValue.type.arguments().size() == 1) {
@@ -489,9 +508,7 @@ public final class OwnershipChecker {
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
         if (call.callee() instanceof Ast.MemberExpr factoryCall
                 && factoryCall.receiver() instanceof Ast.NameExpr factory
-                && (factory.name().equals("Mutex")
-                        || factory.name().equals("SharedMutex")
-                        || factory.name().equals("RwLock"))
+                && (factory.name().equals("Mutex") || factory.name().equals("SharedMutex"))
                 && factoryCall.member().equals("new")
                 && call.arguments().size() == 1) {
             ValueInfo owned = checkExpr(call.arguments().getFirst(), scope, true);
@@ -503,8 +520,7 @@ public final class OwnershipChecker {
                 throw error(factory.name() + ".new cannot hide a guard-bearing value");
             }
             Ast.TypeRef mutexType = new Ast.TypeRef(factory.name(), List.of(owned.type), false);
-            boolean sharedHandle = factory.name().equals("SharedMutex") || factory.name().equals("RwLock");
-            return new ValueInfo(mutexType, sharedHandle ? ValueKind.COPY : ValueKind.MOVE_ONLY, null);
+            return new ValueInfo(mutexType, factory.name().equals("SharedMutex") ? ValueKind.COPY : ValueKind.MOVE_ONLY, null);
         }
 
         if (call.callee() instanceof Ast.NameExpr name
@@ -536,10 +552,7 @@ public final class OwnershipChecker {
                         fn.genericParameters(), fn.genericParameters(),
                         fn.parameters(), fn.returnType(), call, scope, Map.of());
                 checkArguments(call.arguments(), signature.parameters(), scope, "function " + fn.name());
-                Ast.TypeRef result = fn.async()
-                        ? new Ast.TypeRef("Future", List.of(signature.result()), false)
-                        : signature.result();
-                return new ValueInfo(result, kindOfType(result), null);
+                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
             }
         }
 
@@ -555,10 +568,7 @@ public final class OwnershipChecker {
                         signature.parameters(),
                         scope,
                         "function " + namespace.name() + "." + qualified.member());
-                Ast.TypeRef result = fn.async()
-                        ? new Ast.TypeRef("Future", List.of(signature.result()), false)
-                        : signature.result();
-                return new ValueInfo(result, kindOfType(result), null);
+                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
             }
         }
 
@@ -584,10 +594,7 @@ public final class OwnershipChecker {
                             signature.parameters(),
                             scope,
                             "static function " + staticClass.name() + "." + staticFunction.name());
-                    Ast.TypeRef result = staticFunction.async()
-                            ? new Ast.TypeRef("Future", List.of(signature.result()), false)
-                            : signature.result();
-                    return new ValueInfo(result, kindOfType(result), null);
+                    return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
                 }
             }
 
@@ -596,61 +603,6 @@ public final class OwnershipChecker {
                 if (receiverState != null) {
                     requireUsable(receiverState, receiverName.name(), false);
                     Ast.TypeRef receiverType = receiverState.type;
-                    if (receiverType.name().equals("RwLock")
-                            && receiverType.arguments().size() == 1) {
-                        Ast.TypeRef element = receiverType.arguments().getFirst();
-                        if (member.member().equals("read_lock") && call.arguments().isEmpty()) {
-                            return new ValueInfo(
-                                    new Ast.TypeRef("RwReadGuard", List.of(element), false),
-                                    ValueKind.MOVE_ONLY,
-                                    null);
-                        }
-                        if (member.member().equals("try_read_lock") && call.arguments().isEmpty()) {
-                            Ast.TypeRef guard = new Ast.TypeRef("RwReadGuard", List.of(element), false);
-                            return new ValueInfo(
-                                    new Ast.TypeRef("Option", List.of(guard), false),
-                                    ValueKind.MOVE_ONLY,
-                                    null);
-                        }
-                        if (member.member().equals("write_lock") && call.arguments().isEmpty()) {
-                            return new ValueInfo(
-                                    new Ast.TypeRef("RwWriteGuard", List.of(element), false),
-                                    ValueKind.MOVE_ONLY,
-                                    null);
-                        }
-                        if (member.member().equals("try_write_lock") && call.arguments().isEmpty()) {
-                            Ast.TypeRef guard = new Ast.TypeRef("RwWriteGuard", List.of(element), false);
-                            return new ValueInfo(
-                                    new Ast.TypeRef("Option", List.of(guard), false),
-                                    ValueKind.MOVE_ONLY,
-                                    null);
-                        }
-                    }
-                    if (isRwGuardType(receiverType)) {
-                        Ast.TypeRef element = receiverType.arguments().getFirst();
-                        if (member.member().equals("value") && call.arguments().isEmpty()) {
-                            if (isCopyType(element)) {
-                                return new ValueInfo(element, ValueKind.COPY, null);
-                            }
-                            return new ValueInfo(
-                                    Ast.TypeRef.borrowed(element, false),
-                                    ValueKind.IMM_BORROW,
-                                    receiverState);
-                        }
-                        if (receiverType.name().equals("RwWriteGuard")
-                                && member.member().equals("replace")
-                                && call.arguments().size() == 1) {
-                            checkExpr(call.arguments().getFirst(), scope, true);
-                            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
-                        }
-                        if (member.member().equals("release") && call.arguments().isEmpty()) {
-                            move(receiverState, receiverName.name());
-                            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
-                        }
-                        if (member.member().equals("is_released") && call.arguments().isEmpty()) {
-                            return new ValueInfo(Ast.TypeRef.simple("bool"), ValueKind.COPY, null);
-                        }
-                    }
                     if ((receiverType.name().equals("Mutex") || receiverType.name().equals("SharedMutex"))
                             && receiverType.arguments().size() == 1) {
                         Ast.TypeRef element = receiverType.arguments().getFirst();
@@ -705,6 +657,46 @@ public final class OwnershipChecker {
             }
             checkExpr(member.receiver(), scope, false);
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
+            if (concreteReceiver != null
+                    && concreteReceiver.name().equals("ActorRef")
+                    && concreteReceiver.arguments().size() == 1) {
+                Ast.TypeRef protocol = concreteReceiver.arguments().getFirst();
+                Ast.ClassDecl actorClass = findClass(protocol.name());
+                if (actorClass != null && actorClass.actorKind() != Ast.ActorKind.NONE) {
+                    ResolvedMethod actorTarget = findMethodTarget(
+                            actorClass,
+                            protocol,
+                            member.member(),
+                            call.arguments().size(),
+                            new LinkedHashSet<>());
+                    if (actorTarget != null
+                            && actorTarget.method().visibility() == Ast.Visibility.PUBLIC
+                            && !actorTarget.method().name().equals("constructor")) {
+                        Ast.MethodDecl method = actorTarget.method();
+                        Map<String, Ast.TypeRef> ownerBindings = genericBindings(
+                                actorTarget.owner().genericParameters(),
+                                actorTarget.ownerType().arguments());
+                        CallSignature signature = specializeCall(
+                                actorTarget.owner().genericParameters(),
+                                List.of(),
+                                method.parameters(),
+                                method.returnType(),
+                                call,
+                                scope,
+                                ownerBindings);
+                        checkArguments(
+                                call.arguments(),
+                                signature.parameters(),
+                                scope,
+                                "actor protocol method " + actorTarget.owner().name() + "." + method.name());
+                        Ast.TypeRef future = new Ast.TypeRef(
+                                "Future",
+                                List.of(signature.result()),
+                                false);
+                        return new ValueInfo(future, ValueKind.MOVE_ONLY, null);
+                    }
+                }
+            }
             Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
             ResolvedMethod target = klass == null ? null
                     : findMethodTarget(klass, concreteReceiver, member.member(), call.arguments().size(), new LinkedHashSet<>());
@@ -728,11 +720,7 @@ public final class OwnershipChecker {
                     throw error("method '" + target.owner().name() + "." + method.name()
                             + "' cannot return move-only state through a mutex guard/critical-section borrow");
                 }
-                Ast.TypeRef result = method.async()
-                                && target.owner().actorKind() == Ast.ActorKind.NONE
-                        ? new Ast.TypeRef("Future", List.of(signature.result()), false)
-                        : signature.result();
-                return new ValueInfo(result, kindOfType(result), null);
+                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
             }
         }
 
@@ -1502,7 +1490,7 @@ public final class OwnershipChecker {
         return switch (type.name()) {
             case "i8","i16","i32","i64","u8","u16","u32","u64","int","uint","bigint",
                     "f32","f64","float","decimal","complex64","complex128","complex",
-                    "bool","Bool","string","String","void","ActorId","SharedMutex","RwLock","OptionUnwrapError" -> true;
+                    "bool","Bool","string","String","void","ActorId","ActorRef","Recipient","SharedMutex","OptionUnwrapError" -> true;
             case "Option" -> type.arguments().size() == 1 && isCopyType(type.arguments().getFirst());
             case "Result" -> type.arguments().size() == 2
                     && isCopyType(type.arguments().get(0))
@@ -1517,33 +1505,7 @@ public final class OwnershipChecker {
     }
 
     private static boolean isMutexGuardType(Ast.TypeRef type) {
-        return type != null
-                && !type.isBorrow()
-                && type.arguments().size() == 1
-                && (type.name().equals("MutexGuard")
-                        || type.name().equals("RwReadGuard")
-                        || type.name().equals("RwWriteGuard"));
-    }
-
-    private static boolean isRwGuardType(Ast.TypeRef type) {
-        return type != null
-                && !type.isBorrow()
-                && type.arguments().size() == 1
-                && (type.name().equals("RwReadGuard") || type.name().equals("RwWriteGuard"));
-    }
-
-    private boolean isRwGuardValueCall(Ast.Expr expr, Scope scope) {
-        if (!(expr instanceof Ast.CallExpr call)
-                || !call.arguments().isEmpty()
-                || !(call.callee() instanceof Ast.MemberExpr member)
-                || !member.member().equals("value")
-                || !(member.receiver() instanceof Ast.NameExpr receiver)) {
-            return false;
-        }
-        VarState state = scope.lookup(receiver.name());
-        return state != null
-                && isRwGuardType(state.type)
-                && !isCopyType(state.type.arguments().getFirst());
+        return type != null && !type.isBorrow() && type.name().equals("MutexGuard") && type.arguments().size() == 1;
     }
 
     private static boolean containsMutexGuardType(Ast.TypeRef type) {

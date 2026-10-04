@@ -251,7 +251,7 @@ final class LanguageHardeningTest {
                 shared actor Account {
                   let balance = 100;
 
-                  pub receive_message(int delta) => void {
+                  pub receive(int delta) => void {
                     self.balance = self.balance + delta;
                     return;
                   }
