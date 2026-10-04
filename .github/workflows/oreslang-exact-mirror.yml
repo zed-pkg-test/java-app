@@ -34,6 +34,13 @@ jobs:
         run: |
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
+      - name: Build GraalVM Native Image AOT launcher
+        run: mvn -B -ntp -DskipTests -Pnative-aot package
+      - name: Run core examples through AOT launcher
+        run: |
+          test -x target/ores-aot
+          ./target/ores-aot examples/showcase.ores
+          ./target/ores-aot examples/together.ores
       - name: Build Oreslang AOT native executable
         run: mvn -B -ntp -Pnative-aot -DskipTests package
       - name: Smoke test AOT native executable
