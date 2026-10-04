@@ -38,6 +38,12 @@ runtime-internal.
 Host/embedder APIs remain an explicit privileged escape hatch, analogous to
 Java JNI/FFM or Go unsafe; they are not part of the safe Oreslang guest model.
 
+Private/isoactor confinement is enforced twice: the static capability pass and
+the runtime spawn path both remove FFI, native-memory authority, reflection,
+guest-created threads, and polyglot access even when a more privileged
+supervisor policy grants them. This prevents a trusted-but-confined actor from
+using a co-resident JVM escape hatch to reach OresVM or another actor's memory.
+
 ## Four scheduler domains
 
 The VM owns exactly four guest/control execution pools:

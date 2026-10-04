@@ -320,5 +320,87 @@ final class ActorCapabilityIsolationTest {
                         || error.getMessage().contains("ACTOR_SHARE_READONLY"));
     }
 
+    @Test
+    void privateActorRuntimeStripsHostEscapeHatchesEvenWhenSupervisorGrantsThem() throws Exception {
+        IsolatePolicy base = IsolatePolicy.developer();
+        IsolatePolicy privileged = base.withCapabilities(
+                IsolatePolicy.Capability.FFI,
+                IsolatePolicy.Capability.NATIVE,
+                IsolatePolicy.Capability.REFLECTION,
+                IsolatePolicy.Capability.THREAD_CREATE,
+                IsolatePolicy.Capability.POLYGLOT);
+
+        AtomicReference<IsolatePolicy> observed = new AtomicReference<>();
+        CountDownLatch ran = new CountDownLatch(1);
+
+        try (ActorRuntime runtime = new ActorRuntime(privileged)) {
+            var ref = runtime.<String>spawnPrivateTrusted(
+                    privileged,
+                    factoryContext -> {
+                        observed.set(factoryContext.policy());
+                        return (message, context) -> {
+                            ran.countDown();
+                            context.self().stop();
+                        };
+                    });
+
+            ref.send("check");
+            assertTrue(ran.await(2, TimeUnit.SECONDS));
+            assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(ref.failure().isEmpty());
+        }
+
+        IsolatePolicy actorPolicy = observed.get();
+        assertNotNull(actorPolicy);
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.SHARED_MEMORY));
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.ACTOR_SHARE_READONLY));
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.GC_CONTROL));
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.FFI));
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.NATIVE));
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.REFLECTION));
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.THREAD_CREATE));
+        assertFalse(actorPolicy.allows(IsolatePolicy.Capability.POLYGLOT));
+    }
+
+    @Test
+    void privateActorStaticPolicyDeniesFfiPolyglotAndThreadEscapeHatches() {
+        IsolatePolicy privileged = IsolatePolicy.developer().withCapabilities(
+                IsolatePolicy.Capability.FFI,
+                IsolatePolicy.Capability.POLYGLOT,
+                IsolatePolicy.Capability.THREAD_CREATE);
+
+        for (String source : java.util.List.of(
+                """
+                isoactor PrivateWorker {
+                  pub fnc run() => void {
+                    ffi.call();
+                    return;
+                  }
+                }
+                """,
+                """
+                isoactor PrivateWorker {
+                  pub fnc run() => void {
+                    polyglot.eval();
+                    return;
+                  }
+                }
+                """,
+                """
+                isoactor PrivateWorker {
+                  pub fnc run() => void {
+                    thread.spawn();
+                    return;
+                  }
+                }
+                """)) {
+            Ast.Program program = Parser.parse(source);
+            assertThrows(
+                    SecurityException.class,
+                    () -> CapabilityChecker.check(program, privileged));
+        }
+    }
+
+
 
 }

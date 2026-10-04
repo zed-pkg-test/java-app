@@ -3345,6 +3345,22 @@ public final class ActorRuntime implements AutoCloseable {
                         IsolatePolicy.Capability.SHARED_MEMORY,
                         IsolatePolicy.Capability.ACTOR_SHARE_READONLY)
                 : policy;
+
+        // Memory-isolated PRIVATE actors are co-resident with the VM/JVM but
+        // must not receive host escape hatches that can pierce confinement.
+        // Keep this runtime rule aligned with CapabilityChecker and the
+        // TRUSTED_ISOACTOR_JIT hot-loader policy: same process/isolate does not
+        // imply permission to reflect into runtime state, create threads, enter
+        // another polyglot language, or reach native/FFI memory.
+        if (kind == ActorKind.PRIVATE) {
+            effectivePolicy = effectivePolicy.withoutCapabilities(
+                    IsolatePolicy.Capability.FFI,
+                    IsolatePolicy.Capability.NATIVE,
+                    IsolatePolicy.Capability.REFLECTION,
+                    IsolatePolicy.Capability.THREAD_CREATE,
+                    IsolatePolicy.Capability.POLYGLOT);
+        }
+
         // Whole-process GC is control-plane authority. Every actor kind,
         // including shared actors, is confined to actor-local collection.
         effectivePolicy = effectivePolicy.withoutCapabilities(

@@ -190,7 +190,12 @@ public final class CapabilityChecker {
             case PRIVATE -> parent.withoutCapabilities(
                     IsolatePolicy.Capability.SHARED_MEMORY,
                     IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                    IsolatePolicy.Capability.GC_CONTROL);
+                    IsolatePolicy.Capability.GC_CONTROL,
+                    IsolatePolicy.Capability.FFI,
+                    IsolatePolicy.Capability.NATIVE,
+                    IsolatePolicy.Capability.REFLECTION,
+                    IsolatePolicy.Capability.THREAD_CREATE,
+                    IsolatePolicy.Capability.POLYGLOT);
             case SHARED -> parent.withoutCapabilities(
                     IsolatePolicy.Capability.GC_CONTROL);
             case UNTRUSTED -> IsolatePolicy.untrustedActor();
