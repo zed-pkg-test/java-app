@@ -410,23 +410,11 @@ public final class OresMutex {
         }
 
         private void requireActorAccess() {
-            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
-                throw new SecurityException("private actors cannot access SharedMutex<T>");
-            }
-            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
-                throw new SecurityException("untrusted actors cannot access SharedMutex<T>");
-            }
-            IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
-            if (actorPolicy != null) {
-                actorPolicy.require(
-                        IsolatePolicy.Capability.SHARED_MEMORY,
-                        "SharedMutex operation");
-            }
-
-            ActorRuntime current = ActorRuntime.currentActorRuntime();
-            if (current != null && !bindToRuntime(current)) {
-                throw new WrongMutexDomainException(
-                        "SharedMutex belongs to another ActorRuntime");
+            if (ActorRuntime.inActorExecution()) {
+                throw new SecurityException(
+                        "actors cannot mutate external state through SharedMutex<T>; "
+                                + "use actor-owned state for writes and OresRwLock<T> read guards "
+                                + "for explicit shared external reads");
             }
         }
 
