@@ -615,7 +615,12 @@ public final class OresEvalRootNode extends RootNode {
 
             if (!tailBarrier) {
                 if (value instanceof Ast.CallExpr call) {
-                    throw new TailCallSignal(prepareInvocation(call, env));
+                    Invocation invocation = prepareInvocation(call, env);
+                    if (invocation.kind() != InvocationKind.INVOKABLE
+                            || invocation.target() instanceof TailInvokable) {
+                        throw new TailCallSignal(invocation);
+                    }
+                    throw new ReturnSignal(invoke(invocation));
                 }
                 if (value instanceof Ast.ConditionalExpr conditional) {
                     Ast.Expr selected = truth(eval(conditional.condition(), env))
@@ -762,7 +767,7 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("routine " + fn.name()
                                 + " is direct-call-only and cannot be used as a first-class callable value");
                     }
-                    return (Invokable) args -> callFunctionRaw(fn, objectArguments(args));
+                    return (TailInvokable) args -> callFunctionRaw(fn, objectArguments(args));
                 }
                 throw new IllegalArgumentException("unknown name " + name.name());
             }
@@ -956,7 +961,7 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.LambdaExpr lambda) {
                 boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
-                return (Invokable) args -> {
+                return (TailInvokable) args -> {
                     if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
                     Env local = new Env(captured, nonLexical);
                     for (int i = 0; i < lambda.parameters().size(); i++) {
@@ -1038,7 +1043,7 @@ public final class OresEvalRootNode extends RootNode {
                 List<Ast.MethodDecl> functions = klass.owner().findStaticFunctionsByName(klass.klass(), name, new LinkedHashSet<>());
                 if (functions.size() == 1) {
                     Ast.MethodDecl fn = functions.getFirst();
-                    return (Invokable) args -> klass.owner().callStaticFunctionRaw(fn, objectArguments(args));
+                    return (TailInvokable) args -> klass.owner().callStaticFunctionRaw(fn, objectArguments(args));
                 }
                 if (functions.size() > 1) throw new IllegalArgumentException("overloaded static function " + klass.klass().name() + "." + name + " must be called so arity can select it");
                 throw new IllegalArgumentException("unknown static member " + klass.klass().name() + "." + name);
@@ -1354,7 +1359,7 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("import fnc requires a reifiable non-actor fnc; '" + name
                                 + "' is direct-call-only or actor-scheduled");
                     }
-                    yield (Invokable) args -> callFunctionRaw(fn, objectArguments(args));
+                    yield (TailInvokable) args -> callFunctionRaw(fn, objectArguments(args));
                 }
                 case CLASS -> {
                     Ast.ClassDecl klass = findClass(name);
@@ -1379,7 +1384,7 @@ public final class OresEvalRootNode extends RootNode {
             if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC
                     && fn.kind() == Ast.CallableKind.FNC
                     && fn.actorKind() == Ast.ActorKind.NONE) {
-                return (Invokable) args -> callFunctionRaw(fn, objectArguments(args));
+                return (TailInvokable) args -> callFunctionRaw(fn, objectArguments(args));
             }
             for (Ast.ModuleDecl candidate : program.modules()) {
                 for (Ast.Decl decl : candidate.declarations()) {
@@ -1429,7 +1434,7 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("callable '" + module.name() + "." + name
                                 + "' is direct-call-only and cannot be extracted as a value");
                     }
-                    return (Invokable) args -> callFunctionRaw(fn, objectArguments(args));
+                    return (TailInvokable) args -> callFunctionRaw(fn, objectArguments(args));
                 }
                 if (decl instanceof Ast.FieldDecl field && field.name().equals(name) && field.visibility() == Ast.Visibility.PUBLIC) {
                     if (field.initializer() == null) throw new IllegalArgumentException("module field has no initializer: " + module.name() + "." + name);
@@ -1778,6 +1783,7 @@ public final class OresEvalRootNode extends RootNode {
     }
 
     @FunctionalInterface private interface Invokable { Object call(List<Object> arguments); }
+    @FunctionalInterface private interface TailInvokable extends Invokable { }
 
     private static final class Env {
         private static final Object MISSING = new Object();
