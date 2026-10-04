@@ -2509,8 +2509,9 @@ public final class ActorRuntime implements AutoCloseable {
      * Explicit synchronized shared-memory cell.
      *
      * Actor fields do not use this: a mailbox turn already provides exclusive
-     * mutation of actor-owned state. SyncCell is for state intentionally shared
-     * by multiple SHARED actors.
+     * mutation of actor-owned state. SyncCell is retained as a host/root runtime
+     * synchronization primitive; actor code may not access it. Shared actors
+     * read external state only through explicit OresRwLock read capabilities.
      */
     public final class SyncCell<T> implements AutoCloseable {
         private final ReentrantLock lock = new ReentrantLock(true);
@@ -2535,7 +2536,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         public T snapshot() {
-            rejectPrivateActorSharedMemoryAccess("SyncCell.snapshot");
+            rejectActorSyncCellAccess("SyncCell.snapshot");
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -2549,7 +2550,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         public <R> R read(Function<? super T, ? extends R> reader) {
             Objects.requireNonNull(reader);
-            requireSharedActorTurn();
+            rejectActorSyncCellAccess("SyncCell.read");
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -2568,7 +2569,7 @@ public final class ActorRuntime implements AutoCloseable {
         @SuppressWarnings("unchecked")
         public T update(UnaryOperator<T> updater) {
             Objects.requireNonNull(updater);
-            requireSharedActorTurn();
+            rejectActorSyncCellAccess("SyncCell.update");
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -2596,7 +2597,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         @Override
         public void close() {
-            rejectPrivateActorSharedMemoryAccess("SyncCell.close");
+            rejectActorSyncCellAccess("SyncCell.close");
             boolean entered = enterSyncCell(this);
             try {
                 closeFromRuntime();
@@ -3814,6 +3815,7 @@ public final class ActorRuntime implements AutoCloseable {
 
     public <T> SyncCell<T> syncCell(T initialValue) {
         requireCallerRuntimeAffinity("create shared SyncCell values");
+        rejectActorSyncCellAccess("SyncCell creation");
         if (closed.get()) throw new IllegalStateException("actor runtime is closed");
         IsolatePolicy callerPolicy = currentActorPolicy();
         if (callerPolicy != null) {
@@ -3862,10 +3864,12 @@ public final class ActorRuntime implements AutoCloseable {
         }
     }
 
-    private void requireSharedActorTurn() {
-        ActorCell<?> cell = currentActor.get();
-        if (cell == null || cell.kind != ActorKind.SHARED) {
-            throw new IllegalStateException("shared state mutation requires a shared actor mailbox turn");
+    private void rejectActorSyncCellAccess(String operation) {
+        if (inActorExecution()) {
+            throw new SecurityException(
+                    "actors cannot access SyncCell external mutable state via " + operation
+                            + "; use actor-owned state for writes or OresRwLock<T> read guards "
+                            + "for explicit external reads");
         }
     }
 
@@ -4335,7 +4339,11 @@ public final class ActorRuntime implements AutoCloseable {
             requireMutexTransport(target, shared.value(), visiting, depth + 1);
             return;
         }
-        if (value instanceof SyncCell<?>) return;
+        if (value instanceof SyncCell<?>) {
+            throw new SecurityException(
+                    "actors cannot receive SyncCell mutable shared state; "
+                            + "use OresRwLock<T> for explicit external reads");
+        }
         if (visiting.put(value, Boolean.TRUE) != null) {
             throw new IllegalArgumentException("cyclic values cannot cross actor boundaries");
         }
