@@ -1333,15 +1333,24 @@ public final class OresEvalRootNode extends RootNode {
             if (slot == null) throw new IllegalArgumentException("unknown binding " + name);
             slot.value = value;
         }
-        private Object lookup(String name) { Slot s=slots.get(name); return s!=null?s.value:parent==null?MISSING:parent.lookup(name); }
+        private Object lookup(String name) {
+            for (Env scope = this; scope != null; scope = scope.parent) {
+                Slot slot = scope.slots.get(name);
+                if (slot != null) return slot.value;
+            }
+            return MISSING;
+        }
         private void assign(String name, Object value) {
-            Slot slot = slots.get(name);
-            if (slot != null) {
-                if (slot.kind != Ast.BindingKind.LET) throw new IllegalArgumentException("cannot reassign " + slot.kind.name().toLowerCase() + " binding " + name);
+            for (Env scope = this; scope != null; scope = scope.parent) {
+                Slot slot = scope.slots.get(name);
+                if (slot == null) continue;
+                if (slot.kind != Ast.BindingKind.LET) {
+                    throw new IllegalArgumentException(
+                            "cannot reassign " + slot.kind.name().toLowerCase() + " binding " + name);
+                }
                 slot.value = value;
                 return;
             }
-            if (parent != null) { parent.assign(name, value); return; }
             throw new IllegalArgumentException("unknown binding " + name);
         }
         private Env snapshot() {
@@ -1349,6 +1358,7 @@ public final class OresEvalRootNode extends RootNode {
             cp.slots.putAll(slots);
             return cp;
         }
+        @TruffleBoundary
         private void releaseMutexGuards(boolean failed) {
             Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
             for (Slot slot : slots.values()) releaseMutexGuardsInValue(slot.value, failed, seen);
