@@ -252,6 +252,14 @@ final class ArityOverloadAotTest {
                   pub via_self1() => int {
                     return call1(self.pick);
                   }
+
+                  pub static fnc select() => int {
+                    return 70;
+                  }
+
+                  pub static fnc select(int delta) => int {
+                    return 70 + delta;
+                  }
                 end
 
                 pub routine main() => void {
@@ -267,6 +275,8 @@ final class ArityOverloadAotTest {
 
                   stdio.println(new Box(40).via_self0());
                   stdio.println(new Box(50).via_self1());
+                  stdio.println(call0(Box.select));
+                  stdio.println(call1(Box.select));
                   return;
                 }
                 """;
@@ -291,6 +301,8 @@ final class ArityOverloadAotTest {
                 30
                 40
                 55
+                70
+                75
                 """, out.toString(StandardCharsets.UTF_8));
     }
 }

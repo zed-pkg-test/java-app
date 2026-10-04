@@ -69,6 +69,8 @@ pub routine main() => void {
     + "|" + child.callback0()
     + "|" + child.callback1()
     + "|" + child0()
+    + "|" + call0(Base.choose)
+    + "|" + call1(Base.choose)
   );
   return;
 }
