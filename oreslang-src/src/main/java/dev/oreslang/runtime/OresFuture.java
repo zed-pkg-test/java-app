@@ -176,6 +176,7 @@ public final class OresFuture<T> implements Future<T> {
 
     @Override
     public T get() throws InterruptedException, ExecutionException {
+        rejectCarrierBlocking("Future.get");
         Object observed = awaitState(0L, null);
         return reportGet(observed);
     }
@@ -185,6 +186,7 @@ public final class OresFuture<T> implements Future<T> {
             throws InterruptedException, ExecutionException, TimeoutException {
         Objects.requireNonNull(unit, "unit");
         if (timeout < 0) throw new IllegalArgumentException("timeout must be non-negative");
+        rejectCarrierBlocking("Future.get(timeout)");
         Object observed = awaitState(timeout, unit);
         if (observed == PENDING) {
             throw new TimeoutException("OresFuture did not complete before timeout");
@@ -197,6 +199,7 @@ public final class OresFuture<T> implements Future<T> {
      * scheduler suspension ABI rather than calling join on a carrier.
      */
     public T join() {
+        rejectCarrierBlocking("Future.join");
         Object observed = state.get();
         boolean interrupted = false;
         if (observed == PENDING) {
@@ -257,6 +260,14 @@ public final class OresFuture<T> implements Future<T> {
             // Runtime waiter failures must not stop delivery to other waiters or
             // mutate the settled Future. Scheduler plumbing owns its own
             // failure path.
+        }
+    }
+
+    private static void rejectCarrierBlocking(String operation) {
+        if (ActorRuntime.isOresCarrierThread()) {
+            throw new IllegalStateException(
+                    operation
+                            + " cannot block an OresVM carrier; use await/continuation suspension");
         }
     }
 
