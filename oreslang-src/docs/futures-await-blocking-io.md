@@ -58,6 +58,67 @@ Host `CompletionStage` values are compatibility inputs only. They are
 immediately normalized into an OresFuture before they participate in Oreslang
 suspension.
 
+## OresScheduler ownership
+
+Every ordinary Oreslang task has exactly one owning `OresScheduler`.
+
+The Future being awaited does **not** choose the scheduler. The waiting task
+already owns one, and the compiler-generated async state machine is re-enqueued
+there when the Future settles.
+
+```ores
+const io = new OresScheduler(5);
+
+const work = io.start(async || -> {
+    const a = await read_a();
+    const b = await read_b(a);
+    return b;
+});
+```
+
+The task may execute on carrier #2 before an await and carrier #5 afterward.
+Scheduler affinity is guaranteed; physical thread affinity is not.
+
+A single Future may therefore have waiters owned by different schedulers:
+
+```text
+shared Future
+  +--> waiter A --> scheduler A
+  +--> waiter B --> scheduler B
+```
+
+Its producer/completion thread only settles the Future. It never runs either
+guest continuation.
+
+The process entrypoint receives an implicit root `OresScheduler` backed by the
+OresVM CONTROL domain. Root async turns use bounded admission and the same
+reserved root lanes as legacy root work so they cannot consume every CONTROL
+carrier and starve supervisor/ActorMailman work.
+
+User-created `OresScheduler(n)` values own `n` carrier threads and a bounded
+ready queue. `scheduler.start(async || -> { ... })` creates a task whose
+continuations remain scheduler-affine until completion.
+
+Actors are the deliberate special case. They do not migrate to a user-created
+OresScheduler. Their await lowering continues to target the actor cell:
+
+- SHARED actors -> SHARED_ACTOR domain;
+- private/isoactors -> ISOACTOR domain;
+- untrusted actors -> UNTRUSTED_ACTOR domain.
+
+Each actor retains its atomic single-executor lease, so at most one carrier can
+execute that actor's code at a time, including resumed await continuations.
+
+## Async source rule
+
+Ordinary `await` is permitted only inside an explicitly `async` ordinary
+callable or lambda. An ordinary async callable has logical result type `T`,
+while calling it produces `Future<T>`.
+
+Actor callables/methods are inherently MAY_SUSPEND and therefore implicitly
+async. `async actor` is intentionally redundant/illegal rather than a second
+spelling for the same declaration.
+
 ## Await
 
 The semantic lowering is:
@@ -210,6 +271,25 @@ operation that must be moved to the VM blocking bridge.
 
 The compiler must reject ordinary borrows/guards that would escape across a
 suspension unless their ownership/lifetime representation explicitly permits it.
+
+Actor external-state rules are stricter:
+
+- actor-owned mutable fields/state may be written only while that actor holds its
+  single-executor lease;
+- mutable lexical captures from outside the actor are forbidden;
+- SHARED actors may receive an explicit `OresRwLock<T>` capability and acquire
+  only its read guard;
+- private/isoactors and untrusted actors cannot access that shared-memory
+  capability;
+- no actor may acquire an `OresRwLock<T>` write guard;
+- `SharedMutex<T>` is not an actor escape hatch for external mutation and is
+  rejected when acquired from actor execution;
+- an RwLock guard is lexical/thread-affine and therefore may not live across
+  `await`.
+
+Outside actors, ordinary root/scheduler code may hold the write side of an
+`OresRwLock<T>` and publish updates. The Oreslang type checker must expose an
+actor read guard's value as read-only.
 
 ## Current lowering boundary
 
