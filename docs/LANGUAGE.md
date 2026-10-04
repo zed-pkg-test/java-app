@@ -548,17 +548,40 @@ Qualified names such as `x.y` retain their module namespace.
 
 ## `fnc` versus `routine`
 
-`fnc` is the recursive/function form. It may participate in recursive call graphs. Tail-position calls from `fnc` are optimization-eligible, but v0.3 deliberately does **not** promise that every recursive `fnc` executes in constant stack space yet.
+`fnc` and `routine` may both recurse. Recursion and tail-call optimization are not what distinguishes them: tail-position calls in `fnc`, `routine`, and lambda bodies are subject to the same lowering/optimization rules. v0.3 does **not** yet promise that every eligible tail call executes in constant stack space; that guarantee must be implemented identically for AOT and JIT rather than depending on host-JIT luck.
 
-`routine` is the non-recursive procedural form:
+The distinction is **reifiability**:
+
+- a named `fnc` is a first-class callable value. It may be stored in a `Fnc<...>` binding, passed as a callback, or returned when its type matches;
+- a `routine` is direct-call-only. `run_app()` is valid, but evaluating `run_app` as a value is a compile-time error;
+- an instance/actor method is likewise direct-call-only. This also applies when the receiver is typed through a nominal interface or an `@Structural` contract: `worker.process(x)` is valid, but `worker.process` is not a bound-method value;
+- `static fnc` and lambdas are reifiable first-class callables.
+
+When a callback must invoke a routine or instance method, make the closure explicit:
 
 ```ores
-pub routine main(): void {
-  run_app();
+routine rebuild(int value): void {
+  // ...
+}
+
+define class Worker as
+  pub process(int value): void {
+    // ...
+  }
+end
+
+fnc useCallbacks(Worker worker): void {
+  doWork(|int value| -> {
+    rebuild(value);
+  });
+
+  doWork(|int value| -> {
+    worker.process(value);
+  });
 }
 ```
 
-The static checker rejects direct or indirect call cycles that contain a routine. Routines are not tail-call-optimization targets. This makes entrypoints, orchestration steps, and lifecycle procedures explicit.
+This rule keeps ordinary routine/method calls as direct code-symbol dispatch. The runtime does not manufacture an implicit `(receiver, method)` bound-method object; a closure exists only when source code explicitly asks for one.
 
 Lambdas may recurse when their binding supplies an explicit function type so the closure's own signature is available while its body is checked:
 
@@ -773,7 +796,7 @@ Without one of those explicit structural opt-ins, passing that object to a nomin
 
 `structural` is a contextual keyword, so existing identifiers named `structural` remain legal elsewhere.
 
-## Receiver identity and method values
+## Receiver identity and method calls
 
 `self` is injected by the compiler/runtime as an immutable receiver binding. It cannot be declared as a local parameter name or reassigned.
 
@@ -785,13 +808,21 @@ box.get();
 
 The runtime resolves the shared class method definition and passes the receiver as the hidden first argument.
 
-When a method is extracted as a first-class value:
+Instance and actor methods are intentionally **not** first-class values:
 
 ```ores
-val Fnc<int> callback = box.get;
+val Fnc<int> callback = box.get; // compile-time error
 ```
 
-Oreslang creates a small bound-method value containing only the receiver plus method identity. The underlying method definition remains shared by every instance. Calling `callback()` always uses the original `box`; there is no JavaScript-style dynamic `this` rebinding.
+When callback behavior is required, the receiver capture must be explicit:
+
+```ores
+val Fnc<int> callback = || -> {
+  return box.get();
+};
+```
+
+The lambda has ordinary closure-capture semantics; the method itself remains one shared class definition. Oreslang therefore has no implicit bound-method object and no JavaScript-style dynamic `this` rebinding.
 
 
 ## Incremental compilation and code units
