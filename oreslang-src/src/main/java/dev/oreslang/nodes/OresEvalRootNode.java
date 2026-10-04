@@ -194,6 +194,7 @@ public final class OresEvalRootNode extends RootNode {
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
+            final Ast.FunctionDecl entryMain = main;
 
             boolean hostEntry = OresScheduler.current() == null
                     && !ActorRuntime.inRootExecution()
@@ -201,12 +202,12 @@ public final class OresEvalRootNode extends RootNode {
 
             if (hostEntry) {
                 List<?> normalized = normalizeFunctionArguments(
-                        main,
+                        entryMain,
                         List.of(arguments));
-                OresFuture<Object> task = main.async()
-                        ? startAsyncFunction(main, normalized)
+                OresFuture<Object> task = entryMain.async()
+                        ? startAsyncFunction(entryMain, normalized)
                         : context.actors().rootScheduler().startSync(
-                                () -> callFunctionBody(main, normalized));
+                                () -> callFunctionBody(entryMain, normalized));
 
                 // The host/embedder thread may block waiting for the root task;
                 // no Ores carrier is consumed. Completion is published only
@@ -217,7 +218,7 @@ public final class OresEvalRootNode extends RootNode {
             // Internal callers already executing under an Ores scheduler keep
             // that scheduler. Async callables return their Future to the
             // enclosing Ores frame, which may await it normally.
-            return callFunction(main, List.of(arguments));
+            return callFunction(entryMain, List.of(arguments));
         }
 
         private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
