@@ -238,6 +238,11 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private OresFuture<Object> startAsyncFunction(Ast.FunctionDecl fn, List<?> args) {
+            return asyncScheduler().start(
+                    new AsyncPlanTask(asyncFunctionPlan(fn, args)));
+        }
+
+        private AsyncPlan asyncFunctionPlan(Ast.FunctionDecl fn, List<?> args) {
             Env base = new Env(null, fn.nonLexical());
             for (int i = 0; i < fn.parameters().size(); i++) {
                 Ast.Param param = fn.parameters().get(i);
@@ -248,14 +253,16 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             AsyncPlan body = asyncBlock(fn.body(), base);
-            AsyncPlan completed = asyncFlatMap(body, flow -> {
-                Object raw = flow instanceof AsyncReturn returned ? returned.value() : null;
+            return asyncFlatMap(body, flow -> {
+                Object raw =
+                        flow instanceof AsyncReturn returned
+                                ? returned.value()
+                                : null;
                 return asyncPure(shapeReturnedValue(
                         fn.returnType(),
                         raw,
                         "function " + fn.name()));
             });
-            return asyncScheduler().start(new AsyncPlanTask(completed));
         }
 
         private OresFuture<Object> startAsyncMethod(
@@ -497,6 +504,76 @@ public final class OresEvalRootNode extends RootNode {
                     AsyncAwait awaited = (AsyncAwait) current;
                     waiting = awaited;
                     return OresScheduler.await(awaited.future());
+                }
+            }
+        }
+
+        private final class ActorPlanRunner {
+            private AsyncPlan current;
+            private AsyncAwait waiting;
+            private final ActorRuntime.InvocationCompletion<Object> completion;
+
+            private ActorPlanRunner(
+                    AsyncPlan initial,
+                    ActorRuntime.InvocationCompletion<Object> completion) {
+                this.current = Objects.requireNonNull(initial, "initial");
+                this.completion = Objects.requireNonNull(completion, "completion");
+            }
+
+            private void start(ActorRuntime.ActorContext<?> actorContext) {
+                advance(actorContext, true, null, null);
+            }
+
+            private void resume(
+                    Object value,
+                    Throwable failure,
+                    ActorRuntime.ActorContext<?> actorContext) {
+                advance(actorContext, false, value, failure);
+            }
+
+            private void advance(
+                    ActorRuntime.ActorContext<?> actorContext,
+                    boolean initial,
+                    Object resumeValue,
+                    Throwable resumeFailure) {
+                if (waiting != null) {
+                    AsyncAwait awaited = waiting;
+                    waiting = null;
+                    current = safePlan(() -> awaited.continuation().resume(
+                            resumeValue,
+                            resumeFailure));
+                } else if (!initial) {
+                    IllegalStateException invalid =
+                            new IllegalStateException(
+                                    "actor async frame resumed without a captured await");
+                    completion.fail(invalid);
+                    throw invalid;
+                }
+
+                while (true) {
+                    actorContext.checkpoint();
+
+                    if (current instanceof AsyncThunk thunk) {
+                        current = safePlan(thunk.body());
+                        continue;
+                    }
+                    if (current instanceof AsyncFailure failed) {
+                        completion.fail(failed.failure());
+                        throw propagateAsyncFailure(failed.failure());
+                    }
+                    if (current instanceof AsyncPure pure) {
+                        completion.complete(pure.value());
+                        return;
+                    }
+
+                    AsyncAwait awaited = (AsyncAwait) current;
+                    waiting = awaited;
+                    actorContext.suspendOn(
+                            awaited.future(),
+                            (value, failure, resumedContext) ->
+                                    resume(value, failure, resumedContext));
+                    throw new AssertionError(
+                            "ActorContext.suspendOn must unwind the actor turn");
                 }
             }
         }
@@ -1076,10 +1153,18 @@ public final class OresEvalRootNode extends RootNode {
             };
 
             List<?> normalized = normalizeFunctionArguments(fn, evaluated);
-            return context.actors().spawnInvocation(
+            return context.actors().spawnSuspendingInvocation(
                     runtimeKind,
                     normalized,
-                    (delivered, actorContext) -> callFunctionBody(fn, delivered));
+                    (delivered, actorContext, completion) -> {
+                        @SuppressWarnings("unchecked")
+                        ActorRuntime.InvocationCompletion<Object> result =
+                                (ActorRuntime.InvocationCompletion<Object>) completion;
+                        ActorPlanRunner runner = new ActorPlanRunner(
+                                asyncFunctionPlan(fn, delivered),
+                                result);
+                        runner.start(actorContext);
+                    });
         }
 
         private static boolean containsAwait(Ast.Expr expr) {
