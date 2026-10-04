@@ -14,7 +14,7 @@ final class PolyglotSmokeTest {
     void evaluatesOreslangThroughGraalPolyglotContext() throws Exception {
         String program = """
                 define module app
-                  pub fnc main() => void {
+                  pub fnc main(): void {
                     stdio.println("oreslang-ok");
                     return;
                   }

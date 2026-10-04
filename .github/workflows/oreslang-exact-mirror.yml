@@ -11,12 +11,12 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
-      - name: Verify exact source tree
+      - name: Verify exact reconciled source tree
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD:oreslang-src)" = "5f64986924b57939ae79404db8bd2709bc359971"
-          test "$(cat SOURCE_HEAD.txt)" = "1bc19d49828e0576ae609c9f89a1d66c79d7eec4"
+          test "$(git rev-parse HEAD:oreslang-src)" = "23162c865ede0ce45b437509f99b5a6d7f5494fe"
+          test "$(cat SOURCE_HEAD.txt)" = "9b6652d8e63f5a31b1ee7421c560661fe322bbee"
       - uses: graalvm/setup-graalvm@v1
         with:
           version: '25.3'

@@ -4,6 +4,8 @@ import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Lexer;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.parser.Token;
+import dev.oreslang.runtime.CapabilityChecker;
+import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.types.TypeChecker;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +22,7 @@ final class LanguageHardeningTest {
                 import * as everything from './xyz';
 
                 define module app
-                  pub fnc main() => void { return; }
+                  pub fnc main(): void { return; }
                 end
                 """);
 
@@ -40,7 +42,7 @@ final class LanguageHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define module app
-                  fnc main() => void {
+                  fnc main(): void {
                     if true; do
                       return;
                     end
@@ -60,11 +62,11 @@ final class LanguageHardeningTest {
 
                 @AdheresTo(contracts.MathApi)
                 define module math
-                  pub fnc add(int a, int b) => int { return a + b; }
+                  pub fnc add(int a, int b): int { return a + b; }
                 end
 
                 define module app
-                  pub fnc main() => void {
+                  pub fnc main(): void {
                     val answer = math.add(40, 2);
                     stdio.println(answer);
                     return;
@@ -84,7 +86,7 @@ final class LanguageHardeningTest {
 
                 @AdheresTo(contracts.Api)
                 define module broken
-                  pub fnc pong() => int { return 1; }
+                  pub fnc pong(): int { return 1; }
                 end
                 """)));
         assertTrue(error.getMessage().contains("does not adhere"));
@@ -101,19 +103,19 @@ final class LanguageHardeningTest {
                     fnc b() => int;
                   end
 
-                  define class A
-                    pub a() => int { return 1; }
+                  define class A as
+                    pub a(): int { return 1; }
                   end
-                  define class B
-                    pub b() => int { return 2; }
-                  end
-
-                  define class Combined extends A, B implements AApi, BApi
+                  define class B as
+                    pub b(): int { return 2; }
                   end
 
-                  define class ObjectChild extends Object
+                  define class Combined extends A, B implements AApi, BApi as
                   end
-                  define class ListChild extends List
+
+                  define class ObjectChild extends Object as
+                  end
+                  define class ListChild extends List as
                   end
                 end
                 """)));
@@ -123,22 +125,22 @@ final class LanguageHardeningTest {
     void inheritanceCyclesAndConflictingDiamondsAreRejected() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module m
-                  define class A extends B
+                  define class A extends B as
                   end
-                  define class B extends A
+                  define class B extends A as
                   end
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module m
-                  define class A
+                  define class A as
                     pub val int id = 1;
                   end
-                  define class B
+                  define class B as
                     pub val String id = "b";
                   end
-                  define class C extends A, B
+                  define class C extends A, B as
                   end
                 end
                 """)));
@@ -148,7 +150,7 @@ final class LanguageHardeningTest {
     void objArrTupleIndexAndLetAssignmentAreStaticallyChecked() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  pub fnc main() => void {
+                  pub fnc main(): void {
                     val person = obj{name: "ore", age: 1};
                     val values = arr[10, 20, 30];
                     val first = values[0];
@@ -167,7 +169,7 @@ final class LanguageHardeningTest {
     void valAndConstCannotBeReassigned() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc f() => void {
+                  fnc f(): void {
                     val x = 1;
                     x = 2;
                     return;
@@ -176,7 +178,7 @@ final class LanguageHardeningTest {
                 """)));
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc f() => void {
+                  fnc f(): void {
                     const x = 1;
                     x = 2;
                     return;
@@ -189,22 +191,22 @@ final class LanguageHardeningTest {
     void nullIsForbiddenAsAValueOrStandaloneTypeButOptionNullIsExplicitlyAllowed() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define module app
-                  fnc bad() => String { return null; }
+                  fnc bad(): String { return null; }
                 end
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad(null x) => void { return; }
+                  fnc bad(null x): void { return; }
                 end
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc keep(Option<String> x) => Option<String> { return x; }
-                  fnc explicit_marker(Option<null> x) => Option<null> { return x; }
-                  fnc some_value() => Option<int> { return Some(1); }
-                  fnc no_value() => Option<int> { return None; }
+                  fnc keep(Option<String> x): Option<String> { return x; }
+                  fnc explicit_marker(Option<null> x): Option<null> { return x; }
+                  fnc some_value(): Option<int> { return Some(1); }
+                  fnc no_value(): Option<int> { return None; }
                 end
                 """)));
     }
@@ -213,7 +215,7 @@ final class LanguageHardeningTest {
     void nonVoidFunctionsMustReturnOnEveryControlFlowPath() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc incomplete(bool flag) => int {
+                  fnc incomplete(bool flag): int {
                     if flag; do
                       return 1;
                     fi
@@ -223,7 +225,7 @@ final class LanguageHardeningTest {
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc complete(bool flag) => int {
+                  fnc complete(bool flag): int {
                     if flag; do
                       return 1;
                     else
@@ -243,4 +245,51 @@ final class LanguageHardeningTest {
                 end
                 """)));
     }
+    @Test
+    void strictFaasRejectsSharedActorDeclarationsAtAdmission() {
+        Ast.Program sharedActor = TypeChecker.check(Parser.parse("""
+                shared actor Account {
+                  let balance = 100;
+
+                  pub fnc current(): int {
+                    return self.balance;
+                  }
+                }
+                """));
+
+        assertThrows(SecurityException.class, () ->
+                CapabilityChecker.check(sharedActor, IsolatePolicy.strictFaas()));
+        assertDoesNotThrow(() ->
+                CapabilityChecker.check(sharedActor, IsolatePolicy.developer()));
+    }
+
+
+
+@Test
+    void destructureDiscardNeverBecomesAReadableBinding() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc f(): int {
+                    [_, const value] = (1, 2);
+                    return _;
+                  }
+                end
+                """)));
+
+        assertTrue(error.getMessage().contains("unknown name '_'"));
+    }
+
+@Test
+    void explicitBindingKindOnUnderscoreIsAlsoDiscarded() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc f(): int {
+                    [const _, let value] = (1, 2);
+                    [let _, const next] = (3, 4);
+                    return value + next;
+                  }
+                end
+                """)));
+    }
+
 }

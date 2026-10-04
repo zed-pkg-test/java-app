@@ -28,7 +28,7 @@ public final class IncrementalCompiler {
     private final Map<String, CompiledUnit> cache = new LinkedHashMap<>();
 
     public synchronized BuildResult compile(Map<String, String> sources) {
-        if (sources.isEmpty()) return new BuildResult(Map.of(), Set.of(), Set.of());
+        if (sources.isEmpty()) return new BuildResult(Map.of(), Set.of(), Set.of(), List.of());
 
         LinkedHashMap<String, String> normalized = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : sources.entrySet()) {
@@ -41,15 +41,21 @@ public final class IncrementalCompiler {
         Map<String, String> hashes = new LinkedHashMap<>();
         Map<String, String> abiHashes = new LinkedHashMap<>();
         Map<String, Ast.Program> parsed = new LinkedHashMap<>();
-        Map<String, Set<String>> dependencies = new LinkedHashMap<>();
 
+        // Parse the complete source set before resolving imports. This is the
+        // first half of cycle tolerance: A may name B while B names A because
+        // neither unit is recursively compiled while discovering the other.
         for (Map.Entry<String, String> entry : normalized.entrySet()) {
             hashes.put(entry.getKey(), digest(entry.getValue()));
             Ast.Program program = AnnotationExpander.expand(Parser.parse(entry.getValue()));
             parsed.put(entry.getKey(), program);
             abiHashes.put(entry.getKey(), abiDigest(program));
-            dependencies.put(entry.getKey(), resolveDependencies(entry.getKey(), program, normalized.keySet()));
         }
+
+        ImportGraph.validateLinkedImports(parsed);
+        Map<String, Set<String>> dependencies =
+                ImportGraph.resolveDependencies(parsed, normalized.keySet());
+        List<List<String>> initializationGroups = ImportGraph.initializationGroups(dependencies);
 
         LinkedHashSet<String> dirty = new LinkedHashSet<>();
         LinkedHashSet<String> abiChanged = new LinkedHashSet<>();
@@ -105,7 +111,11 @@ public final class IncrementalCompiler {
 
         cache.keySet().retainAll(normalized.keySet());
         cache.putAll(next);
-        return new BuildResult(Map.copyOf(next), Set.copyOf(rebuilt), Set.copyOf(reused));
+        return new BuildResult(
+                Map.copyOf(next),
+                Set.copyOf(rebuilt),
+                Set.copyOf(reused),
+                initializationGroups);
     }
 
     public synchronized void clear() {
@@ -133,14 +143,14 @@ public final class IncrementalCompiler {
     private static void appendAbi(StringBuilder abi, Ast.Decl decl) {
         if (decl instanceof Ast.FunctionDecl fn) {
             if (fn.visibility() != Ast.Visibility.PUBLIC) return;
-            abi.append(fn.kind()).append(" pub ").append(fn.name());
+            abi.append(fn.actorKind()).append(' ').append(fn.kind()).append(" pub ").append(fn.name());
             appendGenerics(abi, fn.genericParameters());
             appendParams(abi, fn.parameters());
             abi.append("=>").append(typeRef(fn.returnType())).append('\n');
             return;
         }
         if (decl instanceof Ast.ClassDecl klass) {
-            abi.append("class ").append(klass.name());
+            abi.append(klass.actorKind()).append(" class ").append(klass.name());
             appendGenerics(abi, klass.genericParameters());
             abi.append(" extends ");
             for (Ast.TypeRef parent : klass.parents()) abi.append(typeRef(parent)).append(',');
@@ -157,7 +167,8 @@ public final class IncrementalCompiler {
                 }
                 if (field.visibility() != Ast.Visibility.PUBLIC) continue;
                 abi.append(" field ").append(field.bindingKind()).append(' ')
-                        .append(typeRef(field.type())).append(' ').append(field.name()).append('\n');
+                        .append(field.type() == null ? "<inferred:" + field.initializer() + ">" : typeRef(field.type()))
+                        .append(' ').append(field.name()).append('\n');
             }
             for (Ast.MethodDecl method : klass.methods()) {
                 if (method.visibility() != Ast.Visibility.PUBLIC) continue;
@@ -301,14 +312,35 @@ public final class IncrementalCompiler {
     public record BuildResult(
             Map<String, CompiledUnit> units,
             Set<String> rebuiltUnits,
-            Set<String> reusedUnits) {
+            Set<String> reusedUnits,
+            List<List<String>> initializationGroups) {
         public BuildResult {
             units = Map.copyOf(units);
             rebuiltUnits = Set.copyOf(rebuiltUnits);
             reusedUnits = Set.copyOf(reusedUnits);
+            initializationGroups = initializationGroups.stream()
+                    .map(List::copyOf)
+                    .toList();
+        }
+
+        /** Backward-compatible constructor for callers that do not need lifecycle planning. */
+        public BuildResult(
+                Map<String, CompiledUnit> units,
+                Set<String> rebuiltUnits,
+                Set<String> reusedUnits) {
+            this(units, rebuiltUnits, reusedUnits, List.of());
         }
 
         public boolean rebuilt(String unitId) { return rebuiltUnits.contains(normalizeUnitId(unitId)); }
         public boolean reused(String unitId) { return reusedUnits.contains(normalizeUnitId(unitId)); }
+
+        /**
+         * Flattens the dependency-first SCC plan. Units in the same inner list
+         * form one load barrier: all of them must be linked before the first
+         * init hook in that group executes.
+         */
+        public List<String> initializationOrder() {
+            return initializationGroups.stream().flatMap(List::stream).toList();
+        }
     }
 }

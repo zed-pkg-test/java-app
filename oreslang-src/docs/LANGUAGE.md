@@ -8,13 +8,13 @@ A source file may contain multiple named modules. A module is a namespace: expor
 
 ```ores
 define module math
-  pub fnc add(int a, int b) => int {
+  pub fnc add(int a, int b): int {
     return a + b;
   }
 end
 
 define module app
-  pub fnc main() => void {
+  pub fnc main(): void {
     val answer = math.add(40, 2);
     stdio.println(answer);
     return;
@@ -26,13 +26,58 @@ Imports are explicit about what kind of symbol is entering the compilation unit:
 
 ```ores
 import module foo from "../xyz";
+import module foo as apiFoo from "../xyz";
 import module {foo, bar} from "../xyz";
-import class {x} from '../xyz';
-import fnc * as funcs from '../xyz';
-import * as x from './xyz';
+import class Widget as ApiWidget from "../xyz";
+import fnc add as apiAdd from "../xyz";
+import fnc * as funcs from "../xyz";
+import * as package from "./xyz";
 ```
 
-Wildcard imports always require a namespace alias. This avoids silently injecting an unbounded set of names into the local scope. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
+Wildcard imports always require a namespace alias. A single named module/class/function import may use `as` to choose its local binding; the original source name still controls export resolution. This avoids namespace pollution while supporting Kotlin-style disambiguation. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
+
+Java host classes use an explicit `java:` URI and the same alias syntax:
+
+```ores
+import class ArrayList as JArrayList from "java:java.util.ArrayList";
+```
+
+The selected name (`ArrayList`) must match the Java simple class name; `JArrayList` is only the Oreslang-local alias. Java imports never grant authority by themselves: runtime use additionally requires the `JAVA_INTEROP` capability and an exact host-class allowlist supplied by the launcher/embedder.
+
+### Circular imports and file initialization
+
+Import cycles are legal. Oreslang does not reject a program merely because its
+file/module graph contains a cycle such as `a.ores -> b.ores -> a.ores`.
+
+The loader uses a staged lifecycle:
+
+1. parse and statically validate the complete reachable source graph;
+2. resolve/link imports for every code unit;
+3. compute strongly connected components (SCCs) of the import graph;
+4. for each dependency-first SCC, verify that **all** members are linked;
+5. run each member's optional file init hook;
+6. after initialization, invoke the entry unit's `main`.
+
+A file init hook has the exact shape:
+
+```ores
+fnc init(): void {
+  // side effects are allowed here
+  return;
+}
+```
+
+It is private, synchronous, non-actor, non-generic, takes no parameters, and
+returns `void`. The hook runs at most once for that loaded code-unit
+generation. Inside a cycle, init hooks execute in deterministic normalized
+code-unit-id order, but code must rely only on the stronger barrier guarantee:
+**every peer in the cycle is already linked before any peer's init begins**.
+
+This means an init hook may call exported declarations from a cyclic peer
+without observing an "unloaded module" state. If application state requires a
+specific sequencing relationship *between* two init hooks in the same cycle,
+that relationship should be made explicit in application code rather than
+inferred from the import edges.
 
 ## Module interfaces / OCaml-style module signatures
 
@@ -48,7 +93,7 @@ end
 
 @AdheresTo(contracts.MathApi)
 define module math
-  pub fnc add(int a, int b) => int { return a + b; }
+  pub fnc add(int a, int b): int { return a + b; }
   pub val String name = "math";
 end
 ```
@@ -59,8 +104,30 @@ Only exported (`pub`) module members satisfy an adherence contract. `@AdheresTo(
 
 Functions use `fnc` and are private by default. `pub` exports them. Return statements are always explicit; a non-`void` function must return on every control-flow path.
 
+Named executable declarations use a colon for the return type:
+
 ```ores
-fnc add(int a, int b) => int {
+pub fnc run(): (() => void) {
+  return || -> {
+    return;
+  };
+}
+```
+
+The equivalent lambda-style declaration keeps executable `->` syntax:
+
+```ores
+pub fnc run = || -> (() => void) {
+  return || -> {
+    return;
+  };
+}
+```
+
+Here `() => void` is a function **type**, while `|| -> { ... }` is executable lambda syntax. The fat arrow is never the return separator for an executable declaration.
+
+```ores
+fnc add(int a, int b): int {
   return a + b;
 }
 
@@ -70,7 +137,27 @@ fnc answer() {
 }
 ```
 
-`@Ret<T>` and `=> T` are equivalent. If both are present they must agree. A function returns exactly one value; multiple logical values are represented by a tuple, array, object, class value, or another aggregate.
+`@Ret<T>` and `: T` are equivalent. If both are present they must agree. A function returns exactly one value; multiple logical values are represented by a tuple, array, object, class value, or another aggregate.
+
+Return types may be unions, homogeneous arrays, finite tuple types, or structural record types:
+
+```ores
+type intOrBoolOrString = bool | int | string;
+
+fnc mixed(): Array<type intOrBoolOrString> {
+  return [3, true, "yes"];
+}
+
+fnc fixed(): [int, bool, string] {
+  return [3, true, "yes"];
+}
+
+fnc named(): {foo: int, bar: string} {
+  return obj{foo: 5, bar: "x"};
+}
+```
+
+The `type` marker inside `Array<type intOrBoolOrString>` is accepted as an explicit alias marker; `Array<intOrBoolOrString>` is equivalent. A finite tuple type records exact arity and the type of each position even though the interpreter represents the value with a JVM `List`. A record type names required members; extra members remain compatible with the structural type system.
 
 ## Bindings
 
@@ -87,18 +174,38 @@ let retries = 0;
 retries = retries + 1;
 ```
 
-Destructuring carries mutability per element:
+Destructuring carries mutability per element. A binding kind propagates through later unqualified names until another explicit binding kind appears. A binding kind may also prefix the whole pattern.
 
 ```ores
-[const code, let body] = (200, "ok");
+[const number, flag, answer] = fixed();   // all const
+const [x, y, z] = fixed();               // all const
+[const head, let middle, tail] = fixed(); // head const; middle/tail let
+
+const {foo, bar} = named();
+// Equivalent per-item spelling, shown in a separate scope:
+// {const foo, const bar} = named();
 ```
 
+A bare `_` is a sequence discard pattern: it consumes that array/tuple position without declaring a variable, so it can be repeated in the same sequence pattern or reused by later destructures. Object patterns do not accept bare `_` because object destructuring is key-based rather than positional.
+
+```ores
+[const code, _, let body] = (200, "ignored", "ok");
+[const next, _, let tail] = (201, "ignored again", "done");
+[_, _, const final] = (1, 2, 3);
+```
+
+`_` is not readable after the destructure because no lexical binding is created for it. A destructured `const` is an immutable runtime binding; unlike a standalone `const x = ...` declaration, the aggregate being destructured does not need to be a compile-time constant.
+
+Sequence destructuring requires a returned tuple or array/list. Finite tuples are checked for exact arity and per-position type. Object destructuring requires a record/map-like value and every requested key must exist. If the returned type is a union, destructuring is allowed only when every union alternative supports the requested pattern; each extracted binding receives the union of the corresponding alternative member types. Function-parameter destructuring is intentionally not part of this syntax yet.
+
 ## Classes, receivers, multiple inheritance, and interfaces
+
+Class headers use `as` as the required body delimiter. The canonical form is `define class Name as ... end`; when `extends` or `implements` are present, `as` follows the complete class header.
 
 Methods omit `fnc`. Instance methods always have an implicit receiver named `self`.
 
 ```ores
-define class Box<T>
+define class Box<T> as
   val T value;
 
   @Ret<self>
@@ -111,7 +218,7 @@ end
 The explicit receiver form remains available:
 
 ```ores
-find(self Box)(int key) => self {
+find(self Box)(int key): self {
   return self;
 }
 ```
@@ -121,7 +228,7 @@ The receiver variable name is always `self`.
 A class may list multiple parent classes and multiple interfaces:
 
 ```ores
-define class Combined extends Cacheable, Serializable implements HasId, Named
+define class Combined extends Cacheable, Serializable implements HasId, Named as
 end
 ```
 
@@ -130,10 +237,10 @@ Parent order is significant and is the deterministic v0.2 method-resolution orde
 `Object` and `List` are extensible base classes:
 
 ```ores
-define class RecordBag extends Object
+define class RecordBag extends Object as
 end
 
-define class Names extends List
+define class Names extends List as
 end
 ```
 
@@ -148,6 +255,26 @@ val user = obj{name: "Ada", age: 37};
 stdio.println(user.name);
 ```
 
+Static object/map keys may be identifiers, reserved member keys such as
+`stop`/`do`/`done`, or strings written with either single or double
+quotes. Backticks make the key dynamic: the expression between the backticks
+must evaluate to a string.
+
+```ores
+val key = "score";
+val stats = obj{
+  stop: 1,
+  'do': 2,
+  "done": 3,
+  `key`: 4
+};
+```
+
+An `obj{...}` containing a dynamic key has type `DynamicStruct<T>`, where
+`T` is the joined value type. A `DynamicStruct<T>` can also be created
+directly with `new DynamicStruct<T>()`; it accepts arbitrary string keys but
+only values assignable to `T`.
+
 Inline array:
 
 ```ores
@@ -157,11 +284,17 @@ val first = values[0];
 
 `arr[...]` is the canonical inline-array spelling. The original bare `[...]` literal remains accepted for source compatibility and destructuring migration.
 
-Tuples preserve per-position static types:
+Tuples preserve per-position static types. Parenthesized tuple literals and list-backed values returned against a finite tuple type both retain the declared positional types:
 
 ```ores
 val pair = (1, "one");
 [const number, let label] = pair;
+
+fnc result(): [int, bool, string] {
+  return [3, true, "yes"];
+}
+
+const [num, ok, answer] = result();
 ```
 
 ## Structural typing and interfaces
@@ -173,21 +306,21 @@ define interface Named
   String name;
 end
 
-define class User implements Named
+define class User implements Named as
   pub val String name;
 end
 ```
 
 Class interface satisfaction uses public members, including inherited public members.
 
-## Option and null
+## Option, Result, and null
 
 Oreslang does **not** have ambient nullable references. A bare `null` value is a compile-time error, and `null` is not a standalone variable/parameter/return type.
 
 Optionality is explicit, using Rust-style `Some(value)` and `None`:
 
 ```ores
-fnc lookup(bool found) => Option<int> {
+fnc lookup(bool found): Option<int> {
   if found; do
     return Some(42);
   else
@@ -195,6 +328,32 @@ fnc lookup(bool found) => Option<int> {
   fi
 }
 ```
+
+Fallible operations use `Result<T, E>`, constructed with `Ok(value)` or `Err(error)`. `Result` always has exactly two explicit type arguments.
+
+```ores
+val Option<int> present = Some(42);
+val number = present.unwrap();
+
+val Option<int> missing = None;
+val safe = missing.unwrap_safe();          // Err(OptionUnwrapError(...))
+
+val Result<int, String> parsed = Ok(123);
+val same = parsed.unwrap_safe();            // Ok(123)
+```
+
+- `Option<T>.unwrap(): T` returns the `Some` payload and panics on `None`.
+- `Option<T>.unwrap_safe(): Result<T, OptionUnwrapError>` never panics for absence.
+- `Result<T,E>.unwrap(): T` returns the `Ok` payload and panics on `Err`.
+- `Result<T,E>.unwrap_safe(): Result<T,E>` never panics; it preserves the error-as-value carrier.
+- `expect(String)` is the descriptive panicking form; `unwrap_or(T)` supplies a fallback.
+- `is_some()/is_none()` and `is_ok()/is_err()` inspect variants without extraction.
+
+Like Rust methods that take `self`, extraction consumes a move-only `Option` or `Result`. `Option<T>` is `Copy` exactly when `T` is `Copy`; `Result<T,E>` is `Copy` exactly when both payload types are `Copy`.
+
+Owned sum values cannot hide lexical borrows until explicit lifetime parameters exist, so `Some(&value)`, `Ok(&value)`, and `Err(&value)` are rejected.
+
+Panics are distinct from ordinary recoverable errors. Normal `try/catch` does not swallow an unwrap panic, while lexical cleanup and `finally` still execute during unwind. Use `unwrap_safe()`, matching, or explicit variant inspection when absence/failure should remain data.
 
 `Option<null>` is accepted only as an explicit type-level escape hatch when an interoperability boundary truly needs to preserve a null marker. The `null` marker cannot escape that direct `Option<null>` position. `Option<void>` is invalid; use `void` when a function returns no value.
 
@@ -210,11 +369,38 @@ Numeric widening is loss-aware; real values can widen toward complex values, but
 
 ## Lambdas
 
-Lambdas use `->`:
+Lambdas are lexical closures by default and use `->`. The canonical block
+form keeps returns explicit:
 
 ```ores
-val Fnc<int, int> inc = (int x) -> x + 1;
+val Fnc<int, int> inc = |int x| -> {
+  return x + 1;
+};
 ```
+
+A normal lambda may capture activation-local bindings from its enclosing
+function or block. Captured mutable state remains part of the closure.
+
+## Non-lexical callables (`nlex`)
+
+`nlex` is an opt-in **capture barrier**, not a ban on global/module lookup.
+It prevents a callable from capturing bindings owned by an enclosing runtime
+activation, so an `nlex` lambda does not retain or snapshot an outer local
+environment.
+
+Inside an `nlex` region:
+
+- parameters and locals declared inside the callable remain available;
+- locals shadow module/global/import bindings normally;
+- module members, imports, top-level callables/classes, and built-ins remain
+  statically resolvable;
+- enclosing activation-local bindings cannot be captured;
+- lambdas nested in an `nlex fnc`, `nlex routine`, or `nlex` lambda inherit
+  the barrier.
+
+Actor entry points remain governed by their actor isolation rules. `nlex` may
+add a capture-free guarantee to an actor fnc, but it does not replace mailbox,
+private-slice, or shared-actor isolation.
 
 ## Conditionals
 
@@ -248,13 +434,77 @@ try {
 
 `defer` executes in LIFO order when its lexical scope unwinds, including returns and exceptional exits.
 
+## Callable-only reserved keywords
+
+`stop`, `do`, and `done` are reserved language keywords. They cannot be used as ordinary identifiers for bindings, parameters, fields, types, classes, modules, or bare function references.
+
+They have one narrow compatibility exception: the three words may be declared as callable names and used when invoking that callable. This includes `fnc`/`routine` declarations, class/actor methods, interface function signatures, `import fnc` selections, direct calls such as `stop()`, and qualified calls such as `worker.done()`.
+
+The exception does not turn the keywords back into general identifiers. For example, `val stop = 1`, `fnc f(int do)`, `val callback = done`, and `val callback = worker.stop` are invalid.
+
 ## Async / await
 
 `async` and `await` are reserved and parsed. `await` unwraps future-like runtime values. The scheduler is intentionally separate from the language surface so actor isolation does not depend on a specific OS-thread implementation.
 
 ## Actors
 
-Actors own their mutable heaps. Cross-actor communication occurs through mailboxes, and message values are frozen/copied/serialized at the runtime boundary. Arbitrary mutable host objects are rejected as messages. Deeply immutable values may use read-only sharing.
+Oreslang uses an Akka-style dispatcher model: an actor is **not** a thread. Every actor owns one mailbox, and at most one mailbox turn for a given actor may execute at a time. Actors are multiplexed over bounded thread pools, so the carrier thread may change between turns.
+
+There are two actor execution domains:
+
+```ores
+pub actor fnc worker(int value): int {
+  return value;
+}
+
+shared actor Account {
+  let int balance = 100;
+
+  pub fnc withdraw(int amount): void {
+    self.balance = self.balance - amount;
+    return;
+  }
+}
+```
+
+- an unqualified `actor` is **private**;
+- `shared actor` is a **shared-memory-capable** actor;
+- private and shared actors are scheduled on **different dispatcher pools** for bulkheading;
+- compiler-generated/context-aware actor factories are capture-free for **both** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
+- trusted host embedding has separately named supervisor-only construction escape hatches, and adversarial policies reject them;
+- both kinds still process their own mailbox serially;
+- actor-owned `let` fields may mutate during a mailbox turn because that turn is the exclusive mutation capability for `self`;
+- no lock is required around ordinary actor-owned fields, including fields of a shared actor;
+- actor `self` and move-only state rooted at `self` cannot escape the mailbox turn by value or returned borrow; copy-like values such as integers, booleans, and strings may be returned normally;
+- synchronized shared memory requires the host-granted `SHARED_MEMORY` capability.
+
+Private actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
+
+The slice has two simultaneous limits:
+
+- a per-actor limit from that actor's `IsolatePolicy.maxHeapBytes()`;
+- an aggregate private-actor memory budget from the parent runtime policy.
+
+This prevents many private actors from multiplying the parent's memory ceiling. Destroying the actor closes its slice and releases its accounting.
+
+The JVM backend's slice is a language/runtime ownership and accounting boundary, not a separate Java GC heap. The slice follows the actor id across dispatcher workers; it is not thread-local state. When physical heap separation is required for adversarial tenant code, the same private-actor semantics must be backed by a cross-thread-capable private region or a separate Graal polyglot/native isolate.
+
+Shared actors may additionally receive:
+
+1. deeply immutable `Shared<T>` values; and
+2. explicit synchronized shared cells.
+
+The runtime primitive for the second case is `SyncCell<T>`. A cell stores only frozen state and serializes replacement updates under a lock. Shared-cell state is quota-accounted against the same parent actor-memory ceiling as private actor slices. Private actor turns cannot create, inspect, mutate, or close a `SyncCell<T>`. This is the intended lowering target for a future `sync` language construct; `sync` is **not** an implicit lock around actor methods.
+
+Actor message graphs are cyclicity-checked and bounded by nesting depth, node count, and logical byte quotas before admission so malicious container graphs cannot turn actor transport into unbounded recursion, CPU, or memory use.
+
+This preserves the central invariant:
+
+> Actor state is mutated through mailbox ownership. Shared mutable state outside an actor is exceptional and must use an explicit synchronization abstraction.
+
+Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into a private or shared actor invalidates dependent compiled units.
+
+Shared writable handles use transactional publication. A `SharedMutex<T>` is reserved to the destination runtime before mailbox visibility, committed only after queue admission, and unbound again when first publication fails. This prevents failed sends from accidentally claiming a writable capability for the wrong runtime.
 
 ## Isolates
 
@@ -284,11 +534,11 @@ Named modules remain the normal namespace unit, but a source file may also conta
 
 ```ores
 define module x
-  define class y
+  define class y as
   end
 end
 
-pub routine main() => void {
+pub routine main(): void {
   val y = new x.y();
   stdio.stdout.write(y)
 }
@@ -303,7 +553,7 @@ Qualified names such as `x.y` retain their module namespace.
 `routine` is the non-recursive procedural form:
 
 ```ores
-pub routine main() => void {
+pub routine main(): void {
   run_app();
 }
 ```
@@ -325,7 +575,7 @@ Semicolons are strongly recommended. They remain the canonical formatter output.
 They may be omitted only where the parser has an unambiguous structural boundary, such as the final expression immediately before `}`, `fi`, or `end`. Oreslang does not use broad JavaScript-style automatic semicolon insertion.
 
 ```ores
-pub routine main() => void {
+pub routine main(): void {
   stdio.stdout.write("done")
 }
 ```
@@ -339,7 +589,7 @@ pub interface Brand {
   markerBrand: 'marking/branding'
 }
 
-fnc consume(@Structural Brand value) => String {
+fnc consume(@Structural Brand value): String {
   return value.markerBrand;
 }
 ```
@@ -400,12 +650,12 @@ The JSON key remains attached to the field annotation, so a JSON reader can map 
 Only methods overload, and only by arity:
 
 ```ores
-define class Lookup
-  find() => Option<int> {
+define class Lookup as
+  find(): Option<int> {
     return None;
   }
 
-  find(int id) => Option<int> {
+  find(int id): Option<int> {
     return Some(id);
   }
 end
@@ -418,7 +668,7 @@ Two methods with the same name and same arity are a compile-time error even when
 The ternary operator is right-associative and lazy in its selected branch:
 
 ```ores
-fnc find(bool found) => Option<int> {
+fnc find(bool found): Option<int> {
   return found ? Some(42) : None;
 }
 ```
@@ -444,8 +694,8 @@ for (val item of values) {
 Classes can expose a JavaScript-like iterator symbol:
 
 ```ores
-define class Bag
-  [Symbol.iterator]() => Array<int> {
+define class Bag as
+  [Symbol.iterator](): Array<int> {
     return arr[1, 2, 3];
   }
 end
@@ -485,7 +735,7 @@ Security is layered. Oreslang uses a deny-by-default language capability policy 
 
 An isolate policy can independently allow or deny:
 
-`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
+`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
 
 The trusted compiler API can reject forbidden API usage before execution:
 
@@ -528,16 +778,16 @@ pub interface Foo extends Bar {
   markerBrand: 'marking/branding'
 }
 
-fnc a(@Structural Foo y) => void {
+fnc a(@Structural Foo y): void {
   return;
 }
 
-fnc b(y structural Foo) => void {
+fnc b(y structural Foo): void {
   return;
 }
 
 @AllowStructural(y)
-fnc c(y Foo) => void {
+fnc c(y Foo): void {
   return;
 }
 ```
@@ -600,7 +850,7 @@ namespace payments;
 
 import fnc {authorize} from "./auth.ores";
 
-pub fnc charge() => void {
+pub fnc charge(): void {
   return;
 }
 ```
@@ -629,8 +879,8 @@ A deployment may still aggregate many code units into one Native Image for start
 Instance methods continue to omit `fnc`:
 
 ```ores
-define class Counter
-  read() => int {
+define class Counter as
+  read(): int {
     return self.value;
   }
 end
@@ -639,8 +889,8 @@ end
 Class-level functions are not methods. They are declared with the explicit `static fnc` form:
 
 ```ores
-define class Counter
-  pub static fnc twice(int value) => int {
+define class Counter as
+  pub static fnc twice(int value): int {
     return value * 2;
   }
 end
@@ -662,20 +912,21 @@ Static data fields are intentionally not part of v0.5 yet; `static` on a class b
 
 The arrows have distinct jobs:
 
-- `=>` declares the return type of a **named callable**.
-- `->` forms a **function type** or **lambda**.
+- `:` declares the return type of a **named executable callable/method**.
+- `->` is executable syntax for lambdas and lambda-style callable declarations.
+- `=>` is type-level syntax for function types and interface callable signatures.
 
 Function aliases can use `typeof fnc`:
 
 ```ores
-type F = typeof fnc() -> int;
-type Predicate = typeof fnc(bool value) -> bool;
+type F = typeof fnc() => int;
+type Predicate = typeof fnc(bool value) => bool;
 ```
 
 The shorter inline function type is also valid:
 
 ```ores
-fnc sink() => ((bool foo) -> void) {
+fnc sink(): ((bool foo) => void) {
   return |foo| -> {
     stdio.println(foo);
     return;
@@ -688,13 +939,13 @@ Parameter names inside function types are documentation-only; structural functio
 The canonical lambda syntax is pipe-delimited and block-only:
 
 ```ores
-fnc find(bool found) => F {
+fnc find(bool found): F {
   return || -> {
     return found ? 5 : 6;
   };
 }
 
-fnc callback() => ((bool foo) -> void) {
+fnc callback(): ((bool foo) => void) {
   return |foo| -> {
     stdio.println(foo);
     return;
@@ -714,7 +965,7 @@ This means higher-order functions and functors do not introduce a second return 
 Closures are lexical. A lambda resolves free variables from the scope where the lambda is created, not from the scope where it is called.
 
 ```ores
-fnc makeCounter() => (() -> int) {
+fnc makeCounter(): (() => int) {
   let int count = 0;
 
   return || -> {
@@ -741,7 +992,7 @@ This makes returned closures safe without retaining raw stack references.
 Parameters are immutable by default.
 
 ```ores
-fnc bad(Bar b) => void {
+fnc bad(Bar b): void {
   b.foo = "foobar"; // compile-time error
   return;
 }
@@ -750,7 +1001,7 @@ fnc bad(Bar b) => void {
 An owned parameter may explicitly opt into mutation by putting `mut` between the type and parameter name:
 
 ```ores
-fnc change(Bar mut b) => Bar {
+fnc change(Bar mut b): Bar {
   b.foo = "foobar";
   return b;
 }
@@ -778,11 +1029,11 @@ Class instances, arrays/lists, object records, and closures are move-only by def
 A by-value binding, argument, or return consumes a non-`Copy` value:
 
 ```ores
-fnc consume(Bar value) => void {
+fnc consume(Bar value): void {
   return;
 }
 
-fnc example() => void {
+fnc example(): void {
   let Bar b = new Bar();
   consume(b);
   // b.foo; // compile-time error: use of moved value
@@ -793,7 +1044,7 @@ fnc example() => void {
 Shared immutable borrowing uses `&T`:
 
 ```ores
-fnc inspect(&Bar value) => void {
+fnc inspect(&Bar value): void {
   stdio.println(value.foo);
   return;
 }
@@ -802,12 +1053,12 @@ fnc inspect(&Bar value) => void {
 Exclusive mutable borrowing uses `&mut T`:
 
 ```ores
-fnc change(&mut Bar value) => void {
+fnc change(&mut Bar value): void {
   value.foo = "changed";
   return;
 }
 
-fnc example() => void {
+fnc example(): void {
   let Bar b = new Bar();
   change(&mut b);
   stdio.println(b.foo); // owner is usable again after the call

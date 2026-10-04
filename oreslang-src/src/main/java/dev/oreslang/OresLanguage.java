@@ -7,8 +7,12 @@ import dev.oreslang.ast.Ast;
 import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.nodes.OresEvalRootNode;
 import dev.oreslang.nodes.OresInteropRootNode;
+import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.OresContext;
 import org.graalvm.polyglot.SandboxPolicy;
+
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 
 @TruffleLanguage.Registration(
         id = OresLanguage.ID,
@@ -28,6 +32,25 @@ public final class OresLanguage extends TruffleLanguage<OresContext> {
         return new OresContext(this, env);
     }
 
+    /**
+     * Host-owned actor dispatcher workers may enter the context. Guest source
+     * still has no raw thread-creation authority; that remains controlled by
+     * IsolatePolicy and the Polyglot Context builder.
+     *
+     * Strict/adversarial contexts serialize actor guest turns in OresContext.
+     * Non-adversarial contexts may execute independent actor turns concurrently.
+     */
+    @Override
+    protected boolean isThreadAccessAllowed(Thread thread, boolean singleThreaded) {
+        return singleThreaded || ActorRuntime.isActorCarrierThread();
+    }
+
+    @Override
+    protected void initializeMultiThreading(OresContext context) {
+        // All mutable language state used by actor turns is context-owned,
+        // actor-owned, immutable, or explicitly synchronized.
+    }
+
     @Override
     protected void disposeContext(OresContext context) {
         context.close();
@@ -35,9 +58,21 @@ public final class OresLanguage extends TruffleLanguage<OresContext> {
 
     @Override
     protected CallTarget parse(ParsingRequest request) {
-        String text = request.getSource().getCharacters().toString();
+        var source = request.getSource();
+        String text = source.getCharacters().toString();
         Ast.Program program = OresCompiler.parseAndTypeCheck(text);
-        RootCallTarget evaluator = new OresEvalRootNode(this, program).getCallTarget();
+        String codeUnitId = source.getPath();
+        if (codeUnitId == null || codeUnitId.isBlank()) {
+            codeUnitId = source.getName();
+        } else {
+            try {
+                codeUnitId = Path.of(codeUnitId).toAbsolutePath().normalize().toString().replace('\\', '/');
+            } catch (InvalidPathException invalidPath) {
+                throw new IllegalArgumentException("invalid Oreslang source path identity", invalidPath);
+            }
+        }
+        if (codeUnitId == null || codeUnitId.isBlank()) codeUnitId = "<anonymous>";
+        RootCallTarget evaluator = new OresEvalRootNode(this, program, codeUnitId).getCallTarget();
         return new OresInteropRootNode(this, evaluator).getCallTarget();
     }
 }

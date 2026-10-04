@@ -39,7 +39,7 @@ final class SerializationAnnotationTest {
     @Test
     void expandsFromJsonIntoPublicTypedGettersAndSetters() {
         Ast.Program checked = TypeChecker.check(Parser.parse("""
-                define class MyBlob
+                define class MyBlob as
                   @FromJson("foo")
                   foo: String;
                   @FromJson("bar")
@@ -109,14 +109,14 @@ final class SerializationAnnotationTest {
     @Test
     void rejectsMalformedDuplicateImmutableAndCollidingFromJsonDeclarations() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   @FromJson(foo)
                   foo: String;
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   @FromJson("same")
                   first: String;
                   @FromJson("same")
@@ -125,14 +125,14 @@ final class SerializationAnnotationTest {
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   @FromJson("foo")
                   val String foo;
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class Bad
+                define class Bad as
                   @FromJson("foo")
                   foo: String;
                   getFoo() => String { return self.foo; }
@@ -143,7 +143,7 @@ final class SerializationAnnotationTest {
     @Test
     void generatedSetterRequiresMutableOwner() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define class MyBlob
+                define class MyBlob as
                   @FromJson("foo")
                   foo: String;
                 end
@@ -154,6 +154,53 @@ final class SerializationAnnotationTest {
                   return;
                 }
                 """)));
+    }
+
+    @Test
+    void macroExpansionPreservesActorIsolationAndRejectsUnsafeWireState() {
+        Ast.ClassDecl actor = new Ast.ClassDecl(
+                "Worker",
+                false,
+                Ast.ActorKind.PRIVATE,
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of());
+        Ast.Program expanded = AnnotationExpander.expand(
+                new Ast.Program(List.of(new Ast.ModuleDecl("root", List.of(actor)))));
+        assertEquals(Ast.ActorKind.PRIVATE, firstClass(expanded).actorKind(),
+                "macro expansion must never erase actor isolation kind");
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define class Inferred as
+                  @FromJson("foo")
+                  let foo = "value";
+                end
+                """)), "@FromJson must require an explicit field type");
+
+        Ast.Annotation fromJson = new Ast.Annotation(
+                "FromJson",
+                List.of(Ast.TypeRef.stringLiteral("payload")));
+        Ast.FieldDecl mailboxField = new Ast.FieldDecl(
+                "payload",
+                Ast.Visibility.PRIVATE,
+                Ast.BindingKind.LET,
+                Ast.TypeRef.simple("String"),
+                List.of(fromJson),
+                null);
+        Ast.ClassDecl sharedActor = new Ast.ClassDecl(
+                "Mailbox",
+                false,
+                Ast.ActorKind.SHARED,
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(mailboxField),
+                List.of());
+        assertThrows(IllegalArgumentException.class, () -> AnnotationExpander.expand(
+                new Ast.Program(List.of(new Ast.ModuleDecl("root", List.of(sharedActor))))),
+                "@FromJson must not generate mutation entry points for actor mailbox state");
     }
 
     private static Ast.ClassDecl firstClass(Ast.Program program) {

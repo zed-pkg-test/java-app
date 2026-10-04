@@ -7,7 +7,7 @@ import java.util.Objects;
 public final class Types {
     private Types() { }
 
-    public sealed interface Type permits Primitive, Named, Borrow, ClassNamespace, Record, Function, ListType, Tuple, Generic, StringLiteral, Unknown { }
+    public sealed interface Type permits Primitive, Named, Borrow, ClassNamespace, Record, Function, ListType, Tuple, Union, Generic, StringLiteral, Unknown { }
 
     public enum Primitive implements Type {
         INT, FLOAT, DECIMAL, COMPLEX, BOOL, STRING, VOID, NULL
@@ -37,6 +37,13 @@ public final class Types {
         public Tuple { elements = List.copyOf(elements); }
     }
 
+    public record Union(List<Type> options) implements Type {
+        public Union {
+            options = List.copyOf(options);
+            if (options.size() < 2) throw new IllegalArgumentException("union needs at least two distinct types");
+        }
+    }
+
     public record Generic(String name) implements Type { }
 
     public record StringLiteral(String value) implements Type { }
@@ -50,6 +57,13 @@ public final class Types {
         if (to instanceof Generic || from instanceof Generic) return true;
         if (from.equals(to)) return true;
         if (from instanceof StringLiteral && to == Primitive.STRING) return true;
+
+        if (from instanceof Union source) {
+            return source.options().stream().allMatch(option -> isAssignable(option, to));
+        }
+        if (to instanceof Union target) {
+            return target.options().stream().anyMatch(option -> isAssignable(from, option));
+        }
 
         if (from instanceof Borrow source && to instanceof Borrow target) {
             if (target.mutable() && !source.mutable()) return false;
@@ -108,6 +122,24 @@ public final class Types {
         if (left == Primitive.DECIMAL || right == Primitive.DECIMAL) return Primitive.DECIMAL;
         if (left == Primitive.FLOAT || right == Primitive.FLOAT) return Primitive.FLOAT;
         return Primitive.INT;
+    }
+
+    public static Type unionOf(Type left, Type right) {
+        return unionOf(List.of(left, right));
+    }
+
+    public static Type unionOf(List<Type> types) {
+        java.util.ArrayList<Type> flattened = new java.util.ArrayList<>();
+        for (Type type : types) {
+            if (type == Unknown.INSTANCE) return Unknown.INSTANCE;
+            if (type instanceof Union union) {
+                for (Type option : union.options()) if (!flattened.contains(option)) flattened.add(option);
+            } else if (!flattened.contains(type)) flattened.add(type);
+        }
+        if (flattened.isEmpty()) return Unknown.INSTANCE;
+        if (flattened.size() == 1) return flattened.getFirst();
+        flattened.sort(java.util.Comparator.comparing(Object::toString));
+        return new Union(flattened);
     }
 
     public static boolean isNumeric(Type type) {

@@ -125,11 +125,20 @@ public final class AnnotationExpander {
         for (Ast.FieldDecl field : klass.fields()) {
             String jsonKey = fromJsonKey(field);
             if (jsonKey == null) continue;
+            if (klass.actorKind() != Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException("@FromJson is not valid on actor mailbox state '"
+                        + klass.name() + "." + field.name()
+                        + "'; deserialize into a plain class value before sending it to an actor");
+            }
 
             String previous = jsonKeys.putIfAbsent(jsonKey, field.name());
             if (previous != null && !previous.equals(field.name())) {
                 throw new IllegalArgumentException("duplicate @FromJson key '" + jsonKey + "' on fields '"
                         + previous + "' and '" + field.name() + "' in class " + klass.name());
+            }
+            if (field.type() == null) {
+                throw new IllegalArgumentException("@FromJson field '" + klass.name() + "." + field.name()
+                        + "' requires an explicit field type");
             }
             if (field.bindingKind() != Ast.BindingKind.LET) {
                 throw new IllegalArgumentException("@FromJson field '" + klass.name() + "." + field.name()
@@ -145,6 +154,7 @@ public final class AnnotationExpander {
         return new Ast.ClassDecl(
                 klass.name(),
                 klass.isAbstract(),
+                klass.actorKind(),
                 klass.genericParameters(),
                 klass.parents(),
                 klass.interfaces(),
