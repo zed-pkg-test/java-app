@@ -134,6 +134,8 @@ final class ImportGraph {
                 if (kind == Ast.ImportKind.FUNCTION
                         && decl instanceof Ast.FunctionDecl fn
                         && fn.visibility() == Ast.Visibility.PUBLIC
+                        && fn.kind() == Ast.CallableKind.FNC
+                        && fn.actorKind() == Ast.ActorKind.NONE
                         && fn.name().equals(name)) {
                     matches++;
                 } else if (kind == Ast.ImportKind.CLASS
