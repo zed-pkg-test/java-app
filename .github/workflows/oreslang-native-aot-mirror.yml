@@ -1,0 +1,45 @@
+name: Oreslang native AOT mirror validation
+
+on:
+  push:
+    branches:
+      - "feat/oreslang-mirror-pr169-0f7a8a4-20261004"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-aot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Provenance
+        run: |
+          test -s SOURCE_HEAD.txt
+          printf 'source-head: '; cat SOURCE_HEAD.txt
+          java --version
+          native-image --version
+          mvn --version
+      - name: Build native AOT host
+        run: mvn -B -ntp -DskipTests -Pnative-aot package
+      - name: Validate native binary
+        run: |
+          test -x target/ores-aot
+          target/ores-aot --check examples/showcase.ores
+          target/ores-aot --check examples/together.ores
+      - name: Run examples in AOT host profile
+        run: |
+          target/ores-aot --mode=aot --platform=server examples/showcase.ores
+          target/ores-aot --mode=aot --platform=server examples/together.ores
