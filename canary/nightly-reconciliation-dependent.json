@@ -1,0 +1,16 @@
+{
+  "schema_version": "nightly-reconciliation-canary.v1",
+  "linear_issue": "DEN-2877",
+  "source_policy_pr": "ORESoftware/project-registry#44",
+  "scenario": "dependent-pr-references-open-dependency-pr-through-zed-and-gitlink",
+  "repository": "zed-pkg-test/java-app",
+  "base_sha": "59ea6f7473edfc6e8675fc7c2f7d7b0589611060",
+  "dependency_repository": "zed-pkg-test/java-lib",
+  "dependency_pull_request": 2,
+  "dependency_head_sha": "c9fa3cb0b50bb39dc3cff005ef3640ae05d9ebfd",
+  "zed_requirement": "^0.1.1",
+  "gitlink_path": "vendor/java-lib",
+  "disposable": true,
+  "merge_forbidden": true,
+  "purpose": "Prove that the nightly reconciler discovers and re-evaluates a dependent PR when an open dependency PR changes, using both Zed metadata and an exact git submodule edge."
+}

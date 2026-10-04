@@ -1,0 +1,8 @@
+[package]
+name = "zed-native-lock-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+zed-interfaces = { path = "../../../zed-interfaces" }

@@ -1,0 +1,34 @@
+name: Oreslang exact-head mirror validation
+on:
+  push:
+    branches:
+      - "feat/oreslang-mirror-pr*"
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:oreslang-src)" = "5f64986924b57939ae79404db8bd2709bc359971"
+          test "$(cat SOURCE_HEAD.txt)" = "1bc19d49828e0576ae609c9f89a1d66c79d7eec4"
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Full JVM verification
+        working-directory: oreslang-src
+        run: mvn -B -ntp verify
+      - name: Run core examples
+        working-directory: oreslang-src
+        run: |
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
