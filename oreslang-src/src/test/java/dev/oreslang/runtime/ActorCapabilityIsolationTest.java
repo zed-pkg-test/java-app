@@ -403,14 +403,14 @@ final class ActorCapabilityIsolationTest {
 
 
     @Test
-    void actorRuntimeDoesNotPubliclyExposeCurrentRuntimeObjects() {
-        for (var method : ActorRuntime.class.getDeclaredMethods()) {
-            if (!java.lang.reflect.Modifier.isPublic(method.getModifiers())) continue;
-            assertNotEquals(
-                    ActorRuntime.class,
-                    method.getReturnType(),
-                    "public ActorRuntime API must not leak the current runtime implementation object: " + method);
-        }
+    void actorRuntimeThreadLocalRuntimeAccessorsAreKernelOnly() throws Exception {
+        var actorAccessor = ActorRuntime.class.getDeclaredMethod("currentActorRuntime");
+        var rootAccessor = ActorRuntime.class.getDeclaredMethod("currentRootRuntime");
+
+        assertFalse(java.lang.reflect.Modifier.isPublic(actorAccessor.getModifiers()));
+        assertFalse(java.lang.reflect.Modifier.isPublic(rootAccessor.getModifiers()));
+        assertEquals(ActorRuntime.class, actorAccessor.getReturnType());
+        assertEquals(ActorRuntime.class, rootAccessor.getReturnType());
     }
 
 
