@@ -16,14 +16,10 @@ import static org.junit.jupiter.api.Assertions.*;
 final class ReservedKeywordsDynamicStructTest {
     @Test
     void reservedWordsRemainCallableNamesAndMapKeysOnly() {
-        var tokens = new Lexer("stop do done declare define end as").scan();
+        var tokens = new Lexer("stop do done").scan();
         assertEquals(Token.Type.STOP, tokens.get(0).type());
         assertEquals(Token.Type.DO, tokens.get(1).type());
         assertEquals(Token.Type.DONE, tokens.get(2).type());
-        assertEquals(Token.Type.DECLARE, tokens.get(3).type());
-        assertEquals(Token.Type.DEFINE, tokens.get(4).type());
-        assertEquals(Token.Type.END, tokens.get(5).type());
-        assertEquals(Token.Type.AS, tokens.get(6).type());
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
@@ -32,7 +28,10 @@ final class ReservedKeywordsDynamicStructTest {
                   fnc done(): int { return 3; }
 
                   pub fnc main(): int {
-                    val values = obj{stop: 4, 'do': 5, "done": 6};
+                    let Map<string, int> values = new Map<string, int>();
+                    values["stop"] = 4;
+                    values["do"] = 5;
+                    values["done"] = 6;
                     return stop() + do() + done()
                         + values["stop"] + values["do"] + values["done"];
                   }
@@ -60,60 +59,46 @@ final class ReservedKeywordsDynamicStructTest {
     }
 
     @Test
-    void objectKeysSupportSingleDoubleQuotedReservedAndBacktickForms() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                define module app
-                  fnc make(string key): DynamicStruct<int> {
-                    return obj{
-                      stop: 1,
-                      'do': 2,
-                      "done": 3,
-                      `key`: 4
-                    };
-                  }
-                end
-                """)));
+    void objAndDynamicStructAreShelved() {
+        IllegalArgumentException obj = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        fnc bad(): void {
+                          val value = obj{foo: 1};
+                          return;
+                        }
+                        """));
+        assertTrue(obj.getMessage().contains("obj{} is shelved"));
 
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define module app
-                  fnc bad(): void {
-                    const key = 42;
-                    const value = obj{`key`: 1};
-                    return;
-                  }
-                end
-                """)));
-
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define module app
-                  fnc bad(): void {
-                    const value = obj{'same': 1, "same": 2};
-                    return;
-                  }
-                end
-                """)));
+        IllegalArgumentException dynamic = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad(): void {
+                          let DynamicStruct<int> bag = new DynamicStruct<int>();
+                          return;
+                        }
+                        """)));
+        assertTrue(dynamic.getMessage().contains("DynamicStruct is shelved"));
     }
 
     @Test
-    void dynamicStructAllowsArbitraryStringKeysWithTypedValuesAtRuntime() throws Exception {
+    void mapAllowsDynamicInsertionWithTypedKeysAndValues() throws Exception {
         String program = """
-                define module app
-                  pub fnc main(): void {
-                    let DynamicStruct<int> bag = new DynamicStruct<int>();
+                pub fnc main(): void {
+                    let Map<string, int> bag = new Map<string, int>();
                     bag["stop"] = 1;
                     bag["done"] = 2;
                     const key = "do";
                     bag[key] = 3;
                     stdio.println(bag["stop"] + bag["done"] + bag[key]);
                     return;
-                  }
-                end
+                }
                 """;
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse(program)));
 
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        Source source = Source.newBuilder(OresLanguage.ID, program, "dynamic-struct.ores")
+        Source source = Source.newBuilder(OresLanguage.ID, program, "map.ores")
                 .mimeType(OresLanguage.MIME_TYPE)
                 .build();
 
@@ -128,68 +113,30 @@ final class ReservedKeywordsDynamicStructTest {
     }
 
     @Test
-    void dynamicStructCheckedLookupAvoidsUndefinedAndNull() throws Exception {
-        String program = """
-                define module app
-                  pub fnc main(): void {
-                    let DynamicStruct<int> bag = new DynamicStruct<int>();
-                    bag["answer"] = 42;
-                    stdio.stdout.write(bag.has_key("answer"));
-                    stdio.stdout.write("|");
-                    stdio.stdout.write(bag.has_key("missing"));
-                    stdio.stdout.write("|");
-                    stdio.stdout.write(bag.get("answer").unwrap());
-                    stdio.stdout.write("|");
-                    stdio.stdout.write(bag.get_or("missing", 7));
-                    return;
-                  }
-                end
-                """;
-
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse(program)));
-
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        Source source = Source.newBuilder(OresLanguage.ID, program, "dynamic-struct-checked.ores")
-                .mimeType(OresLanguage.MIME_TYPE)
-                .build();
-        try (Context context = Context.newBuilder(OresLanguage.ID)
-                .allowAllAccess(false)
-                .out(output)
-                .build()) {
-            context.eval(source);
-        }
-        assertEquals("true|false|42|7", output.toString(StandardCharsets.UTF_8));
-    }
-
-    @Test
-    void dynamicStructRejectsWrongValueAndNonStringIndexTypes() {
+    void mapChecksKeyAndValueTypes() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define module app
-                  fnc bad(): void {
-                    let DynamicStruct<int> bag = new DynamicStruct<int>();
-                    bag.answer = "forty-two";
+                fnc bad(): void {
+                    let Map<string, int> bag = new Map<string, int>();
+                    bag["answer"] = "forty-two";
                     return;
-                  }
-                end
+                }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define module app
-                  fnc bad(): void {
-                    let DynamicStruct<int> bag = new DynamicStruct<int>();
+                fnc bad(): void {
+                    let Map<string, int> bag = new Map<string, int>();
                     bag[1] = 42;
                     return;
-                  }
-                end
+                }
                 """)));
 
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define module app
-                  fnc bad(): void {
-                    let DynamicStruct<void> bag = new DynamicStruct<void>();
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc ok(): void {
+                    let Map<int, string> bag = new Map<int, string>();
+                    bag[1] = "one";
+                    val value = bag[1];
                     return;
-                  }
-                end
+                }
                 """)));
     }
 }
