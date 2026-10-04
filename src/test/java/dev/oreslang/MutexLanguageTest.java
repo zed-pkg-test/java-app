@@ -587,7 +587,7 @@ final class MutexLanguageTest {
                 """);
         IllegalArgumentException methodError = assertThrows(
                 IllegalArgumentException.class, () -> TypeChecker.check(methodProgram));
-        assertTrue(methodError.getMessage().contains("cannot extract a bound method"));
+        assertTrue(methodError.getMessage().contains("direct-call-only"));
     }
 
     @Test
