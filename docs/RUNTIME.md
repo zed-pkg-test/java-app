@@ -74,7 +74,7 @@ Method code is stored once per class declaration. Direct calls dispatch to that 
 
 ## Proper tail-call runtime
 
-OresVM implements proper tail calls itself instead of relying on GraalVM to infer tail-recursion optimization. A tail-position call is prepared as an internal invocation descriptor after its receiver/callee and arguments have been evaluated. The current activation unwinds, and an iterative trampoline executes the next raw activation. Self-recursion, mutual recursion, routines, instance methods, `static fnc`, lambdas, module/import calls, and first-class Oreslang function values therefore share the same constant-call-stack mechanism.
+OresVM implements proper tail calls itself instead of relying on GraalVM to infer tail-recursion optimization. A tail-position call is prepared as an internal invocation descriptor after its receiver/callee and arguments have been evaluated. The current activation unwinds, and an iterative trampoline executes the next raw activation. Self-recursion, same-evaluator mutual recursion, routines, instance methods, `static fnc`, same-unit module calls, lambdas, and evaluator-owned first-class Oreslang function values therefore share the same constant-call-stack mechanism. Untyped cross-code-unit imports are the explicit contract barrier described below.
 
 The trampoline performs a scheduler safepoint every 64 tail transfers. This prevents a very long recursive chain from becoming an uncooperative scheduling loophole.
 

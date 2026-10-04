@@ -252,7 +252,12 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      because the caller still owns semantic work or a runtime return contract.
    - fnc declarations are reifiable first-class callable values; routine
      declarations are direct-call-only and cannot be stored, returned, or
-     passed as callbacks without an explicit wrapping lambda.
+     passed as callbacks without an explicit wrapping lambda. Reified module
+     aliases preserve this distinction.
+   - Fnc<...>-valued fields are callable data and remain reifiable. A class or
+     interface field name may not collide with an instance-method name across
+     inheritance; module callables/classes/bindings likewise share one runtime
+     value-member base-name namespace.
    - nlex on a fnc/routine is a capture barrier inherited by lambdas created
      inside it; an explicit nlex lambda establishes the same barrier.
    - nlex blocks activation-local captures only. Module members, imports,

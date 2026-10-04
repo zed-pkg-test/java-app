@@ -668,12 +668,22 @@ public final class OresEvalRootNode extends RootNode {
                 if (receiver instanceof OresObject object) {
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, methodCall.member(), args.size(), new LinkedHashSet<>());
-                    if (method == null) {
-                        throw new IllegalArgumentException(
-                                "no method " + object.klass.name() + "." + methodCall.member()
-                                        + " with arity " + args.size());
+                    if (method != null) {
+                        return object.owner.methodInvocation(object, method, args);
                     }
-                    return object.owner.methodInvocation(object, method, args);
+
+                    Object fieldValue = object.fields.get(methodCall.member());
+                    if (fieldValue instanceof Invokable invokable) {
+                        return object.owner.invokableInvocation(invokable, args);
+                    }
+                    if (object.fields.containsKey(methodCall.member())) {
+                        throw new IllegalArgumentException(
+                                "field " + object.klass.name() + "." + methodCall.member()
+                                        + " is not callable");
+                    }
+                    throw new IllegalArgumentException(
+                            "no method or callable field " + object.klass.name() + "."
+                                    + methodCall.member() + " with arity " + args.size());
                 }
 
                 if (receiver instanceof ClassFacade klass) {

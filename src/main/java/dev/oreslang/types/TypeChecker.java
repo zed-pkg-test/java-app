@@ -944,8 +944,44 @@ public final class TypeChecker {
                     }
                     Ast.ClassDecl klass = findClass(named.name());
                     if (klass != null) {
-                        ResolvedMethod target = findMethodTarget(klass, named, member.member(), call.arguments().size(), new LinkedHashSet<>());
-                        if (target == null) throw new IllegalArgumentException("no method '" + member.member() + "' with arity " + call.arguments().size() + " on " + named.name());
+                        ResolvedMethod target = findMethodTarget(
+                                klass, named, member.member(), call.arguments().size(), new LinkedHashSet<>());
+                        if (target == null) {
+                            ResolvedField field = findFieldTarget(
+                                    klass, named, member.member(), new LinkedHashSet<>());
+                            if (field != null) {
+                                if (call.typeArgumentsPresent()) {
+                                    throw new IllegalArgumentException(
+                                            "function-valued field '" + member.member()
+                                                    + "' does not accept call-site type arguments");
+                                }
+                                Type fieldType = substituteGenerics(
+                                        classFieldType(field.owner(), field.field()),
+                                        classGenericBindings(field.owner(), field.ownerType()));
+                                if (!(fieldType instanceof Function fn)) {
+                                    throw new IllegalArgumentException(
+                                            "field '" + member.member() + "' on " + named.name()
+                                                    + " is not callable");
+                                }
+                                if (fn.parameters().size() != call.arguments().size()) {
+                                    throw new IllegalArgumentException(
+                                            "function-valued field '" + member.member() + "' call arity mismatch");
+                                }
+                                for (int i = 0; i < fn.parameters().size(); i++) {
+                                    validateLambdaArgument(
+                                            call.arguments().get(i), fn.parameters().get(i), env, generics, self);
+                                    requireAssignable(
+                                            typeOf(call.arguments().get(i), env, generics, self),
+                                            fn.parameters().get(i),
+                                            "argument " + (i + 1));
+                                }
+                                return fn.result();
+                            }
+                            throw new IllegalArgumentException(
+                                    "no method or callable field '" + member.member()
+                                            + "' with arity " + call.arguments().size()
+                                            + " on " + named.name());
+                        }
                         Ast.MethodDecl method = target.method();
                         Ast.ClassDecl owner = target.owner();
                         Named ownerType = target.ownerType();
