@@ -174,6 +174,9 @@ final class AsyncSchedulerLanguageTest {
                 pub async routine main() => void {
                   val scheduler = new OresScheduler(2);
                   val work = scheduler.start(async || -> {
+                    val local = Mutex.new(41);
+                    val guard = await local.lock_async();
+                    guard.release();
                     return 41;
                   });
                   val value = await work;
