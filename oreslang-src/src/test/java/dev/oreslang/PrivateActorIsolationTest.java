@@ -146,7 +146,7 @@ final class PrivateActorIsolationTest {
             var syncCell = runtime.syncCell(1);
             var sharedMutex = OresMutex.shared(new int[]{1});
 
-            assertThrows(IllegalArgumentException.class, () -> privateRef.send(syncCell));
+            assertThrows(SecurityException.class, () -> privateRef.send(syncCell));
             assertThrows(RuntimeException.class, () -> privateRef.send(sharedMutex));
             privateRef.stop();
         }
