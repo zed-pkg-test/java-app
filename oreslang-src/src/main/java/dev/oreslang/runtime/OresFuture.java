@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -29,8 +30,33 @@ import java.util.function.Supplier;
  * Future. Guest code may observe state, await, or request cancellation, but it
  * cannot forge a value/failure.</p>
  */
-public final class OresFuture<T> implements Future<T> {
+public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     private static final Object PENDING = new Object();
+
+    /**
+     * Single-shot completion capability used to adapt callback-only APIs.
+     *
+     * <p>Calling resolve/reject/cancel settles the target Future but never
+     * resumes Oreslang guest code inline. Awaiting code is still resumed only
+     * by its owning scheduler after the suspending turn has unwound.</p>
+     */
+    public interface Callback<T> {
+        void resolve(T value);
+        void reject(Throwable failure);
+        void cancel();
+        boolean isDone();
+
+        default void complete(Throwable failure, T value) {
+            if (failure == null) resolve(value);
+            else reject(failure);
+        }
+    }
+
+    public static final class AlreadySettledException extends IllegalStateException {
+        public AlreadySettledException(String message) {
+            super(message);
+        }
+    }
 
     private record Success<T>(T value) { }
     private record Failure(Throwable failure) { }
@@ -70,6 +96,84 @@ public final class OresFuture<T> implements Future<T> {
         return future;
     }
 
+    /**
+     * Adapt a single-shot callback registration API into an Ores Future.
+     *
+     * <p>The registrar may invoke the callback synchronously. That only settles
+     * the Future; it cannot re-enter an awaiting Oreslang frame. A second
+     * callback settlement is rejected deterministically.</p>
+     */
+    public static <T> OresFuture<T> fromCallback(
+            Consumer<? super Callback<T>> registrar) {
+        Objects.requireNonNull(registrar, "registrar");
+        OresFuture<T> future = new OresFuture<>();
+        AtomicBoolean callbackClaimed = new AtomicBoolean();
+
+        Callback<T> completion = new Callback<>() {
+            private void claim(String operation) {
+                if (!callbackClaimed.compareAndSet(false, true)) {
+                    throw new AlreadySettledException(
+                            "callback Future already settled; duplicate " + operation);
+                }
+            }
+
+            @Override
+            public void resolve(T value) {
+                claim("resolve");
+                if (!future.completeFromRuntime(value)) {
+                    throw new AlreadySettledException(
+                            "callback Future was already settled before resolve");
+                }
+            }
+
+            @Override
+            public void reject(Throwable failure) {
+                Objects.requireNonNull(failure, "failure");
+                claim("reject");
+                if (!future.failFromRuntime(failure)) {
+                    throw new AlreadySettledException(
+                            "callback Future was already settled before reject");
+                }
+            }
+
+            @Override
+            public void cancel() {
+                claim("cancel");
+                if (!future.cancel(false)) {
+                    throw new AlreadySettledException(
+                            "callback Future was already settled before cancel");
+                }
+            }
+
+            @Override
+            public boolean isDone() {
+                return callbackClaimed.get() || future.isDone();
+            }
+        };
+
+        try {
+            registrar.accept(completion);
+        } catch (Throwable failure) {
+            // Promise-style constructor semantics: a registrar failure rejects
+            // only if the callback has not already won the single-shot race.
+            if (callbackClaimed.compareAndSet(false, true)) {
+                future.failFromRuntime(failure);
+            } else if (failure instanceof VirtualMachineError fatal) {
+                throw fatal;
+            } else if (failure instanceof ThreadDeath fatal) {
+                throw fatal;
+            } else if (failure instanceof LinkageError fatal) {
+                throw fatal;
+            }
+        }
+        return future;
+    }
+
+    @Override
+    public OresFuture<T> getAwaited() {
+        return this;
+    }
+
     @SuppressWarnings("unchecked")
     public static <T> OresFuture<T> from(OresFuture<? extends T> future) {
         return (OresFuture<T>) Objects.requireNonNull(future, "future");
@@ -93,6 +197,71 @@ public final class OresFuture<T> implements Future<T> {
             }
         });
         return result;
+    }
+
+    /**
+     * Chain a callback-only operation after this Future on an explicit Ores
+     * scheduler. Guest registrar code executes only as a scheduler turn.
+     *
+     * <p>If the callback fires synchronously, the dependent Future is already
+     * settled when this turn returns Await, but TaskRunner still requires the
+     * current turn to unwind before the continuation can be dispatched.</p>
+     */
+    public <U> OresFuture<U> attachCallback(
+            OresScheduler scheduler,
+            java.util.function.BiConsumer<? super T, ? super Callback<U>> registrar) {
+        Objects.requireNonNull(scheduler, "scheduler");
+        Objects.requireNonNull(registrar, "registrar");
+        OresFuture<T> source = this;
+
+        return scheduler.start(new OresScheduler.Task<>() {
+            private int pc;
+            private OresFuture<U> dependent;
+
+            @Override
+            public OresScheduler.Step<U> resume(OresScheduler.Resume resume) {
+                if (pc == 0) {
+                    if (!resume.initial()) {
+                        throw new IllegalStateException(
+                                "callback chain started with a non-initial resume");
+                    }
+                    pc = 1;
+                    return OresScheduler.await(source);
+                }
+
+                if (pc == 1) {
+                    if (resume.failure() != null) {
+                        throw propagate(resume.failure());
+                    }
+                    @SuppressWarnings("unchecked")
+                    T value = (T) resume.value();
+                    dependent = OresFuture.fromCallback(
+                            callback -> registrar.accept(value, callback));
+                    pc = 2;
+                    return OresScheduler.await(dependent);
+                }
+
+                if (pc == 2) {
+                    if (resume.failure() != null) {
+                        throw propagate(resume.failure());
+                    }
+                    @SuppressWarnings("unchecked")
+                    U value = (U) resume.value();
+                    pc = 3;
+                    return OresScheduler.done(value);
+                }
+
+                throw new IllegalStateException(
+                        "callback Future chain resumed after completion");
+            }
+
+            private RuntimeException propagate(Throwable failure) {
+                Throwable unwrapped = OresFuture.unwrap(failure);
+                if (unwrapped instanceof RuntimeException runtime) return runtime;
+                if (unwrapped instanceof Error error) throw error;
+                return new RuntimeException(unwrapped);
+            }
+        });
     }
 
     boolean completeFromRuntime(T value) {

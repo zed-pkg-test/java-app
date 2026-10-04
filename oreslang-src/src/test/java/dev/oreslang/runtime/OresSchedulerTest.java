@@ -76,6 +76,38 @@ final class OresSchedulerTest {
     }
 
     @Test
+    void completedAwaitMayReuseSameCarrierButAlwaysGetsFreshDispatch() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> completed = OresFuture.completed(7);
+            AtomicInteger pc = new AtomicInteger();
+            AtomicReference<Thread> firstCarrier = new AtomicReference<>();
+            AtomicReference<Long> firstDispatch = new AtomicReference<>();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                if (pc.getAndIncrement() == 0) {
+                    firstCarrier.set(Thread.currentThread());
+                    firstDispatch.set(OresScheduler.currentDispatchId());
+                    assertNotEquals(0L, firstDispatch.get().longValue());
+                    return OresScheduler.await(completed);
+                }
+
+                // A one-thread pool guarantees physical carrier reuse. The
+                // logical scheduler dispatch must nevertheless be new.
+                assertSame(firstCarrier.get(), Thread.currentThread());
+                assertNotEquals(
+                        firstDispatch.get().longValue(),
+                        OresScheduler.currentDispatchId(),
+                        "await must unwind and re-enter through a fresh scheduler dispatch");
+                assertEquals(7, resume.value());
+                return OresScheduler.done(8);
+            });
+
+            assertEquals(8, result.get(5, TimeUnit.SECONDS));
+            assertEquals(2, pc.get());
+        }
+    }
+
+    @Test
     void oneFutureMayResumeWaitersOnDifferentSchedulers() throws Exception {
         try (OresScheduler left = new OresScheduler(1);
              OresScheduler right = new OresScheduler(1)) {
