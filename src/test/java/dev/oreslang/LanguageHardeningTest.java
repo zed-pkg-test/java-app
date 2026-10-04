@@ -76,6 +76,195 @@ final class LanguageHardeningTest {
     }
 
     @Test
+    void directOnlyRoutineStillParticipatesInModuleCallableContracts() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module contracts
+                  define interface Api
+                    fnc ping(int value) => int;
+                  end
+                end
+
+                @AdheresTo(contracts.Api)
+                define module service
+                  pub routine ping(int value): int {
+                    return value + 1;
+                  }
+                end
+
+                fnc callDirectly(): int {
+                  return service.ping(41);
+                }
+                """)));
+
+        IllegalArgumentException extracted = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module service
+                          pub routine ping(int value): int {
+                            return value + 1;
+                          }
+                        end
+
+                        fnc bad(): void {
+                          val Fnc<int, int> callback = service.ping;
+                        }
+                        """)));
+        assertTrue(extracted.getMessage().contains("direct-call-only"));
+    }
+
+    @Test
+    void interfaceMethodsAreDirectOnlyAndInheritedGenericCallsStayTyped() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module model
+                  define interface Base<T>
+                    fnc apply(T value) => T;
+                  end
+
+                  define interface IntApi extends Base<int>
+                  end
+
+                  fnc invoke(IntApi api): int {
+                    return api.apply(41);
+                  }
+                end
+                """)));
+
+        IllegalArgumentException extracted = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface Base<T>
+                            fnc apply(T value) => T;
+                          end
+
+                          define interface IntApi extends Base<int>
+                          end
+
+                          fnc bad(IntApi api): void {
+                            val Fnc<int, int> callback = api.apply;
+                            return;
+                          }
+                        end
+                        """)));
+        assertTrue(extracted.getMessage().contains("interface method"));
+        assertTrue(extracted.getMessage().contains("direct-call-only"));
+
+        IllegalArgumentException badArgument = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface Base<T>
+                            fnc apply(T value) => T;
+                          end
+
+                          define interface IntApi extends Base<int>
+                          end
+
+                          fnc bad(IntApi api): int {
+                            return api.apply("wrong");
+                          }
+                        end
+                        """)));
+        assertTrue(badArgument.getMessage().contains("argument 1"));
+    }
+
+    @Test
+    void structuralMethodsAreDirectOnlyButDirectCallsRemainTyped() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module model
+                  define interface Api
+                    fnc apply(int value) => int;
+                  end
+
+                  fnc invoke(@Structural Api api): int {
+                    return api.apply(41);
+                  }
+                end
+                """)));
+
+        IllegalArgumentException extracted = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface Api
+                            fnc apply(int value) => int;
+                          end
+
+                          fnc bad(@Structural Api api): void {
+                            val Fnc<int, int> callback = api.apply;
+                            return;
+                          }
+                        end
+                        """)));
+        assertTrue(extracted.getMessage().contains("structural method"));
+        assertTrue(extracted.getMessage().contains("direct-call-only"));
+
+        IllegalArgumentException badArgument = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface Api
+                            fnc apply(int value) => int;
+                          end
+
+                          fnc bad(@Structural Api api): int {
+                            return api.apply("wrong");
+                          }
+                        end
+                        """)));
+        assertTrue(badArgument.getMessage().contains("argument 1"));
+    }
+
+    @Test
+    void genericStructuralMethodsInferAndSpecializeWithoutUnknownEscape() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module model
+                  define interface GenericApi
+                    fnc identity<T>(T value) => T;
+                  end
+
+                  fnc infer(@Structural GenericApi api): int {
+                    return api.identity(41);
+                  }
+
+                  fnc explicit(@Structural GenericApi api): int {
+                    return api.identity<int>(41);
+                  }
+                end
+                """)));
+
+        IllegalArgumentException explicitMismatch = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface GenericApi
+                            fnc identity<T>(T value) => T;
+                          end
+
+                          fnc bad(@Structural GenericApi api): int {
+                            return api.identity<int>("wrong");
+                          }
+                        end
+                        """)));
+        assertTrue(explicitMismatch.getMessage().contains("argument 1"));
+
+        IllegalArgumentException inferredReturnMismatch = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define interface GenericApi
+                            fnc identity<T>(T value) => T;
+                          end
+
+                          fnc bad(@Structural GenericApi api): int {
+                            return api.identity("wrong");
+                          }
+                        end
+                        """)));
+        assertTrue(inferredReturnMismatch.getMessage().contains("return expression"));
+    }
+
+    @Test
     void moduleAdherenceRejectsMissingExports() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module contracts
