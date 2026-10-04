@@ -26,24 +26,13 @@ jobs:
           cache: maven
       - name: Verify exact source subtree
         run: |
-          test "$(git rev-parse HEAD:oreslang-src)" = "01e43e6f52201c65bba29c6c518e16ddce4d68bd"
+          test "$(git rev-parse HEAD:oreslang-src)" = "17413d22ef83a43bc82e5e21bb94fe073f76563b"
           printf 'source-tree: '
           git rev-parse HEAD:oreslang-src
           java --version
           native-image --version
           mvn --version
-      - name: Actor runtime isolation tests
-        continue-on-error: true
-        run: timeout 75s mvn -B -ntp -Dtest=ActorRuntimeTest,PrivateActorIsolationTest,SharedPrivateActorIsolationProofTest test
-      - name: Actor language tests
-        continue-on-error: true
-        run: timeout 75s mvn -B -ntp -Dtest=ActorCallableKeywordTest,ActorSpawnLanguageTest test
-      - name: Future and lock language tests
-        continue-on-error: true
-        run: timeout 75s mvn -B -ntp -Dtest=FutureLanguageTest,RwLockLanguageTest,MutexLanguageTest test
-      - name: Mutex runtime tests
-        continue-on-error: true
-        run: timeout 75s mvn -B -ntp -Dtest=MutexRuntimeTest test
-      - name: Hot reload and linked runner tests
-        continue-on-error: true
-        run: timeout 75s mvn -B -ntp -Dtest=SecureJitHotReloadDomainTest,LinkedProgramRunnerTest test
+      - name: Loop safepoint regression
+        run: timeout 75s mvn -B -ntp -Dtest=RoutineAndLoopTest test
+      - name: Hot reload cleanup regression
+        run: timeout 75s mvn -B -ntp -Dtest=SecureJitHotReloadDomainTest test
