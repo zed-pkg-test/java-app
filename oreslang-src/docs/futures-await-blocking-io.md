@@ -79,6 +79,13 @@ const work = io.start(async || -> {
 The task may execute on carrier #2 before an await and carrier #5 afterward.
 Scheduler affinity is guaranteed; physical thread affinity is not.
 
+Each scheduler task also owns a stable logical execution-domain token. Runtime
+objects whose safety depends on local ownership, such as `Mutex<T>`, bind to
+that task token rather than the transient carrier Thread. This lets a mutex
+created before `await` remain owned by the same logical task after resumption,
+while a different task on the same scheduler still has a distinct domain. Actor
+code continues to use the actor's stable execution-domain token instead.
+
 A single Future may therefore have waiters owned by different schedulers:
 
 ```text
