@@ -96,4 +96,37 @@ final class OresRwLockTest {
                     () -> "actor failed: " + actor.failure().orElse(null));
         }
     }
+    @Test
+    void sharedActorNeverBlocksCarrierOnContendedExternalReadLock() throws Exception {
+        OresRwLock<Integer> lock = new OresRwLock<>(13);
+        OresRwLock.WriteGuard<Integer> writer = lock.writeLock();
+
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            java.util.concurrent.CountDownLatch checked =
+                    new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicReference<Throwable> observed =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+
+            ActorRuntime.ActorRef<OresRwLock<Integer>> actor =
+                    runtime.spawnShared(context -> (incoming, actorContext) -> {
+                        try {
+                            incoming.readLock();
+                        } catch (Throwable failure) {
+                            observed.set(failure);
+                        } finally {
+                            checked.countDown();
+                            actorContext.self().stop();
+                        }
+                    });
+
+            actor.send(lock);
+            assertTrue(checked.await(2, TimeUnit.SECONDS),
+                    "contended external read must fail fast rather than park an actor carrier");
+            assertInstanceOf(OresRwLock.WouldBlockException.class, observed.get());
+            assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+        } finally {
+            writer.close();
+        }
+    }
+
 }
