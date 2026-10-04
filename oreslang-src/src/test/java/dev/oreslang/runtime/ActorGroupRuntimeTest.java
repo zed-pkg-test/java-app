@@ -207,11 +207,8 @@ final class ActorGroupRuntimeTest {
                         @SuppressWarnings("unchecked")
                         ActorGroupHandle<String> sameGroup =
                                 (ActorGroupHandle<String>) turn.group().orElseThrow();
-                        ActorRuntime.ActorRef<String> child = turn.runtime().spawnInGroup(
-                                sameGroup,
-                                ActorRuntime.ActorKind.SHARED,
-                                turn.policy(),
-                                ECHO);
+                        ActorRuntime.ActorRef<String> child =
+                                turn.spawnInGroup(sameGroup, ECHO);
                         child.send("from-child");
                     };
 

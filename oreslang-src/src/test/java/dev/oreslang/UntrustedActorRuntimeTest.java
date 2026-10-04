@@ -163,7 +163,7 @@ final class UntrustedActorRuntimeTest {
                     null,
                     null,
                     ignored -> (message, turn) ->
-                            turn.runtime().spawnPrivate(factoryContext ->
+                            turn.spawnPrivate(factoryContext ->
                                     (childMessage, childContext) -> { }));
 
             ref.send("spawn");

@@ -1049,24 +1049,17 @@ final class ActorRuntimeTest {
     }
 
     @Test
-    void actorCodeCannotCloseItsOwnRuntime() throws Exception {
-        try (ActorRuntime runtime = new ActorRuntime()) {
-            CountDownLatch checked = new CountDownLatch(1);
-            AtomicReference<Throwable> failure = new AtomicReference<>();
-
-            var ref = runtime.<String>spawn(() -> (message, context) -> {
-                try {
-                    assertThrows(SecurityException.class, context.runtime()::close);
-                } catch (Throwable problem) {
-                    failure.set(problem);
-                } finally {
-                    checked.countDown();
-                }
-            });
-
-            ref.send("check");
-            assertTrue(checked.await(2, TimeUnit.SECONDS));
-            assertNull(failure.get());
+    void actorContextDoesNotExposeRawRuntimeAuthority() {
+        for (var method : ActorRuntime.ActorContext.class.getMethods()) {
+            assertNotEquals(
+                    ActorRuntime.class,
+                    method.getReturnType(),
+                    "actor context must not expose the owning runtime: " + method);
+            assertNotEquals("runtime", method.getName());
+            assertNotEquals("close", method.getName());
+            assertFalse(
+                    method.getName().contains("Trusted"),
+                    "actor context must not expose trusted host construction: " + method);
         }
     }
 
@@ -1077,7 +1070,7 @@ final class ActorRuntimeTest {
             var ref = runtime.<String>spawnPrivate(
                     strict,
                     factoryContext -> (message, context) ->
-                            context.runtime().shareReadonly(List.of("secret")));
+                            context.shareReadonly(List.of("secret")));
 
             ref.send("check");
             assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
@@ -1148,7 +1141,7 @@ final class ActorRuntimeTest {
 
             var ref = runtime.<String>spawnPrivate(() -> (message, context) -> {
                 try {
-                    context.runtime().shareReadonly(List.of("private"));
+                    context.shareReadonly(List.of("private"));
                 } catch (Throwable failure) {
                     observed.set(failure);
                 } finally {
