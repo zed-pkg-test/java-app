@@ -103,8 +103,30 @@ reserved root lanes as legacy root work so they cannot consume every CONTROL
 carrier and starve supervisor/ActorMailman work.
 
 User-created `OresScheduler(n)` values own `n` carrier threads and a bounded
-ready queue. `scheduler.start(async || -> { ... })` creates a task whose
-continuations remain scheduler-affine until completion.
+ready queue. They are constructed with ordinary Oreslang `new` syntax and are
+owned by the current Ores context:
+
+```ores
+val io = new OresScheduler(5);
+
+val work = io.start(async || -> {
+    val response = await fetch_data();
+    return response;
+});
+
+val response = await work;
+io.close();
+```
+
+`scheduler.start(async || -> { ... })` currently accepts an inline async
+zero-argument lambda and creates a task whose continuations remain
+scheduler-affine until completion. The context also closes any remaining user
+schedulers during teardown, so forgotten scheduler handles cannot leak carrier
+threads.
+
+Custom scheduler construction is forbidden from actor code: actors stay on
+their owning SHARED/ISOACTOR/UNTRUSTED_ACTOR scheduler domain. Adversarial
+contexts also cannot create custom scheduler pools.
 
 Actors are the deliberate special case. They do not migrate to a user-created
 OresScheduler. Their await lowering continues to target the actor cell:
