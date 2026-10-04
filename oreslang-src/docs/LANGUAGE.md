@@ -316,7 +316,11 @@ end
 
 `implements` and `impl` remain accepted as migration aliases for `is`; new source should use `is`.
 
-Parent order is significant and is the deterministic v0.2 method-resolution order after child methods: the first declared parent is searched before the next parent. The static checker rejects inheritance cycles and incompatible inherited member shapes. Child members may override inherited members only with compatible types.
+Multiple class inheritance is legal, but the compiler emits `ORES-MI-001` to steer ordinary designs toward multiple interfaces (`is`) and traits (`with`) where those express the intent. **Parent order is never a method-resolution rule.** If two direct parent branches expose the same method name + arity — including a diamond where both branches inherit the same grandparent implementation — the subclass must declare a compatible override.
+
+The resolving override must be an explicit **public method declared by the subclass**; a private method or a method merely flattened in from a trait does not count as choosing between concrete parent branches. It may delegate explicitly with `super.A.foo(...)` or `super.B.foo(...)`, where `A` and `B` are direct parents. `super.foo(...)` is accepted only when the enclosing class has exactly one direct parent. Super methods are direct-call syntax; they cannot be extracted as bound method values. An override must be type-compatible with every inherited branch it resolves.
+
+Inherited state is stricter: if two parent branches contribute the same field name, compilation fails even when the field types match, and a subclass may not redeclare/shadow an inherited field. Oreslang does not silently merge, replace, or select base state by parent order. The static checker also rejects inheritance cycles and incompatible ordinary overrides.
 
 `Object` and `List` are extensible base classes:
 

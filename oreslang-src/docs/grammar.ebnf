@@ -182,6 +182,7 @@ argument_list   = expression { "," expression } ;
 primary         = literal
                 | IDENT
                 | "self"
+                | "super" [ "." IDENT ]
                 | "new" type_ref "(" [ argument_list ] ")"
                 | named_struct_literal
                 | anonymous_struct_literal
@@ -301,6 +302,19 @@ struct_field_terminator = ";" | "," | STRUCT_CLOSING_BOUNDARY | NEXT_NAME_COLON_
    - null is a type marker only directly inside Option<null>.
    - inline obj{} / arr[] values cannot be subclassed; extend Object/List.
    - "structural" is contextual in parameter position, not globally reserved.
+   - Multiple class inheritance is legal but emits compiler warning ORES-MI-001;
+     prefer multiple interfaces via is and traits via with when possible.
+   - Parent declaration order is never a method-resolution order.
+   - If two direct parent branches expose the same method name + arity, the
+     subclass must provide a compatible override, including classic diamonds
+     where both branches inherit one grandparent implementation.
+   - A resolving override must be an explicit public subclass method; private
+     methods and trait-composed methods do not resolve concrete-parent ambiguity.
+   - A resolving override selects a direct branch with super.Parent.method(...).
+     Unqualified super.method(...) is legal only with exactly one direct parent.
+   - Inherited field-name collisions across parent branches are compile errors;
+     subclasses also cannot shadow/redeclare inherited state fields. Duplicated
+     base state is never silently merged, replaced, or selected by parent order.
    - self is an immutable receiver borrow and cannot be rebound.
    - Parameters are immutable by default. Type "mut" name grants mutation of an
      owned parameter inside the callee, e.g. Bar mut b.
