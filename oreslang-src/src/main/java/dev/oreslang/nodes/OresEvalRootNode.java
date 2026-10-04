@@ -848,7 +848,7 @@ public final class OresEvalRootNode extends RootNode {
                             future,
                             (result, failure) -> failure == null
                                     ? asyncPure(result)
-                                    : asyncFailure(OresFuture.unwrap(failure)));
+                                    : asyncFailure(unwrapFutureFailure(failure)));
                 });
             }
 
