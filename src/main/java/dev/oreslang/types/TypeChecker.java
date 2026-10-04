@@ -167,8 +167,7 @@ public final class TypeChecker {
         Map<String, Type> members = new LinkedHashMap<>();
         for (Ast.Decl decl : module.declarations()) {
             if (decl instanceof Ast.FunctionDecl fn && fn.visibility() == Ast.Visibility.PUBLIC
-                    && fn.actorKind() == Ast.ActorKind.NONE
-                    && fn.kind() == Ast.CallableKind.FNC) {
+                    && fn.actorKind() == Ast.ActorKind.NONE) {
                 Type signature = callableContractType(
                         fn.genericParameters(), fn.parameters(), fn.returnType(), Set.of(), null);
                 mergeMember(members, fn.name(), signature, "module " + module.name());
@@ -634,7 +633,8 @@ public final class TypeChecker {
                 throw new IllegalArgumentException(
                         "module init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
             }
-            if (call.callee() instanceof Ast.NameExpr functionName) {
+            if (call.callee() instanceof Ast.NameExpr functionName
+                    && env.lookup(functionName.name()) == null) {
                 Ast.FunctionDecl target = findFunction(functionName.name());
                 if (target != null) {
                     if (target.actorKind() != Ast.ActorKind.NONE
@@ -659,6 +659,7 @@ public final class TypeChecker {
             }
             if (call.callee() instanceof Ast.MemberExpr qualifiedCall
                     && qualifiedCall.receiver() instanceof Ast.NameExpr namespace
+                    && env.lookup(namespace.name()) == null
                     && modules.containsKey(namespace.name())) {
                 Ast.FunctionDecl target = functions.get(namespace.name() + "." + qualifiedCall.member());
                 if (target != null) {
@@ -824,7 +825,9 @@ public final class TypeChecker {
             return fn.result();
         }
         if (expr instanceof Ast.MemberExpr member) {
-            if (member.receiver() instanceof Ast.NameExpr namespace && modules.containsKey(namespace.name())) {
+            if (member.receiver() instanceof Ast.NameExpr namespace
+                    && env.lookup(namespace.name()) == null
+                    && modules.containsKey(namespace.name())) {
                 Ast.FunctionDecl moduleFunction = functions.get(namespace.name() + "." + member.member());
                 if (moduleFunction != null) {
                     if (moduleFunction.kind() == Ast.CallableKind.ROUTINE) {
