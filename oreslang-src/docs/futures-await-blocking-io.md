@@ -224,6 +224,13 @@ Custom scheduler construction is forbidden from actor code: actors stay on
 their owning SHARED/ISOACTOR/UNTRUSTED_ACTOR scheduler domain. Adversarial
 contexts also cannot create custom scheduler pools.
 
+User schedulers are managed context resources rather than raw thread authority.
+The current runtime caps one pool at 64 carriers, caps a context at 32 user
+schedulers and 256 user-scheduler carriers in total, rolls accounting back if
+pool creation fails, and closes remaining pools during context teardown. Each
+custom carrier is admitted by the language thread-access gate and explicitly
+enters/leaves the owning Truffle context around every guest scheduler turn.
+
 Actors are the deliberate special case. They do not migrate to a user-created
 OresScheduler. Their await lowering continues to target the actor cell:
 

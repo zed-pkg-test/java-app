@@ -147,7 +147,8 @@ public final class OresScheduler implements AutoCloseable {
             String name,
             int parallelism,
             Executor executor,
-            ExecutorService ownedExecutor) {
+            ExecutorService ownedExecutor,
+            TurnExecutor turnExecutor) {
         this.name = Objects.requireNonNull(name, "name");
         if (parallelism <= 0) {
             throw new IllegalArgumentException("scheduler parallelism must be positive");
@@ -155,7 +156,7 @@ public final class OresScheduler implements AutoCloseable {
         this.parallelism = parallelism;
         this.executor = Objects.requireNonNull(executor, "executor");
         this.ownedExecutor = ownedExecutor;
-        this.turnExecutor = Runnable::run;
+        this.turnExecutor = Objects.requireNonNull(turnExecutor, "turnExecutor");
     }
 
     /**
@@ -166,7 +167,30 @@ public final class OresScheduler implements AutoCloseable {
             String name,
             int parallelism,
             Executor executor) {
-        return new OresScheduler(name, parallelism, executor, null);
+        return runtimeOwned(name, parallelism, executor, Runnable::run);
+    }
+
+    /**
+     * Runtime-owned scheduler whose physical carrier dispatch is distinct from
+     * guest-turn admission. The carrier executor owns only where the task runs;
+     * the turn executor owns the entered language/context boundary.
+     *
+     * <p>This separation is critical for await completion publication:
+     * {@link TaskRunner#afterCarrierTurn()} runs after {@code turnExecutor}
+     * returns, so a terminal Future cannot become externally visible until the
+     * guest turn has completely left its Truffle context.</p>
+     */
+    static OresScheduler runtimeOwned(
+            String name,
+            int parallelism,
+            Executor executor,
+            TurnExecutor turnExecutor) {
+        return new OresScheduler(
+                name,
+                parallelism,
+                executor,
+                null,
+                turnExecutor);
     }
 
     /**
