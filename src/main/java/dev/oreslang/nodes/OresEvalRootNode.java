@@ -1611,6 +1611,9 @@ public final class OresEvalRootNode extends RootNode {
 
         private MemorySlotSingletonRegistry.Handle<ModuleState> singletonHandle(
                 Ast.ModuleDecl module) {
+            context.requireCapability(
+                    IsolatePolicy.Capability.SINGLETON_STATE,
+                    "singleton module " + module.name());
             return context.actors().singletons().getOrCreate(
                     statefulModuleKey(module),
                     () -> initializeStatefulModule(module));
