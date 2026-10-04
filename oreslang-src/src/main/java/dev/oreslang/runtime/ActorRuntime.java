@@ -3343,9 +3343,12 @@ public final class ActorRuntime implements AutoCloseable {
         IsolatePolicy effectivePolicy = kind.memoryIsolated()
                 ? policy.withoutCapabilities(
                         IsolatePolicy.Capability.SHARED_MEMORY,
-                        IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                        IsolatePolicy.Capability.GC_CONTROL)
+                        IsolatePolicy.Capability.ACTOR_SHARE_READONLY)
                 : policy;
+        // Whole-process GC is control-plane authority. Every actor kind,
+        // including shared actors, is confined to actor-local collection.
+        effectivePolicy = effectivePolicy.withoutCapabilities(
+                IsolatePolicy.Capability.GC_CONTROL);
         if (kind == ActorKind.UNTRUSTED) {
             effectivePolicy = restrictUntrustedPolicy(effectivePolicy, untrustedLimits);
             effectivePolicy = intersectUntrustedWithRuntimeCeiling(effectivePolicy);
