@@ -1,5 +1,6 @@
 package dev.oreslang.nodes;
 
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.ExecutionSignature;
 import com.oracle.truffle.api.nodes.RootNode;
@@ -60,11 +61,11 @@ public final class OresEvalRootNode extends RootNode {
 
     @Override
     public Object execute(VirtualFrame frame) {
-        return executeBoundary(OresContext.get(this), frame.getArguments());
+        return executeProgram(OresContext.get(this), frame.getArguments());
     }
 
-    private Object executeBoundary(OresContext context, Object[] arguments) {
-        CapabilityChecker.check(program, context.isolatePolicy());
+    private Object executeProgram(OresContext context, Object[] arguments) {
+        checkCapabilities(program, context.isolatePolicy());
         Evaluator current = evaluator(context);
         if (isControl(arguments, LINK_ONLY_COMMAND)) {
             current.link();
@@ -87,6 +88,16 @@ public final class OresEvalRootNode extends RootNode {
         current.link();
         current.initialize();
         return current.executeMain(arguments);
+    }
+
+    /**
+     * Admission is host/static policy work, not guest execution. Keep the
+     * recursive contract/type walk out of partial evaluation; otherwise AOT
+     * compilation tries to inline recursive TypeRef traversal.
+     */
+    @TruffleBoundary
+    private static void checkCapabilities(Ast.Program program, IsolatePolicy policy) {
+        CapabilityChecker.check(program, policy);
     }
 
     private Evaluator evaluator(OresContext context) {
