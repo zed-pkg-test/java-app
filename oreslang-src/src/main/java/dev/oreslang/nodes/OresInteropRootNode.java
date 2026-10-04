@@ -30,6 +30,11 @@ public final class OresInteropRootNode extends RootNode {
     }
 
     @Override
+    protected ExecutionSignature prepareForAOT() {
+        return ExecutionSignature.GENERIC;
+    }
+
+    @Override
     public Object execute(VirtualFrame frame) {
         Object value = delegate.call(frame.getArguments());
         return value == null ? OresNull.INSTANCE : value;

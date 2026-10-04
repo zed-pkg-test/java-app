@@ -1,6 +1,5 @@
 package dev.oreslang.nodes;
 
-import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.RootNode;
 import dev.oreslang.OresLanguage;
@@ -48,12 +47,21 @@ public final class OresEvalRootNode extends RootNode {
     @Override public String getName() { return "ores-eval"; }
     @Override public boolean isInternal() { return true; }
 
+    /**
+     * Oreslang roots are statically parsed and type checked before call-target
+     * creation. A generic signature is correct until typed frame lowering
+     * provides a narrower signature.
+     */
+    @Override
+    protected ExecutionSignature prepareForAOT() {
+        return ExecutionSignature.GENERIC;
+    }
+
     @Override
     public Object execute(VirtualFrame frame) {
         return executeBoundary(OresContext.get(this), frame.getArguments());
     }
 
-    @TruffleBoundary
     private Object executeBoundary(OresContext context, Object[] arguments) {
         CapabilityChecker.check(program, context.isolatePolicy());
         Evaluator current = evaluator(context);
