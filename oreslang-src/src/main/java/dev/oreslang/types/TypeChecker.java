@@ -738,6 +738,61 @@ public final class TypeChecker {
                     return fn.async() ? futureOf(logicalResult) : logicalResult;
                 }
                 if (receiver instanceof Named named) {
+                    if (named.name().equals("OresScheduler")) {
+                        if (call.typeArgumentsPresent()) {
+                            throw new IllegalArgumentException(
+                                    "OresScheduler." + member.member()
+                                            + " does not accept call-site type arguments");
+                        }
+                        return switch (member.member()) {
+                            case "start" -> {
+                                if (call.arguments().size() != 1) {
+                                    throw new IllegalArgumentException(
+                                            "OresScheduler.start expects exactly one async zero-argument lambda");
+                                }
+                                Ast.Expr work = call.arguments().getFirst();
+                                if (!(work instanceof Ast.LambdaExpr lambda)
+                                        || !lambda.async()
+                                        || !lambda.parameters().isEmpty()) {
+                                    throw new IllegalArgumentException(
+                                            "OresScheduler.start requires an inline async zero-argument lambda");
+                                }
+                                Type callback = typeOf(lambda, env, generics, self);
+                                if (!(callback instanceof Function fn)
+                                        || !fn.parameters().isEmpty()
+                                        || !(fn.result() instanceof Named future)
+                                        || !future.name().equals("Future")
+                                        || future.arguments().size() != 1) {
+                                    throw new IllegalArgumentException(
+                                            "OresScheduler.start requires an async lambda producing Future<T>");
+                                }
+                                yield fn.result();
+                            }
+                            case "parallelism" -> {
+                                if (!call.arguments().isEmpty()) {
+                                    throw new IllegalArgumentException(
+                                            "OresScheduler.parallelism expects no arguments");
+                                }
+                                yield Primitive.INT;
+                            }
+                            case "is_closed" -> {
+                                if (!call.arguments().isEmpty()) {
+                                    throw new IllegalArgumentException(
+                                            "OresScheduler.is_closed expects no arguments");
+                                }
+                                yield Primitive.BOOL;
+                            }
+                            case "close" -> {
+                                if (!call.arguments().isEmpty()) {
+                                    throw new IllegalArgumentException(
+                                            "OresScheduler.close expects no arguments");
+                                }
+                                yield Primitive.VOID;
+                            }
+                            default -> throw new IllegalArgumentException(
+                                    "unknown OresScheduler member '" + member.member() + "'");
+                        };
+                    }
                     if (named.name().equals("SharedMutex")
                             && currentActorKind != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException(
@@ -919,6 +974,26 @@ public final class TypeChecker {
             throw new IllegalArgumentException("indexing requires an array/list or tuple");
         }
         if (expr instanceof Ast.NewExpr created) {
+            if (created.type().name().equals("OresScheduler")) {
+                if (currentActorKind != Ast.ActorKind.NONE) {
+                    throw new IllegalArgumentException(
+                            "actors cannot create OresScheduler instances; actor work remains on its owning actor scheduler");
+                }
+                if (created.type().inferArguments() || !created.type().arguments().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "OresScheduler does not take type arguments");
+                }
+                if (created.arguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "new OresScheduler(...) expects exactly one integer parallelism");
+                }
+                requireAssignable(
+                        typeOf(created.arguments().getFirst(), env, generics, self),
+                        Primitive.INT,
+                        "OresScheduler parallelism");
+                return new Named("OresScheduler", List.of());
+            }
+
             Ast.ClassDecl klass = findClass(created.type().name());
             if (klass == null) return resolve(created.type(), generics, self);
             if (klass.actorKind() != Ast.ActorKind.NONE) {
@@ -1272,6 +1347,10 @@ public final class TypeChecker {
             throw new IllegalArgumentException(where + " is not actor-boundary sendable: " + type);
         }
 
+        if (named.name().equals("OresScheduler")) {
+            throw new IllegalArgumentException(
+                    where + " cannot transport OresScheduler across an actor boundary");
+        }
         if (named.name().equals("Mutex") || named.name().equals("MutexGuard")
                 || named.name().equals("RwReadGuard") || named.name().equals("RwWriteGuard")
                 || named.name().equals("Future") || named.name().equals("ActorSpawn")) {
@@ -1360,6 +1439,7 @@ public final class TypeChecker {
                 || named.name().equals("RwLock")
                 || named.name().equals("RwReadGuard") || named.name().equals("RwWriteGuard")
                 || named.name().equals("Future") || named.name().equals("ActorSpawn")
+                || named.name().equals("OresScheduler")
                 || named.name().equals("SharedMutex")) return false;
         if (named.name().equals("OptionUnwrapError")) return named.arguments().isEmpty();
         if (named.name().equals("Option")) {
@@ -2475,6 +2555,13 @@ public final class TypeChecker {
                             "RwLock<T> requires a concrete shared-safe type");
                 }
                 yield new Named("RwLock", List.of(element));
+            }
+            case "OresScheduler" -> {
+                if (ref.inferArguments() || !ref.arguments().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "OresScheduler does not take type arguments");
+                }
+                yield new Named("OresScheduler", List.of());
             }
             case "Fnc" -> {
                 List<Type> args = ref.arguments().stream().map(arg -> resolve(arg, generics, self)).toList();
