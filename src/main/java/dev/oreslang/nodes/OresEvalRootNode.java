@@ -517,7 +517,17 @@ public final class OresEvalRootNode extends RootNode {
                 Object imported = importedValue(name.name());
                 if (imported != Env.MISSING) return imported;
                 Ast.FunctionDecl fn = findFunction(name.name());
-                if (fn != null) return (Invokable) args -> callFunction(fn, args);
+                if (fn != null) {
+                    if (fn.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("actor callable " + fn.name()
+                                + " is an actor entry point, not a first-class callable value");
+                    }
+                    if (fn.kind() == Ast.CallableKind.ROUTINE) {
+                        throw new IllegalArgumentException("routine " + fn.name()
+                                + " is direct-call-only and cannot be used as a first-class callable value");
+                    }
+                    return (Invokable) args -> callFunction(fn, args);
+                }
                 throw new IllegalArgumentException("unknown name " + name.name());
             }
             if (expr instanceof Ast.AssignExpr assignment) {
@@ -607,6 +617,14 @@ public final class OresEvalRootNode extends RootNode {
                 return binary(binary.operator(), left, right);
             }
             if (expr instanceof Ast.CallExpr call) {
+                if (call.callee() instanceof Ast.NameExpr directName
+                        && env.lookup(directName.name()) == Env.MISSING) {
+                    Ast.FunctionDecl direct = findFunction(directName.name());
+                    if (direct != null) {
+                        List<Object> args = call.arguments().stream().map(arg -> eval(arg, env)).toList();
+                        return callFunction(direct, args);
+                    }
+                }
                 if (call.callee() instanceof Ast.MemberExpr methodCall) {
                     Object receiver = eval(methodCall.receiver(), env);
                     List<Object> args = call.arguments().stream().map(arg -> eval(arg, env)).toList();
@@ -615,6 +633,9 @@ public final class OresEvalRootNode extends RootNode {
                     }
                     if (receiver instanceof ClassFacade klass) {
                         return klass.owner().invokeStaticFunction(klass.klass(), methodCall.member(), args);
+                    }
+                    if (receiver instanceof ModuleFacade module) {
+                        return module.owner().invokeModuleFunction(module.module(), methodCall.member(), args);
                     }
                     Object callee = member(receiver, methodCall.member());
                     if (!(callee instanceof Invokable invokable)) throw new IllegalArgumentException("value is not callable: " + callee);
@@ -809,7 +830,12 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (receiver instanceof OresObject object) {
                 if (object.fields.containsKey(name)) return object.fields.get(name);
-                return new BoundMethod(object.owner, object, name);
+                if (object.owner.hasInstanceMethodNamed(object.klass, name, new LinkedHashSet<>())) {
+                    throw new IllegalArgumentException("instance method " + object.klass.name() + "." + name
+                            + " is direct-call-only and cannot be used as a first-class callable value; "
+                            + "wrap receiver." + name + "(...) in an explicit lambda when a callback is required");
+                }
+                throw new IllegalArgumentException("unknown member " + object.klass.name() + "." + name);
             }
             if (receiver instanceof DynamicStructValue dynamic) {
                 if (!dynamic.fields.containsKey(name)) {
@@ -1028,28 +1054,6 @@ public final class OresEvalRootNode extends RootNode {
             } catch (ReturnSignal signal) { return shapeReturnedValue(fn.returnType(), signal.value, "static function " + fn.name()); }
         }
 
-        /**
-         * Go-style method value: one shared method definition per class plus a
-         * tiny (receiver, method-name) pair only when a method is extracted as
-         * a first-class callback. Direct receiver.method(...) calls allocate no
-         * bound-method object.
-         */
-        private static final class BoundMethod implements Invokable {
-            private final Evaluator owner;
-            private final OresObject receiver;
-            private final String methodName;
-
-            private BoundMethod(Evaluator owner, OresObject receiver, String methodName) {
-                this.owner = owner;
-                this.receiver = receiver;
-                this.methodName = methodName;
-            }
-
-            @Override public Object call(List<Object> arguments) {
-                return owner.invokeMethod(receiver, methodName, arguments);
-            }
-        }
-
         private Object importedValue(String name) {
             ImportedBinding direct = namedImports.get(name);
             if (direct != null) {
@@ -1098,6 +1102,10 @@ public final class OresEvalRootNode extends RootNode {
                     if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
                         throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export function '" + name + "'");
                     }
+                    if (fn.kind() != Ast.CallableKind.FNC || fn.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("import fnc requires a reifiable non-actor fnc; '" + name
+                                + "' is direct-call-only or actor-scheduled");
+                    }
                     yield (Invokable) args -> callFunction(fn, args);
                 }
                 case CLASS -> {
@@ -1120,7 +1128,11 @@ public final class OresEvalRootNode extends RootNode {
             Ast.ClassDecl klass = findClass(name);
             if (klass != null) return new ClassFacade(this, klass);
             Ast.FunctionDecl fn = findFunction(name);
-            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC) return (Invokable) args -> callFunction(fn, args);
+            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC
+                    && fn.kind() == Ast.CallableKind.FNC
+                    && fn.actorKind() == Ast.ActorKind.NONE) {
+                return (Invokable) args -> callFunction(fn, args);
+            }
             for (Ast.ModuleDecl candidate : program.modules()) {
                 for (Ast.Decl decl : candidate.declarations()) {
                     if (decl instanceof Ast.FieldDecl field
@@ -1165,6 +1177,10 @@ public final class OresEvalRootNode extends RootNode {
                     return new ClassFacade(this, klass);
                 }
                 if (decl instanceof Ast.FunctionDecl fn && fn.name().equals(name) && fn.visibility() == Ast.Visibility.PUBLIC) {
+                    if (fn.kind() == Ast.CallableKind.ROUTINE || fn.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("callable '" + module.name() + "." + name
+                                + "' is direct-call-only and cannot be extracted as a value");
+                    }
                     return (Invokable) args -> callFunction(fn, args);
                 }
                 if (decl instanceof Ast.FieldDecl field && field.name().equals(name) && field.visibility() == Ast.Visibility.PUBLIC) {
@@ -1173,6 +1189,38 @@ public final class OresEvalRootNode extends RootNode {
                 }
             }
             throw new IllegalArgumentException("module '" + module.name() + "' does not export '" + name + "'");
+        }
+
+        private Object invokeModuleFunction(Ast.ModuleDecl module, String name, List<Object> args) {
+            for (Ast.Decl decl : module.declarations()) {
+                if (decl instanceof Ast.FunctionDecl fn
+                        && fn.name().equals(name)
+                        && fn.visibility() == Ast.Visibility.PUBLIC) {
+                    return callFunction(fn, args);
+                }
+            }
+            throw new IllegalArgumentException("module '" + module.name()
+                    + "' does not export callable '" + name + "'");
+        }
+
+        private boolean hasInstanceMethodNamed(Ast.ClassDecl klass, String name, Set<Ast.ClassDecl> seen) {
+            if (!seen.add(klass)) return false;
+            for (Ast.MethodDecl method : klass.methods()) {
+                if (!method.isStatic() && method.name().equals(name)) {
+                    seen.remove(klass);
+                    return true;
+                }
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent != null && hasInstanceMethodNamed(parent, name, seen)) {
+                    seen.remove(klass);
+                    return true;
+                }
+            }
+            seen.remove(klass);
+            return false;
         }
 
         private List<Ast.FieldDecl> effectiveFields(Ast.ClassDecl klass, Set<Ast.ClassDecl> seen) {
