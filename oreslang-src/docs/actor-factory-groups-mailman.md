@@ -206,7 +206,7 @@ Actor B ----> group.outbox ---> logical mailman
 Actor C --/
 ```
 
-The mailman is one logical serialized consumer, not one permanently dedicated OS thread. It runs on the Oreslang VM CONTROL scheduler (shared with supervisors/root control work, never an actor-domain pool) and may migrate across control-plane carriers between quanta.
+The mailman is one logical serialized consumer, not one permanently dedicated OS thread. It may migrate across carriers exactly like an actor.
 
 A future implementation may partition mailman work by an explicit routing key, but parallel routing must be opt-in because it weakens total ordering.
 
