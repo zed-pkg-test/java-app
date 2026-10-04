@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class OresScheduler implements AutoCloseable {
     private static final AtomicLong NEXT_ID = new AtomicLong();
     private static final ThreadLocal<OresScheduler> CURRENT = new ThreadLocal<>();
+    private static final ThreadLocal<Object> CURRENT_TASK_DOMAIN = new ThreadLocal<>();
     private static final int DEFAULT_QUEUE_CAPACITY = 65_536;
 
     /** One compiler-generated async state-machine turn. */
@@ -166,6 +167,17 @@ public final class OresScheduler implements AutoCloseable {
                     "operation requires an executing OresScheduler task");
         }
         return scheduler;
+    }
+
+    /**
+     * Stable logical execution-domain token for the currently running
+     * scheduler task, or {@code null} outside a scheduler task.
+     *
+     * <p>The token survives await/resume carrier migration and is intentionally
+     * distinct for concurrent tasks sharing the same OresScheduler.</p>
+     */
+    public static Object currentTaskDomain() {
+        return CURRENT_TASK_DOMAIN.get();
     }
 
     public static <T> Step<T> done(T value) {
@@ -302,6 +314,8 @@ public final class OresScheduler implements AutoCloseable {
                 return;
             }
 
+            Object priorTaskDomain = CURRENT_TASK_DOMAIN.get();
+            CURRENT_TASK_DOMAIN.set(this);
             try {
                 Resume resume = pendingResume.getAndSet(null);
                 if (resume == null) {
@@ -338,6 +352,11 @@ public final class OresScheduler implements AutoCloseable {
                 failTerminal(new IllegalStateException(
                         "unknown OresScheduler task step " + step.getClass().getName()));
             } finally {
+                if (priorTaskDomain == null) {
+                    CURRENT_TASK_DOMAIN.remove();
+                } else {
+                    CURRENT_TASK_DOMAIN.set(priorTaskDomain);
+                }
                 executing.set(false);
                 scheduleReadyResume();
             }
