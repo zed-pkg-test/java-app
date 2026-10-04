@@ -204,6 +204,39 @@ final class StatefulModuleInjectionTest {
                 () -> CapabilityChecker.check(injected, IsolatePolicy.strictFaas()));
     }
     @Test
+    void untrustedPolicyCannotLoadSingletonModulesOrSingletonRefs() {
+        Ast.Program singleton = TypeChecker.check(Parser.parse("""
+                define singleton module LocalSecret
+                  pub const Symbol state = :state;
+                end
+                """));
+
+        assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(singleton, IsolatePolicy.strictFaas()));
+
+        Ast.Program injected = TypeChecker.check(Parser.parse("""
+                define singleton module LocalSecret
+                  pub const Symbol state = :state;
+                end
+
+                define class Holder as
+                  @InjectSingleton(LocalSecret)
+                  private val SingletonRef<LocalSecret> secret;
+                end
+                """));
+
+        assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(injected, IsolatePolicy.strictFaas()));
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> IsolatePolicy.strictFaas().withCapabilities(
+                        IsolatePolicy.Capability.SINGLETON_STATE));
+    }
+
+    @Test
     void persistentStateRequiresExplicitSchemaType() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
