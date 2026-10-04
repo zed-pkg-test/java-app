@@ -85,7 +85,7 @@ final class ActorHotLoadContractTest {
     }
 
     @Test
-    void hotLoaderStagesOpaqueIsoactorOnlyAfterContractAdmission() {
+    void contractMismatchIsRejectedBeforeIsolatedContextAllocation() {
         OresVM vm = OresVM.dedicated(ActorRuntime.DispatcherConfig.defaults());
         try (HotReloadManager hot = vm.newHotReloadManager(
                 IsolatePolicy.developer(),
@@ -93,23 +93,20 @@ final class ActorHotLoadContractTest {
                 ExecutionProfile.serverJit(),
                 HotReloadManager.ExecutionDomain.ISOLATED_JIT)) {
 
-            HotReloadManager.Generation generation = hot.loadActor(
-                    "worker.ores",
-                    """
-                    fnc implementation_detail(int value) => int {
-                      return value + 10;
-                    }
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> hot.loadActor(
+                            "worker.ores",
+                            """
+                            pub isoactor fnc worker(String value) => int {
+                              return 1;
+                            }
+                            """,
+                            ISO_INT_TO_INT));
 
-                    pub isoactor fnc worker(int value) => int {
-                      return implementation_detail(value);
-                    }
-                    """,
-                    ISO_INT_TO_INT);
-
-            assertEquals(HotReloadManager.GenerationState.STAGED, generation.state());
-            assertEquals(ISO_INT_TO_INT, generation.actorContract().orElseThrow());
-            assertEquals(ISO_INT_TO_INT.abiDigest(), generation.actorAbiDigest().orElseThrow());
-            assertEquals(1, hot.liveGenerations("worker.ores"));
+            assertTrue(failure.getMessage().contains("does not match required ABI"));
+            assertEquals(0, hot.liveGenerations(),
+                    "ABI rejection must occur before allocating a spawned-isolate context");
         } finally {
             vm.shutdownNow();
         }
@@ -144,7 +141,7 @@ final class ActorHotLoadContractTest {
     }
 
     @Test
-    void untrustedActorRequiresUntrustedExecutionDomain() {
+    void untrustedActorRequiresUntrustedExecutionDomainBeforeStaging() {
         ActorHotLoadContract contract = ActorHotLoadContract.untrustedFnc(
                 "sandbox",
                 List.of(Ast.TypeRef.simple("int")),
@@ -155,21 +152,22 @@ final class ActorHotLoadContractTest {
                 IsolatePolicy.developer(),
                 IsolatePolicy.developer(),
                 ExecutionProfile.serverJit(),
-                HotReloadManager.ExecutionDomain.UNTRUSTED_JIT)) {
+                HotReloadManager.ExecutionDomain.TRUSTED_JIT)) {
 
-            HotReloadManager.Generation generation = hot.loadActor(
-                    "sandbox.ores",
-                    """
-                    pub untrusted actor fnc sandbox(int value) => int {
-                      return value;
-                    }
-                    """,
-                    contract);
+            SecurityException failure = assertThrows(
+                    SecurityException.class,
+                    () -> hot.loadActor(
+                            "sandbox.ores",
+                            """
+                            pub untrusted actor fnc sandbox(int value) => int {
+                              return value;
+                            }
+                            """,
+                            contract));
 
-            assertEquals(ActorHotLoadContract.Isolation.UNTRUSTED,
-                    generation.actorContract().orElseThrow().isolation());
-            assertTrue(generation.guestPolicy().adversarial());
-            assertTrue(generation.guestPolicy().capabilities().isEmpty());
+            assertTrue(failure.getMessage().contains("UNTRUSTED_JIT"));
+            assertEquals(0, hot.liveGenerations(),
+                    "domain rejection must occur before any generation is staged");
         } finally {
             vm.shutdownNow();
         }
