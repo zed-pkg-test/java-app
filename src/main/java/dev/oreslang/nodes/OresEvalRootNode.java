@@ -1399,9 +1399,17 @@ public final class OresEvalRootNode extends RootNode {
             Ast.ClassDecl klass = findClass(name);
             if (klass != null) return new ClassFacade(this, klass);
             Ast.FunctionDecl fn = findFunction(name);
-            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC
-                    && fn.kind() == Ast.CallableKind.FNC
-                    && fn.actorKind() == Ast.ActorKind.NONE) {
+            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC) {
+                if (fn.kind() == Ast.CallableKind.ROUTINE) {
+                    throw new IllegalArgumentException(
+                            "routine '" + name
+                                    + "' is direct-call-only and cannot be extracted through a wildcard import namespace");
+                }
+                if (fn.actorKind() != Ast.ActorKind.NONE) {
+                    throw new IllegalArgumentException(
+                            "actor callable '" + name
+                                    + "' is scheduler-dispatched and cannot be extracted as a first-class callable value");
+                }
                 return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
             }
             for (Ast.ModuleDecl candidate : program.modules()) {

@@ -2444,6 +2444,12 @@ public final class ActorRuntime implements AutoCloseable {
             // reporting success until they actually leave the runtime.
             privateDispatcher.shutdownNow();
             sharedDispatcher.shutdownNow();
+
+            // shutdownNow() removes queued tasks without invoking runBatch().
+            // Clear those cells' scheduled bits only when no carrier actually
+            // entered the TurnExecutor boundary. Active carriers retain the bit
+            // until their executor finally exits.
+            for (ActorCell<?> cell : snapshot) cell.cancelQueuedScheduleOnShutdown();
         }
 
         long deadline = System.nanoTime() + CLOSE_WAIT_NANOS;
@@ -2529,6 +2535,7 @@ public final class ActorRuntime implements AutoCloseable {
         private final Object lifecycleLock = new Object();
         private final Object executionDomain = new Object();
         private int activeTurns;
+        private boolean carrierActive;
         private boolean finalized;
         private Behavior<M> behavior;
 
@@ -2586,7 +2593,10 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void finalizeStopLocked() {
-            if (finalized || activeTurns != 0) return;
+            // External termination is not observable until the dispatcher has
+            // fully crossed back out of the TurnExecutor boundary. For
+            // Truffle-backed runtimes that boundary owns context enter/leave.
+            if (finalized || activeTurns != 0 || scheduled.get() || carrierActive) return;
             finalized = true;
             drainMailboxReservations();
             if (memorySlice != null) memorySlice.close();
@@ -2616,6 +2626,16 @@ public final class ActorRuntime implements AutoCloseable {
                     if (remaining <= 0) return;
                     long millis = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remaining));
                     lifecycleLock.wait(millis);
+                }
+            }
+        }
+
+        private void cancelQueuedScheduleOnShutdown() {
+            synchronized (lifecycleLock) {
+                if (scheduled.get() && !carrierActive) {
+                    scheduled.set(false);
+                    if (stopped.get() && activeTurns == 0) finalizeStopLocked();
+                    lifecycleLock.notifyAll();
                 }
             }
         }
@@ -2665,16 +2685,50 @@ public final class ActorRuntime implements AutoCloseable {
 
         private void runBatch() {
             ACTOR_CARRIER.set(Boolean.TRUE);
+            boolean carrierEntered = false;
+            boolean reschedule = false;
             try {
+                synchronized (lifecycleLock) {
+                    // shutdownNow() may leave a queued executor task that races
+                    // with explicit queued-schedule cancellation. If shutdown
+                    // won that race, this task is an inert no-op.
+                    if (!scheduled.get()) return;
+
+                    if (stopped.get() || closed.get()) {
+                        scheduled.set(false);
+                        if (activeTurns == 0) finalizeStopLocked();
+                        lifecycleLock.notifyAll();
+                        return;
+                    }
+
+                    carrierActive = true;
+                    carrierEntered = true;
+                }
+
                 turnExecutor.execute(this::runBatchEntered);
             } catch (Throwable failure) {
                 fail(failure);
-                scheduled.set(false);
                 if (failure instanceof VirtualMachineError fatal) throw fatal;
                 if (failure instanceof ThreadDeath fatal) throw fatal;
                 if (failure instanceof LinkageError fatal) throw fatal;
             } finally {
+                // The actor remains logically scheduled until the TurnExecutor
+                // returns. OresContext's executor leaves the TruffleContext in
+                // its own finally block, so clearing this bit any earlier lets
+                // shutdown/finalization race a carrier that still owns guest
+                // context state.
+                synchronized (lifecycleLock) {
+                    if (carrierEntered) carrierActive = false;
+                    if (scheduled.get()) scheduled.set(false);
+                    if (stopped.get() && activeTurns == 0) finalizeStopLocked();
+                    reschedule = !stopped.get()
+                            && !closed.get()
+                            && !finalized
+                            && !mailbox.isEmpty();
+                    lifecycleLock.notifyAll();
+                }
                 ACTOR_CARRIER.remove();
+                if (reschedule) schedule();
             }
         }
 
@@ -2736,12 +2790,8 @@ public final class ActorRuntime implements AutoCloseable {
                 if (turnActive) endTurn();
                 CURRENT_ACTOR_EXECUTION.remove();
                 currentActor.remove();
-                scheduled.set(false);
-
-                if (!stopped.get() && !closed.get() && !mailbox.isEmpty()) {
-                    // Bounded batch/throughput handoff for dispatcher fairness.
-                    schedule();
-                }
+                // scheduled/finalization/rescheduling belong to runBatch(),
+                // after TurnExecutor.execute(...) has returned.
             }
         }
 

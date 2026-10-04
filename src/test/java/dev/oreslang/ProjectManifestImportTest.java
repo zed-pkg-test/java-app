@@ -112,6 +112,68 @@ final class ProjectManifestImportTest {
     }
 
     @Test
+    void wildcardNamespaceCannotExtractRoutineOrActorCallableValues() throws Exception {
+        Path app = temp.resolve("wildcard-direct-only");
+        Files.createDirectories(app);
+        Path child = app.resolve("child.ores");
+        Path routineMain = app.resolve("routine-main.ores");
+        Path actorMain = app.resolve("actor-main.ores");
+
+        Files.writeString(child, """
+                pub routine direct_only(int value): int {
+                  return value + 1;
+                }
+
+                pub actor fnc actor_only(int value): int {
+                  return value + 1;
+                }
+                """);
+
+        Files.writeString(routineMain, """
+                import * as external from "./child.ores";
+
+                pub routine main(): void {
+                  val callback = external.direct_only;
+                  return;
+                }
+                """);
+
+        Files.writeString(actorMain, """
+                import * as external from "./child.ores";
+
+                pub routine main(): void {
+                  val callback = external.actor_only;
+                  return;
+                }
+                """);
+
+        PolyglotException routineFailure = assertThrows(
+                PolyglotException.class,
+                () -> LinkedProgramRunner.run(
+                        routineMain,
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        Map.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+        assertTrue(routineFailure.getMessage().contains("direct-call-only"));
+
+        PolyglotException actorFailure = assertThrows(
+                PolyglotException.class,
+                () -> LinkedProgramRunner.run(
+                        actorMain,
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        Map.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+        assertTrue(actorFailure.getMessage().contains("scheduler-dispatched"));
+        assertTrue(actorFailure.getMessage().contains("cannot be extracted"));
+    }
+
+    @Test
     void importedTailCallsPreserveCallerReturnContracts() throws Exception {
         Path app = temp.resolve("tail-contract-import");
         Files.createDirectories(app);
