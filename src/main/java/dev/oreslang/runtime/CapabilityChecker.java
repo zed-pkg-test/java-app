@@ -45,12 +45,6 @@ public final class CapabilityChecker {
         }
 
         for (Ast.ModuleDecl module : program.modules()) {
-            if (module.storage() == Ast.ModuleStorage.GLOBAL) {
-                require(
-                        policy,
-                        IsolatePolicy.Capability.PROCESS_GLOBAL,
-                        "global module " + module.name());
-            }
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.TypeAliasDecl alias) {
                     index(aliases, ambiguousAliases, module.name(), alias.name(), alias);
@@ -180,6 +174,12 @@ public final class CapabilityChecker {
         }
 
         for (Ast.ModuleDecl module : program.modules()) {
+            if (module.storage() == Ast.ModuleStorage.GLOBAL) {
+                require(
+                        policy,
+                        IsolatePolicy.Capability.PROCESS_GLOBAL,
+                        "global module " + module.name());
+            }
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.FunctionDecl fn) {
                     IsolatePolicy actorPolicy = actorPolicy(fn.actorKind(), policy);

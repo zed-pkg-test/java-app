@@ -2174,6 +2174,15 @@ public final class ActorRuntime implements AutoCloseable {
      * Private transport never retains a shared mutable reference. Immutable
      * shared wrappers are unwrapped and copied into the private message graph.
      */
+    /**
+     * Re-materializes a previously frozen data graph for a trusted serial owner.
+     * Package-private on purpose: this is transport machinery, not a language
+     * capability or general unfreezing API.
+     */
+    static Object materializeFrozen(Object value) {
+        return isolateCopy(value, new IdentityHashMap<>(), 0);
+    }
+
     private static Object isolateCopy(Object value) {
         return isolateCopy(value, new IdentityHashMap<>(), 0);
     }
