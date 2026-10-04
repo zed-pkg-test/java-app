@@ -293,4 +293,59 @@ final class LanguageHardeningTest {
                 """)));
     }
 
+    @Test
+    void declarationIdentitiesCannotBeCreatedFromExecutableBlocks() {
+        IllegalArgumentException module = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        pub fnc main() => void {
+                          define module RuntimeMade
+                          end
+                          return;
+                        }
+                        """));
+        assertTrue(module.getMessage().contains("module declarations are compile-time"));
+
+        IllegalArgumentException klass = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        pub fnc main() => void {
+                          define class RuntimeMade as
+                          end
+                          return;
+                        }
+                        """));
+        assertTrue(klass.getMessage().contains("class declarations are compile-time"));
+
+        IllegalArgumentException namespace = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        pub fnc main() => void {
+                          namespace runtime;
+                          return;
+                        }
+                        """));
+        assertTrue(namespace.getMessage().contains("namespace declarations are file-scope"));
+    }
+
+    @Test
+    void structAndTraitAreReservedForStaticTypeDeclarations() {
+        var tokens = new Lexer("struct Point trait Display").scan();
+        assertEquals(Token.Type.STRUCT, tokens.get(0).type());
+        assertEquals(Token.Type.IDENT, tokens.get(1).type());
+        assertEquals(Token.Type.TRAIT, tokens.get(2).type());
+        assertEquals(Token.Type.IDENT, tokens.get(3).type());
+
+        IllegalArgumentException trait = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        pub fnc main() => void {
+                          trait RuntimeTrait
+                          return;
+                        }
+                        """));
+        assertTrue(trait.getMessage().contains("runtime trait creation is forbidden"));
+    }
+
+
 }
