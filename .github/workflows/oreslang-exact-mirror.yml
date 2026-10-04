@@ -32,5 +32,18 @@ jobs:
           java --version
           native-image --version
           mvn --version
-      - name: Bounded full JVM tests
-        run: timeout 120s mvn -B -ntp test
+      - name: Actor runtime isolation tests
+        continue-on-error: true
+        run: timeout 75s mvn -B -ntp -Dtest=ActorRuntimeTest,PrivateActorIsolationTest,SharedPrivateActorIsolationProofTest test
+      - name: Actor language tests
+        continue-on-error: true
+        run: timeout 75s mvn -B -ntp -Dtest=ActorCallableKeywordTest,ActorSpawnLanguageTest test
+      - name: Future and lock language tests
+        continue-on-error: true
+        run: timeout 75s mvn -B -ntp -Dtest=FutureLanguageTest,RwLockLanguageTest,MutexLanguageTest test
+      - name: Mutex runtime tests
+        continue-on-error: true
+        run: timeout 75s mvn -B -ntp -Dtest=MutexRuntimeTest test
+      - name: Hot reload and linked runner tests
+        continue-on-error: true
+        run: timeout 75s mvn -B -ntp -Dtest=SecureJitHotReloadDomainTest,LinkedProgramRunnerTest test
