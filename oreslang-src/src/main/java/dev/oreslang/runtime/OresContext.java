@@ -175,16 +175,22 @@ public final class OresContext implements AutoCloseable {
 
     public void closeUserScheduler(OresScheduler scheduler) {
         if (scheduler == null) return;
+
+        // Close first. A rejected self-close or other teardown failure must not
+        // make a still-live pool disappear from context ownership/accounting.
+        scheduler.close();
+
         if (userSchedulers.remove(scheduler)) {
             userSchedulerCount.decrementAndGet();
             int remaining = userSchedulerCarriers.addAndGet(-scheduler.parallelism());
             if (remaining < 0) {
                 userSchedulerCarriers.addAndGet(scheduler.parallelism());
+                userSchedulerCount.incrementAndGet();
+                userSchedulers.add(scheduler);
                 throw new IllegalStateException(
                         "OresScheduler carrier accounting underflow");
             }
         }
-        scheduler.close();
     }
 
     /**
