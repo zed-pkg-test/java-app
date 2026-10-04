@@ -1,5 +1,6 @@
 package dev.oreslang.types;
 
+import dev.oreslang.ast.AnnotationExpander;
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.Types.Function;
@@ -50,6 +51,7 @@ public final class TypeChecker {
             java.util.Collections.newSetFromMap(new IdentityHashMap<>());
 
     public static Ast.Program check(Ast.Program program) {
+        program = AnnotationExpander.expand(program);
         TypeChecker checker = new TypeChecker();
         checker.validateImports(program);
         checker.collect(program);

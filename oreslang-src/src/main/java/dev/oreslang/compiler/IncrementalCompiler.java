@@ -1,5 +1,6 @@
 package dev.oreslang.compiler;
 
+import dev.oreslang.ast.AnnotationExpander;
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
 
@@ -44,7 +45,7 @@ public final class IncrementalCompiler {
 
         for (Map.Entry<String, String> entry : normalized.entrySet()) {
             hashes.put(entry.getKey(), digest(entry.getValue()));
-            Ast.Program program = Parser.parse(entry.getValue());
+            Ast.Program program = AnnotationExpander.expand(Parser.parse(entry.getValue()));
             parsed.put(entry.getKey(), program);
             abiHashes.put(entry.getKey(), abiDigest(program));
             dependencies.put(entry.getKey(), resolveDependencies(entry.getKey(), program, normalized.keySet()));
@@ -151,6 +152,14 @@ public final class IncrementalCompiler {
             for (Ast.TypeRef iface : klass.interfaces()) abi.append(typeRef(iface)).append(',');
             abi.append('\n');
             for (Ast.FieldDecl field : klass.fields()) {
+                String fromJsonKey = AnnotationExpander.fromJsonKey(field);
+                if (fromJsonKey != null) {
+                    abi.append(" from-json ")
+                            .append(field.name()).append('=')
+                            .append(fromJsonKey.length()).append(':').append(fromJsonKey)
+                            .append(':').append(field.type() == null ? "<inferred>" : typeRef(field.type()))
+                            .append('\n');
+                }
                 if (field.visibility() != Ast.Visibility.PUBLIC) continue;
                 abi.append(field.isStatic() ? " static-field " : " field ")
                         .append(field.bindingKind()).append(' ')
