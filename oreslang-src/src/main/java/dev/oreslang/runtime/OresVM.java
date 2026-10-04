@@ -74,7 +74,7 @@ public final class OresVM {
 
     /** Dedicated VM used by host tests/tools that explicitly construct ActorRuntime. */
     static OresVM dedicated(ActorRuntime.DispatcherConfig config) {
-        return new OresVM(config, "ores-vm-", false);
+        return new OresVM(config, "ores-", false);
     }
 
     public UUID id() {

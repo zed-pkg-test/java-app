@@ -1474,12 +1474,12 @@ final class ActorRuntimeTest {
     }
 
     @Test
-    void rootProcessExecutesOnSharedCarrierPool() {
+    void rootProcessExecutesOnControlPlaneCarrierPool() {
         try (ActorRuntime runtime = new ActorRuntime()) {
             String threadName = runtime.executeRootTask(
                     () -> Thread.currentThread().getName());
             assertTrue(
-                    threadName.startsWith("ores-shared-actor-dispatcher-"),
+                    threadName.startsWith("ores-control-plane-dispatcher-"),
                     threadName);
         }
     }
@@ -1633,14 +1633,14 @@ final class ActorRuntimeTest {
 
             String firstThread = first.executeRootTask(
                     () -> Thread.currentThread().getName());
-            assertTrue(firstThread.startsWith("ores-process-shared-actor-dispatcher-"),
+            assertTrue(firstThread.startsWith("ores-process-control-plane-dispatcher-"),
                     firstThread);
 
             first.close();
 
             String secondThread = second.executeRootTask(
                     () -> Thread.currentThread().getName());
-            assertTrue(secondThread.startsWith("ores-process-shared-actor-dispatcher-"),
+            assertTrue(secondThread.startsWith("ores-process-control-plane-dispatcher-"),
                     secondThread);
         } finally {
             try {
@@ -1679,8 +1679,12 @@ final class ActorRuntimeTest {
                     }));
 
             assertTrue(
-                    runtime.dispatcherStats(ActorRuntime.ActorKind.SHARED).overrunTurns() >= 1,
-                    "root wall-time expiration must be observable on the shared dispatcher");
+                    runtime.controlDispatcherStats().overrunTurns() >= 1,
+                    "root wall-time expiration must be observable on the control-plane dispatcher");
+            assertEquals(
+                    0,
+                    runtime.dispatcherStats(ActorRuntime.ActorKind.SHARED).overrunTurns(),
+                    "root wall-time expiration must not contaminate shared-actor metrics");
         }
     }
 
@@ -1729,7 +1733,7 @@ final class ActorRuntimeTest {
 
             assertTrue(
                     actorRan.await(2, TimeUnit.SECONDS),
-                    "a root/main task must leave shared carrier capacity for shared actors");
+                    "a control-plane root/main task must not consume shared-actor carriers");
 
             releaseRoot.countDown();
             rootCaller.join(2_000);

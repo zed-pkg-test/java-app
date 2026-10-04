@@ -1790,6 +1790,19 @@ public final class ActorRuntime implements AutoCloseable {
                 executor.getLargestPoolSize());
     }
 
+    /** Immutable observability for the privileged VM control-plane scheduler. */
+    public DispatcherStats controlDispatcherStats() {
+        return new DispatcherStats(
+                dispatcherConfig.controlParallelism(),
+                controlDispatcher.getActiveCount(),
+                controlDispatcher.getQueue().size(),
+                controlDispatcher.getCompletedTaskCount(),
+                controlCompensatingThreads.get(),
+                controlOverrunTurns.get(),
+                controlRejectedTurns.get(),
+                controlDispatcher.getLargestPoolSize());
+    }
+
     /**
      * Run trusted root/main-process and supervisor work on the VM CONTROL
      * scheduler domain. This is not an actor turn and never borrows a shared,
@@ -1805,7 +1818,7 @@ public final class ActorRuntime implements AutoCloseable {
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new CancellationException(
-                    "interrupted while waiting for a shared/root execution lane");
+                    "interrupted while waiting for a control-plane root execution lane");
         }
 
         RootTask<T> rootTask;
