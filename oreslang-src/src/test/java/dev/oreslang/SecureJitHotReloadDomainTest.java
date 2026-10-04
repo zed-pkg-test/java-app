@@ -59,7 +59,7 @@ final class SecureJitHotReloadDomainTest {
     }
 
     @Test
-    void isolatedJitStripsNativeReflectionAndThreadEscapeHatches() {
+    void trustedIsoactorJitStaysPrimaryWhileStrippingHostEscapeHatches() {
         IsolatePolicy requested = IsolatePolicy.developer().withCapabilities(
                 IsolatePolicy.Capability.FFI,
                 IsolatePolicy.Capability.NATIVE,
@@ -71,9 +71,11 @@ final class SecureJitHotReloadDomainTest {
                 IsolatePolicy.developer(),
                 requested,
                 ExecutionProfile.serverJit(),
-                HotReloadManager.ExecutionDomain.ISOLATED_JIT)) {
-            assertTrue(hot.guestPolicy().adversarial(),
-                    "isolated JIT is backed by the spawned-isolate sandbox path");
+                HotReloadManager.ExecutionDomain.TRUSTED_ISOACTOR_JIT)) {
+            assertFalse(hot.executionDomain().spawnedIsolate(),
+                    "trusted isoactors must remain in the primary Graal isolate");
+            assertFalse(hot.guestPolicy().adversarial(),
+                    "trusted isoactor confinement is not the untrusted/adversarial isolate boundary");
             assertFalse(hot.guestPolicy().allows(IsolatePolicy.Capability.FFI));
             assertFalse(hot.guestPolicy().allows(IsolatePolicy.Capability.NATIVE));
             assertFalse(hot.guestPolicy().allows(IsolatePolicy.Capability.REFLECTION));
@@ -93,7 +95,7 @@ final class SecureJitHotReloadDomainTest {
     }
 
     @Test
-    void activationDrainsPinnedOldGenerationAndReclaimsAfterLeaseRelease() {
+    void activationDrainsPinnedOldGenerationAndReclaimsAfterLeaseRelease() throws Exception {
         try (HotReloadManager hot = new HotReloadManager(
                 IsolatePolicy.developer(),
                 ExecutionProfile.serverJit())) {
@@ -118,7 +120,12 @@ final class SecureJitHotReloadDomainTest {
 
             lease.close();
 
-            assertTrue(first.closed());
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+            while (!first.closed() && System.nanoTime() < deadline) {
+                Thread.sleep(1);
+            }
+            assertTrue(first.closed(),
+                    "control-plane generation reclamation must complete after the final lease release");
             assertEquals(1, hot.liveGenerations());
             assertEquals(HotReloadManager.GenerationState.ACTIVE, second.state());
         }
