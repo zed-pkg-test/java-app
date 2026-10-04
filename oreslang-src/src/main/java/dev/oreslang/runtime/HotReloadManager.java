@@ -361,18 +361,28 @@ public final class HotReloadManager implements AutoCloseable {
         closeDetached(reclaim);
     }
 
-    public synchronized int liveGenerations() { return generations.size(); }
+    public synchronized int liveGenerations() {
+        int count = 0;
+        for (Generation generation : generations.values()) {
+            if (isLiveState(generation.state())) count++;
+        }
+        return count;
+    }
 
     public synchronized int liveGenerations(String codeUnitId) {
         int count = 0;
         for (Generation generation : generations.values()) {
             if (generation.codeUnitId().equals(codeUnitId)
-                    && generation.state() != GenerationState.CLOSED
-                    && generation.state() != GenerationState.FAILED) {
+                    && isLiveState(generation.state())) {
                 count++;
             }
         }
         return count;
+    }
+
+    private static boolean isLiveState(GenerationState state) {
+        return state != GenerationState.CLOSED
+                && state != GenerationState.FAILED;
     }
 
     private void release(Generation generation) {
