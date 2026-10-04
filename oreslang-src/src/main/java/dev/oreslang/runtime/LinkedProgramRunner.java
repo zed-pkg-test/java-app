@@ -45,11 +45,12 @@ public final class LinkedProgramRunner {
         IncrementalCompiler.BuildResult build = compiler.compile(sources);
         String entryId = unitId(entry);
 
-        // The official launcher owns the context-entry thread. Schedule the
-        // entire Graal lifecycle on the process SHARED/root carrier before the
-        // context is built/entered; RootNode must never hop threads after entry.
-        ActorRuntime.executeProcessRoot(policy, () -> {
-            Context.Builder builder = policy.restrictedContextBuilder(executionProfile);
+        // The launcher/host thread owns the Polyglot Context lifecycle.
+        // OresEvalRootNode.executeMain() dispatches main itself onto the
+        // context's implicit root OresScheduler and joins only on this host
+        // thread. OresFuture values therefore never cross the Polyglot interop
+        // boundary merely because main is async.
+        Context.Builder builder = policy.restrictedContextBuilder(executionProfile);
             // Graal's UNTRUSTED sandbox rejects the JVM's standard streams even
             // when they were explicitly supplied to Builder.out/err. Wrap host
             // streams in a non-closing forwarding stream so the sandbox sees a
@@ -92,8 +93,6 @@ public final class LinkedProgramRunner {
                 }
                 entryPoint.execute(OresEvalRootNode.MAIN_ONLY_COMMAND);
             }
-            return null;
-        });
 
         return build;
     }
