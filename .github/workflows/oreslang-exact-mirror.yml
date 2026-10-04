@@ -32,5 +32,11 @@ jobs:
           java --version
           native-image --version
           mvn --version
-      - name: Scheduler focused tests
-        run: mvn -B -ntp -Dtest=AsyncSchedulerLanguageTest,OresSchedulerTest,OresObservableTest,OresFutureCallbackTest test
+      - name: Core OresScheduler tests
+        run: timeout 90s mvn -B -ntp -Dtest=OresSchedulerTest test
+      - name: Future callback tests
+        run: timeout 90s mvn -B -ntp -Dtest=OresFutureCallbackTest test
+      - name: RX scheduler tests
+        run: timeout 90s mvn -B -ntp -Dtest=OresObservableTest test
+      - name: Source scheduler tests
+        run: timeout 90s mvn -B -ntp -Dtest=AsyncSchedulerLanguageTest test
