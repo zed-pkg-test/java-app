@@ -5,6 +5,7 @@ import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.RootNode;
 import dev.oreslang.OresLanguage;
 import dev.oreslang.ast.Ast;
+import dev.oreslang.ast.CallableSelector;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.OresContext;
 import dev.oreslang.runtime.CapabilityChecker;
@@ -817,13 +818,15 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object invokeMethod(OresObject receiver, String name, List<Object> args) {
-            Ast.MethodDecl method = findMethod(receiver.klass, name, args.size(), new LinkedHashSet<>());
+            CallableSelector selector = CallableSelector.instance(name, args.size());
+            Ast.MethodDecl method = findMethod(receiver.klass, selector, new LinkedHashSet<>());
             if (method == null) throw new IllegalArgumentException("no method " + receiver.klass.name() + "." + name + " with arity " + args.size());
             return callMethod(receiver, method, args);
         }
 
         private Object invokeStaticFunction(Ast.ClassDecl klass, String name, List<Object> args) {
-            Ast.MethodDecl fn = findStaticFunction(klass, name, args.size(), new LinkedHashSet<>());
+            CallableSelector selector = CallableSelector.staticFunction(name, args.size());
+            Ast.MethodDecl fn = findStaticFunction(klass, selector, new LinkedHashSet<>());
             if (fn == null) throw new IllegalArgumentException("no static function " + klass.name() + "." + name + " with arity " + args.size());
             return callStaticFunction(klass, fn, args);
         }
@@ -996,10 +999,16 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
-        private Ast.MethodDecl findMethod(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
+        private Ast.MethodDecl findMethod(
+                Ast.ClassDecl klass,
+                CallableSelector selector,
+                Set<Ast.ClassDecl> seen) {
+            if (selector.kind() != CallableSelector.Kind.INSTANCE) {
+                throw new IllegalArgumentException("instance dispatch requires an INSTANCE selector");
+            }
             if (!seen.add(klass)) throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
             for (Ast.MethodDecl method : klass.methods()) {
-                if (!method.isStatic() && method.name().equals(name) && method.parameters().size() == arity) {
+                if (selector.matches(method)) {
                     seen.remove(klass);
                     return method;
                 }
@@ -1008,7 +1017,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
                 Ast.ClassDecl parent = findClass(parentRef.name());
                 if (parent == null) continue;
-                Ast.MethodDecl candidate = findMethod(parent, name, arity, seen);
+                Ast.MethodDecl candidate = findMethod(parent, selector, seen);
                 if (candidate != null) {
                     seen.remove(klass);
                     return candidate;
@@ -1018,10 +1027,16 @@ public final class OresEvalRootNode extends RootNode {
             return null;
         }
 
-        private Ast.MethodDecl findStaticFunction(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
+        private Ast.MethodDecl findStaticFunction(
+                Ast.ClassDecl klass,
+                CallableSelector selector,
+                Set<Ast.ClassDecl> seen) {
+            if (selector.kind() != CallableSelector.Kind.STATIC) {
+                throw new IllegalArgumentException("static dispatch requires a STATIC selector");
+            }
             if (!seen.add(klass)) throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
             for (Ast.MethodDecl fn : klass.methods()) {
-                if (fn.isStatic() && fn.name().equals(name) && fn.parameters().size() == arity) {
+                if (selector.matches(fn)) {
                     seen.remove(klass);
                     return fn;
                 }
@@ -1030,7 +1045,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
                 Ast.ClassDecl parent = findClass(parentRef.name());
                 if (parent == null) continue;
-                Ast.MethodDecl candidate = findStaticFunction(parent, name, arity, seen);
+                Ast.MethodDecl candidate = findStaticFunction(parent, selector, seen);
                 if (candidate != null) {
                     seen.remove(klass);
                     return candidate;
@@ -1060,7 +1075,10 @@ public final class OresEvalRootNode extends RootNode {
             if (value instanceof List<?> list) return list;
             if (value instanceof Object[] array) return List.of(array);
             if (value instanceof OresObject object) {
-                Ast.MethodDecl iterator = findMethod(object.klass, "Symbol.iterator", 0, new LinkedHashSet<>());
+                Ast.MethodDecl iterator = findMethod(
+                        object.klass,
+                        CallableSelector.instance("Symbol.iterator", 0),
+                        new LinkedHashSet<>());
                 if (iterator == null) throw new IllegalArgumentException("value has no [Symbol.iterator]()");
                 Object produced = callMethod(object, iterator, List.of());
                 return iterableValues(produced);

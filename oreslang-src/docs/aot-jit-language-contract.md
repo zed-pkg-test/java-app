@@ -163,6 +163,71 @@ compiler-known declarations. JIT may optimize dispatch using profiling; AOT may
 emit conservative dispatch tables. The observable language semantics remain the
 same.
 
+## Method overloading by arity
+
+Class callable overloading is closed-world and based **only on arity**.
+
+The canonical selector inside one owner class is:
+
+```text
+(dispatch_kind, method_name, parameter_count)
+```
+
+where `dispatch_kind` is either instance or static.
+
+Examples:
+
+```text
+instance$read$arity0
+instance$read$arity1
+instance$read$arity2
+static$read$arity0
+```
+
+These are distinct compile/link slots. Parameter runtime types are never used
+to select an overload. Therefore these declarations are illegal because they
+occupy the same slot:
+
+```ores
+pub parse(int value) => int { ... }
+pub parse(String value) => String { ... } // illegal: same name + arity
+```
+
+Likewise, changing only generic arity does not create another overload:
+
+```ores
+pub parse<T>(T value) => T { ... }
+pub parse<T, U>(T value) => T { ... } // illegal: same runtime call arity
+```
+
+Static and instance callables have separate selector namespaces, so a class may
+have both an instance `read()` and a `static fnc read()`.
+
+Interfaces use the same name+arity slot model. A class implementing an
+interface with `read()`, `read(x)`, and `read(x, y)` must provide those
+three statically enumerable slots.
+
+Inheritance preserves the slot. A child declaration with the same selector
+overrides/hides the inherited target; a different arity adds a different slot.
+With multiple inheritance, if two distinct parent implementations contribute
+the same selector and the child does not provide an explicit local definition,
+the class is rejected as ambiguous. An ordinary diamond that reaches the exact
+same original method declaration through two paths remains one slot.
+
+This is directly AOT-compatible:
+
+- the call-site arity is syntax-known;
+- an AOT compiler can lower a direct/static call to one symbol immediately;
+- virtual calls can use a precomputed vtable slot keyed by the selector;
+- a JIT can inline/cache that same slot without changing resolution semantics;
+- no runtime type inspection, reflection, dynamic class generation, or overload
+  search by parameter value type is required.
+
+An overloaded bound method cannot be extracted as an untyped first-class value,
+because doing so would discard the arity needed to select the slot. It must be
+called directly (or later be explicitly disambiguated by a function type if the
+language adds that feature).
+
 ## JIT versus AOT
 
 JIT-only optimizations may include:

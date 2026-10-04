@@ -1,17 +1,52 @@
-pub interface ValueApi {
-  fnc value() => int;
+pub interface Picker {
+  fnc pick() => String;
+  fnc pick(int x) => String;
+  fnc pick(int x, int y) => String;
 }
 
-define class Box implements ValueApi as
-  let int stored;
+define class Base implements Picker as
+  pub pick() => String {
+    return "base0";
+  }
 
-  pub value() => int {
-    return self.stored;
+  pub pick(int x) => String {
+    return "base1";
+  }
+
+  pub pick(int x, int y) => String {
+    return "base2";
+  }
+
+  pub static fnc choose() => String {
+    return "static0";
+  }
+
+  pub static fnc choose(int x) => String {
+    return "static1";
+  }
+end
+
+define class Child extends Base as
+  pub pick(int x) => String {
+    return "child1";
   }
 end
 
 pub routine main() => void {
-  val box = new Box(42);
-  stdio.println(box.value());
+  val base = new Base();
+  val child = new Child();
+
+  stdio.println(
+    base.pick()
+    + "|" + base.pick(1)
+    + "|" + base.pick(1, 2)
+    + "|" + Base.choose()
+    + "|" + Base.choose(1)
+    + "|" + child.pick()
+    + "|" + child.pick(1)
+    + "|" + child.pick(1, 2)
+    + "|" + Child.choose()
+    + "|" + Child.choose(1)
+  );
   return;
 }

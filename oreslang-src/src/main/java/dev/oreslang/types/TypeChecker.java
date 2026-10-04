@@ -1,6 +1,7 @@
 package dev.oreslang.types;
 
 import dev.oreslang.ast.Ast;
+import dev.oreslang.ast.CallableSelector;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.Types.Function;
 import dev.oreslang.types.Types.Borrow;
@@ -30,6 +31,7 @@ import java.util.Set;
 public final class TypeChecker {
     private record ResolvedMethod(Ast.ClassDecl owner, Named ownerType, Ast.MethodDecl method) { }
     private record ResolvedField(Ast.ClassDecl owner, Named ownerType, Ast.FieldDecl field) { }
+    private record CallableTarget(Ast.ClassDecl owner, Ast.MethodDecl method) { }
     private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
     private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
     private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
@@ -178,7 +180,7 @@ public final class TypeChecker {
 
         for (Ast.InterfaceMember member : iface.members()) {
             if (member instanceof Ast.InterfaceFunctionDecl fn) {
-                String key = methodKey(fn.name(), fn.parameters().size());
+                String key = CallableSelector.instance(fn.name(), fn.parameters().size()).mangledName();
                 if (!memberKeys.add(key)) throw new IllegalArgumentException("duplicate interface method '" + iface.name() + "." + fn.name() + "' with arity " + fn.parameters().size());
                 Set<String> all = new HashSet<>(generics);
                 for (String generic : fn.genericParameters()) {
@@ -282,16 +284,20 @@ public final class TypeChecker {
             }
         }
 
-        Set<String> localMethodSignatures = new HashSet<>();
+        Set<CallableSelector> localMethodSignatures = new HashSet<>();
         for (Ast.MethodDecl method : klass.methods()) {
-            String memberKind = method.isStatic() ? "static:" : "instance:";
-            String signature = memberKind + methodKey(method.name(), method.arity());
-            if (!localMethodSignatures.add(signature)) {
+            CallableSelector selector = CallableSelector.of(method);
+            if (!localMethodSignatures.add(selector)) {
                 String label = method.isStatic() ? "static function" : "method";
                 throw new IllegalArgumentException(label + " '" + klass.name() + "." + method.name() + "' already has arity " + method.arity()
                         + "; class callables may overload only by arity within their own static/instance namespace");
             }
         }
+        // Every effective (kind, name, arity) slot must have one statically
+        // determined implementation. This is the vtable/static-table contract
+        // shared by AOT and JIT. Multiple-inheritance collisions require the
+        // child to declare an explicit local override/hide for that slot.
+        effectiveCallableTargets(klass, new LinkedHashSet<>());
 
         for (Ast.FieldDecl field : klass.fields()) {
             if (klass.actorKind() != Ast.ActorKind.NONE && field.visibility() == Ast.Visibility.PUBLIC) {
@@ -1775,7 +1781,7 @@ public final class TypeChecker {
     private ResolvedMethod findMethodTarget(Ast.ClassDecl klass, Named concreteType, String name, int arity, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return null;
         for (Ast.MethodDecl method : klass.methods()) {
-            if (!method.isStatic() && method.name().equals(name) && method.arity() == arity) {
+            if (CallableSelector.instance(name, arity).matches(method)) {
                 seen.remove(klass);
                 return new ResolvedMethod(klass, concreteType, method);
             }
@@ -1797,7 +1803,12 @@ public final class TypeChecker {
     private List<Ast.MethodDecl> findMethodsByName(Ast.ClassDecl klass, String name, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return List.of();
         LinkedHashMap<Integer, Ast.MethodDecl> methods = new LinkedHashMap<>();
-        for (Ast.MethodDecl method : klass.methods()) if (!method.isStatic() && method.name().equals(name)) methods.put(method.arity(), method);
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            if (selector.kind() == CallableSelector.Kind.INSTANCE && selector.name().equals(name)) {
+                methods.put(selector.arity(), method);
+            }
+        }
         for (Ast.TypeRef parentRef : klass.parents()) {
             Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
             if (parent == null) continue;
@@ -1810,7 +1821,7 @@ public final class TypeChecker {
     private Ast.MethodDecl findStaticFunction(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return null;
         for (Ast.MethodDecl method : klass.methods()) {
-            if (method.isStatic() && method.name().equals(name) && method.arity() == arity) {
+            if (CallableSelector.staticFunction(name, arity).matches(method)) {
                 seen.remove(klass);
                 return method;
             }
@@ -1831,7 +1842,12 @@ public final class TypeChecker {
     private List<Ast.MethodDecl> findStaticFunctionsByName(Ast.ClassDecl klass, String name, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return List.of();
         LinkedHashMap<Integer, Ast.MethodDecl> functions = new LinkedHashMap<>();
-        for (Ast.MethodDecl method : klass.methods()) if (method.isStatic() && method.name().equals(name)) functions.put(method.arity(), method);
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            if (selector.kind() == CallableSelector.Kind.STATIC && selector.name().equals(name)) {
+                functions.put(selector.arity(), method);
+            }
+        }
         for (Ast.TypeRef parentRef : klass.parents()) {
             Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
             if (parent == null) continue;
@@ -1839,6 +1855,52 @@ public final class TypeChecker {
         }
         seen.remove(klass);
         return List.copyOf(functions.values());
+    }
+
+    private Map<CallableSelector, CallableTarget> effectiveCallableTargets(
+            Ast.ClassDecl klass,
+            Set<Ast.ClassDecl> stack) {
+        if (!stack.add(klass)) {
+            throw new IllegalArgumentException("inheritance cycle involving class '" + klass.name() + "'");
+        }
+
+        Map<CallableSelector, CallableTarget> local = new LinkedHashMap<>();
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            CallableTarget previous = local.putIfAbsent(selector, new CallableTarget(klass, method));
+            if (previous != null) {
+                throw new IllegalArgumentException(
+                        "duplicate callable slot '" + selector.mangledName() + "' on class '" + klass.name() + "'");
+            }
+        }
+
+        Map<CallableSelector, CallableTarget> effective = new LinkedHashMap<>();
+        for (Ast.TypeRef parentRef : klass.parents()) {
+            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+            if (parent == null) continue;
+            Map<CallableSelector, CallableTarget> parentTargets =
+                    effectiveCallableTargets(parent, stack);
+            for (Map.Entry<CallableSelector, CallableTarget> entry : parentTargets.entrySet()) {
+                CallableSelector selector = entry.getKey();
+                if (local.containsKey(selector)) continue;
+
+                CallableTarget previous = effective.putIfAbsent(selector, entry.getValue());
+                if (previous != null && previous.method() != entry.getValue().method()) {
+                    String label = selector.kind() == CallableSelector.Kind.STATIC
+                            ? "static function" : "method";
+                    throw new IllegalArgumentException(
+                            "ambiguous inherited " + label + " slot '"
+                                    + selector.name() + "' with arity " + selector.arity()
+                                    + " on class '" + klass.name()
+                                    + "'; declare an explicit " + label
+                                    + " with that arity on the child");
+                }
+            }
+        }
+
+        effective.putAll(local);
+        stack.remove(klass);
+        return effective;
     }
 
     private Ast.ClassDecl resolveClassParent(Ast.TypeRef parentRef, Ast.ClassDecl child) {
@@ -2525,12 +2587,8 @@ public final class TypeChecker {
         if (!assignable(actual, expected)) throw new IllegalArgumentException(where + " has type " + actual + " but expected " + expected);
     }
 
-    private String methodKey(String name, int arity) {
-        return name + "$arity" + arity;
-    }
-
     private String methodContractKey(String name, int arity, int genericArity) {
-        return methodKey(name, arity) + "$generics" + genericArity;
+        return CallableSelector.instance(name, arity).contractKey(genericArity);
     }
 
     private void validateRoutineRecursion() {
