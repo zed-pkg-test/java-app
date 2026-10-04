@@ -206,7 +206,10 @@ public final class ActorRuntime implements AutoCloseable {
 
     public static Object currentExecutionDomain() {
         ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
-        return current == null ? Thread.currentThread() : current.executionDomain();
+        if (current != null) return current.executionDomain();
+
+        Object taskDomain = OresScheduler.currentTaskDomain();
+        return taskDomain != null ? taskDomain : Thread.currentThread();
     }
 
     /**
