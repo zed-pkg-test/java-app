@@ -19,7 +19,7 @@ final class InitializationBarrierTest {
     void moduleAndRootInitHooksRunBeforeMainAfterAllModulesAreIndexed() throws Exception {
         String output = run("""
                 define module early
-                  routine init() => void {
+                  routine init() : void  {
                     stdio.stdout.write("early:");
                     later.ping();
                     stdio.stdout.write("|");
@@ -28,23 +28,23 @@ final class InitializationBarrierTest {
                 end
 
                 define module later
-                  pub fnc ping() => void {
+                  pub fnc ping() : void  {
                     stdio.stdout.write("linked");
                     return;
                   }
 
-                  fnc init() => void {
+                  fnc init() : void  {
                     stdio.stdout.write("later|");
                     return;
                   }
                 end
 
-                fnc init() => void {
+                fnc init() : void  {
                   stdio.stdout.write("root|");
                   return;
                 }
 
-                pub routine main() => void {
+                pub routine main() : void  {
                   stdio.stdout.write("main");
                   return;
                 }
@@ -57,43 +57,43 @@ final class InitializationBarrierTest {
     void initMayBeFncOrRoutineButMustRemainClosedAndSynchronous() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module a
-                  fnc init() => void { return; }
+                  fnc init() : void  { return; }
                 end
 
                 define module b
-                  routine init() => void { return; }
+                  routine init() : void  { return; }
                 end
 
-                fnc init() => void { return; }
-                pub routine main() => void { return; }
+                fnc init() : void  { return; }
+                pub routine main() : void  { return; }
                 """)));
 
-        assertInitRejected("fnc init(int value) => void { return; }");
-        assertInitRejected("fnc init<T>() => void { return; }");
-        assertInitRejected("fnc init() => int { return 1; }");
-        assertInitRejected("async fnc init() => void { return; }");
-        assertInitRejected("pub fnc init() => void { return; }");
-        assertInitRejected("actor fnc init() => void { return; }");
-        assertInitRejected("shared actor fnc init() => void { return; }");
+        assertInitRejected("fnc init(int value) : void  { return; }");
+        assertInitRejected("fnc init<T>() : void  { return; }");
+        assertInitRejected("fnc init() : int  { return 1; }");
+        assertInitRejected("async fnc init() : void  { return; }");
+        assertInitRejected("pub fnc init() : void  { return; }");
+        assertInitRejected("actor fnc init() : void  { return; }");
+        assertInitRejected("shared actor fnc init() : void  { return; }");
     }
 
     @Test
     void moduleInitUsesTheSameLifecycleRestrictions() {
         assertInitRejected("""
                 define module bad
-                  pub routine init() => void { return; }
+                  pub routine init() : void  { return; }
                 end
                 """);
 
         assertInitRejected("""
                 define module bad
-                  actor routine init() => void { return; }
+                  actor routine init() : void  { return; }
                 end
                 """);
 
         assertInitRejected("""
                 define module bad
-                  routine init(String value) => void { return; }
+                  routine init(String value) : void  { return; }
                 end
                 """);
     }
@@ -103,9 +103,9 @@ final class InitializationBarrierTest {
         IllegalArgumentException rootCall = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
-                        fnc init() => void { return; }
+                        fnc init() : void  { return; }
 
-                        pub routine main() => void {
+                        pub routine main() : void  {
                           init();
                           return;
                         }
@@ -116,10 +116,10 @@ final class InitializationBarrierTest {
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         define module lifecycle
-                          fnc init() => void { return; }
+                          fnc init() : void  { return; }
                         end
 
-                        pub routine main() => void {
+                        pub routine main() : void  {
                           lifecycle.init();
                           return;
                         }
@@ -130,11 +130,11 @@ final class InitializationBarrierTest {
     @Test
     void mainOnlyCommandCannotBypassInitializationBarrier() throws Exception {
         Source source = Source.newBuilder(OresLanguage.ID, """
-                fnc init() => void {
+                fnc init() : void  {
                   return;
                 }
 
-                pub routine main() => void {
+                pub routine main() : void  {
                   return;
                 }
                 """, "barrier.ores")
@@ -162,14 +162,14 @@ final class InitializationBarrierTest {
     void initFailureIsTerminalAndMainNeverRuns() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, """
-                fnc init() => void {
+                fnc init() : void  {
                   stdio.stdout.write("I");
                   val values = arr[1];
                   val impossible = values[9];
                   return;
                 }
 
-                pub routine main() => void {
+                pub routine main() : void  {
                   stdio.stdout.write("M");
                   return;
                 }
