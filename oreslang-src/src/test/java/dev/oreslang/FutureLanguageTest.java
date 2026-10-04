@@ -106,4 +106,113 @@ final class FutureLanguageTest {
 
         assertTrue(output.toString(StandardCharsets.UTF_8).contains("futures-all-ok"));
     }
+    @Test
+    void awaitableProtocolProjectsFuturePayload() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class Deferred implements Awaitable<int> as
+                    pub val Future<int> pending;
+
+                    pub getAwait() => Future<int> {
+                      return self.pending;
+                    }
+                  end
+
+                  fnc consume(Deferred value) => int {
+                    return await value;
+                  }
+
+                  fnc consume_interface(Awaitable<int> value) => int {
+                    return await value;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void awaitableGetAwaitMayBeAsyncAndDeclareThePayloadType() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define class LazyValue implements Awaitable<int> as
+                    pub async getAwait() => int {
+                      return 42;
+                    }
+                  end
+
+                  fnc consume(LazyValue value) => int {
+                    return await value;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void userInterfacesMayExtendAwaitable() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  define interface NamedTask<T> extends Awaitable<T> {
+                    fnc label() => string;
+                  }
+
+                  define class Task implements NamedTask<int> as
+                    pub async getAwait() => int {
+                      return 7;
+                    }
+
+                    pub label() => string {
+                      return "task";
+                    }
+                  end
+
+                  fnc consume(Task value) => int {
+                    return await value;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void malformedAwaitableContractsAreRejected() {
+        IllegalArgumentException wrongSyncReturn = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          define class Bad implements Awaitable<int> as
+                            pub getAwait() => int {
+                              return 1;
+                            }
+                          end
+                        end
+                        """)));
+        assertTrue(wrongSyncReturn.getMessage().contains("must return Future"));
+
+        IllegalArgumentException wrongAsyncReturn = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          define class Bad implements Awaitable<int> as
+                            pub async getAwait() => string {
+                              return "nope";
+                            }
+                          end
+                        end
+                        """)));
+        assertTrue(wrongAsyncReturn.getMessage().contains("async Awaitable"));
+    }
+
+    @Test
+    void awaitRejectsValuesWithoutAwaitableProtocol() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module app
+                          fnc bad(int value) => int {
+                            return await value;
+                          }
+                        end
+                        """)));
+        assertTrue(failure.getMessage().contains("Future<T> or Awaitable<T>"));
+    }
+
+
 }

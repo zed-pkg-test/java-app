@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class OresVM {
     enum SchedulerDomain {
         CONTROL,
+        ROOT_TASK,
         SHARED_ACTOR,
         ISOACTOR,
         UNTRUSTED_ACTOR
@@ -34,6 +35,8 @@ final class OresVM {
             List<SchedulerDomain> domains,
             int controlMinThreads,
             int controlMaxThreads,
+            int rootTaskMinThreads,
+            int rootTaskMaxThreads,
             int sharedActorMinThreads,
             int sharedActorMaxThreads,
             int isoactorMinThreads,
@@ -42,10 +45,10 @@ final class OresVM {
             int untrustedActorMaxThreads) {
         SchedulerTopology {
             domains = List.copyOf(domains);
-            if (domains.size() != 4
+            if (domains.size() != 5
                     || !domains.containsAll(List.of(SchedulerDomain.values()))) {
                 throw new IllegalArgumentException(
-                        "Oreslang VM topology must declare exactly four scheduler domains");
+                        "Oreslang VM topology must declare exactly five scheduler domains");
             }
         }
     }
@@ -70,6 +73,7 @@ final class OresVM {
     private final UUID vmId = UUID.randomUUID();
     private final String contextBindingToken = UUID.randomUUID().toString();
     private final ActorRuntime.DispatcherGroup dispatchers;
+    private final RootTaskScheduler rootTaskScheduler;
     private final BlockingIoExecutor blockingIo;
     private final boolean processVm;
     private final Set<HotReloadManager> hotReloadManagers = ConcurrentHashMap.newKeySet();
@@ -83,9 +87,12 @@ final class OresVM {
             String threadPrefix,
             boolean processVm) {
         String prefix = Objects.requireNonNull(threadPrefix, "threadPrefix");
+        ActorRuntime.DispatcherConfig schedulerConfig =
+                Objects.requireNonNull(config, "config");
         this.dispatchers = new ActorRuntime.DispatcherGroup(
-                Objects.requireNonNull(config, "config"),
+                schedulerConfig,
                 prefix);
+        this.rootTaskScheduler = new RootTaskScheduler(schedulerConfig, prefix);
         this.blockingIo = new BlockingIoExecutor(prefix);
         this.processVm = processVm;
         VM_BINDINGS.put(contextBindingToken, this);
@@ -193,11 +200,14 @@ final class OresVM {
         return new SchedulerTopology(
                 List.of(
                         SchedulerDomain.CONTROL,
+                        SchedulerDomain.ROOT_TASK,
                         SchedulerDomain.SHARED_ACTOR,
                         SchedulerDomain.ISOACTOR,
                         SchedulerDomain.UNTRUSTED_ACTOR),
                 config.controlParallelism(),
                 config.maxControlParallelism(),
+                config.rootTaskParallelism(),
+                config.maxRootTaskParallelism(),
                 config.sharedParallelism(),
                 config.maxParallelismFor(ActorRuntime.ActorKind.SHARED),
                 config.privateParallelism(),
@@ -284,6 +294,11 @@ final class OresVM {
         return dispatchers;
     }
 
+    RootTaskScheduler rootTaskScheduler() {
+        ensureRunning();
+        return rootTaskScheduler;
+    }
+
     void executeControlMaintenance(Runnable task) {
         // Teardown may race VM shutdown after shutdown=true but before the
         // physical CONTROL pool is stopped. Let already-owned cleanup drain.
@@ -347,6 +362,7 @@ final class OresVM {
         }
         generationBindings.clear();
         blockingIo.close();
+        rootTaskScheduler.close();
         dispatchers.shutdownNow();
         VM_BINDINGS.remove(contextBindingToken, this);
 

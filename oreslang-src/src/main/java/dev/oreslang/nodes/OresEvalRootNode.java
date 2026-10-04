@@ -12,6 +12,7 @@ import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.OresFutures;
 import dev.oreslang.runtime.OresFuture;
+import dev.oreslang.runtime.OresAwaitable;
 import dev.oreslang.runtime.ActorRuntime;
 
 import java.nio.file.Path;
@@ -101,12 +102,14 @@ public final class OresEvalRootNode extends RootNode {
         private final String codeUnitId;
         private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
         private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
+        private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> typeAliases = new HashMap<>();
         private final Map<String, Ast.ModuleDecl> modules = new HashMap<>();
         private final Map<String, Ast.ImportDecl> namedImports = new HashMap<>();
         private final Map<String, Ast.ImportDecl> namespaceImports = new HashMap<>();
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
+        private final Set<String> ambiguousInterfaces = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
         private boolean initialized;
 
@@ -134,6 +137,7 @@ public final class OresEvalRootNode extends RootNode {
                 for (Ast.Decl decl : module.declarations()) {
                     if (decl instanceof Ast.FunctionDecl fn) index(functions, ambiguousFunctions, module.name(), fn.name(), fn);
                     else if (decl instanceof Ast.ClassDecl klass) index(classes, ambiguousClasses, module.name(), klass.name(), klass);
+                    else if (decl instanceof Ast.InterfaceDecl iface) index(interfaces, ambiguousInterfaces, module.name(), iface.name(), iface);
                     else if (decl instanceof Ast.TypeAliasDecl alias) index(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias);
                 }
             }
@@ -156,6 +160,11 @@ public final class OresEvalRootNode extends RootNode {
         private Ast.ClassDecl findClass(String name) {
             if (ambiguousClasses.contains(name)) throw new IllegalArgumentException("ambiguous class " + name + "; qualify it with its module");
             return classes.get(name);
+        }
+
+        private Ast.InterfaceDecl findInterface(String name) {
+            if (ambiguousInterfaces.contains(name)) throw new IllegalArgumentException("ambiguous interface " + name + "; qualify it with its module");
+            return interfaces.get(name);
         }
 
         private Ast.TypeAliasDecl findTypeAlias(String name) {
@@ -544,47 +553,28 @@ public final class OresEvalRootNode extends RootNode {
                 return spawnFunction(spawned.call(), env);
             }
             if (expr instanceof Ast.AwaitExpr awaited) {
-                Object value = eval(awaited.expression(), env);
-                if (value instanceof ActorRuntime.ActorSpawn<?, ?> spawn) {
-                    value = spawn.ready();
-                }
+                OresFuture<?> future = awaitFuture(eval(awaited.expression(), env));
 
-                if (value instanceof OresFuture<?> future) {
-                    // Source actor await must never resume inline, including for
-                    // an already-settled Future. The stackless source-frame
-                    // lowerer replaces this recursive-evaluator path with
-                    // ActorContext.suspendOn(...).
-                    if (ActorRuntime.inActorExecution()) {
-                        throw new IllegalStateException(
-                                "source await inside an actor requires continuation lowering; "
-                                        + "the recursive evaluator must not block or inline-resume an actor carrier");
-                    }
-                    if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
-                        throw new IllegalStateException(
-                                "await would block an adversarial serialized root context; "
-                                        + "continuation lowering must suspend/resume before awaiting readiness/result");
-                    }
-                    return future.join();
+                // Source actor/root await must never resume inline, including
+                // for an already-settled Future. The stackless source-frame
+                // lowerer replaces this recursive-evaluator path with the
+                // scheduler suspension ABI.
+                if (ActorRuntime.inActorExecution()) {
+                    throw new IllegalStateException(
+                            "source await inside an actor requires continuation lowering; "
+                                    + "the recursive evaluator must not block or inline-resume an actor carrier");
                 }
-
-                // Compatibility boundary for host/legacy async primitives such
-                // as the current mutex implementation. Normalize their
-                // completion policy before exposing them as an Ores Future.
-                if (value instanceof CompletionStage<?> stage) {
-                    OresFuture<?> future = OresFuture.from(stage);
-                    if (ActorRuntime.inActorExecution()) {
-                        throw new IllegalStateException(
-                                "source await inside an actor requires continuation lowering; "
-                                        + "host stages are normalized to OresFuture before suspension");
-                    }
-                    if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
-                        throw new IllegalStateException(
-                                "await would block an adversarial serialized root context; "
-                                        + "continuation lowering must suspend/resume before awaiting a host stage");
-                    }
-                    return future.join();
+                if (ActorRuntime.inRootExecution()) {
+                    throw new IllegalStateException(
+                            "source await inside a root/main task requires continuation lowering; "
+                                    + "the recursive evaluator must not join or park a ROOT_TASK carrier");
                 }
-                return value;
+                if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
+                    throw new IllegalStateException(
+                            "await would block an adversarial serialized root context; "
+                                    + "continuation lowering must suspend/resume before awaiting readiness/result");
+                }
+                return future.join();
             }
             if (expr instanceof Ast.ListExpr list) {
                 ArrayList<Object> result = new ArrayList<>(list.elements().size());
@@ -1094,6 +1084,102 @@ public final class OresEvalRootNode extends RootNode {
             }
             seen.remove(klass);
             return List.copyOf(result.values());
+        }
+
+        private OresFuture<?> awaitFuture(Object value) {
+            if (value instanceof OresFuture<?> future) return future;
+
+            if (value instanceof OresAwaitable<?> awaitable) {
+                OresFuture<?> future = awaitable.getAwait();
+                if (future == null) {
+                    throw new IllegalStateException(
+                            "Awaitable.getAwait() returned null");
+                }
+                return future;
+            }
+
+            if (value instanceof OresObject object
+                    && classImplementsAwaitable(
+                            object.klass,
+                            new LinkedHashSet<>())) {
+                Ast.MethodDecl method = findMethod(
+                        object.klass,
+                        "getAwait",
+                        0,
+                        new LinkedHashSet<>());
+                if (method == null) {
+                    throw new IllegalStateException(
+                            "Awaitable class '" + object.klass.name()
+                                    + "' has no getAwait() method at runtime");
+                }
+                if (method.async()) {
+                    throw new IllegalStateException(
+                            "async Awaitable.getAwait() requires async callable/continuation lowering; "
+                                    + "the recursive evaluator must not execute it synchronously");
+                }
+
+                Object projected = callMethod(object, method, List.of());
+                if (projected instanceof OresFuture<?> future) return future;
+                if (projected instanceof CompletionStage<?> stage) {
+                    return OresFuture.from(stage);
+                }
+                throw new IllegalStateException(
+                        "Awaitable.getAwait() must return Future<T>, got "
+                                + (projected == null
+                                        ? "null"
+                                        : projected.getClass().getName()));
+            }
+
+            // Compatibility boundary for host/legacy async primitives such as
+            // the current mutex implementation. Source-level types should
+            // prefer Future<T> / Awaitable<T>.
+            if (value instanceof CompletionStage<?> stage) {
+                return OresFuture.from(stage);
+            }
+
+            throw new IllegalArgumentException(
+                    "await requires Future<T> or Awaitable<T>, got "
+                            + (value == null ? "null" : value.getClass().getName()));
+        }
+
+        private boolean classImplementsAwaitable(
+                Ast.ClassDecl klass,
+                Set<Ast.ClassDecl> seen) {
+            if (!seen.add(klass)) return false;
+            for (Ast.TypeRef interfaceRef : klass.interfaces()) {
+                if (interfaceExtendsAwaitable(
+                        interfaceRef.name(),
+                        new LinkedHashSet<>())) {
+                    return true;
+                }
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object")
+                        || parentRef.name().equals("List")) {
+                    continue;
+                }
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent != null
+                        && classImplementsAwaitable(parent, seen)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean interfaceExtendsAwaitable(
+                String interfaceName,
+                Set<String> seen) {
+            if (interfaceName.equals("Awaitable")) return true;
+            if (!seen.add(interfaceName)) return false;
+            Ast.InterfaceDecl iface = findInterface(interfaceName);
+            if (iface == null) return false;
+            for (Ast.TypeRef parent : iface.parents()) {
+                if (interfaceExtendsAwaitable(parent.name(), seen)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private List<?> iterableValues(Object value) {

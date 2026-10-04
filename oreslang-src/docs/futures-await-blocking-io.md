@@ -1,9 +1,11 @@
 # Futures, await, blocking I/O, and scheduler suspension
 
-Status: runtime Future/suspension ABI implemented on top of the OresVM four-domain
-scheduler. Source-frame lowering for arbitrary nested `await` expressions is a
-compiler follow-up and must target this ABI; the recursive evaluator fails closed
-inside actor turns rather than blocking or inline-resuming a carrier.
+Status: runtime Future/suspension ABI implemented on top of the OresVM five-domain
+scheduler. Actors already suspend through captured continuations. Root/main tasks
+now have the same runtime state-machine substrate on a dedicated ROOT_TASK carrier
+pool. Source-frame lowering for arbitrary nested `await` expressions remains the
+compiler follow-up; the recursive evaluator fails closed inside actor or root turns
+rather than blocking, joining, or inline-resuming a carrier.
 
 ## Rule: ordinary execution does not implicitly yield
 
@@ -35,6 +37,49 @@ val bytes = await pending;
 ```
 
 Calling an async operation is not itself a scheduling boundary.
+
+## Virtual-thread-like logical task model
+
+Oreslang tasks are conceptually closer to **Java virtual threads / structured
+tasks** than to bare Go goroutines in one important respect: a spawned async
+operation has an awaitable completion object.
+
+```ores
+pub async fnc calculate(int value) : int {
+    return value * 2;
+}
+
+pub async fnc main() : void {
+    val pending = calculate(21);
+    val answer = await pending;
+    print(answer);
+}
+```
+
+The intended lowering is:
+
+```text
+async fnc call
+    -> create logical Ores task
+    -> return Future<T> immediately
+    -> execute task on owning scheduler domain
+    -> await suspends that logical task
+    -> Future completion makes its continuation runnable
+```
+
+The logical task is **not** a Java platform thread and does not permanently own
+a carrier. It may execute on carrier A, suspend, and resume on carrier B. That is
+the property Oreslang borrows from virtual threads: blocking-looking source
+semantics without pinning a scarce carrier.
+
+This is deliberately unlike a bare goroutine handle: Oreslang async work has a
+first-class `Future<T>` result that can be awaited, cancelled, composed, and
+used for structured lifetime management.
+
+Actors use the same suspension substrate with stronger mailbox/ownership rules.
+An `ActorRef` exposes an awaitable `done()` lifecycle Future, while one-shot
+actor callables expose `ready()`, `done()`, and `result()` Futures. Guest
+code must await those Futures; synchronous actor termination joins are host-only.
 
 ## OresFuture is not CompletableFuture
 
@@ -97,9 +142,13 @@ restore frame and continue after await
 `await` is a scheduling boundary even when the Future was already settled.
 The continuation is enqueued for a later turn instead of being resumed inline.
 
-For actors, the current runtime target is
-`ActorContext.suspendOn(OresFuture, ActorContinuation)`. The existing host
-`CompletionStage` overload is only an adapter and normalizes to OresFuture.
+For actors, the runtime target is
+`ActorContext.suspendOn(OresFuture, ActorContinuation)`. For root/main tasks,
+the runtime target is `ActorRuntime.suspendCurrentRootOn(OresFuture,
+RootContinuation)`. Both paths capture state before suspension and both enqueue
+the continuation for a later turn; neither resumes guest code on the producer
+thread. The existing host `CompletionStage` actor overload is only an adapter
+and normalizes to OresFuture.
 
 A suspended actor remains logically inside the same mailbox turn:
 
@@ -140,7 +189,11 @@ return carrier to OresVM
 resume when operation completes
 ```
 
-It must never mean "park this Ores actor carrier in a host blocking call."
+It must never mean "park this OresVM carrier in a host blocking call."
+
+As a defense-in-depth rule, host-style `OresFuture.get()` and `join()` reject
+calls from every OresVM carrier. Host/embedder threads may use those APIs; guest
+execution must use scheduler suspension.
 
 Native async readiness should be preferred for sockets, pipes, timers, and other
 reactor-friendly operations.
@@ -173,19 +226,27 @@ Cancellation is a request, not proof that host work stopped. Admission for a
 running uncooperative Java blocking call remains charged until its worker
 actually exits.
 
-## Four scheduler domains
+## Five scheduler domains
 
 Continuation wakeup preserves the task's owning domain:
 
 ```text
 OresVM
 ├── CONTROL
-│   ├── supervisor/root work
-│   └── ActorGroup mailmen
+│   ├── supervisors
+│   ├── ActorGroup mailmen
+│   └── VM maintenance
+├── ROOT_TASK
+│   ├── main
+│   └── ordinary async Ores tasks
 ├── SHARED_ACTOR
 ├── ISOACTOR
 └── UNTRUSTED_ACTOR
 ```
+
+ROOT_TASK is physically separate from CONTROL so application async work cannot
+consume supervisor/mailman carrier capacity. A root continuation may resume on a
+different ROOT_TASK carrier than the one on which it suspended.
 
 I/O reactors, timer drivers, completion threads, Java virtual threads used for
 blocking interop, and native blocking workers are runtime service threads. They
@@ -213,12 +274,13 @@ suspension unless their ownership/lifetime representation explicitly permits it.
 
 ## Current lowering boundary
 
-The actor scheduler, OresFuture, timer path, and blocking bridge provide the
-runtime substrate. The recursive reference evaluator cannot safely preserve an
-arbitrary Java call stack across an actor `await`.
+The actor scheduler, root-task scheduler, OresFuture, timer path, and blocking
+bridge provide the runtime substrate. The recursive reference evaluator cannot
+safely preserve an arbitrary Java call stack across an actor or root/main
+`await`.
 
 Until the stackless/CPS source-frame transformation lands, source `await`
-encountered inside an actor turn fails closed instead of:
+encountered inside an actor or root turn fails closed instead of:
 
 - blocking the carrier;
 - using `join()`;

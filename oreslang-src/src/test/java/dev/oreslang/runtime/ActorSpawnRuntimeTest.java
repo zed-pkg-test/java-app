@@ -114,6 +114,7 @@ final class ActorSpawnRuntimeTest {
                     () -> spawn.done().get(2, TimeUnit.SECONDS));
             assertInstanceOf(IllegalStateException.class, doneFailure.getCause());
 
+            assertTrue(ref.done().get(2, TimeUnit.SECONDS));
             assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
             assertInstanceOf(IllegalStateException.class, ref.failure().orElseThrow());
         }
@@ -199,5 +200,56 @@ final class ActorSpawnRuntimeTest {
             contextGate.unlock();
         }
     }
+
+    @Test
+    void actorRefDoneIsFutureBasedLifecycleJoin() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CountDownLatch entered = new CountDownLatch(1);
+            ActorRuntime.ActorRef<String> ref = runtime.spawnPrivateTrusted(
+                    ignored -> (message, context) -> {
+                        entered.countDown();
+                        context.self().stop();
+                    });
+
+            ref.send("stop");
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertTrue(ref.done().get(2, TimeUnit.SECONDS));
+            assertFalse(ref.isAlive());
+        }
+    }
+
+    @Test
+    void actorCarrierCannotUseBlockingTerminationJoin() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CountDownLatch checked = new CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+
+            ActorRuntime.ActorRef<String> target = runtime.spawnPrivateTrusted(
+                    ignored -> (message, context) -> { });
+            ActorRuntime.ActorRef<String> checker = runtime.spawnPrivateTrusted(
+                    ignored -> (message, context) -> {
+                        try {
+                            target.awaitTermination(1, TimeUnit.MILLISECONDS);
+                        } catch (Throwable denied) {
+                            failure.set(denied);
+                        } finally {
+                            checked.countDown();
+                            context.self().stop();
+                        }
+                    });
+
+            checker.send("check");
+            assertTrue(checked.await(2, TimeUnit.SECONDS));
+            IllegalStateException denied = assertInstanceOf(
+                    IllegalStateException.class,
+                    failure.get());
+            assertTrue(denied.getMessage().contains("await ref.done()"));
+
+            target.stop();
+            assertTrue(target.done().get(2, TimeUnit.SECONDS));
+        }
+    }
+
 
 }

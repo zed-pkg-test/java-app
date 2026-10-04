@@ -38,24 +38,51 @@ runtime-internal.
 Host/embedder APIs remain an explicit privileged escape hatch, analogous to
 Java JNI/FFM or Go unsafe; they are not part of the safe Oreslang guest model.
 
-## Four scheduler domains
+## Five scheduler domains
 
-The VM owns exactly four guest/control execution pools:
+The VM owns exactly five guest/control execution pools:
 
-1. **CONTROL** — main/root execution, supervisors, ActorGroup mailmen, and VM maintenance.
-2. **SHARED_ACTOR** — shared-address-space actors.
-3. **ISOACTOR** — private/memory-confined actors.
-4. **UNTRUSTED_ACTOR** — sandboxed untrusted actors.
+1. **CONTROL** — supervisors, ActorGroup mailmen, and VM maintenance.
+2. **ROOT_TASK** — main/root execution and ordinary async Ores tasks.
+3. **SHARED_ACTOR** — shared-address-space actors.
+4. **ISOACTOR** — private/memory-confined actors.
+5. **UNTRUSTED_ACTOR** — sandboxed untrusted actors.
 
 Timers, I/O reactors, watchdogs, GC threads, and Graal/JVM service threads are
 runtime infrastructure. They are not additional actor scheduler domains and may
 not execute actor guest code directly.
 
-Each scheduler is M:N: actors/mailmen are logical tasks multiplexed over bounded
-carrier threads. A logical actor or mailman does not own an OS thread.
+Each scheduler is M:N: root tasks, actors, and mailmen are logical executions
+multiplexed over bounded carrier threads. A logical Ores task does not own an OS
+thread and may resume on a different carrier after suspension.
 
 The production default keeps the elastic carrier policy: a small floor with
-bounded headroom. The control pool is physically distinct from all actor pools.
+bounded headroom. ROOT_TASK is physically distinct from CONTROL and from all
+actor pools, preventing application async work from starving supervision.
+
+
+## Awaitable task identity
+
+Oreslang deliberately gives async execution a first-class completion identity.
+Calling an `async fnc` is intended to create a logical task and return an
+`OresFuture<T>`; callers can await that Future just as structured Java code can
+join an independently scheduled virtual task. This differs from fire-and-forget
+goroutine semantics.
+
+The analogy is semantic, not an implementation leak:
+
+- an Ores task is not a Java `Thread`;
+- ROOT_TASK carriers are bounded VM-owned platform threads;
+- `await` captures the Ores frame, releases the carrier, and later remounts the
+  logical task on an available ROOT_TASK carrier;
+- actor awaits do the same thing inside the owning actor scheduler domain while
+  preserving the mailbox turn and single-execution lease;
+- Future producer/I/O/timer threads only enqueue continuations;
+- `OresFuture.get/join` are rejected on OresVM carriers;
+- blocking host APIs are dispatched through the VM blocking bridge instead.
+
+Actor lifecycle follows the same model: `ActorRef.done()` is an awaitable Future.
+The old blocking `awaitTermination` API is retained only for host/embedder use.
 
 ## Control plane authority
 
@@ -63,11 +90,11 @@ Supervision and ordinary actor execution do not share an actor scheduling queue.
 
 The control plane runs:
 
-- root/main Oreslang execution;
 - supervisor lifecycle and failure policy;
 - one logical `ActorMailman` per `ActorGroup`;
 - bounded VM maintenance such as generation reclamation.
 
+Root/main and ordinary async application work runs on ROOT_TASK, not CONTROL.
 Running on a CONTROL carrier does not itself grant supervisor authority.
 
 User mailman callbacks receive only `ActorGroupContext`, currently exposing
@@ -88,10 +115,12 @@ Graal isolate.
 OS process
 └── PRIMARY_GRAAL_ISOLATE
     ├── OresVM / CONTROL
-    │   ├── main/root
     │   ├── supervisors
     │   ├── ActorGroup mailmen
     │   └── generation reclamation
+    ├── ROOT_TASK
+    │   ├── main/root
+    │   └── ordinary async tasks
     ├── SHARED_ACTOR
     │   └── trusted shared actors
     ├── ISOACTOR
@@ -270,6 +299,7 @@ OresContext
     ↓
 OresVM
     ├── CONTROL
+    ├── ROOT_TASK
     ├── SHARED_ACTOR
     ├── ISOACTOR
     ├── UNTRUSTED_ACTOR

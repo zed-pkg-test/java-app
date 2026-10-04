@@ -18,23 +18,26 @@ import static org.junit.jupiter.api.Assertions.*;
 final class OresVMTest {
 
     @Test
-    void processVmDeclaresExactlyFourSchedulerDomainsWithoutExposingExecutors() {
+    void processVmDeclaresExactlyFiveSchedulerDomainsWithoutExposingExecutors() {
         OresVM vm = OresVM.process();
         OresVM.SchedulerTopology topology = vm.schedulerTopology();
 
         assertEquals(
                 List.of(
                         OresVM.SchedulerDomain.CONTROL,
+                        OresVM.SchedulerDomain.ROOT_TASK,
                         OresVM.SchedulerDomain.SHARED_ACTOR,
                         OresVM.SchedulerDomain.ISOACTOR,
                         OresVM.SchedulerDomain.UNTRUSTED_ACTOR),
                 topology.domains());
 
         assertTrue(topology.controlMinThreads() > 0);
+        assertTrue(topology.rootTaskMinThreads() > 0);
         assertTrue(topology.sharedActorMinThreads() > 0);
         assertTrue(topology.isoactorMinThreads() > 0);
         assertTrue(topology.untrustedActorMinThreads() > 0);
         assertTrue(topology.controlMaxThreads() >= topology.controlMinThreads());
+        assertTrue(topology.rootTaskMaxThreads() >= topology.rootTaskMinThreads());
 
         for (Method method : OresVM.class.getDeclaredMethods()) {
             if (!Modifier.isPublic(method.getModifiers())) continue;
@@ -301,7 +304,7 @@ final class OresVMTest {
     }
 
     @Test
-    void controlPlaneRunsRootAndMailmanOffSharedActorCarriers() throws Exception {
+    void rootTasksControlMailmenAndActorsUseSeparateCarrierDomains() throws Exception {
         ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
                 1,
                 1,
@@ -319,7 +322,7 @@ final class OresVMTest {
                 return null;
             });
             assertNotNull(rootThread.get());
-            assertTrue(rootThread.get().contains("control-plane-dispatcher-"));
+            assertTrue(rootThread.get().contains("root-task-dispatcher-"));
 
             CountDownLatch mailDelivered = new CountDownLatch(1);
             AtomicReference<String> actorThread = new AtomicReference<>();
@@ -363,7 +366,118 @@ final class OresVMTest {
             assertTrue(mailDelivered.await(5, TimeUnit.SECONDS));
             assertTrue(actorThread.get().contains("shared-actor-dispatcher-"));
             assertTrue(mailmanThread.get().contains("control-plane-dispatcher-"));
+            assertNotEquals(rootThread.get(), mailmanThread.get());
+            assertNotEquals(rootThread.get(), actorThread.get());
             assertNotEquals(actorThread.get(), mailmanThread.get());
         }
     }
+    @Test
+    void rootAwaitUnwindsCarrierAndResumesOnlyThroughRootTaskScheduler()
+            throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(2),
+                1,
+                64);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            OresFuture<Integer> pending = new OresFuture<>();
+            CountDownLatch awaitRegistered = new CountDownLatch(1);
+            AtomicReference<String> firstCarrier = new AtomicReference<>();
+            AtomicReference<String> producerThread = new AtomicReference<>();
+            AtomicReference<String> resumedCarrier = new AtomicReference<>();
+
+            Thread producer = Thread.ofPlatform()
+                    .name("test-future-producer")
+                    .start(() -> {
+                        try {
+                            assertTrue(awaitRegistered.await(2, TimeUnit.SECONDS));
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                        producerThread.set(Thread.currentThread().getName());
+                        pending.completeFromRuntime(41);
+                    });
+
+            Integer result = runtime.executeRootTask(() -> {
+                firstCarrier.set(Thread.currentThread().getName());
+                awaitRegistered.countDown();
+                ActorRuntime.suspendCurrentRootOn(
+                        pending,
+                        (value, failure) -> {
+                            assertNull(failure);
+                            resumedCarrier.set(Thread.currentThread().getName());
+                            assertTrue(
+                                    ActorRuntime.isOresCarrierThread(),
+                                    "continuation must run on an Ores carrier");
+                            assertNotEquals(
+                                    producerThread.get(),
+                                    resumedCarrier.get(),
+                                    "Future producer must never execute guest continuation code");
+                            return ((Integer) value) + 1;
+                        });
+                fail("root await lowering must unwind instead of returning inline");
+                return -1;
+            });
+
+            producer.join();
+            assertEquals(42, result);
+            assertTrue(firstCarrier.get().contains("root-task-dispatcher-"));
+            assertTrue(resumedCarrier.get().contains("root-task-dispatcher-"));
+        }
+    }
+
+    @Test
+    void alreadyCompletedRootAwaitStillResumesAfterCarrierStackUnwinds() {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(2),
+                1,
+                64);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            AtomicBoolean unwound = new AtomicBoolean();
+            Integer result = runtime.executeRootTask(() -> {
+                try {
+                    ActorRuntime.suspendCurrentRootOn(
+                            OresFuture.completed(7),
+                            (value, failure) -> {
+                                assertNull(failure);
+                                assertTrue(
+                                        unwound.get(),
+                                        "completed Future must not inline-resume before await unwinds");
+                                return ((Integer) value) * 2;
+                            });
+                    fail("await must not return inline");
+                    return -1;
+                } finally {
+                    unwound.set(true);
+                }
+            });
+
+            assertEquals(14, result);
+        }
+    }
+
+    @Test
+    void blockingFutureObservationIsRejectedOnRootCarrier() {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(2),
+                1,
+                64);
+
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
+            IllegalStateException failure = assertThrows(
+                    IllegalStateException.class,
+                    () -> runtime.executeRootTask(() -> OresFuture.completed(1).join()));
+            assertTrue(failure.getMessage().contains("cannot block an OresVM carrier"));
+        }
+    }
+
+
 }
