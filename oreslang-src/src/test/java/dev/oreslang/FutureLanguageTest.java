@@ -329,4 +329,73 @@ final class FutureLanguageTest {
     }
 
 
+    @Test
+    void compilerKnownAsyncProtocolTypeNamesCannotBeShadowed() {
+        for (String declaration : java.util.List.of(
+                "define class Awaitable end",
+                "define interface Future<T> { fnc nope() => void; }",
+                "type ActorSpawn = int;",
+                "define class ActorRef end")) {
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> TypeChecker.check(Parser.parse(
+                            "define module app\n" + declaration + "\nend\n")));
+            assertTrue(failure.getMessage().contains("compiler/runtime built-in type"));
+        }
+    }
+
+
+    @Test
+    void asyncCallableBoundaryRejectsBorrowedParameters() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        async fnc bad(&int value) => int {
+                          return 1;
+                        }
+                        """)));
+        assertTrue(failure.getMessage().contains("async"));
+        assertTrue(failure.getMessage().contains("borrowed"));
+    }
+
+    @Test
+    void asyncInstanceMethodMovesOwnedReceiverIntoTask() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Worker
+                          pub async run() => int {
+                            return 1;
+                          }
+                        end
+
+                        fnc bad() => void {
+                          val worker = new Worker();
+                          val first = worker.run();
+                          val second = worker.run();
+                          return;
+                        }
+                        """)));
+        assertTrue(failure.getMessage().contains("moved value"));
+    }
+
+    @Test
+    void asyncInstanceMethodRejectsBorrowedSelfReceiver() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Worker
+                          pub async run() => int {
+                            return 1;
+                          }
+
+                          pub start() => Future<int> {
+                            return self.run();
+                          }
+                        end
+                        """)));
+        assertTrue(failure.getMessage().contains("borrowed receiver"));
+    }
+
+
 }

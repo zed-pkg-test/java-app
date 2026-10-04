@@ -28,6 +28,12 @@ import java.util.Set;
 
 /** Static semantic pass run before Oreslang code is lowered/executed. */
 public final class TypeChecker {
+    private static final Set<String> RESERVED_RUNTIME_TYPE_NAMES = Set.of(
+            "Future",
+            "Awaitable",
+            "ActorSpawn",
+            "ActorRef");
+
     private record ResolvedMethod(Ast.ClassDecl owner, Named ownerType, Ast.MethodDecl method) { }
     private record ResolvedField(Ast.ClassDecl owner, Named ownerType, Ast.FieldDecl field) { }
     private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
@@ -85,15 +91,28 @@ public final class TypeChecker {
                     putQualified(functions, ambiguousFunctions, module.name(), fn.name(), fn, fn.kind() == Ast.CallableKind.ROUTINE ? "routine" : "function");
                     functionOwners.put(fn, module.name());
                 } else if (decl instanceof Ast.ClassDecl klass) {
+                    rejectReservedRuntimeTypeName(klass.name(), "class");
                     putQualified(classes, ambiguousClasses, module.name(), klass.name(), klass, "class");
                     classOwners.put(klass, module.name());
                 } else if (decl instanceof Ast.InterfaceDecl iface) {
+                    rejectReservedRuntimeTypeName(iface.name(), "interface");
                     putQualified(interfaces, ambiguousInterfaces, module.name(), iface.name(), iface, "interface");
                     interfaceOwners.put(iface, module.name());
                 } else if (decl instanceof Ast.TypeAliasDecl alias) {
+                    rejectReservedRuntimeTypeName(alias.name(), "type alias");
                     putQualified(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias, "type alias");
                 }
             }
+        }
+    }
+
+    private static void rejectReservedRuntimeTypeName(
+            String name,
+            String declarationKind) {
+        if (RESERVED_RUNTIME_TYPE_NAMES.contains(name)) {
+            throw new IllegalArgumentException(
+                    declarationKind + " '" + name
+                            + "' conflicts with a compiler/runtime built-in type");
         }
     }
 

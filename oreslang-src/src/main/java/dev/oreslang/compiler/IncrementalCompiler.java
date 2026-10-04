@@ -122,7 +122,7 @@ public final class IncrementalCompiler {
     }
 
     private static String abiDigest(Ast.Program program) {
-        StringBuilder abi = new StringBuilder("ores-abi-v1\n");
+        StringBuilder abi = new StringBuilder("ores-abi-v2\n");
         abi.append("namespace=").append(program.namespace() == null ? "" : program.namespace()).append('\n');
 
         for (Ast.ModuleDecl module : program.modules()) {
@@ -142,7 +142,9 @@ public final class IncrementalCompiler {
     private static void appendAbi(StringBuilder abi, Ast.Decl decl) {
         if (decl instanceof Ast.FunctionDecl fn) {
             if (fn.visibility() != Ast.Visibility.PUBLIC) return;
-            abi.append(fn.actorKind()).append(' ').append(fn.kind()).append(" pub ").append(fn.name());
+            abi.append(fn.actorKind()).append(' ').append(fn.kind());
+            if (fn.async()) abi.append(" async");
+            abi.append(" pub ").append(fn.name());
             appendGenerics(abi, fn.genericParameters());
             appendParams(abi, fn.parameters());
             abi.append("=>").append(typeRef(fn.returnType())).append('\n');
@@ -164,8 +166,9 @@ public final class IncrementalCompiler {
             }
             for (Ast.MethodDecl method : klass.methods()) {
                 if (method.visibility() != Ast.Visibility.PUBLIC) continue;
-                abi.append(method.isStatic() ? " static-fnc " : " method ")
-                        .append(method.name());
+                abi.append(method.isStatic() ? " static-fnc " : " method ");
+                if (method.async()) abi.append("async ");
+                abi.append(method.name());
                 appendGenerics(abi, method.genericParameters());
                 appendParams(abi, method.parameters());
                 abi.append("=>").append(typeRef(method.returnType())).append('\n');

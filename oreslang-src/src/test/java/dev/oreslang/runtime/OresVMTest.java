@@ -2,6 +2,7 @@ package dev.oreslang.runtime;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.Duration;
@@ -525,6 +526,150 @@ final class OresVMTest {
                 assertEquals(100 + i, results.get(i).get(2, TimeUnit.SECONDS));
             }
         }
+    }
+
+
+    @Test
+    void runtimeFutureWaiterRegistrationCanDetachBeforeSettlement() {
+        OresFuture<Integer> future = new OresFuture<>();
+        AtomicInteger callbacks = new AtomicInteger();
+
+        OresFuture.RuntimeWaiterRegistration registration =
+                future.whenCompleteRuntime((value, failure) -> callbacks.incrementAndGet());
+
+        assertTrue(registration.cancel());
+        assertFalse(registration.cancel());
+        assertTrue(future.completeFromRuntime(1));
+        assertEquals(0, callbacks.get());
+    }
+
+    @Test
+    void cancellationRacingRootSuspensionCannotResurrectContinuation() throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(2),
+                0,
+                32);
+
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config);
+        try {
+            OresFuture<Integer> awaited = new OresFuture<>();
+            CountDownLatch entered = new CountDownLatch(1);
+            CountDownLatch unwound = new CountDownLatch(1);
+            CountDownLatch resumed = new CountDownLatch(1);
+            AtomicBoolean allowSuspend = new AtomicBoolean();
+
+            OresFuture<Integer> task = runtime.submitAsyncRootTask(() -> {
+                entered.countDown();
+                while (!allowSuspend.get()) Thread.onSpinWait();
+                try {
+                    ActorRuntime.suspendCurrentRootOn(
+                            awaited,
+                            (value, failure) -> {
+                                resumed.countDown();
+                                return 99;
+                            });
+                    fail("suspend must unwind the root carrier");
+                    return -1;
+                } finally {
+                    unwound.countDown();
+                }
+            });
+
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertTrue(task.cancel(true));
+            allowSuspend.set(true);
+            assertTrue(unwound.await(2, TimeUnit.SECONDS));
+
+            awaited.completeFromRuntime(1);
+            assertFalse(
+                    resumed.await(100, TimeUnit.MILLISECONDS),
+                    "a canceled logical task must never be resurrected by its old await waiter");
+            assertTrue(task.isCancelled());
+
+            // Close also proves activeRootTasks/rootSlots were not stranded by
+            // the cancellation-vs-suspension publication race.
+            runtime.close();
+        } finally {
+            runtime.close();
+        }
+    }
+
+    @Test
+    void stoppedSuspendedActorDetachesItsFutureWaiter() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            OresFuture<Integer> awaited = new OresFuture<>();
+            CountDownLatch suspended = new CountDownLatch(1);
+            CountDownLatch resumed = new CountDownLatch(1);
+
+            ActorRuntime.ActorRef<String> ref = runtime.spawnPrivateTrusted(
+                    ignored -> (message, context) -> {
+                        try {
+                            context.suspendOn(
+                                    awaited,
+                                    (value, failure, resumedContext) -> resumed.countDown());
+                        } finally {
+                            suspended.countDown();
+                        }
+                    });
+
+            ref.send("wait");
+            assertTrue(suspended.await(2, TimeUnit.SECONDS));
+            ref.stop();
+            assertTrue(ref.done().get(2, TimeUnit.SECONDS));
+
+            awaited.completeFromRuntime(1);
+            assertFalse(
+                    resumed.await(100, TimeUnit.MILLISECONDS),
+                    "a finalized actor must not remain reachable through an old Future waiter");
+        }
+    }
+
+
+    @Test
+    void timedFutureGetDoesNotRetainHostWaiterAfterTimeout() throws Exception {
+        OresFuture<Integer> future = new OresFuture<>();
+
+        assertThrows(
+                java.util.concurrent.TimeoutException.class,
+                () -> future.get(1, TimeUnit.MILLISECONDS));
+
+        Field waitersField = OresFuture.class.getDeclaredField("waiters");
+        waitersField.setAccessible(true);
+        java.util.Queue<?> waiters =
+                (java.util.Queue<?>) waitersField.get(future);
+        assertTrue(
+                waiters.isEmpty(),
+                "timed-out host observation must detach its Future waiter");
+    }
+
+
+    @Test
+    void terminalFutureReleasesCancellationAuthority() throws Exception {
+        AtomicInteger cancellations = new AtomicInteger();
+        OresFuture<Integer> cancelled =
+                new OresFuture<>(cancellations::incrementAndGet);
+
+        assertTrue(cancelled.cancel(true));
+        assertFalse(cancelled.cancel(true));
+        assertEquals(1, cancellations.get());
+
+        OresFuture<Integer> completed =
+                new OresFuture<>(() -> fail("completed Future must not invoke cancel hook"));
+        assertTrue(completed.completeFromRuntime(7));
+
+        Field cancelHookField = OresFuture.class.getDeclaredField("cancelHook");
+        cancelHookField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        AtomicReference<Runnable> cancelledHook =
+                (AtomicReference<Runnable>) cancelHookField.get(cancelled);
+        @SuppressWarnings("unchecked")
+        AtomicReference<Runnable> completedHook =
+                (AtomicReference<Runnable>) cancelHookField.get(completed);
+
+        assertNull(cancelledHook.get());
+        assertNull(completedHook.get());
     }
 
 

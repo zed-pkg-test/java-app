@@ -77,6 +77,9 @@ public final class OwnershipChecker {
     }
 
     private void checkFunction(Ast.FunctionDecl fn) {
+        if (fn.async()) {
+            validateAsyncParameters(fn.parameters(), "async " + fn.kind().name().toLowerCase() + " " + fn.name());
+        }
         Scope scope = new Scope(null, fn.nonLexical());
         for (Ast.Param param : fn.parameters()) {
             scope.define(param.name(), stateForParam(param));
@@ -87,6 +90,12 @@ public final class OwnershipChecker {
 
     private void checkClass(Ast.ClassDecl klass) {
         for (Ast.MethodDecl method : klass.methods()) {
+            if (method.async()) {
+                validateAsyncParameters(
+                        method.parameters(),
+                        "async " + (method.isStatic() ? "static function " : "method ")
+                                + klass.name() + "." + method.name());
+            }
             Scope scope = new Scope(null);
             if (!method.isStatic()) {
                 if (klass.actorKind() != Ast.ActorKind.NONE) {
@@ -375,7 +384,7 @@ public final class OwnershipChecker {
                     }
                 }
             }
-            checkExpr(member.receiver(), scope, false);
+            ValueInfo receiverInfo = checkExpr(member.receiver(), scope, false);
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
             if (concreteReceiver != null && concreteReceiver.name().equals("ActorSpawn")) {
                 return switch (member.member()) {
@@ -527,7 +536,8 @@ public final class OwnershipChecker {
                         fn.genericParameters(), fn.genericParameters(),
                         fn.parameters(), fn.returnType(), call, scope, Map.of());
                 checkArguments(call.arguments(), signature.parameters(), scope, "function " + fn.name());
-                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                Ast.TypeRef result = asyncResultType(fn.async(), signature.result());
+                return new ValueInfo(result, kindOfType(result), null);
             }
         }
 
@@ -543,7 +553,8 @@ public final class OwnershipChecker {
                         signature.parameters(),
                         scope,
                         "function " + namespace.name() + "." + qualified.member());
-                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                Ast.TypeRef result = asyncResultType(fn.async(), signature.result());
+                return new ValueInfo(result, kindOfType(result), null);
             }
         }
 
@@ -569,7 +580,9 @@ public final class OwnershipChecker {
                             signature.parameters(),
                             scope,
                             "static function " + staticClass.name() + "." + staticFunction.name());
-                    return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                    Ast.TypeRef result =
+                            asyncResultType(staticFunction.async(), signature.result());
+                    return new ValueInfo(result, kindOfType(result), null);
                 }
             }
 
@@ -650,12 +663,20 @@ public final class OwnershipChecker {
                         allGenerics, method.genericParameters(),
                         method.parameters(), method.returnType(), call, scope, ownerBindings);
                 checkArguments(call.arguments(), signature.parameters(), scope, "method " + method.name());
+                if (method.async()) {
+                    consumeAsyncReceiver(
+                            member.receiver(),
+                            receiverInfo,
+                            scope,
+                            target.owner().name() + "." + method.name());
+                }
                 if (protectedReceiver && !isCopyType(signature.result())
                         && !signature.result().name().equals("void")) {
                     throw error("method '" + target.owner().name() + "." + method.name()
                             + "' cannot return move-only state through a mutex guard/critical-section borrow");
                 }
-                return new ValueInfo(signature.result(), kindOfType(signature.result()), null);
+                Ast.TypeRef result = asyncResultType(method.async(), signature.result());
+                return new ValueInfo(result, kindOfType(result), null);
             }
         }
 
@@ -720,6 +741,54 @@ public final class OwnershipChecker {
             return new ValueInfo(receiverType, kindOfType(receiverType), null);
         }
         return new ValueInfo(okType, kindOfType(okType), null);
+    }
+
+    private void validateAsyncParameters(
+            List<Ast.Param> params,
+            String callable) {
+        for (Ast.Param param : params) {
+            if (param.type().isBorrow() || param.structural()) {
+                throw error(callable + " parameter '" + param.name()
+                        + "' cannot be borrowed/structural-by-reference; async tasks may outlive the caller stack");
+            }
+        }
+    }
+
+    private Ast.TypeRef asyncResultType(boolean async, Ast.TypeRef result) {
+        return async
+                ? new Ast.TypeRef("Future", List.of(result), false)
+                : result;
+    }
+
+    private void consumeAsyncReceiver(
+            Ast.Expr receiver,
+            ValueInfo receiverInfo,
+            Scope scope,
+            String callable) {
+        if (receiverInfo.kind == ValueKind.IMM_BORROW
+                || receiverInfo.kind == ValueKind.MUT_BORROW
+                || (receiverInfo.type != null && receiverInfo.type.isBorrow())) {
+            throw error("async method '" + callable
+                    + "' cannot escape a borrowed receiver across a scheduler boundary");
+        }
+
+        if (receiver instanceof Ast.NameExpr name) {
+            VarState state = scope.lookup(name.name());
+            if (state == null) return;
+            requireUsable(state, name.name(), false);
+            if (state.kind == ValueKind.MOVE_ONLY) {
+                move(state, name.name());
+            }
+            return;
+        }
+
+        if (receiver instanceof Ast.MemberExpr || receiver instanceof Ast.IndexExpr) {
+            throw error("async method '" + callable
+                    + "' cannot implicitly move a projected receiver; bind/take it into an owned local first");
+        }
+
+        // New/call/await temporaries already have no reusable owner in this
+        // scope. Their producing expressions were ownership-checked above.
     }
 
     private void checkArguments(List<Ast.Expr> arguments, List<Ast.Param> params, Scope scope, String callable) {

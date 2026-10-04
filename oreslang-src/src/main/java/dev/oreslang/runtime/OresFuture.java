@@ -36,6 +36,10 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
     private record Failure(Throwable failure) { }
     private record Cancelled(CancellationException failure) { }
 
+    interface RuntimeWaiterRegistration {
+        boolean cancel();
+    }
+
     private static final class Waiter<T> {
         private final BiConsumer<? super T, ? super Throwable> callback;
         private final AtomicBoolean claimed = new AtomicBoolean();
@@ -45,7 +49,7 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
         }
     }
 
-    private final Runnable cancelHook;
+    private final AtomicReference<Runnable> cancelHook;
     private final AtomicBoolean cancelHookRun = new AtomicBoolean();
     private final AtomicReference<Object> state = new AtomicReference<>(PENDING);
     private final ConcurrentLinkedQueue<Waiter<T>> waiters = new ConcurrentLinkedQueue<>();
@@ -55,7 +59,8 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
     }
 
     OresFuture(Runnable cancelHook) {
-        this.cancelHook = Objects.requireNonNull(cancelHook, "cancelHook");
+        this.cancelHook = new AtomicReference<>(
+                Objects.requireNonNull(cancelHook, "cancelHook"));
     }
 
     public static <T> OresFuture<T> completed(T value) {
@@ -119,14 +124,15 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
      * Futures used as reactive sources, where many subscriptions may observe the
      * same already-completed producer.</p>
      */
-    void whenCompleteRuntime(BiConsumer<? super T, ? super Throwable> callback) {
+    RuntimeWaiterRegistration whenCompleteRuntime(
+            BiConsumer<? super T, ? super Throwable> callback) {
         Objects.requireNonNull(callback, "callback");
         Waiter<T> waiter = new Waiter<>(callback);
 
         Object observed = state.get();
         if (observed != PENDING) {
             notifyWaiter(waiter, observed);
-            return;
+            return () -> false;
         }
 
         waiters.add(waiter);
@@ -139,6 +145,8 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
             waiters.remove(waiter);
             notifyWaiter(waiter, observed);
         }
+
+        return () -> cancelRuntimeWaiter(waiter);
     }
 
     @Override
@@ -150,11 +158,12 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
     public boolean cancel(boolean mayInterruptIfRunning) {
         CancellationException cancelled =
                 new CancellationException("OresFuture was cancelled");
+        Runnable hook = cancelHook.get();
         if (!settle(new Cancelled(cancelled))) return false;
 
-        if (cancelHookRun.compareAndSet(false, true)) {
+        if (hook != null && cancelHookRun.compareAndSet(false, true)) {
             try {
-                cancelHook.run();
+                hook.run();
             } catch (RuntimeException | Error ignored) {
                 // Cancellation state is already authoritative. A host
                 // cancellation hook cannot roll it back or poison waiter
@@ -245,6 +254,11 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
     private boolean settle(Object terminal) {
         if (!state.compareAndSet(PENDING, terminal)) return false;
 
+        // No terminal Future retains producer/task cancellation authority.
+        // public cancel() snapshots the hook before settlement when it is the
+        // winning terminal transition.
+        cancelHook.set(null);
+
         Waiter<T> waiter;
         while ((waiter = waiters.poll()) != null) {
             notifyWaiter(waiter, terminal);
@@ -285,14 +299,22 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
         if (observed != PENDING) return observed;
 
         java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
-        whenCompleteRuntime((value, failure) -> done.countDown());
+        RuntimeWaiterRegistration registration =
+                whenCompleteRuntime((value, failure) -> done.countDown());
 
-        if (unit == null) {
-            done.await();
-        } else if (!done.await(timeout, unit)) {
-            return state.get() == PENDING ? PENDING : state.get();
+        try {
+            if (unit == null) {
+                done.await();
+            } else if (!done.await(timeout, unit)) {
+                return state.get();
+            }
+            return state.get();
+        } finally {
+            // Timed-out and interrupted host observers must not remain rooted
+            // in a Future that may never settle. If completion already claimed
+            // the waiter, cancel() is a harmless no-op.
+            registration.cancel();
         }
-        return state.get();
     }
 
     @SuppressWarnings("unchecked")
