@@ -129,7 +129,10 @@ final class RoutineAndLoopTest {
                 }
 
                 fnc main(): void {
-                  val branded = obj{markerBrand: "marking/branding"};
+                  struct Branded {
+                    markerBrand: 'marking/branding'
+                  }
+                  val Branded branded = Branded{markerBrand: "marking/branding"};
                   stdio.println(structural(branded));
                   return;
                 }
@@ -145,7 +148,10 @@ final class RoutineAndLoopTest {
                 }
 
                 fnc main(): void {
-                  val branded = obj{markerBrand: "marking/branding"};
+                  struct Branded {
+                    markerBrand: 'marking/branding'
+                  }
+                  val Branded branded = Branded{markerBrand: "marking/branding"};
                   stdio.println(nominal(branded));
                   return;
                 }
