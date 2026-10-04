@@ -109,14 +109,30 @@ public final class OresFuture<T> implements Future<T> {
      * <p>Callbacks registered here must be scheduler plumbing only: transition a
      * dependent Future, enqueue a continuation, or release runtime accounting.
      * They must never execute Oreslang guest code directly.</p>
+     *
+     * <p>Registration is race-safe against completion and does not retain
+     * already-delivered waiters on a terminal Future. That matters for shared
+     * Futures used as reactive sources, where many subscriptions may observe the
+     * same already-completed producer.</p>
      */
     void whenCompleteRuntime(BiConsumer<? super T, ? super Throwable> callback) {
         Objects.requireNonNull(callback, "callback");
         Waiter<T> waiter = new Waiter<>(callback);
-        waiters.add(waiter);
 
         Object observed = state.get();
         if (observed != PENDING) {
+            notifyWaiter(waiter, observed);
+            return;
+        }
+
+        waiters.add(waiter);
+
+        observed = state.get();
+        if (observed != PENDING) {
+            // Completion may have raced either before or after queue insertion.
+            // Remove our queue node when it is still present; claimed prevents
+            // duplicate delivery if the settling thread already polled it.
+            waiters.remove(waiter);
             notifyWaiter(waiter, observed);
         }
     }

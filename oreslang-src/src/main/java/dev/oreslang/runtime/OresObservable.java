@@ -31,12 +31,24 @@ import java.util.function.Function;
  */
 public abstract class OresObservable<T> {
 
-    public abstract OresSubscription<T> subscribe();
+    /**
+     * Create one independent subscription.
+     *
+     * <p>The public entrypoint is final so runtime sources cannot bypass the
+     * non-null subscription invariant.</p>
+     */
+    public final OresSubscription<T> subscribe() {
+        return Objects.requireNonNull(
+                subscribeFromRuntime(),
+                "subscribeFromRuntime returned null Subscription");
+    }
+
+    protected abstract OresSubscription<T> subscribeFromRuntime();
 
     public static <T> OresObservable<T> empty() {
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 return new OresSubscription<>() {
                     @Override
                     protected OresFuture<OresNotification<T>> nextFromRuntime() {
@@ -62,7 +74,7 @@ public abstract class OresObservable<T> {
 
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 return new OresSubscription<>() {
                     private int index;
 
@@ -92,7 +104,7 @@ public abstract class OresObservable<T> {
 
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 return new OresSubscription<>() {
                     private boolean emitted;
 
@@ -126,7 +138,7 @@ public abstract class OresObservable<T> {
         OresObservable<T> upstream = this;
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 OresSubscription<T> inner = upstream.subscribe();
 
                 return new OresSubscription<>() {
