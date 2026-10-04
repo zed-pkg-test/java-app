@@ -149,7 +149,7 @@ public final class ActorRuntime implements AutoCloseable {
         return CURRENT_MAILMAN_RUNTIME.get() != null;
     }
 
-    public static ActorRuntime currentRootRuntime() {
+    static ActorRuntime currentRootRuntime() {
         return CURRENT_ROOT_RUNTIME.get();
     }
 
@@ -163,7 +163,7 @@ public final class ActorRuntime implements AutoCloseable {
         return current == null ? null : current.policy();
     }
 
-    public static ActorRuntime currentActorRuntime() {
+    static ActorRuntime currentActorRuntime() {
         ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
         return current == null ? null : current.runtime();
     }
