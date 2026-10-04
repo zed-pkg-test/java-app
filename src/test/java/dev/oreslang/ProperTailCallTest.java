@@ -119,6 +119,54 @@ final class ProperTailCallTest {
     }
 
     @Test
+    void cleanupAndExceptionHandlersRemainTailCallBarriers() throws Exception {
+        String output = run("""
+                fnc leaf(): int {
+                  stdio.stdout.write("L");
+                  return 7;
+                }
+
+                fnc with_defer(): int {
+                  defer stdio.stdout.write("D");
+                  return leaf();
+                }
+
+                fnc with_finally(): int {
+                  try {
+                    return leaf();
+                  } catch (err) {
+                    return -1;
+                  } finally {
+                    stdio.stdout.write("F");
+                  }
+                }
+
+                fnc divide_by_zero(): int {
+                  return 1 / 0;
+                }
+
+                fnc with_catch(): int {
+                  try {
+                    return divide_by_zero();
+                  } catch (err) {
+                    return 42;
+                  }
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(with_defer());
+                  stdio.stdout.write("|");
+                  stdio.stdout.write(with_finally());
+                  stdio.stdout.write("|");
+                  stdio.stdout.write(with_catch());
+                  return;
+                }
+                """);
+
+        assertEquals("LD7|LF7|42", output);
+    }
+
+    @Test
     void conditionalTailPositionAlsoUsesTheTrampoline() throws Exception {
         String output = run("""
                 fnc down(int n): int {

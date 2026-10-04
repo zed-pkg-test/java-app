@@ -548,13 +548,19 @@ Qualified names such as `x.y` retain their module namespace.
 
 ## `fnc` versus `routine`
 
-`fnc` and `routine` may both recurse. Recursion and tail-call optimization are not what distinguishes them: tail-position calls in `fnc`, `routine`, and lambda bodies are subject to the same lowering/optimization rules. v0.3 does **not** yet promise that every eligible tail call executes in constant stack space; that guarantee must be implemented identically for AOT and JIT rather than depending on host-JIT luck.
+`fnc` and `routine` may both recurse. Recursion and tail-call optimization are not what distinguishes them. Eligible calls in tail position in `fnc`, `routine`, instance methods, `static fnc`, and lambda bodies are lowered as **proper tail calls**: they do not grow the Oreslang/host call stack. This is a runtime guarantee shared by JIT, Native Image AOT, and hybrid execution; it does not depend on the host JIT discovering recursive-call optimization.
+
+A tail call is eligible only when the current activation has no semantic work that must remain live after the call. Active `defer`/catch/finally cleanup and live mutex guards are tail-call barriers; in those cases the call executes normally so cleanup and return validation remain correct. Conditional return arms inherit tail position, so `return cond ? f() : g();` may tail-transfer through the selected arm.
+
+The runtime resolves the target and arguments before releasing the caller, then transfers through an iterative trampoline. Every 64 tail transfers it executes a scheduler safepoint so a long recursive chain cannot bypass OresVM scheduling/fairness. Reified Oreslang `fnc`/lambda values are tail-transferable while they remain in the evaluator/code unit that established their static contract; arbitrary host/interop callables complete before the caller is released.
+
+A linked call that crosses into another source code unit through an import whose signature is currently represented as `Unknown` is also a tail-call barrier. The caller remains live until that imported call returns so its declared runtime return-shape check cannot be skipped. Once execution is inside the imported unit, its own same-unit tail-call chain still uses the trampoline. Cross-unit proper-tail transfer can be re-enabled when the linker carries typed imported ABI contracts rather than `Unknown`.
 
 The distinction is **reifiability**:
 
 - a named `fnc` is a first-class callable value. It may be stored in a `Fnc<...>` binding, passed as a callback, or returned when its type matches;
 - a `routine` is direct-call-only. `run_app()` is valid, but evaluating `run_app` as a value is a compile-time error;
-- an instance/actor method is likewise direct-call-only. `worker.process(x)` is valid, but `worker.process` is not a bound-method value;
+- an instance/actor method is likewise direct-call-only. This also applies when the receiver is typed through a nominal interface or an `@Structural` contract: `worker.process(x)` is valid, but `worker.process` is not a bound-method value;
 - `static fnc` and lambdas are reifiable first-class callables.
 
 When a callback must invoke a routine or instance method, make the closure explicit:
