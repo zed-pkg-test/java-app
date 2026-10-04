@@ -1,0 +1,30 @@
+name: Oreslang guest AOT probe
+on:
+  push:
+    branches:
+      - "feat/oreslang-mirror-pr180-*"
+permissions:
+  contents: read
+jobs:
+  guest-aot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: oreslang-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Provenance
+        run: |
+          test -s SOURCE_HEAD.txt
+          printf 'source-head: '; cat SOURCE_HEAD.txt
+          java --version
+      - name: Force no-warmup guest compilation
+        run: mvn -B -ntp -Dtest=dev.oreslang.GuestAotPreparationTest test
