@@ -405,6 +405,11 @@ public final class OwnershipChecker {
                     }
                     return new ValueInfo(fieldType, fieldKind, null);
                 }
+                if (hasMethodNamed(klass, member.member(), new LinkedHashSet<>())
+                        && isRootedAtActorSelf(member.receiver(), scope)) {
+                    throw error("actor self method '" + klass.name() + "." + member.member()
+                            + "' cannot escape its mailbox turn as a bound method; invoke it directly inside the turn");
+                }
             }
             return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
         }

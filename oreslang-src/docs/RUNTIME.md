@@ -53,7 +53,13 @@ The strict production direction is:
 
 ## Receiver implementation
 
-Method code is stored once per class declaration. Direct calls dispatch to that definition with the receiver as an implicit immutable argument. Only first-class method extraction allocates a bound method pair. This provides Go-like receiver safety without allocating a closure for every instance or every direct method invocation.
+Method code is stored once per class declaration. Object instances store state/layout data, not private copies of their methods.
+
+A direct instance call dispatches through the statically known `(INSTANCE, name, arity)` selector and supplies the object as an implicit first argument. It does not create a bound callable.
+
+First-class extraction such as `obj.method` is represented semantically as a compact bound-method pair containing receiver identity plus shared method identity/slot information. The current reference evaluator keeps the receiver and method-name family and selects the closed-world slot from callback arity; AOT may resolve that to a receiver pointer plus code/vtable slot. A non-escaping value may be stack/register allocated or optimized away, so the language does not require a heap allocation merely because method-value syntax was used.
+
+The receiver is fixed when the method value is formed. Invocation never dynamically rebinds `self`.
 
 
 ## Truffle thread boundary

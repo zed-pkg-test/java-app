@@ -332,6 +332,24 @@ final class OwnershipAndClosureTest {
         assertTrue(error.getMessage().contains("use of moved value 'box'"));
     }
 
+    @Test
+    void actorSelfBoundMethodCannotEscapeMailboxTurn() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        actor Worker {
+                          private helper() => int {
+                            return 7;
+                          }
+
+                          private leak() => (() -> int) {
+                            return self.helper;
+                          }
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("cannot escape its mailbox turn as a bound method"));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "ownership.ores")

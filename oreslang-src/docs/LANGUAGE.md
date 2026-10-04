@@ -819,21 +819,45 @@ Without one of those explicit structural opt-ins, passing that object to a nomin
 
 `self` is injected by the compiler/runtime as an immutable receiver binding. It cannot be declared as a local parameter name or reassigned.
 
+Instance method code belongs to the class declaration, not to individual objects. Creating one million `Box` values does not create one million copies of `Box.get`.
+
 Direct method calls do not create per-instance closures:
 
 ```ores
 box.get();
 ```
 
-The runtime resolves the shared class method definition and passes the receiver as the hidden first argument.
+The compiler/runtime resolves the shared class method slot and passes `box` as a hidden first argument. The hidden receiver is not part of the source-visible arity used for overload selection.
 
-When a method is extracted as a first-class value:
+Methods may also be used as first-class callbacks:
 
 ```ores
-val Fnc<int> callback = box.get;
+val (() -> int) callback = box.get;
+doWork(self.get);
 ```
 
-Oreslang creates a small bound-method value containing only the receiver plus method identity. The underlying method definition remains shared by every instance. Calling `callback()` always uses the original `box`; there is no JavaScript-style dynamic `this` rebinding.
+A method value is a small bound-method/fat-pointer value: receiver identity plus shared method identity/slot information. It never contains a copied method body. Calling `callback()` always uses the receiver captured at extraction time; there is no JavaScript-style dynamic `this` rebinding.
+
+Direct calls allocate no bound-method carrier. First-class extraction logically materializes the receiver+slot pair; an AOT or JIT backend may keep a non-escaping pair in registers/on the stack or eliminate it entirely, while an escaping callback may require a small heap object.
+
+If a method name is overloaded by arity, an expected function type may select the slot:
+
+```ores
+fnc doWork((() -> int) callback) => int {
+  return callback();
+}
+
+define class Box as
+  pub get() => int { return 1; }
+  pub get(int fallback) => int { return fallback; }
+
+  pub run() => int {
+    return doWork(self.get); // selects get/0
+  }
+end
+```
+
+An untyped overloaded extraction such as `val callback = box.get;` is rejected because no arity is available to identify the closed-world method slot. Generic method values remain direct-call-only until Oreslang has an explicit specialization syntax for them.
 
 
 ## Incremental compilation and code units
