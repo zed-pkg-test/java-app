@@ -3343,7 +3343,8 @@ public final class ActorRuntime implements AutoCloseable {
         IsolatePolicy effectivePolicy = kind.memoryIsolated()
                 ? policy.withoutCapabilities(
                         IsolatePolicy.Capability.SHARED_MEMORY,
-                        IsolatePolicy.Capability.ACTOR_SHARE_READONLY)
+                        IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
+                        IsolatePolicy.Capability.GC_CONTROL)
                 : policy;
         if (kind == ActorKind.UNTRUSTED) {
             effectivePolicy = restrictUntrustedPolicy(effectivePolicy, untrustedLimits);
@@ -3594,6 +3595,7 @@ public final class ActorRuntime implements AutoCloseable {
                 IsolatePolicy.Capability.PROCESS_INFO,
                 IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
                 IsolatePolicy.Capability.SHARED_MEMORY,
+                IsolatePolicy.Capability.GC_CONTROL,
                 IsolatePolicy.Capability.NETWORK,
                 IsolatePolicy.Capability.FILESYSTEM_READ,
                 IsolatePolicy.Capability.FILESYSTEM_WRITE,
