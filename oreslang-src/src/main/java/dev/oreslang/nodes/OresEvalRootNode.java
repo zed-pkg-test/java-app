@@ -318,6 +318,15 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.LambdaExpr lambda,
                 Env captured,
                 List<Object> args) {
+            return startAsyncLambdaOn(asyncScheduler(), lambda, captured, args);
+        }
+
+        private OresFuture<Object> startAsyncLambdaOn(
+                OresScheduler scheduler,
+                Ast.LambdaExpr lambda,
+                Env captured,
+                List<Object> args) {
+            Objects.requireNonNull(scheduler, "scheduler");
             if (args.size() != lambda.parameters().size()) {
                 throw new IllegalArgumentException("lambda arity mismatch");
             }
@@ -332,7 +341,65 @@ public final class OresEvalRootNode extends RootNode {
             AsyncPlan body = asyncBlock(lambda.blockBody(), base);
             AsyncPlan completed = asyncFlatMap(body, flow ->
                     asyncPure(flow instanceof AsyncReturn returned ? returned.value() : null));
-            return asyncScheduler().start(new AsyncPlanTask(completed));
+            return scheduler.start(new AsyncPlanTask(completed));
+        }
+
+        private final class AsyncLambdaValue implements Invokable {
+            private final Ast.LambdaExpr lambda;
+            private final Env captured;
+
+            private AsyncLambdaValue(Ast.LambdaExpr lambda, Env captured) {
+                this.lambda = Objects.requireNonNull(lambda, "lambda");
+                this.captured = captured;
+            }
+
+            @Override
+            public Object call(List<Object> args) {
+                return startAsyncLambda(lambda, captured, args);
+            }
+
+            private OresFuture<Object> startOn(
+                    OresScheduler scheduler,
+                    List<Object> args) {
+                return startAsyncLambdaOn(scheduler, lambda, captured, args);
+            }
+        }
+
+        private final class SchedulerFacade {
+            private final OresScheduler scheduler;
+
+            private SchedulerFacade(int parallelism) {
+                this.scheduler = context.createUserScheduler(parallelism);
+            }
+
+            private Object member(String name) {
+                return switch (name) {
+                    case "start" -> (Invokable) args -> {
+                        requireOne(args, "OresScheduler.start");
+                        Object work = args.getFirst();
+                        if (!(work instanceof AsyncLambdaValue asyncLambda)) {
+                            throw new IllegalArgumentException(
+                                    "OresScheduler.start currently requires an async zero-argument lambda");
+                        }
+                        return asyncLambda.startOn(scheduler, List.of());
+                    };
+                    case "parallelism" -> (Invokable) args -> {
+                        requireZero(args, "OresScheduler.parallelism");
+                        return (long) scheduler.parallelism();
+                    };
+                    case "is_closed" -> (Invokable) args -> {
+                        requireZero(args, "OresScheduler.is_closed");
+                        return scheduler.isClosed();
+                    };
+                    case "close" -> (Invokable) args -> {
+                        requireZero(args, "OresScheduler.close");
+                        context.closeUserScheduler(scheduler);
+                        return null;
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown OresScheduler member " + name);
+                };
+            }
         }
 
         private sealed interface AsyncPlan
@@ -956,6 +1023,15 @@ public final class OresEvalRootNode extends RootNode {
                 return asyncFlatMap(
                         asyncEvalArguments(created.arguments(), 0, env, new ArrayList<>()),
                         args -> safePlan(() -> {
+                            if (created.type().name().equals("OresScheduler")) {
+                                if (args.size() != 1 || !(args.getFirst() instanceof Number number)) {
+                                    throw new IllegalArgumentException(
+                                            "new OresScheduler(...) expects exactly one integer parallelism");
+                                }
+                                return asyncPure(new SchedulerFacade(
+                                        Math.toIntExact(number.longValue())));
+                            }
+
                             Ast.ClassDecl klass = findClass(created.type().name());
                             Evaluator owner = this;
                             if (klass == null) {
@@ -1540,6 +1616,19 @@ public final class OresEvalRootNode extends RootNode {
                 throw new IllegalArgumentException("value is not indexable: " + receiver);
             }
             if (expr instanceof Ast.NewExpr created) {
+                if (created.type().name().equals("OresScheduler")) {
+                    if (created.arguments().size() != 1) {
+                        throw new IllegalArgumentException(
+                                "new OresScheduler(...) expects exactly one integer parallelism");
+                    }
+                    Object value = eval(created.arguments().getFirst(), env);
+                    if (!(value instanceof Number number)) {
+                        throw new IllegalArgumentException(
+                                "OresScheduler parallelism must be an integer");
+                    }
+                    return new SchedulerFacade(Math.toIntExact(number.longValue()));
+                }
+
                 Ast.ClassDecl klass = findClass(created.type().name());
                 Evaluator owner = this;
                 if (klass == null) {
@@ -1617,8 +1706,7 @@ public final class OresEvalRootNode extends RootNode {
                         lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
                 if (lambda.async()) {
-                    return (Invokable) args ->
-                            startAsyncLambda(lambda, captured, args);
+                    return new AsyncLambdaValue(lambda, captured);
                 }
                 return (Invokable) args -> {
                     if (args.size() != lambda.parameters().size()) {
@@ -1678,6 +1766,9 @@ public final class OresEvalRootNode extends RootNode {
                     case "gc" -> (Invokable) actor::gc;
                     default -> throw new IllegalArgumentException("unknown actor member " + name);
                 };
+            }
+            if (receiver instanceof SchedulerFacade scheduler) {
+                return scheduler.member(name);
             }
             if (receiver instanceof FuturesFacade futures) {
                 return switch (name) {
