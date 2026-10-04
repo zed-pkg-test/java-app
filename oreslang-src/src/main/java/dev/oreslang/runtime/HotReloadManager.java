@@ -350,7 +350,17 @@ public final class HotReloadManager implements AutoCloseable {
         closeDetached(reclaim);
     }
 
-    public synchronized int liveGenerations() { return generations.size(); }
+    public synchronized int liveGenerations() {
+        int count = 0;
+        for (Generation generation : generations.values()) {
+            GenerationState state = generation.state();
+            if (state != GenerationState.CLOSED
+                    && state != GenerationState.FAILED) {
+                count++;
+            }
+        }
+        return count;
+    }
 
     public synchronized int liveGenerations(String codeUnitId) {
         int count = 0;
@@ -677,9 +687,15 @@ public final class HotReloadManager implements AutoCloseable {
 
         private void closeContext() {
             if (contextClosed.compareAndSet(false, true)) {
-                state.set(GenerationState.CLOSED);
                 owner.vm.unregisterGenerationBinding(generationBindingToken);
-                context.close(true);
+                try {
+                    context.close(true);
+                } finally {
+                    // Publish CLOSED only after Context.close has returned.
+                    // Ownership-map removal may follow immediately after this,
+                    // but liveGenerations() filters terminal sentinels.
+                    state.set(GenerationState.CLOSED);
+                }
             }
         }
 
