@@ -33,6 +33,7 @@ final class GuestAotPreparationTest {
                 .allowAllAccess(false)
                 .allowExperimentalOptions(true)
                 .option("engine.CompileAOTOnCreate", "true")
+                .option("engine.CompilationFailureAction", "Throw")
                 .out(output)
                 .build()) {
             context.eval(source);
@@ -72,6 +73,7 @@ final class GuestAotPreparationTest {
                 .allowAllAccess(false)
                 .allowExperimentalOptions(true)
                 .option("engine.CompileAOTOnCreate", "true")
+                .option("engine.CompilationFailureAction", "Throw")
                 .out(output)
                 .build()) {
             context.eval(source);
