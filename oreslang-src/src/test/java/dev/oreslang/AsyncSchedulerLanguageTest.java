@@ -3,7 +3,12 @@ package dev.oreslang;
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.TypeChecker;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Source;
 import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -163,4 +168,92 @@ final class AsyncSchedulerLanguageTest {
 
         assertTrue(failure.getMessage().contains("await is only legal"));
     }
+    @Test
+    void sourceCanCreateSchedulerStartAsyncLambdaAndAwaitResult() throws Exception {
+        String program = """
+                pub async routine main() => void {
+                  val scheduler = new OresScheduler(2);
+                  val work = scheduler.start(async || -> {
+                    return 41;
+                  });
+                  val value = await work;
+                  stdio.println(value);
+                  stdio.println(scheduler.parallelism());
+                  scheduler.close();
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse(program)));
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "scheduler-source.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        String rendered = output.toString(StandardCharsets.UTF_8);
+        assertTrue(rendered.contains("41"));
+        assertTrue(rendered.contains("2"));
+    }
+
+    @Test
+    void schedulerStartRequiresInlineAsyncZeroArgumentLambda() {
+        IllegalArgumentException synchronous = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(|| -> {
+                            return;
+                          });
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+        assertTrue(synchronous.getMessage().contains("inline async zero-argument lambda"));
+
+        IllegalArgumentException parameterized = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(async |value| -> {
+                            return value;
+                          });
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+        assertTrue(parameterized.getMessage().contains("zero-argument"));
+    }
+
+    @Test
+    void actorsCannotCreateOrReceiveOrdinarySchedulers() {
+        IllegalArgumentException create = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        actor fnc bad() => void {
+                          val scheduler = new OresScheduler(2);
+                          return;
+                        }
+                        """)));
+        assertTrue(create.getMessage().contains("actors cannot create OresScheduler"));
+
+        IllegalArgumentException receive = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        actor fnc bad(OresScheduler scheduler) => void {
+                          return;
+                        }
+                        """)));
+        assertTrue(receive.getMessage().contains("cannot transport OresScheduler"));
+    }
+
 }
