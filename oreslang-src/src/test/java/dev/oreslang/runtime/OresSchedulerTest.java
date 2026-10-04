@@ -2,6 +2,9 @@ package dev.oreslang.runtime;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -108,6 +111,47 @@ final class OresSchedulerTest {
     }
 
     @Test
+    void runtimeOwnedCompletionPublishesOnlyAfterGuestTurnAdmissionExits() throws Exception {
+        ExecutorService carrier = Executors.newSingleThreadExecutor();
+        AtomicBoolean insideGuestTurn = new AtomicBoolean();
+        CountDownLatch completionObserved = new CountDownLatch(1);
+        AtomicBoolean completionPublishedInsideGuestTurn = new AtomicBoolean();
+
+        try (OresScheduler scheduler = OresScheduler.runtimeOwned(
+                "test-runtime-owned",
+                1,
+                carrier,
+                turn -> {
+                    assertFalse(
+                            insideGuestTurn.get(),
+                            "runtime scheduler guest turns must not nest context admission");
+                    insideGuestTurn.set(true);
+                    try {
+                        turn.run();
+                    } finally {
+                        insideGuestTurn.set(false);
+                    }
+                })) {
+            OresFuture<Integer> result =
+                    scheduler.start(resume -> OresScheduler.done(42));
+
+            result.whenCompleteRuntime((value, failure) -> {
+                completionPublishedInsideGuestTurn.set(insideGuestTurn.get());
+                completionObserved.countDown();
+            });
+
+            assertEquals(42, result.get(5, TimeUnit.SECONDS));
+            assertTrue(completionObserved.await(5, TimeUnit.SECONDS));
+            assertFalse(
+                    completionPublishedInsideGuestTurn.get(),
+                    "terminal Future publication must happen only after guest/context exit");
+        } finally {
+            carrier.shutdownNow();
+            assertTrue(carrier.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void oneFutureMayResumeWaitersOnDifferentSchedulers() throws Exception {
         try (OresScheduler left = new OresScheduler(1);
              OresScheduler right = new OresScheduler(1)) {
@@ -201,6 +245,24 @@ final class OresSchedulerTest {
                     "await/resume must preserve the logical task execution domain");
             assertNotSame(firstDomain.get(), secondTaskDomain.get(),
                     "two tasks on one scheduler must not share mutex/borrow ownership");
+        }
+    }
+
+    @Test
+    void schedulerCannotCloseItselfFromOwnTaskTurn() throws Exception {
+        OresScheduler scheduler = new OresScheduler(1);
+        try {
+            OresFuture<Boolean> result = scheduler.startSync(() -> {
+                IllegalStateException failure =
+                        assertThrows(IllegalStateException.class, scheduler::close);
+                return failure.getMessage().contains("outside/root");
+            });
+
+            assertTrue(result.get(5, TimeUnit.SECONDS));
+            assertFalse(scheduler.isClosed(),
+                    "failed self-close must leave scheduler usable");
+        } finally {
+            scheduler.close();
         }
     }
 
