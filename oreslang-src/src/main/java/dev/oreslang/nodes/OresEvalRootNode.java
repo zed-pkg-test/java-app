@@ -115,7 +115,7 @@ public final class OresEvalRootNode extends RootNode {
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
-        private boolean initialized;
+        private StartupPhase startupPhase = StartupPhase.CREATED;
 
         private Evaluator(Ast.Program program, OresContext context, String codeUnitId) {
             this.program = program;
@@ -240,19 +240,47 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private synchronized void link() {
+            if (startupPhase == StartupPhase.FAILED) {
+                throw new IllegalStateException("cannot relink failed code unit " + codeUnitId);
+            }
             context.registerLinkedCodeUnit(codeUnitId, this);
+            if (startupPhase == StartupPhase.CREATED) startupPhase = StartupPhase.LINKED;
         }
 
         private synchronized Object initialize() {
-            if (initialized) return null;
-            // Mark before invocation so a recursive path cannot run init twice.
-            initialized = true;
-            Ast.FunctionDecl init = functions.get(Parser.ROOT_MODULE + ".init");
-            if (init == null) return null;
-            return callFunction(init, List.of());
+            if (startupPhase == StartupPhase.READY) return null;
+            if (startupPhase == StartupPhase.INITIALIZING) {
+                throw new IllegalStateException("recursive initialization of code unit " + codeUnitId);
+            }
+            if (startupPhase == StartupPhase.FAILED) {
+                throw new IllegalStateException("initialization previously failed for code unit " + codeUnitId);
+            }
+            if (startupPhase == StartupPhase.CREATED) link();
+
+            startupPhase = StartupPhase.INITIALIZING;
+            Object last = null;
+            try {
+                for (Ast.ModuleDecl module : program.modules()) {
+                    for (Ast.Decl decl : module.declarations()) {
+                        if (decl instanceof Ast.FunctionDecl fn && fn.name().equals("init")) {
+                            last = callFunctionBody(fn, List.of());
+                        }
+                    }
+                }
+                startupPhase = StartupPhase.READY;
+                return last;
+            } catch (RuntimeException | Error failure) {
+                startupPhase = StartupPhase.FAILED;
+                throw failure;
+            }
         }
 
         private Object executeMain(Object[] arguments) {
+            if (startupPhase != StartupPhase.READY) {
+                throw new IllegalStateException(
+                        "main cannot run before successful initialization of code unit "
+                                + codeUnitId + "; current phase=" + startupPhase);
+            }
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
@@ -270,6 +298,10 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
+            if (fn.name().equals("init")) {
+                throw new IllegalStateException(
+                        "init is a lifecycle hook and cannot be invoked directly; startup runs it exactly once");
+            }
             List<?> normalized = normalizeFunctionArguments(fn, args);
             if (fn.actorKind() == Ast.ActorKind.NONE) {
                 return callFunctionBody(fn, normalized);
@@ -1550,6 +1582,14 @@ public final class OresEvalRootNode extends RootNode {
     private static final class ReturnSignal extends RuntimeException {
         private final Object value;
         private ReturnSignal(Object value) { super(null,null,false,false); this.value=value; }
+    }
+
+    private enum StartupPhase {
+        CREATED,
+        LINKED,
+        INITIALIZING,
+        READY,
+        FAILED
     }
 
     private record Complex(double real, double imaginary) implements OresMutex.SharedState {
