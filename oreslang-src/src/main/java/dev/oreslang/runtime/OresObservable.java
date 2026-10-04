@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.function.Function;
 
 /**
@@ -188,7 +189,12 @@ public abstract class OresObservable<T> {
                 return;
             }
             if (failure != null) {
-                result.failFromRuntime(OresFuture.unwrap(failure));
+                Throwable terminalFailure = OresFuture.unwrap(failure);
+                if (terminalFailure instanceof CancellationException) {
+                    result.cancel(true);
+                } else {
+                    result.failFromRuntime(terminalFailure);
+                }
                 subscription.cancel();
                 return;
             }
@@ -226,7 +232,12 @@ public abstract class OresObservable<T> {
                 return;
             }
             if (failure != null) {
-                result.failFromRuntime(OresFuture.unwrap(failure));
+                Throwable terminalFailure = OresFuture.unwrap(failure);
+                if (terminalFailure instanceof CancellationException) {
+                    result.cancel(true);
+                } else {
+                    result.failFromRuntime(terminalFailure);
+                }
                 return;
             }
             try {

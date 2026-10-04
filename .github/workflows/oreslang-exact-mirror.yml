@@ -26,7 +26,7 @@ jobs:
           cache: maven
       - name: Verify exact source subtree
         run: |
-          test "$(git rev-parse HEAD:oreslang-src)" = "fd804722ba8d962bd87ea8bb18b15ab86a006067"
+          test "$(git rev-parse HEAD:oreslang-src)" = "6f246600da157f9fc8dce38eea65651ca320ee80"
           printf 'source-tree: '
           git rev-parse HEAD:oreslang-src
           java --version
@@ -40,6 +40,13 @@ jobs:
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
       - name: Build Oreslang AOT native executable
         run: mvn -B -ntp -Pnative-aot -DskipTests package
+      - name: Assert unused RX substrate is not retained in AOT image
+        run: |
+          test -x target/ores-aot
+          if strings target/ores-aot | grep -E 'dev\.oreslang\.runtime\.Ores(Observable|Subscription|Notification)' ; then
+            echo "unused rx-ores runtime type retained in no-RX AOT executable" >&2
+            exit 1
+          fi
       - name: Smoke test AOT native executable
         run: |
           test -x target/ores-aot

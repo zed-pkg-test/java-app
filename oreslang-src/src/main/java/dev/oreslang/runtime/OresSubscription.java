@@ -1,6 +1,7 @@
 package dev.oreslang.runtime;
 
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -76,20 +77,23 @@ public abstract class OresSubscription<T> {
         }
 
         source.whenCompleteRuntime((notification, failure) -> {
+            Throwable terminalFailure =
+                    failure == null ? null : OresFuture.unwrap(failure);
             boolean terminalTransition = false;
+
             synchronized (gate) {
                 if (active == exposed) {
                     active = null;
                 }
                 pulling = false;
 
-                if (failure != null) {
+                if (terminalFailure != null) {
                     terminal = true;
                     terminalTransition = true;
                 } else if (notification == null) {
                     terminal = true;
                     terminalTransition = true;
-                    failure = new IllegalStateException(
+                    terminalFailure = new IllegalStateException(
                             "rx-ores source completed a pull with null notification");
                 } else if (notification.isComplete()) {
                     terminal = true;
@@ -104,10 +108,12 @@ public abstract class OresSubscription<T> {
             if (exposed.isDone()) {
                 return;
             }
-            if (failure == null) {
+            if (terminalFailure == null) {
                 exposed.completeFromRuntime(notification);
+            } else if (terminalFailure instanceof CancellationException) {
+                exposed.cancel(true);
             } else {
-                exposed.failFromRuntime(OresFuture.unwrap(failure));
+                exposed.failFromRuntime(terminalFailure);
             }
         });
 

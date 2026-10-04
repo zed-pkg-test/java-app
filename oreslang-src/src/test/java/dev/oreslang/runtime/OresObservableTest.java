@@ -100,6 +100,34 @@ final class OresObservableTest {
     }
 
     @Test
+    void sharedFutureCancellationRemainsCancellationForPulledDemand() {
+        OresFuture<Integer> source = new OresFuture<>();
+        OresSubscription<Integer> subscription =
+                OresObservable.fromFuture(source).subscribe();
+
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+        assertTrue(source.cancel(true));
+
+        assertTrue(pull.isCancelled(),
+                "upstream cancellation must not be converted into an ordinary stream failure");
+        assertThrows(CancellationException.class, pull::join);
+        assertTrue(subscription.isTerminated());
+        assertFalse(subscription.isCancelled(),
+                "the source cancelled; the subscriber did not explicitly cancel itself");
+    }
+
+    @Test
+    void firstPreservesUpstreamCancellation() {
+        OresFuture<Integer> source = new OresFuture<>();
+        OresFuture<Integer> first = OresObservable.fromFuture(source).first();
+
+        assertTrue(source.cancel(true));
+
+        assertTrue(first.isCancelled());
+        assertThrows(CancellationException.class, first::join);
+    }
+
+    @Test
     void sourceFailureIsTerminal() {
         OresFuture<Integer> source =
                 OresFuture.failed(new IllegalStateException("boom"));
