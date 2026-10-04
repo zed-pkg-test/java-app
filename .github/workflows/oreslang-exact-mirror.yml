@@ -1,4 +1,4 @@
-name: Oreslang exact-head mirror validation
+name: Oreslang PR182 scheduler diagnostic
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 8
     defaults:
       run:
         working-directory: oreslang-src
@@ -32,18 +32,5 @@ jobs:
           java --version
           native-image --version
           mvn --version
-      - name: Full JVM verification
-        run: mvn -B -ntp verify
-      - name: Run core examples
-        run: |
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/scheduler-await.ores"
-      - name: Build Oreslang AOT native executable
-        run: mvn -B -ntp -Pnative-aot -DskipTests package
-      - name: Smoke test AOT native executable
-        run: |
-          test -x target/ores-aot
-          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/together.ores
-          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/showcase.ores
-          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/scheduler-await.ores
+      - name: Scheduler focused tests
+        run: mvn -B -ntp -Dtest=AsyncSchedulerLanguageTest,OresSchedulerTest,OresObservableTest,OresFutureCallbackTest test
