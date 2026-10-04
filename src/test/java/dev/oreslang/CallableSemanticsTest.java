@@ -150,17 +150,10 @@ final class CallableSemanticsTest {
     }
 
     @Test
-    void routineAndFncRemainSemanticallyDistinct() {
-        assertThrows(IllegalArgumentException.class, () ->
-                TypeChecker.check(Parser.parse("""
-                        routine loop(): void {
-                          loop();
-                        }
-                        """)));
-
+    void routineAndFncDifferByReifiabilityNotRecursion() throws Exception {
         assertDoesNotThrow(() ->
                 TypeChecker.check(Parser.parse("""
-                        fnc loop(bool finished): void {
+                        routine loop(bool finished): void {
                           if finished; do
                             return;
                           else
@@ -169,6 +162,118 @@ final class CallableSemanticsTest {
                           fi
                         }
                         """)));
+
+        IllegalArgumentException routineValue = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        routine work(int value): int {
+                          return value + 1;
+                        }
+
+                        fnc bad(): void {
+                          val Fnc<int, int> callback = work;
+                        }
+                        """)));
+        assertTrue(routineValue.getMessage().contains("direct-call-only"));
+
+        String output = run("""
+                fnc apply(Fnc<int, int> callback, int value): int {
+                  return callback(value);
+                }
+
+                fnc increment(int value): int {
+                  return value + 1;
+                }
+
+                routine countdown(int value): int {
+                  if value == 0; do
+                    return 0;
+                  else
+                    return countdown(value - 1);
+                  fi
+                }
+
+                pub routine main(): void {
+                  val Fnc<int, int> callback = increment;
+                  stdio.stdout.write(apply(callback, 4));
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(countdown(4));
+                  return;
+                }
+                """);
+        assertEquals("5:0", output);
+    }
+
+    @Test
+    void instanceMethodsAreDirectOnlyButStaticFncsAndExplicitLambdasAreFirstClass() throws Exception {
+        IllegalArgumentException methodValue = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub addOne(int value): int {
+                            return value + 1;
+                          }
+                        end
+
+                        fnc bad(): void {
+                          val box = new Box();
+                          val Fnc<int, int> callback = box.addOne;
+                        }
+                        """)));
+        assertTrue(methodValue.getMessage().contains("direct-call-only"));
+
+        String output = run("""
+                fnc apply(Fnc<int, int> callback, int value): int {
+                  return callback(value);
+                }
+
+                define class Box as
+                  pub addOne(int value): int {
+                    return value + 1;
+                  }
+
+                  pub static fnc twice(int value): int {
+                    return value * 2;
+                  }
+                end
+
+                pub routine main(): void {
+                  val Fnc<int, int> wrapped = |int value| -> {
+                    val box = new Box();
+                    return box.addOne(value);
+                  };
+                  val Fnc<int, int> static_callback = Box.twice;
+
+                  stdio.stdout.write(apply(wrapped, 4));
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(apply(static_callback, 4));
+                  return;
+                }
+                """);
+        assertEquals("5:8", output);
+    }
+
+    @Test
+    void localCallableBindingShadowsTopLevelDeclarationForDirectCalls() throws Exception {
+        String output = run("""
+                fnc value(): int {
+                  return 1;
+                }
+
+                fnc invoke(Fnc<int> value): int {
+                  return value();
+                }
+
+                pub routine main(): void {
+                  val Fnc<int> local = || -> {
+                    return 7;
+                  };
+                  stdio.stdout.write(invoke(local));
+                  return;
+                }
+                """);
+
+        assertEquals("7", output);
     }
 
     private static String run(String program) throws Exception {
