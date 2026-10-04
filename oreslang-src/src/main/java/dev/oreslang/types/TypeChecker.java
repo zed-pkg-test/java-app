@@ -787,7 +787,9 @@ public final class TypeChecker {
                                 ownerType,
                                 bindings,
                                 label);
-                        return method.async() ? futureOf(logicalResult) : logicalResult;
+                        return method.async() && owner.actorKind() == Ast.ActorKind.NONE
+                                ? futureOf(logicalResult)
+                                : logicalResult;
                     }
                 }
             }
