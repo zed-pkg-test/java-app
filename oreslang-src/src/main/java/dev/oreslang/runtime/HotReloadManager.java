@@ -18,8 +18,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -112,12 +114,56 @@ public final class HotReloadManager implements AutoCloseable {
      * context state and cross-context cancellation can violate Context close
      * invariants.
      */
+    private static final ThreadLocal<Boolean> CONTEXT_LIFECYCLE_THREAD =
+            new ThreadLocal<>();
+
     private static final ExecutorService CONTEXT_CLOSE_EXECUTOR =
-            Executors.newSingleThreadExecutor(
+            Executors.newSingleThreadExecutor(task ->
                     Thread.ofPlatform()
                             .daemon(true)
                             .name("ores-hot-reload-context-close-", 0)
-                            .factory());
+                            .unstarted(() -> {
+                                CONTEXT_LIFECYCLE_THREAD.set(Boolean.TRUE);
+                                try {
+                                    task.run();
+                                } finally {
+                                    CONTEXT_LIFECYCLE_THREAD.remove();
+                                }
+                            }));
+
+    /**
+     * True only for the host-owned generation lifecycle executor. OresLanguage
+     * admits this thread to Polyglot contexts solely so a detached generation
+     * can be closed after its final lease is gone; guest code cannot acquire
+     * this marker or schedule arbitrary work onto this executor.
+     */
+    public static boolean isContextLifecycleThread() {
+        return Boolean.TRUE.equals(CONTEXT_LIFECYCLE_THREAD.get());
+    }
+
+    private static void runContextLifecycleSync(Runnable operation) {
+        Objects.requireNonNull(operation, "operation");
+        if (isContextLifecycleThread()) {
+            operation.run();
+            return;
+        }
+
+        Future<?> submitted = CONTEXT_CLOSE_EXECUTOR.submit(operation);
+        try {
+            submitted.get();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new java.util.concurrent.CancellationException(
+                    "interrupted while waiting for hot-reload context lifecycle work");
+        } catch (ExecutionException failed) {
+            Throwable cause = failed.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            if (cause instanceof Error error) throw error;
+            throw new IllegalStateException(
+                    "hot-reload context lifecycle operation failed",
+                    cause);
+        }
+    }
     private final AtomicReference<Generation> active = new AtomicReference<>();
     private final Map<String, Generation> activeByCodeUnit = new LinkedHashMap<>();
     private final Map<Long, Generation> generations = new LinkedHashMap<>();
@@ -561,28 +607,42 @@ public final class HotReloadManager implements AutoCloseable {
             active.set(null);
         }
 
-        RuntimeException failure = null;
+        AtomicReference<RuntimeException> failure = new AtomicReference<>();
         try {
-            for (Generation generation : toClose) {
-                try {
-                    generation.closeContext();
-                } catch (RuntimeException closeFailure) {
-                    if (failure == null) failure = closeFailure;
-                    else failure.addSuppressed(closeFailure);
+            // Serialize behind every previously queued detached-generation
+            // close. No new asynchronous closes may be queued after
+            // managerClosed becomes true, so the shared Engine is closed only
+            // after all generation Contexts have finished teardown.
+            runContextLifecycleSync(() -> {
+                for (Generation generation : toClose) {
+                    try {
+                        generation.closeContext();
+                    } catch (RuntimeException closeFailure) {
+                        RuntimeException first = failure.get();
+                        if (first == null) {
+                            failure.set(closeFailure);
+                        } else {
+                            first.addSuppressed(closeFailure);
+                        }
+                    }
                 }
-            }
-            if (sharedTrustedEngine != null) {
-                try {
-                    sharedTrustedEngine.close();
-                } catch (RuntimeException closeFailure) {
-                    if (failure == null) failure = closeFailure;
-                    else failure.addSuppressed(closeFailure);
+                if (sharedTrustedEngine != null) {
+                    try {
+                        sharedTrustedEngine.close();
+                    } catch (RuntimeException closeFailure) {
+                        RuntimeException first = failure.get();
+                        if (first == null) {
+                            failure.set(closeFailure);
+                        } else {
+                            first.addSuppressed(closeFailure);
+                        }
+                    }
                 }
-            }
+            });
         } finally {
             vm.unregisterHotReloadManager(this);
         }
-        if (failure != null) throw failure;
+        if (failure.get() != null) throw failure.get();
     }
 
     private static String digest(String text) {
