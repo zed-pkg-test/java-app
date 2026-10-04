@@ -82,11 +82,10 @@ public abstract class OresSubscription<T> {
             boolean terminalTransition = false;
 
             synchronized (gate) {
-                if (active == exposed) {
-                    active = null;
-                }
-                pulling = false;
-
+                // Keep active/pulling claimed until the exposed Future is
+                // actually settled. Releasing the slot here would let a
+                // concurrent next() start before the previous pull is done and
+                // would let cancel() miss an in-flight exposed pull.
                 if (terminalFailure != null) {
                     terminal = true;
                     terminalTransition = true;
@@ -105,15 +104,21 @@ public abstract class OresSubscription<T> {
                 runCancelFromRuntimeOnce();
             }
 
-            if (exposed.isDone()) {
-                return;
+            if (!exposed.isDone()) {
+                if (terminalFailure == null) {
+                    exposed.completeFromRuntime(notification);
+                } else if (terminalFailure instanceof CancellationException) {
+                    exposed.cancel(true);
+                } else {
+                    exposed.failFromRuntime(terminalFailure);
+                }
             }
-            if (terminalFailure == null) {
-                exposed.completeFromRuntime(notification);
-            } else if (terminalFailure instanceof CancellationException) {
-                exposed.cancel(true);
-            } else {
-                exposed.failFromRuntime(terminalFailure);
+
+            synchronized (gate) {
+                if (active == exposed) {
+                    active = null;
+                }
+                pulling = false;
             }
         });
 
