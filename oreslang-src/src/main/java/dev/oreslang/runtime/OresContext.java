@@ -1,5 +1,6 @@
 package dev.oreslang.runtime;
 
+import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.TruffleContext;
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.TruffleLanguage.ContextReference;
@@ -97,6 +98,7 @@ public final class OresContext implements AutoCloseable {
      * every iteration so a future supervisor/control mailbox can interrupt
      * long-running actor code without requiring recursion-only looping.
      */
+    @TruffleBoundary
     public void schedulerSafepoint() {
         schedulerSafepoints.incrementAndGet();
         ActorRuntime carrierRuntime = ActorRuntime.currentActorRuntime();
