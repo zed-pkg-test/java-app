@@ -637,6 +637,9 @@ public final class OresEvalRootNode extends RootNode {
                     if (receiver instanceof ModuleFacade module) {
                         return module.owner().invokeModuleFunction(module.module(), methodCall.member(), args);
                     }
+                    if (receiver instanceof ImportedNamespace namespace) {
+                        return namespace.owner().invokeImportedCallable(namespace.kind(), methodCall.member(), args);
+                    }
                     Object callee = member(receiver, methodCall.member());
                     if (!(callee instanceof Invokable invokable)) throw new IllegalArgumentException("value is not callable: " + callee);
                     return invokable.call(args);
@@ -1093,6 +1096,26 @@ public final class OresEvalRootNode extends RootNode {
                 else if (context.hasLinkedCodeUnit(candidate + ".java")) candidate += ".java";
             }
             return candidate;
+        }
+
+        private Object invokeImportedCallable(Ast.ImportKind kind, String name, List<Object> args) {
+            Ast.FunctionDecl fn = findFunction(name);
+            if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
+                throw new IllegalArgumentException("code unit '" + codeUnitId
+                        + "' does not export callable '" + name + "'");
+            }
+            if (kind == Ast.ImportKind.FUNCTION) {
+                if (fn.kind() != Ast.CallableKind.FNC || fn.actorKind() != Ast.ActorKind.NONE) {
+                    throw new IllegalArgumentException("import fnc requires a reifiable non-actor fnc; '" + name
+                            + "' is direct-call-only or actor-scheduled");
+                }
+                return callFunction(fn, args);
+            }
+            if (kind == Ast.ImportKind.ALL) {
+                return callFunction(fn, args);
+            }
+            throw new IllegalArgumentException("import namespace kind " + kind
+                    + " does not expose direct callable '" + name + "'");
         }
 
         private Object exportValue(Ast.ImportKind kind, String name) {

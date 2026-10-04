@@ -69,6 +69,42 @@ final class ProjectManifestImportTest {
     }
 
     @Test
+    void wildcardNamespaceCanDirectCallRoutineWithoutReifyingIt() throws Exception {
+        Path project = temp.resolve("routine-import");
+        Files.createDirectories(project);
+        Path library = project.resolve("library.ores");
+        Path main = project.resolve("main.ores");
+
+        Files.writeString(library, """
+                pub routine increment(int value): int {
+                  return value + 1;
+                }
+                """);
+
+        Files.writeString(main, """
+                import * as library from "./library.ores";
+
+                pub routine main(): void {
+                  stdio.println(library.increment(41));
+                  return;
+                }
+                """);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        var build = LinkedProgramRunner.run(
+                main,
+                IsolatePolicy.developer(),
+                ExecutionProfile.serverJit(),
+                Set.of(),
+                Map.of(),
+                out,
+                new ByteArrayOutputStream());
+
+        assertEquals(2, build.units().size());
+        assertTrue(out.toString(StandardCharsets.UTF_8).contains("42"));
+    }
+
+    @Test
     void oreslangPathResolvesBareImportsWithoutAManifest() throws Exception {
         Path app = temp.resolve("app");
         Path shared = temp.resolve("shared-root");
