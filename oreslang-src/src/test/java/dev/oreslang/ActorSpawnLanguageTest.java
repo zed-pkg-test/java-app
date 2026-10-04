@@ -2,6 +2,9 @@ package dev.oreslang;
 
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
+import dev.oreslang.runtime.ExecutionProfile;
+import dev.oreslang.runtime.IsolatePolicy;
+import dev.oreslang.runtime.LinkedProgramRunner;
 import dev.oreslang.types.TypeChecker;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
@@ -9,6 +12,8 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -243,5 +248,43 @@ final class ActorSpawnLanguageTest {
                 }
                 """)));
     }
+
+    @Test
+    void linkedProgramRunnerRootCarrierCanSpawnSharedAndPrivateActorCallables() throws Exception {
+        Path source = Files.createTempFile("oreslang-linked-actor-", ".ores");
+        try {
+            Files.writeString(source, """
+                    pub actor fnc shared_double(int value) => int {
+                      return value * 2;
+                    }
+
+                    pub isoactor fnc private_add_one(int value) => int {
+                      return value + 1;
+                    }
+
+                    pub routine main() => void {
+                      val shared_pending = spawn shared_double(21);
+                      val private_pending = spawn private_add_one(41);
+                      stdio.println(await shared_pending.result);
+                      stdio.println(await private_pending.result);
+                      return;
+                    }
+                    """);
+
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            LinkedProgramRunner.run(
+                    source,
+                    IsolatePolicy.developer(),
+                    ExecutionProfile.serverJit(),
+                    output,
+                    output);
+
+            String rendered = output.toString(StandardCharsets.UTF_8);
+            assertTrue(rendered.contains("42"), rendered);
+        } finally {
+            Files.deleteIfExists(source);
+        }
+    }
+
 
 }
