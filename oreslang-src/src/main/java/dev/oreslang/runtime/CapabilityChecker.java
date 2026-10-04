@@ -263,6 +263,7 @@ public final class CapabilityChecker {
 
     private void checkStatements(List<Ast.Stmt> statements, IsolatePolicy policy) {
         for (Ast.Stmt stmt : statements) {
+            if (stmt instanceof Ast.LocalTypeDeclStmt) continue;
             if (stmt instanceof Ast.BindingStmt s) {
                 checkType(s.declaredType(), policy);
                 checkExpr(s.initializer(), policy);
