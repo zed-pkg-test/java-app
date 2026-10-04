@@ -103,6 +103,50 @@ final class IncrementalFunctorStaticTest {
     }
 
     @Test
+    void callableKindAndActorKindParticipateInAbiInvalidation() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+        Map<String, String> initial = Map.of(
+                "service.ores", """
+                        pub fnc work(int value): int {
+                          return value + 1;
+                        }
+                        """,
+                "consumer.ores", """
+                        import * as service from "./service.ores";
+                        pub routine main(): void {
+                          stdio.stdout.write(service.work(1));
+                          return;
+                        }
+                        """);
+
+        compiler.compile(initial);
+
+        Map<String, String> routineChanged = Map.of(
+                "service.ores", """
+                        pub routine work(int value): int {
+                          return value + 1;
+                        }
+                        """,
+                "consumer.ores", initial.get("consumer.ores"));
+        var routineResult = compiler.compile(routineChanged);
+        assertTrue(routineResult.rebuilt("service.ores"));
+        assertTrue(routineResult.rebuilt("consumer.ores"),
+                "fnc -> routine changes reifiability and must invalidate dependents");
+
+        Map<String, String> actorChanged = Map.of(
+                "service.ores", """
+                        pub actor fnc work(int value): int {
+                          return value + 1;
+                        }
+                        """,
+                "consumer.ores", initial.get("consumer.ores"));
+        var actorResult = compiler.compile(actorChanged);
+        assertTrue(actorResult.rebuilt("service.ores"));
+        assertTrue(actorResult.rebuilt("consumer.ores"),
+                "actor-kind changes dispatch semantics and must invalidate dependents");
+    }
+
+    @Test
     void inferredPublicBindingsParticipateInAbiInvalidation() {
         IncrementalCompiler compiler = new IncrementalCompiler();
         Map<String, String> first = Map.of(
