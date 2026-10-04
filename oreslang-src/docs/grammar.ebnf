@@ -60,13 +60,16 @@ actor_method_decl
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
                   [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
-                  { class_member } "end" ;
+                  "as" { class_member } "end" ;
 
 class_member    = field_decl
                 | method_decl
                 | static_function_decl ;
 
-field_decl      = visibility binding_kind type_ref IDENT [ "=" expression ] stmt_terminator ;
+field_decl      = { annotation } visibility
+                  ( binding_kind type_ref IDENT [ "=" expression ]
+                  | IDENT ":" type_ref [ "=" expression ] )
+                  stmt_terminator ;
 
 method_decl     = { annotation } visibility { method_modifier } method_name [ generic_params ]
                   method_head return_spec ( block | stmt_terminator ) ;

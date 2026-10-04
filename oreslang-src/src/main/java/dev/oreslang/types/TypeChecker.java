@@ -1,5 +1,6 @@
 package dev.oreslang.types;
 
+import dev.oreslang.ast.AnnotationExpander;
 import dev.oreslang.ast.Ast;
 import dev.oreslang.imports.ImportRules;
 import dev.oreslang.parser.Parser;
@@ -51,6 +52,7 @@ public final class TypeChecker {
     private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
 
     public static Ast.Program check(Ast.Program program) {
+        program = AnnotationExpander.expand(program);
         TypeChecker checker = new TypeChecker();
         checker.validateImports(program);
         checker.collect(program);

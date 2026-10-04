@@ -293,4 +293,36 @@ final class IncrementalFunctorStaticTest {
         }
         return output.toString(StandardCharsets.UTF_8);
     }
+    @Test
+    void fromJsonKeyChangesInvalidateIncrementalImporters() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+        Map<String, String> first = Map.of(
+                "model.ores", """
+                        define class Payload as
+                          @FromJson("foo")
+                          foo: String;
+                        end
+                        """,
+                "consumer.ores", """
+                        import class Payload from "./model.ores";
+                        pub fnc consume(Payload payload) : void { return; }
+                        """);
+
+        compiler.compile(first);
+
+        Map<String, String> changed = Map.of(
+                "model.ores", """
+                        define class Payload as
+                          @FromJson("external_foo")
+                          foo: String;
+                        end
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+
+        var result = compiler.compile(changed);
+        assertTrue(result.rebuilt("model.ores"));
+        assertTrue(result.rebuilt("consumer.ores"),
+                "changing a JSON wire key is an ABI change for importers");
+    }
+
 }

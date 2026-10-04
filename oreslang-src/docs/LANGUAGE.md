@@ -1058,3 +1058,10 @@ The same compiled program can target a secondary multi-threaded runtime because:
 - actor messages continue to cross actor boundaries only through the existing frozen/sendable contract.
 
 When explicit thread/task spawning is added, cross-thread transfer will require move semantics and a `Send`-equivalent capability; shared cross-thread references will additionally require a `Sync`-equivalent guarantee. Those marker traits are intentionally a future surface feature—the current source language has no ambient raw-thread API, so there is no unchecked escape hatch to bypass ownership.
+
+
+## Serialization annotations and generated accessors
+
+`@FromJson("key")` is a compiler annotation for typed class fields. It expands before type/ownership checking into public typed getters/setters; no JVM reflection or guest-code macro execution is involved. The field must have an explicit type and mutable storage. The name-first shorthand `field_name: Type` is mutable only when annotated with `@FromJson`; otherwise it is an immutable `val` field.
+
+Generated setters still require a mutable owner at the call site. Duplicate/blank keys, immutable annotated fields, accessor collisions, annotations on module bindings/callables, and annotations on actor state all fail closed. JSON wire keys participate in incremental ABI fingerprints.

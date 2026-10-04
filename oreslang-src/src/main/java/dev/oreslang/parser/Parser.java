@@ -191,7 +191,7 @@ public final class Parser {
         if (modifiers.nonLexical) throw error(peek(), "'nlex' applies only to fnc, routine, or lambda");
         if (match(INTERFACE)) return parseInterface(modifiers.visibility);
         if (match(TYPE)) return parseTypeAlias();
-        if (isBindingKind(peek().type())) return parseModuleBinding(modifiers.visibility);
+        if (isBindingKind(peek().type())) return parseModuleBinding(annotations, modifiers.visibility);
         return null;
     }
 
@@ -249,7 +249,12 @@ public final class Parser {
             if (mods.nonLexical) throw error(peek(), "'nlex' is unnecessary on class members; methods/static fnc never capture enclosing local scopes");
             if (isBindingKind(peek().type())) {
                 if (mods.isStatic) throw error(peek(), "static data members are not implemented yet; static class functions use 'static fnc'");
-                fields.add(parseField(mods.visibility));
+                fields.add(parseField(annotations, mods.visibility));
+                continue;
+            }
+            if (check(IDENT) && checkNext(COLON)) {
+                if (mods.isStatic) throw error(peek(), "static data members are not implemented yet; static class functions use 'static fnc'");
+                fields.add(parseColonField(annotations, mods.visibility));
                 continue;
             }
             if (mods.isStatic) {
@@ -290,7 +295,7 @@ public final class Parser {
                 if (mods.visibility == Ast.Visibility.PUBLIC) {
                     throw error(peek(), "actor state fields are private; expose state through actor methods");
                 }
-                fields.add(parseField(mods.visibility));
+                fields.add(parseField(annotations, mods.visibility));
                 continue;
             }
 
@@ -362,7 +367,7 @@ public final class Parser {
         return refs;
     }
 
-    private Ast.FieldDecl parseField(Ast.Visibility visibility) {
+    private Ast.FieldDecl parseField(List<Ast.Annotation> annotations, Ast.Visibility visibility) {
         Ast.BindingKind kind = parseBindingKind();
         Ast.TypeRef type = null;
         String name;
@@ -377,10 +382,20 @@ public final class Parser {
             throw error(previous(), "inferred field '" + name + "' requires an initializer");
         }
         consumeStatementTerminator("field declaration should end with ';'");
-        return new Ast.FieldDecl(name, visibility, kind, type, initializer);
+        return new Ast.FieldDecl(name, visibility, kind, type, annotations, initializer);
     }
 
-    private Ast.FieldDecl parseModuleBinding(Ast.Visibility visibility) {
+    private Ast.FieldDecl parseColonField(List<Ast.Annotation> annotations, Ast.Visibility visibility) {
+        String name = consume(IDENT, "expected field name").lexeme();
+        consume(COLON, "expected ':' after field name");
+        Ast.TypeRef type = parseTypeRef();
+        Ast.Expr initializer = match(EQUAL) ? parseExpression() : null;
+        Ast.BindingKind kind = hasAnnotation(annotations, "FromJson") ? Ast.BindingKind.LET : Ast.BindingKind.VAL;
+        consumeClassFieldTerminator("field declaration should end with ';'");
+        return new Ast.FieldDecl(name, visibility, kind, type, annotations, initializer);
+    }
+
+    private Ast.FieldDecl parseModuleBinding(List<Ast.Annotation> annotations, Ast.Visibility visibility) {
         Ast.BindingKind kind = parseBindingKind();
         Ast.TypeRef type = null;
         String name;
@@ -392,7 +407,7 @@ public final class Parser {
         consume(EQUAL, "module bindings require an initializer");
         Ast.Expr initializer = parseExpression();
         consumeStatementTerminator("module binding should end with ';'");
-        return new Ast.FieldDecl(name, visibility, kind, type, initializer);
+        return new Ast.FieldDecl(name, visibility, kind, type, annotations, initializer);
     }
 
     private Ast.MethodDecl parseMethod(List<Ast.Annotation> annotations, Modifiers mods) {
@@ -1363,6 +1378,19 @@ public final class Parser {
     private void consumeMemberTerminator(Token.Type structuralTerminator, String message) {
         if (match(SEMICOLON) || check(structuralTerminator)) return;
         throw error(peek(), message);
+    }
+
+    private void consumeClassFieldTerminator(String message) {
+        if (match(SEMICOLON) || check(AT) || check(END) || check(PUB) || check(PRIVATE)
+                || check(STATIC) || check(ABSTRACT) || check(ASYNC) || check(LBRACKET)
+                || isBindingKind(peek().type())
+                || (check(IDENT) && (checkNext(COLON) || checkNext(LPAREN)))) return;
+        throw error(peek(), message);
+    }
+
+    private boolean hasAnnotation(List<Ast.Annotation> annotations, String name) {
+        for (Ast.Annotation annotation : annotations) if (annotation.name().equals(name)) return true;
+        return false;
     }
 
     private void consumeStatementTerminator(String message) {

@@ -1,5 +1,6 @@
 package dev.oreslang.types;
 
+import dev.oreslang.ast.AnnotationExpander;
 import dev.oreslang.ast.Ast;
 
 import java.util.ArrayList;
@@ -96,10 +97,10 @@ public final class OwnershipChecker {
                             ValueKind.MUT_BORROW,
                             Origin.PARAM));
                 } else {
-                    // Receiver is immutable unless a future explicit "mut self"
-                    // syntax is introduced. Methods can still mutate through an
-                    // explicit &mut parameter.
-                    scope.define("self", new VarState(Ast.TypeRef.simple(klass.name()), false, ValueKind.IMM_BORROW, Origin.PARAM));
+                    ValueKind receiverKind = AnnotationExpander.isGeneratedFromJsonSetter(method)
+                            ? ValueKind.MUT_BORROW
+                            : ValueKind.IMM_BORROW;
+                    scope.define("self", new VarState(Ast.TypeRef.simple(klass.name()), false, receiverKind, Origin.PARAM));
                 }
             }
             for (Ast.Param param : method.parameters()) scope.define(param.name(), stateForParam(param));
@@ -629,6 +630,9 @@ public final class OwnershipChecker {
                     : findMethodTarget(klass, concreteReceiver, member.member(), call.arguments().size(), new LinkedHashSet<>());
             if (target != null) {
                 Ast.MethodDecl method = target.method();
+                if (AnnotationExpander.isGeneratedFromJsonSetter(method)) {
+                    ensureMutableReceiver(member.receiver(), scope, "generated JSON setter '" + method.name() + "'");
+                }
                 boolean protectedReceiver = false;
                 if (member.receiver() instanceof Ast.NameExpr receiverName) {
                     VarState receiverState = scope.lookup(receiverName.name());
