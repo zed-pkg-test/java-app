@@ -64,6 +64,34 @@ import java.util.function.UnaryOperator;
  * shared actors may coordinate through explicitly synchronized shared cells.
  */
 public final class ActorRuntime implements AutoCloseable {
+
+    /**
+     * Internal lifetime pin acquired for every actor born inside a hot-loaded
+     * code generation. It is intentionally not part of the guest actor API.
+     */
+    @FunctionalInterface
+    interface ActorGenerationLease {
+        void close();
+    }
+
+    @FunctionalInterface
+    interface ActorGenerationLeaseFactory {
+        ActorGenerationLease acquire();
+    }
+
+    private static final ActorGenerationLease NO_GENERATION_LEASE = () -> { };
+    private static final ActorGenerationLeaseFactory NO_GENERATION_LEASE_FACTORY =
+            () -> NO_GENERATION_LEASE;
+
+    enum RuntimePlacement {
+        /** Direct host/embedder runtime; not an Oreslang guest security boundary. */
+        HOST_EMBEDDER,
+        /** Trusted application/control code co-resident with OresVM. */
+        MAIN_GRAAL_ISOLATE,
+        /** Context created with Graal spawnIsolate(true). */
+        SPAWNED_GRAAL_ISOLATE
+    }
+
     private static final int MAX_MESSAGE_GRAPH_DEPTH = 256;
     private static final int MAX_MESSAGE_GRAPH_NODES = 100_000;
     private static final long CLOSE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
@@ -86,6 +114,7 @@ public final class ActorRuntime implements AutoCloseable {
     private static final ThreadLocal<Boolean> ACTOR_CARRIER = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<ActorExecutionContext> CURRENT_ACTOR_EXECUTION = new ThreadLocal<>();
     private static final ThreadLocal<ActorRuntime> CURRENT_ROOT_RUNTIME = new ThreadLocal<>();
+    private static final ThreadLocal<ActorRuntime> CURRENT_MAILMAN_RUNTIME = new ThreadLocal<>();
     private static final ThreadLocal<Long> CURRENT_ROOT_DEADLINE_NANOS = new ThreadLocal<>();
 
     private record ActorExecutionContext(
@@ -114,6 +143,10 @@ public final class ActorRuntime implements AutoCloseable {
 
     public static boolean inRootExecution() {
         return CURRENT_ROOT_RUNTIME.get() != null;
+    }
+
+    static boolean inMailmanExecution() {
+        return CURRENT_MAILMAN_RUNTIME.get() != null;
     }
 
     public static ActorRuntime currentRootRuntime() {
@@ -1365,6 +1398,27 @@ public final class ActorRuntime implements AutoCloseable {
             return config;
         }
 
+        /**
+         * Kernel-only maintenance runs on the CONTROL pool, never on an actor
+         * carrier domain. If the bounded control queue is momentarily full,
+         * retry through the existing watchdog service rather than dropping a
+         * generation-reclamation task.
+         */
+        void executeControlMaintenance(Runnable task) {
+            Objects.requireNonNull(task, "task");
+            try {
+                controlDispatcher.execute(task);
+            } catch (RejectedExecutionException rejected) {
+                if (controlDispatcher.isShutdown() || messageWatchdog.isShutdown()) {
+                    throw rejected;
+                }
+                messageWatchdog.schedule(
+                        () -> executeControlMaintenance(task),
+                        1L,
+                        TimeUnit.MILLISECONDS);
+            }
+        }
+
         void shutdownNow() {
             controlDispatcher.shutdownNow();
             privateDispatcher.shutdownNow();
@@ -1428,6 +1482,8 @@ public final class ActorRuntime implements AutoCloseable {
     private final DispatcherConfig dispatcherConfig;
     private final TurnExecutor turnExecutor;
     private final OresVM vm;
+    private final ActorGenerationLeaseFactory generationLeaseFactory;
+    private final RuntimePlacement runtimePlacement;
     private final DispatcherGroup dispatcherGroup;
     private final boolean ownsVm;
     private volatile Consumer<Object> actorExitHook = ignored -> { };
@@ -1484,6 +1540,8 @@ public final class ActorRuntime implements AutoCloseable {
                 dispatcherConfig,
                 turnExecutor,
                 OresVM.dedicated(dispatcherConfig),
+                NO_GENERATION_LEASE_FACTORY,
+                RuntimePlacement.HOST_EMBEDDER,
                 true);
     }
 
@@ -1502,11 +1560,40 @@ public final class ActorRuntime implements AutoCloseable {
             IsolatePolicy policyCeiling,
             TurnExecutor turnExecutor) {
         Objects.requireNonNull(vm, "vm");
+        return attachToVm(
+                vm,
+                policyCeiling,
+                turnExecutor,
+                NO_GENERATION_LEASE_FACTORY);
+    }
+
+    static ActorRuntime attachToVm(
+            OresVM vm,
+            IsolatePolicy policyCeiling,
+            TurnExecutor turnExecutor,
+            ActorGenerationLeaseFactory generationLeaseFactory) {
+        return attachToVm(
+                vm,
+                policyCeiling,
+                turnExecutor,
+                generationLeaseFactory,
+                RuntimePlacement.MAIN_GRAAL_ISOLATE);
+    }
+
+    static ActorRuntime attachToVm(
+            OresVM vm,
+            IsolatePolicy policyCeiling,
+            TurnExecutor turnExecutor,
+            ActorGenerationLeaseFactory generationLeaseFactory,
+            RuntimePlacement runtimePlacement) {
+        Objects.requireNonNull(vm, "vm");
         return new ActorRuntime(
                 policyCeiling,
                 vm.dispatcherGroup().config(),
                 turnExecutor,
                 vm,
+                Objects.requireNonNull(generationLeaseFactory, "generationLeaseFactory"),
+                Objects.requireNonNull(runtimePlacement, "runtimePlacement"),
                 false);
     }
 
@@ -1534,11 +1621,17 @@ public final class ActorRuntime implements AutoCloseable {
             DispatcherConfig dispatcherConfig,
             TurnExecutor turnExecutor,
             OresVM vm,
+            ActorGenerationLeaseFactory generationLeaseFactory,
+            RuntimePlacement runtimePlacement,
             boolean ownsVm) {
         this.policyCeiling = Objects.requireNonNull(policyCeiling);
         this.dispatcherConfig = Objects.requireNonNull(dispatcherConfig);
         this.turnExecutor = Objects.requireNonNull(turnExecutor);
         this.vm = Objects.requireNonNull(vm);
+        this.generationLeaseFactory =
+                Objects.requireNonNull(generationLeaseFactory, "generationLeaseFactory");
+        this.runtimePlacement =
+                Objects.requireNonNull(runtimePlacement, "runtimePlacement");
         this.dispatcherGroup = vm.dispatcherGroup();
         this.ownsVm = ownsVm;
         if (dispatcherGroup.config() != dispatcherConfig
@@ -1570,7 +1663,8 @@ public final class ActorRuntime implements AutoCloseable {
 
     public IsolatePolicy policyCeiling() { return policyCeiling; }
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
-    public OresVM vm() { return vm; }
+    OresVM vm() { return vm; }
+    RuntimePlacement runtimePlacement() { return runtimePlacement; }
     public boolean usesProcessSharedDispatchers() { return vm.processVm(); }
     public int maxActors() { return dispatcherConfig.maxActors(); }
 
@@ -1635,9 +1729,16 @@ public final class ActorRuntime implements AutoCloseable {
         try {
             controlDispatcher.execute(() -> {
                 ACTOR_CARRIER.set(Boolean.TRUE);
+                if (CURRENT_MAILMAN_RUNTIME.get() != null) {
+                    ACTOR_CARRIER.remove();
+                    throw new IllegalStateException(
+                            "nested actor-group mailman execution is forbidden");
+                }
+                CURRENT_MAILMAN_RUNTIME.set(ActorRuntime.this);
                 try {
                     turnExecutor.execute(turn);
                 } finally {
+                    CURRENT_MAILMAN_RUNTIME.remove();
                     ACTOR_CARRIER.remove();
                     relaxControlDispatcherAfterQuantum();
                 }
@@ -1757,6 +1858,16 @@ public final class ActorRuntime implements AutoCloseable {
      * domain is retired. Guest code cannot mutate this hook.
      */
     public void setActorExitHook(Consumer<Object> actorExitHook) {
+        requireSupervisorContext("install actor-exit hook");
+        installActorExitHookFromKernel(actorExitHook);
+    }
+
+    /**
+     * Kernel-only lifecycle wiring. OresContext construction may run while a
+     * root task owns the runtime execution marker, so it cannot use the public
+     * supervisor API without being mistaken for guest code.
+     */
+    void installActorExitHookFromKernel(Consumer<Object> actorExitHook) {
         if (closed.get()) throw new IllegalStateException("actor runtime is closed");
         this.actorExitHook = Objects.requireNonNull(actorExitHook, "actorExitHook");
     }
@@ -2521,10 +2632,20 @@ public final class ActorRuntime implements AutoCloseable {
 
     public interface ActorContext<M> {
         ActorRef<M> self();
-        ActorRuntime runtime();
         IsolatePolicy policy();
         ActorKind kind();
         Optional<ActorMemorySlice> privateMemory();
+
+        /**
+         * Narrow actor syscall surface. Actor code never receives the owning
+         * ActorRuntime/OresVM implementation object.
+         */
+        <N> ActorRef<N> spawnPrivate(BehaviorFactory<N> behaviorFactory);
+        <N> ActorRef<N> spawnShared(BehaviorFactory<N> behaviorFactory);
+        <N, Out> ActorRef<N> spawnInGroup(
+                ActorGroupHandle<Out> group,
+                BehaviorFactory<N> behaviorFactory);
+        <T> Shared<T> shareReadonly(T value);
 
         /**
          * Restricted actor-side group capability. UNTRUSTED actors never receive
@@ -2591,6 +2712,7 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorKind kind;
         private final AtomicReference<Throwable> terminationCause = new AtomicReference<>();
         private final OresFuture<ActorRef<M>> readiness;
+        private final CompletableFuture<Void> finalization = new CompletableFuture<>();
 
         private ActorRef(ActorId id, ActorKind kind) {
             this.id = id;
@@ -2603,6 +2725,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         public ActorId id() { return id; }
         private OresFuture<ActorRef<M>> readiness() { return readiness; }
+        private CompletionStage<Void> finalization() { return finalization; }
         private void markReady() { readiness.completeFromRuntime(this); }
         private void failReady(Throwable failure) {
             if (!readiness.isDone()) readiness.failFromRuntime(failure);
@@ -2721,14 +2844,16 @@ public final class ActorRuntime implements AutoCloseable {
 
     private void requireCallerRuntimeAffinity(String operation) {
         ActorRuntime caller = currentActorRuntime();
+        if (caller == null) caller = currentRootRuntime();
+        if (caller == null) caller = CURRENT_MAILMAN_RUNTIME.get();
         if (caller != null && caller != this) {
             throw new SecurityException(
-                    "actor cannot " + operation + " through another ActorRuntime");
+                    "guest execution cannot " + operation + " through another ActorRuntime");
         }
     }
 
     private static void requireSupervisorContext(String operation) {
-        if (inActorExecution() || inRootExecution()) {
+        if (inActorExecution() || inRootExecution() || inMailmanExecution()) {
             throw new SecurityException(
                     "guest code cannot " + operation
                             + "; this operation belongs to the host/supervisor");
@@ -3100,7 +3225,8 @@ public final class ActorRuntime implements AutoCloseable {
             return;
         }
         if (value instanceof ActorContext<?> actorContext) {
-            if (!actorContext.self().id().equals(owner) || actorContext.runtime() != this) {
+            if (!actorContext.self().id().equals(owner)
+                    || !actorContext.self().ownedBy(this)) {
                 throw new SecurityException(
                         "private actor behavior captured a foreign actor context in " + fieldName);
             }
@@ -3196,6 +3322,12 @@ public final class ActorRuntime implements AutoCloseable {
         if (kind != ActorKind.UNTRUSTED) {
             requireWithinCeiling(policy);
         }
+        if (kind == ActorKind.UNTRUSTED
+                && runtimePlacement == RuntimePlacement.MAIN_GRAAL_ISOLATE) {
+            throw new SecurityException(
+                    "UNTRUSTED actors cannot execute in the main Graal isolate; "
+                            + "load the untrusted code through OresVM into a spawned isolate");
+        }
         if (kind == ActorKind.UNTRUSTED && untrustedLimits == null) {
             throw new SecurityException("untrusted actor hard limits are required");
         }
@@ -3240,9 +3372,15 @@ public final class ActorRuntime implements AutoCloseable {
             }
 
             ActorCell<M> cell = null;
+            ActorGenerationLease generationLease = null;
             try {
                 reserveActorSlot(kind);
                 runtimeReserved = true;
+                generationLease = generationLeaseFactory.acquire();
+                if (generationLease == null) {
+                    throw new IllegalStateException(
+                            "actor generation lease factory returned null");
+                }
                 ActorId id = ActorId.create();
                 ActorRef<M> ref = new ActorRef<>(id, kind);
                 cell = new ActorCell<>(
@@ -3255,7 +3393,8 @@ public final class ActorRuntime implements AutoCloseable {
                         untrustedLimits,
                         requestTransport,
                         responseTransport,
-                        outboundTransport);
+                        outboundTransport,
+                        generationLease);
                 actors.put(id, cell);
                 if (groupState != null) {
                     groupState.commitActor(id);
@@ -3278,6 +3417,9 @@ public final class ActorRuntime implements AutoCloseable {
                     } else if (groupReserved) {
                         groupState.abortActorReservation();
                     }
+                }
+                if (generationLease != null) {
+                    generationLease.close();
                 }
                 if (runtimeReserved) releaseReservedActorSlot(kind);
                 throw failure;
@@ -3304,6 +3446,9 @@ public final class ActorRuntime implements AutoCloseable {
 
         IsolatePolicy policy = defaultSpawnPolicy();
         AtomicReference<ActorRef<M>> spawnedRef = new AtomicReference<>();
+        AtomicReference<R> invocationValue = new AtomicReference<>();
+        AtomicReference<Throwable> invocationFailure = new AtomicReference<>();
+        AtomicBoolean invocationReturned = new AtomicBoolean();
         OresFuture<R> completion = new OresFuture<>(() -> {
             ActorRef<M> ref = spawnedRef.get();
             if (ref != null && ref.isAlive()) {
@@ -3322,21 +3467,22 @@ public final class ActorRuntime implements AutoCloseable {
                     try {
                         @SuppressWarnings("unchecked")
                         R frozen = (R) freeze(invocation.run(delivered, turnContext));
-                        completion.completeFromRuntime(frozen);
+                        invocationValue.set(frozen);
+                        invocationReturned.set(true);
                     } catch (VirtualMachineError fatal) {
-                        completion.failFromRuntime(fatal);
+                        invocationFailure.compareAndSet(null, fatal);
                         throw fatal;
                     } catch (ThreadDeath fatal) {
-                        completion.failFromRuntime(fatal);
+                        invocationFailure.compareAndSet(null, fatal);
                         throw fatal;
                     } catch (LinkageError fatal) {
-                        completion.failFromRuntime(fatal);
+                        invocationFailure.compareAndSet(null, fatal);
                         throw fatal;
                     } catch (Exception failure) {
-                        completion.failFromRuntime(failure);
+                        invocationFailure.compareAndSet(null, failure);
                         throw failure;
                     } catch (Error failure) {
-                        completion.failFromRuntime(failure);
+                        invocationFailure.compareAndSet(null, failure);
                         throw failure;
                     } finally {
                         turnContext.self().stop();
@@ -3345,9 +3491,24 @@ public final class ActorRuntime implements AutoCloseable {
                 true);
         spawnedRef.set(ref);
         ActorSpawn<M, R> spawn = new ActorSpawn<>(ref, completion);
-        ref.readiness().whenComplete((readyRef, startupFailure) -> {
-            if (startupFailure != null && !completion.isDone()) {
-                completion.failFromRuntime(OresFuture.unwrap(startupFailure));
+
+        // Do not publish a source-level actor result until the actor has fully
+        // finalized and its carrier has left the Truffle context. Otherwise a
+        // root awaiting result() can race Context.close() with the actor turn.
+        ref.finalization().whenComplete((ignored, finalizationFailure) -> {
+            if (completion.isDone()) return;
+            Throwable failure = invocationFailure.get();
+            if (failure == null) failure = ref.terminationCause.get();
+            if (failure == null && finalizationFailure != null) {
+                failure = OresFuture.unwrap(finalizationFailure);
+            }
+            if (failure != null) {
+                completion.failFromRuntime(failure);
+            } else if (invocationReturned.get()) {
+                completion.completeFromRuntime(invocationValue.get());
+            } else {
+                completion.failFromRuntime(new CancellationException(
+                        "actor callable terminated before producing a result"));
             }
         });
 
@@ -5353,7 +5514,9 @@ public final class ActorRuntime implements AutoCloseable {
         private final AtomicLong sharedInboxBytes = new AtomicLong();
         private final Object lifecycleLock = new Object();
         private final Object executionDomain = new Object();
+        private final ActorGenerationLease generationLease;
         private int activeTurns;
+        private boolean finalizing;
         private boolean finalized;
         private volatile boolean logicalTurnSuspended;
         /**
@@ -5375,13 +5538,16 @@ public final class ActorRuntime implements AutoCloseable {
                 UntrustedActorLimits untrustedLimits,
                 HttpRequestTransport requestTransport,
                 HttpResponseTransport responseTransport,
-                OutboundHttpTransport outboundTransport) {
+                OutboundHttpTransport outboundTransport,
+                ActorGenerationLease generationLease) {
             this.ref = ref;
             this.kind = kind;
             this.groupHandle = groupHandle;
             this.policy = policy;
             this.behaviorFactory = behaviorFactory;
             this.trustedFactory = trustedFactory;
+            this.generationLease =
+                    Objects.requireNonNull(generationLease, "generationLease");
             this.inboxCapacity = groupHandle == null
                     ? policy.maxMailboxMessages()
                     : Math.min(
@@ -5603,8 +5769,9 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void finalizeStopLocked() {
-            if (finalized || activeTurns != 0) return;
-            finalized = true;
+            if (finalized || finalizing || activeTurns != 0) return;
+            finalizing = true;
+            try {
             if (!ref.readiness().isDone()) {
                 Throwable cause = ref.terminationCause.get();
                 ref.failReady(cause != null
@@ -5646,8 +5813,28 @@ public final class ActorRuntime implements AutoCloseable {
                 // Actor termination must still complete. Runtime cleanup hooks
                 // are best-effort and retryable by the process collector.
             }
+            // Remove the actor from its runtime before releasing the code
+            // generation. The final lease may make a draining generation
+            // reclaimable and close its Polyglot Context; context teardown must
+            // therefore observe this actor as already retired.
             unregisterActor(this);
-            lifecycleLock.notifyAll();
+            try {
+                generationLease.close();
+            } catch (VirtualMachineError | ThreadDeath fatal) {
+                throw fatal;
+            } catch (Throwable leaseFailure) {
+                ref.terminationCause.compareAndSet(null, leaseFailure);
+            }
+            // Publish finalized only after registry/accounting teardown and the
+            // generation lease release are complete. Runtime.close() waits on
+            // this flag; publishing it earlier lets close() zero accounting
+            // while this finalizer is still unregistering the actor.
+            finalized = true;
+            ref.finalization.complete(null);
+            } finally {
+                finalizing = false;
+                lifecycleLock.notifyAll();
+            }
         }
 
         private boolean finalized() {
@@ -5914,9 +6101,27 @@ public final class ActorRuntime implements AutoCloseable {
             try {
                 ActorContext<M> context = new ActorContext<>() {
                     @Override public ActorRef<M> self() { return ref; }
-                    @Override public ActorRuntime runtime() { return ActorRuntime.this; }
                     @Override public IsolatePolicy policy() { return policy; }
                     @Override public ActorKind kind() { return kind; }
+                    @Override public <N> ActorRef<N> spawnPrivate(BehaviorFactory<N> factory) {
+                        return ActorRuntime.this.spawnPrivate(factory);
+                    }
+                    @Override public <N> ActorRef<N> spawnShared(BehaviorFactory<N> factory) {
+                        return ActorRuntime.this.spawnShared(factory);
+                    }
+                    @Override public <N, Out> ActorRef<N> spawnInGroup(
+                            ActorGroupHandle<Out> group,
+                            BehaviorFactory<N> factory) {
+                        Objects.requireNonNull(group, "group");
+                        return ActorRuntime.this.spawnInGroup(
+                                group,
+                                group.kind(),
+                                policy,
+                                factory);
+                    }
+                    @Override public <T> Shared<T> shareReadonly(T value) {
+                        return ActorRuntime.this.shareReadonly(value);
+                    }
                     @Override public Optional<ActorMemorySlice> privateMemory() {
                         return Optional.ofNullable(memorySlice);
                     }
