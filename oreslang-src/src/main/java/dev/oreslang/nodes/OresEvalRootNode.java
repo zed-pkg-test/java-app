@@ -559,6 +559,11 @@ public final class OresEvalRootNode extends RootNode {
                                 "source await inside an actor requires continuation lowering; "
                                         + "the recursive evaluator must not block or inline-resume an actor carrier");
                     }
+                    if (ActorRuntime.inRootExecution()) {
+                        throw new IllegalStateException(
+                                "source await inside a root/main task requires continuation lowering; "
+                                        + "the recursive evaluator must not join or park a ROOT_TASK carrier");
+                    }
                     if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
                         throw new IllegalStateException(
                                 "await would block an adversarial serialized root context; "
@@ -576,6 +581,11 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalStateException(
                                 "source await inside an actor requires continuation lowering; "
                                         + "host stages are normalized to OresFuture before suspension");
+                    }
+                    if (ActorRuntime.inRootExecution()) {
+                        throw new IllegalStateException(
+                                "source await inside a root/main task requires continuation lowering; "
+                                        + "host stages must suspend through OresFuture instead of joining a carrier");
                     }
                     if (ActorRuntime.currentRootIsAdversarial() && !future.isDone()) {
                         throw new IllegalStateException(
