@@ -717,6 +717,33 @@ public final class TypeChecker {
             }
             if (call.callee() instanceof Ast.MemberExpr member) {
                 Type receiver = deref(typeOf(member.receiver(), env, generics, self));
+
+                if (receiver instanceof Named guard
+                        && guard.name().equals("MutexGuard")
+                        && guard.arguments().size() == 1) {
+                    Type guardBuiltin = builtinMutexMember(receiver, member.member());
+                    if (guardBuiltin instanceof Function builtin) {
+                        if (call.typeArgumentsPresent()) {
+                            throw new IllegalArgumentException("MutexGuard." + member.member()
+                                    + " does not accept call-site type arguments");
+                        }
+                        if (builtin.parameters().size() != call.arguments().size()) {
+                            throw new IllegalArgumentException("MutexGuard." + member.member() + " call arity mismatch");
+                        }
+                        for (int i = 0; i < builtin.parameters().size(); i++) {
+                            requireAssignable(
+                                    typeOf(call.arguments().get(i), env, generics, self),
+                                    builtin.parameters().get(i),
+                                    "argument " + (i + 1));
+                        }
+                        return builtin.result();
+                    }
+                    // Non-builtin members are direct calls on the protected value.
+                    // Unwrap only for call resolution; plain guard.method remains
+                    // non-reifiable through the ordinary MemberExpr path.
+                    receiver = unwrapMutexGuard(receiver);
+                }
+
                 if (receiver instanceof ClassNamespace classNamespace) {
                     Ast.ClassDecl klass = findClass(classNamespace.className());
                     if (klass == null) throw new IllegalArgumentException("unknown class namespace '" + classNamespace.className() + "'");
