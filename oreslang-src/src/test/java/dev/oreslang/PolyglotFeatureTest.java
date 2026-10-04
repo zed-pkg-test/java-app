@@ -27,10 +27,13 @@ final class PolyglotFeatureTest {
 
                 define module app
                   pub fnc main(): void {
+                    struct Person {
+                      name: string
+                    }
                     let answer = math.add(1, 2);
                     answer = answer + 4;
                     val values = arr[answer, 9];
-                    val person = obj{name: "ores"};
+                    val Person person = Person{name: "ores"};
                     val inherited = new B();
                     stdio.println(values[0]);
                     stdio.println(person.name);
