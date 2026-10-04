@@ -368,7 +368,7 @@ public final class OwnershipChecker {
                             return new ValueInfo(fieldType, ValueKind.COPY, null);
                         }
                         if (hasMethodNamed(klass, member.member(), new LinkedHashSet<>())) {
-                            throw error("cannot extract a bound method from protected mutex state; invoke it directly while the guard is live");
+                            throw error("instance methods are direct-call-only and cannot be extracted from protected mutex state; invoke the method directly while the guard is live or use an explicit lambda where capture is legal");
                         }
                     }
                     if (isMutexGuardType(receiverState.type)) {

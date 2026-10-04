@@ -796,7 +796,7 @@ Without one of those explicit structural opt-ins, passing that object to a nomin
 
 `structural` is a contextual keyword, so existing identifiers named `structural` remain legal elsewhere.
 
-## Receiver identity and method values
+## Receiver identity and method calls
 
 `self` is injected by the compiler/runtime as an immutable receiver binding. It cannot be declared as a local parameter name or reassigned.
 
@@ -808,13 +808,21 @@ box.get();
 
 The runtime resolves the shared class method definition and passes the receiver as the hidden first argument.
 
-When a method is extracted as a first-class value:
+Instance and actor methods are intentionally **not** first-class values:
 
 ```ores
-val Fnc<int> callback = box.get;
+val Fnc<int> callback = box.get; // compile-time error
 ```
 
-Oreslang creates a small bound-method value containing only the receiver plus method identity. The underlying method definition remains shared by every instance. Calling `callback()` always uses the original `box`; there is no JavaScript-style dynamic `this` rebinding.
+When callback behavior is required, the receiver capture must be explicit:
+
+```ores
+val Fnc<int> callback = || -> {
+  return box.get();
+};
+```
+
+The lambda has ordinary closure-capture semantics; the method itself remains one shared class definition. Oreslang therefore has no implicit bound-method object and no JavaScript-style dynamic `this` rebinding.
 
 
 ## Incremental compilation and code units
