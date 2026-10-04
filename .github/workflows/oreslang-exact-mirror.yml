@@ -39,6 +39,6 @@ jobs:
       - name: Smoke test AOT native executable
         run: |
           test -x target/ores-aot
-          ./target/ores-aot --mode=aot --platform=linux examples/together.ores
-          ./target/ores-aot --mode=aot --platform=linux examples/showcase.ores
-          ./target/ores-aot --mode=aot --platform=linux examples/aot-actor-smoke.ores
+          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/together.ores
+          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/showcase.ores
+          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/aot-actor-smoke.ores
