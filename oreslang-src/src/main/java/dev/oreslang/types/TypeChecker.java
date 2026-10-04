@@ -48,6 +48,7 @@ public final class TypeChecker {
     private final Set<String> importedValues = new HashSet<>();
     private final Set<Ast.TypeAliasDecl> resolvingAliases = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
+    private boolean currentMaySuspend;
 
     public static Ast.Program check(Ast.Program program) {
         TypeChecker checker = new TypeChecker();
@@ -213,7 +214,7 @@ public final class TypeChecker {
         }
         if (fn.name().equals("main") && fn.actorKind() != Ast.ActorKind.NONE) {
             throw new IllegalArgumentException(
-                    "program entrypoint 'main' cannot be an actor fnc; main must run synchronously and explicitly launch actors");
+                    "program entrypoint 'main' cannot be an actor fnc; main may be ordinary sync/async code and explicitly launch actors");
         }
         Set<String> generics = uniqueGenerics(fn.genericParameters(), (fn.kind() == Ast.CallableKind.ROUTINE ? "routine " : "function ") + fn.name());
         Env env = new Env(null, fn.nonLexical());
@@ -240,10 +241,13 @@ public final class TypeChecker {
                     "return type of actor callable '" + module + "." + fn.name() + "'");
         }
         Ast.ActorKind previousActorKind = currentActorKind;
+        boolean previousMaySuspend = currentMaySuspend;
         currentActorKind = fn.actorKind();
+        currentMaySuspend = fn.async() || fn.actorKind() != Ast.ActorKind.NONE;
         try {
             checkBlock(fn.body(), env, generics, returns, null);
         } finally {
+            currentMaySuspend = previousMaySuspend;
             currentActorKind = previousActorKind;
         }
         if (returns != Primitive.VOID && !definitelyReturns(fn.body())) {
@@ -345,10 +349,14 @@ public final class TypeChecker {
             for (Ast.Param param : method.parameters()) env.define(param.name(), resolveParam(param, generics, callableSelf), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             Type returns = resolve(method.returnType(), generics, callableSelf);
             Ast.ActorKind previousActorKind = currentActorKind;
+            boolean previousMaySuspend = currentMaySuspend;
             currentActorKind = method.isStatic() ? Ast.ActorKind.NONE : klass.actorKind();
+            currentMaySuspend = method.async()
+                    || (!method.isStatic() && klass.actorKind() != Ast.ActorKind.NONE);
             try {
                 checkBlock(method.body(), env, generics, returns, callableSelf);
             } finally {
+                currentMaySuspend = previousMaySuspend;
                 currentActorKind = previousActorKind;
             }
             if (!method.isAbstract() && returns != Primitive.VOID && !definitelyReturns(method.body())) {
@@ -503,7 +511,10 @@ public final class TypeChecker {
                             "generic callable '" + fn.name()
                                     + "' must be specialized by a direct call; polymorphic function values are not supported yet");
                 }
-                return functionType(fn.parameters(), fn.returnType(), Set.of(), null);
+                Function type = functionType(fn.parameters(), fn.returnType(), Set.of(), null);
+                return fn.async()
+                        ? new Function(type.parameters(), futureOf(type.result()))
+                        : type;
             }
             throw new IllegalArgumentException("unknown name '" + name.name() + "'");
         }
@@ -590,7 +601,7 @@ public final class TypeChecker {
                     }
                     String label = "function " + functionName.name();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
-                    return checkGenericCallable(
+                    Type logicalResult = checkGenericCallable(
                             target.genericParameters(),
                             target.parameters(),
                             target.returnType(),
@@ -599,6 +610,7 @@ public final class TypeChecker {
                             null,
                             explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
                             label);
+                    return target.async() ? futureOf(logicalResult) : logicalResult;
                 }
             }
             if (call.callee() instanceof Ast.MemberExpr qualifiedCall
@@ -614,7 +626,7 @@ public final class TypeChecker {
                     }
                     String label = "function " + namespace.name() + "." + qualifiedCall.member();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
-                    return checkGenericCallable(
+                    Type logicalResult = checkGenericCallable(
                             target.genericParameters(),
                             target.parameters(),
                             target.returnType(),
@@ -623,6 +635,7 @@ public final class TypeChecker {
                             null,
                             explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
                             label);
+                    return target.async() ? futureOf(logicalResult) : logicalResult;
                 }
             }
             if (call.callee() instanceof Ast.MemberExpr futuresCall
@@ -692,7 +705,7 @@ public final class TypeChecker {
                     validateCallTypeArgumentMarker(call, fn.genericParameters(), "static function " + klass.name() + "." + fn.name());
                     List<String> callableGenerics = new ArrayList<>(fn.genericParameters());
                     String label = "static function " + klass.name() + "." + fn.name();
-                    return checkGenericCallable(
+                    Type logicalResult = checkGenericCallable(
                             callableGenerics,
                             fn.parameters(),
                             fn.returnType(),
@@ -701,6 +714,7 @@ public final class TypeChecker {
                             null,
                             explicitGenericBindings(fn.genericParameters(), call.typeArguments(), generics, self, label),
                             label);
+                    return fn.async() ? futureOf(logicalResult) : logicalResult;
                 }
                 if (receiver instanceof Named named) {
                     if (named.name().equals("SharedMutex")
@@ -739,7 +753,7 @@ public final class TypeChecker {
                         String label = "method " + owner.name() + "." + method.name();
                         Map<String, Type> bindings = new HashMap<>(classGenericBindings(owner, ownerType));
                         bindings.putAll(explicitGenericBindings(method.genericParameters(), call.typeArguments(), generics, self, label));
-                        return checkGenericCallable(
+                        Type logicalResult = checkGenericCallable(
                                 callableGenerics,
                                 method.parameters(),
                                 method.returnType(),
@@ -748,6 +762,7 @@ public final class TypeChecker {
                                 ownerType,
                                 bindings,
                                 label);
+                        return method.async() ? futureOf(logicalResult) : logicalResult;
                     }
                 }
             }
@@ -777,7 +792,14 @@ public final class TypeChecker {
                                 "generic callable '" + namespace.name() + "." + member.member()
                                         + "' must be specialized by a direct call; polymorphic function values are not supported yet");
                     }
-                    return functionType(moduleFunction.parameters(), moduleFunction.returnType(), Set.of(), null);
+                    Function type = functionType(
+                            moduleFunction.parameters(),
+                            moduleFunction.returnType(),
+                            Set.of(),
+                            null);
+                    return moduleFunction.async()
+                            ? new Function(type.parameters(), futureOf(type.result()))
+                            : type;
                 }
                 Ast.ClassDecl memberClass = classes.get(namespace.name() + "." + member.member());
                 if (memberClass != null) return new ClassNamespace(qualifiedClassName(memberClass));
@@ -955,6 +977,10 @@ public final class TypeChecker {
             return new Named("ActorSpawn", List.of(result));
         }
         if (expr instanceof Ast.AwaitExpr awaited) {
+            if (!currentMaySuspend) {
+                throw new IllegalArgumentException(
+                        "await is only legal inside an async fnc/routine/lambda or an actor callable/method");
+            }
             Type awaitedType = typeOf(awaited.expression(), env, generics, self);
             if (awaitedType instanceof Named named && named.name().equals("Future") && named.arguments().size() == 1) {
                 return named.arguments().getFirst();
@@ -997,8 +1023,15 @@ public final class TypeChecker {
             if (lambda.expressionBody() != null) {
                 throw new IllegalArgumentException("expression-body lambdas are not supported; lambdas require braces and explicit return");
             }
-            checkBlock(lambda.blockBody(), lambdaEnv, generics, Unknown.INSTANCE, self);
-            return new Function(parameters, Unknown.INSTANCE);
+            boolean previousMaySuspend = currentMaySuspend;
+            currentMaySuspend = lambda.async();
+            try {
+                checkBlock(lambda.blockBody(), lambdaEnv, generics, Unknown.INSTANCE, self);
+            } finally {
+                currentMaySuspend = previousMaySuspend;
+            }
+            Type invocationResult = lambda.async() ? futureOf(Unknown.INSTANCE) : Unknown.INSTANCE;
+            return new Function(parameters, invocationResult);
         }
         return Unknown.INSTANCE;
     }
@@ -1078,6 +1111,10 @@ public final class TypeChecker {
     }
 
     private void validateMutexCallback(Ast.LambdaExpr lambda, Type expectedParameter, Env parent, Set<String> generics, Type self) {
+        if (lambda.async()) {
+            throw new IllegalArgumentException(
+                    "mutex callbacks cannot be async or await while a guard is held");
+        }
         if (lambda.expressionBody() != null) {
             throw new IllegalArgumentException("mutex callbacks require a block body");
         }
@@ -1117,8 +1154,26 @@ public final class TypeChecker {
             requireAssignable(declared, expectedParam, "lambda parameter " + param.name());
             lambdaEnv.define(param.name(), declared, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
         }
-        checkBlock(lambda.blockBody(), lambdaEnv, generics, expected.result(), self);
-        if (expected.result() != Primitive.VOID && !definitelyReturns(lambda.blockBody())) {
+
+        Type bodyResult = expected.result();
+        if (lambda.async()) {
+            if (!(bodyResult instanceof Named named)
+                    || !named.name().equals("Future")
+                    || named.arguments().size() != 1) {
+                throw new IllegalArgumentException(
+                        "async lambda requires a contextual function result of Future<T>");
+            }
+            bodyResult = named.arguments().getFirst();
+        }
+
+        boolean previousMaySuspend = currentMaySuspend;
+        currentMaySuspend = lambda.async();
+        try {
+            checkBlock(lambda.blockBody(), lambdaEnv, generics, bodyResult, self);
+        } finally {
+            currentMaySuspend = previousMaySuspend;
+        }
+        if (bodyResult != Primitive.VOID && !definitelyReturns(lambda.blockBody())) {
             throw new IllegalArgumentException("non-void lambda must explicitly return on every path");
         }
     }
@@ -1424,6 +1479,10 @@ public final class TypeChecker {
         };
     }
 
+    private static Named futureOf(Type logicalResult) {
+        return new Named("Future", List.of(logicalResult));
+    }
+
     private Type futureCollectionPayload(Type collection, String operation) {
         collection = deref(collection);
         if (collection instanceof ListType list) {
@@ -1471,11 +1530,10 @@ public final class TypeChecker {
         Type element = named.arguments().getFirst();
         if (named.name().equals("Mutex") || named.name().equals("SharedMutex")) {
             if (named.name().equals("SharedMutex")
-                    && currentActorKind != Ast.ActorKind.NONE
-                    && (member.equals("lock") || member.equals("with_lock"))) {
+                    && currentActorKind != Ast.ActorKind.NONE) {
                 throw new IllegalArgumentException(
-                        "actor code cannot use blocking SharedMutex." + member
-                                + "(); use try_lock() or await lock_async()");
+                        "actor code cannot acquire or mutate external SharedMutex<T>; "
+                                + "use actor-owned state for writes and an explicit RwLock read capability for external reads");
             }
             Type guard = new Named("MutexGuard", List.of(element));
             return switch (member) {
@@ -2280,7 +2338,6 @@ public final class TypeChecker {
             case "Future" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Future requires exactly one explicit type argument");
                 Type element = resolve(ref.arguments().getFirst(), generics, self);
-                if (element == Primitive.VOID) throw new IllegalArgumentException("Future<void> is invalid");
                 yield new Named("Future", List.of(element));
             }
             case "SharedMutex" -> {
