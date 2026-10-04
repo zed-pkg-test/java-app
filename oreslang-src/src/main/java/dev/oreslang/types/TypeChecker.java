@@ -1,7 +1,6 @@
 package dev.oreslang.types;
 
 import dev.oreslang.ast.Ast;
-import dev.oreslang.imports.ImportRules;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.Types.Function;
 import dev.oreslang.types.Types.Borrow;
@@ -62,32 +61,17 @@ public final class TypeChecker {
 
     private void validateImports(Ast.Program program) {
         Set<String> exposed = new HashSet<>();
-        Set<String> localNames = new HashSet<>(Set.of(
-                "stdio", "process", "actor", "print", "Some", "None", "Ok", "Err",
-                "Mutex", "SharedMutex", "Object", "List", "Option", "Result", "Future",
-                "int", "uint", "float", "decimal", "complex", "bool", "String", "void",
-                "self", "null"));
-
-        for (Ast.ModuleDecl module : program.modules()) {
-            if (!module.name().equals(Parser.ROOT_MODULE)) localNames.add(module.name());
-            for (Ast.Decl declaration : module.declarations()) {
-                if (declaration instanceof Ast.FunctionDecl fn) localNames.add(fn.name());
-                else if (declaration instanceof Ast.ClassDecl klass) localNames.add(klass.name());
-                else if (declaration instanceof Ast.InterfaceDecl iface) localNames.add(iface.name());
-                else if (declaration instanceof Ast.FieldDecl field) localNames.add(field.name());
-                else if (declaration instanceof Ast.TypeAliasDecl alias) localNames.add(alias.name());
-            }
-        }
-
         for (Ast.ImportDecl imported : program.imports()) {
-            ImportRules.validate(imported);
-            for (String name : ImportRules.exposedBindings(imported)) {
-                if (!exposed.add(name)) throw new IllegalArgumentException("duplicate imported name '" + name + "'");
-                if (localNames.contains(name)) {
-                    throw new IllegalArgumentException("imported name '" + name + "' conflicts with a local or builtin name");
-                }
-                if (imported.kind() != Ast.ImportKind.CLASS || ImportRules.isJavaPath(imported.path())) {
-                    importedValues.add(name);
+            if (imported.path() == null || imported.path().isBlank()) throw new IllegalArgumentException("import path cannot be empty");
+            if (imported.wildcard()) {
+                if (imported.namespace() == null || imported.namespace().isBlank()) throw new IllegalArgumentException("wildcard imports require a namespace alias");
+                if (!exposed.add(imported.namespace())) throw new IllegalArgumentException("duplicate imported name '" + imported.namespace() + "'");
+                importedValues.add(imported.namespace());
+            } else {
+                if (imported.names().isEmpty()) throw new IllegalArgumentException("named import must select at least one name");
+                for (String name : imported.names()) {
+                    if (!exposed.add(name)) throw new IllegalArgumentException("duplicate imported name '" + name + "'");
+                    if (imported.kind() != Ast.ImportKind.CLASS) importedValues.add(name);
                 }
             }
         }
@@ -210,9 +194,10 @@ public final class TypeChecker {
     }
 
     private void checkFunction(String module, Ast.FunctionDecl fn) {
-        if (fn.name().equals("init")) {
+        if (module.equals(Parser.ROOT_MODULE) && fn.name().equals("init")) {
             Ast.TypeRef initReturn = fn.returnType();
-            if (fn.visibility() != Ast.Visibility.PRIVATE
+            if (fn.kind() != Ast.CallableKind.FNC
+                    || fn.visibility() != Ast.Visibility.PRIVATE
                     || fn.async()
                     || fn.nonLexical()
                     || fn.actorKind() != Ast.ActorKind.NONE
@@ -223,8 +208,7 @@ public final class TypeChecker {
                     || !initReturn.arguments().isEmpty()
                     || initReturn.inferArguments()) {
                 throw new IllegalArgumentException(
-                        "init hook must be a private synchronous non-actor non-generic zero-arity "
-                                + "fnc/routine returning void");
+                        "file init hook must be exactly 'fnc init() => void' (private, synchronous, non-actor, non-generic)");
             }
         }
         if (fn.name().equals("main") && fn.actorKind() != Ast.ActorKind.NONE) {
@@ -232,7 +216,7 @@ public final class TypeChecker {
                     "program entrypoint 'main' cannot be an actor fnc; main must run synchronously and explicitly launch actors");
         }
         Set<String> generics = uniqueGenerics(fn.genericParameters(), (fn.kind() == Ast.CallableKind.ROUTINE ? "routine " : "function ") + fn.name());
-        Env env = new Env(moduleBindingEnv(module), fn.nonLexical());
+        Env env = new Env(null, fn.nonLexical());
         for (Ast.Param param : fn.parameters()) {
             Type parameterType = resolveParam(param, generics, null);
             if (fn.actorKind() != Ast.ActorKind.NONE) {
@@ -390,20 +374,6 @@ public final class TypeChecker {
         }
     }
 
-    private Env moduleBindingEnv(String moduleName) {
-        Env env = new Env(null);
-        Ast.ModuleDecl module = modules.get(moduleName);
-        if (module == null) return env;
-        for (Ast.Decl declaration : module.declarations()) {
-            if (!(declaration instanceof Ast.FieldDecl field) || field.initializer() == null) continue;
-            Type type = field.type() == null
-                    ? typeOf(field.initializer(), env, Set.of(), null)
-                    : resolve(field.type(), Set.of(), null);
-            env.define(field.name(), type, field.bindingKind());
-        }
-        return env;
-    }
-
     private void checkModuleBinding(Ast.FieldDecl field) {
         if (field.initializer() == null) throw new IllegalArgumentException("module binding '" + field.name() + "' requires an initializer");
         Type actual = typeOf(field.initializer(), new Env(null), Set.of(), null);
@@ -513,6 +483,7 @@ public final class TypeChecker {
             Env.Binding local = env.lookup(name.name());
             if (local != null) return local.type();
             if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("actor")) return new Named(name.name(), List.of());
+            if (name.name().equals("Futures")) return new Named("$FuturesFactory", List.of());
             if (name.name().equals("Mutex") || name.name().equals("SharedMutex")) return new Named("$" + name.name() + "Factory", List.of());
             if (name.name().equals("print")) return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             if (name.name().equals("None")) return new Named("Option", List.of(Unknown.INSTANCE));
@@ -551,18 +522,10 @@ public final class TypeChecker {
             } else if (assignment.target() instanceof Ast.IndexExpr indexed) {
                 Type receiver = deref(typeOf(indexed.receiver(), env, generics, self));
                 Type index = typeOf(indexed.index(), env, generics, self);
-                if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-                    if (dynamic.arguments().size() != 1) {
-                        throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
-                    }
-                    requireAssignable(index, Primitive.STRING, "DynamicStruct key");
-                    targetType = dynamic.arguments().getFirst();
-                } else {
-                    requireAssignable(index, Primitive.INT, "array/list index");
-                    if (receiver instanceof ListType list) targetType = list.element();
-                    else if (receiver instanceof Tuple tuple) targetType = tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
-                    else throw new IllegalArgumentException("indexed assignment requires an array/list, tuple, or DynamicStruct");
-                }
+                requireAssignable(index, Primitive.INT, "array/list index");
+                if (receiver instanceof ListType list) targetType = list.element();
+                else if (receiver instanceof Tuple tuple) targetType = tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
+                else throw new IllegalArgumentException("indexed assignment requires an array/list or tuple");
                 where = "index";
             } else throw new IllegalArgumentException("unsupported assignment target");
             Type value = typeOf(assignment.value(), env, generics, self);
@@ -617,27 +580,13 @@ public final class TypeChecker {
             };
         }
         if (expr instanceof Ast.CallExpr call) {
-            if (call.callee() instanceof Ast.NameExpr name
-                    && name.name().equals("init")) {
-                throw new IllegalArgumentException(
-                        "init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
-            }
-            if (call.callee() instanceof Ast.MemberExpr member
-                    && member.member().equals("init")
-                    && member.receiver() instanceof Ast.NameExpr namespace
-                    && modules.containsKey(namespace.name())) {
-                throw new IllegalArgumentException(
-                        "module init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
-            }
             if (call.callee() instanceof Ast.NameExpr functionName) {
                 Ast.FunctionDecl target = findFunction(functionName.name());
                 if (target != null) {
-                    if (target.actorKind() != Ast.ActorKind.NONE
-                            && currentActorKind != Ast.ActorKind.NONE) {
+                    if (target.actorKind() != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException(
                                 "actor callable '" + target.name()
-                                        + "' cannot be synchronously invoked from another actor turn; "
-                                        + "use mailbox-oriented actor composition");
+                                        + "' is an actor entry point; invoke it with 'spawn " + target.name() + "(...)'");
                     }
                     String label = "function " + functionName.name();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
@@ -657,12 +606,11 @@ public final class TypeChecker {
                     && modules.containsKey(namespace.name())) {
                 Ast.FunctionDecl target = functions.get(namespace.name() + "." + qualifiedCall.member());
                 if (target != null) {
-                    if (target.actorKind() != Ast.ActorKind.NONE
-                            && currentActorKind != Ast.ActorKind.NONE) {
+                    if (target.actorKind() != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException(
                                 "actor callable '" + namespace.name() + "." + target.name()
-                                        + "' cannot be synchronously invoked from another actor turn; "
-                                        + "use mailbox-oriented actor composition");
+                                        + "' is an actor entry point; invoke it with 'spawn "
+                                        + namespace.name() + "." + target.name() + "(...)'");
                     }
                     String label = "function " + namespace.name() + "." + qualifiedCall.member();
                     validateCallTypeArgumentMarker(call, target.genericParameters(), label);
@@ -676,6 +624,30 @@ public final class TypeChecker {
                             explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
                             label);
                 }
+            }
+            if (call.callee() instanceof Ast.MemberExpr futuresCall
+                    && futuresCall.receiver() instanceof Ast.NameExpr futures
+                    && futures.name().equals("Futures")) {
+                if (call.typeArgumentsPresent()) {
+                    throw new IllegalArgumentException(
+                            "Futures." + futuresCall.member() + " does not accept call-site type arguments");
+                }
+                if (call.arguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "Futures." + futuresCall.member() + " expects exactly one list of Future values");
+                }
+                Type collection = deref(typeOf(call.arguments().getFirst(), env, generics, self));
+                Type payload = futureCollectionPayload(
+                        collection,
+                        "Futures." + futuresCall.member());
+                return switch (futuresCall.member()) {
+                    case "all" -> new Named(
+                            "Future",
+                            List.of(new ListType(payload)));
+                    case "race" -> new Named("Future", List.of(payload));
+                    default -> throw new IllegalArgumentException(
+                            "unknown Futures member '" + futuresCall.member() + "'");
+                };
             }
             if (call.callee() instanceof Ast.MemberExpr factoryCall
                     && factoryCall.receiver() instanceof Ast.NameExpr factory
@@ -795,6 +767,11 @@ public final class TypeChecker {
             if (member.receiver() instanceof Ast.NameExpr namespace && modules.containsKey(namespace.name())) {
                 Ast.FunctionDecl moduleFunction = functions.get(namespace.name() + "." + member.member());
                 if (moduleFunction != null) {
+                    if (moduleFunction.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException(
+                                "actor callable '" + namespace.name() + "." + member.member()
+                                        + "' is not an ordinary function value; invoke it with spawn");
+                    }
                     if (!moduleFunction.genericParameters().isEmpty()) {
                         throw new IllegalArgumentException(
                                 "generic callable '" + namespace.name() + "." + member.member()
@@ -818,6 +795,10 @@ public final class TypeChecker {
                 throw new IllegalArgumentException(
                         "unknown " + sumNamed.name() + " member '" + member.member() + "'");
             }
+            Type futureMember = builtinFutureMember(sumReceiver, member.member());
+            if (futureMember != null) return futureMember;
+            Type actorHandleMember = builtinActorHandleMember(sumReceiver, member.member());
+            if (actorHandleMember != null) return actorHandleMember;
             Type mutexMember = builtinMutexMember(receiver, member.member());
             if (mutexMember != null) return mutexMember;
             receiver = unwrapMutexGuard(receiver);
@@ -850,12 +831,6 @@ public final class TypeChecker {
                 if (result == null) throw new IllegalArgumentException("unknown structural member '" + member.member() + "'");
                 return result;
             }
-            if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-                if (dynamic.arguments().size() != 1) {
-                    throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
-                }
-                return dynamic.arguments().getFirst();
-            }
             if (receiver instanceof Named named) {
                 Ast.ClassDecl klass = findClass(named.name());
                 if (klass != null) {
@@ -887,38 +862,12 @@ public final class TypeChecker {
         if (expr instanceof Ast.IndexExpr indexed) {
             Type receiver = deref(typeOf(indexed.receiver(), env, generics, self));
             Type index = typeOf(indexed.index(), env, generics, self);
-            if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-                if (dynamic.arguments().size() != 1) {
-                    throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
-                }
-                requireAssignable(index, Primitive.STRING, "DynamicStruct key");
-                return dynamic.arguments().getFirst();
-            }
-            if (receiver instanceof Record record) {
-                requireAssignable(index, Primitive.STRING, "object/map key");
-                if (index instanceof StringLiteral key) {
-                    Type member = record.members().get(key.value());
-                    if (member == null) {
-                        throw new IllegalArgumentException("unknown object/map key '" + key.value() + "'");
-                    }
-                    return member;
-                }
-                if (record.members().isEmpty()) return Unknown.INSTANCE;
-                return record.members().values().stream().reduce(Unknown.INSTANCE, this::commonType);
-            }
             requireAssignable(index, Primitive.INT, "array/list index");
             if (receiver instanceof ListType list) return list.element();
             if (receiver instanceof Tuple tuple) return tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
-            throw new IllegalArgumentException("indexing requires an array/list, tuple, or DynamicStruct");
+            throw new IllegalArgumentException("indexing requires an array/list or tuple");
         }
         if (expr instanceof Ast.NewExpr created) {
-            if (created.type().name().equals("DynamicStruct")) {
-                Type dynamic = resolve(created.type(), generics, self);
-                if (!created.arguments().isEmpty()) {
-                    throw new IllegalArgumentException("DynamicStruct<T> constructor takes no positional arguments");
-                }
-                return dynamic;
-            }
             Ast.ClassDecl klass = findClass(created.type().name());
             if (klass == null) return resolve(created.type(), generics, self);
             if (klass.actorKind() != Ast.ActorKind.NONE) {
@@ -956,9 +905,64 @@ public final class TypeChecker {
             }
             return nominal;
         }
+        if (expr instanceof Ast.SpawnExpr spawned) {
+            if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
+                throw new IllegalArgumentException(
+                        "untrusted actors cannot spawn child actors; use bounded async I/O/Futures instead");
+            }
+            Ast.CallExpr call = spawned.call();
+            Ast.FunctionDecl target;
+            String label;
+            if (call.callee() instanceof Ast.NameExpr functionName) {
+                target = findFunction(functionName.name());
+                label = "actor callable " + functionName.name();
+            } else if (call.callee() instanceof Ast.MemberExpr qualified
+                    && qualified.receiver() instanceof Ast.NameExpr namespace
+                    && modules.containsKey(namespace.name())) {
+                target = functions.get(namespace.name() + "." + qualified.member());
+                label = "actor callable " + namespace.name() + "." + qualified.member();
+            } else {
+                throw new IllegalArgumentException(
+                        "spawn requires a direct actor fnc/routine call, optionally module-qualified");
+            }
+            if (target == null) throw new IllegalArgumentException("spawn target is not a known callable");
+            if (target.actorKind() == Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException(
+                        "spawn target '" + target.name() + "' is not declared with the actor keyword");
+            }
+            if (currentActorKind == Ast.ActorKind.PRIVATE
+                    && target.actorKind() == Ast.ActorKind.SHARED) {
+                throw new IllegalArgumentException(
+                        "isoactor/private actor code cannot spawn shared actor callable '"
+                                + target.name()
+                                + "' because that would escalate into the SHARED_MEMORY domain");
+            }
+            validateCallTypeArgumentMarker(call, target.genericParameters(), label);
+            Type result = checkGenericCallable(
+                    target.genericParameters(),
+                    target.parameters(),
+                    target.returnType(),
+                    call.arguments(),
+                    env, generics, self,
+                    null,
+                    explicitGenericBindings(
+                            target.genericParameters(),
+                            call.typeArguments(),
+                            generics,
+                            self,
+                            label),
+                    label);
+            return new Named("ActorSpawn", List.of(result));
+        }
         if (expr instanceof Ast.AwaitExpr awaited) {
             Type awaitedType = typeOf(awaited.expression(), env, generics, self);
-            if (awaitedType instanceof Named named && named.name().equals("Future") && named.arguments().size() == 1) return named.arguments().getFirst();
+            if (awaitedType instanceof Named named && named.name().equals("Future") && named.arguments().size() == 1) {
+                return named.arguments().getFirst();
+            }
+            if (awaitedType instanceof Named named && named.name().equals("ActorSpawn")
+                    && named.arguments().size() == 1) {
+                return new Named("ActorRef", List.of());
+            }
             return Unknown.INSTANCE;
         }
         if (expr instanceof Ast.ListExpr list) {
@@ -974,27 +978,10 @@ public final class TypeChecker {
         }
         if (expr instanceof Ast.ObjectExpr object) {
             Map<String, Type> members = new LinkedHashMap<>();
-            boolean dynamicKeys = false;
-            Type dynamicValue = null;
             for (Ast.ObjectField field : object.fields()) {
-                Type exactValueType = typeOf(field.value(), env, generics, self);
-                Type dynamicValueType = widenCollectionElement(exactValueType);
-                dynamicValue = dynamicValue == null
-                        ? dynamicValueType
-                        : collectionElementJoin(dynamicValue, dynamicValueType);
-                if (field.isDynamic()) {
-                    dynamicKeys = true;
-                    requireAssignable(
-                            typeOf(field.dynamicName(), env, generics, self),
-                            Primitive.STRING,
-                            "dynamic obj key");
-                } else if (members.putIfAbsent(field.name(), exactValueType) != null) {
+                if (members.putIfAbsent(field.name(), typeOf(field.value(), env, generics, self)) != null) {
                     throw new IllegalArgumentException("duplicate obj field '" + field.name() + "'");
                 }
-            }
-            if (dynamicKeys) {
-                return new Named("DynamicStruct", List.of(
-                        dynamicValue == null ? Unknown.INSTANCE : dynamicValue));
             }
             return new Record(members);
         }
@@ -1147,18 +1134,12 @@ public final class TypeChecker {
             if (result == null) throw new IllegalArgumentException("unknown structural member '" + member.member() + "'");
             return result;
         }
-        if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
-            if (dynamic.arguments().size() != 1) {
-                throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
-            }
-            return dynamic.arguments().getFirst();
-        }
         if (receiver instanceof Named named) {
             Ast.ClassDecl klass = findClass(named.name());
             if (klass != null) {
                 ResolvedField field = findFieldTarget(klass, named, member.member(), new LinkedHashSet<>());
                 if (field != null) {
-                    Type pattern = resolve(field.field().type(), Set.copyOf(field.owner().genericParameters()), field.ownerType());
+                    Type pattern = classFieldType(field.owner(), field.field());
                     return substituteGenerics(pattern, classGenericBindings(field.owner(), field.ownerType()));
                 }
             }
@@ -1207,20 +1188,10 @@ public final class TypeChecker {
             throw new IllegalArgumentException(where + " is not actor-boundary sendable: " + type);
         }
 
-        if (named.name().equals("Mutex") || named.name().equals("MutexGuard") || named.name().equals("Future")) {
+        if (named.name().equals("Mutex") || named.name().equals("MutexGuard")
+                || named.name().equals("Future") || named.name().equals("ActorSpawn")) {
             throw new IllegalArgumentException(
                     where + " cannot use " + named.name() + " across an actor boundary");
-        }
-        if (named.name().equals("DynamicStruct")) {
-            if (named.arguments().size() != 1) {
-                throw new IllegalArgumentException(where + " requires DynamicStruct<T> with one value type");
-            }
-            validateActorCallableBoundaryType(
-                    named.arguments().getFirst(),
-                    actorKind,
-                    false,
-                    where + " value");
-            return;
         }
         if (named.name().equals("SharedMutex")) {
             if (actorKind == Ast.ActorKind.PRIVATE) {
@@ -1288,11 +1259,8 @@ public final class TypeChecker {
         if (!(type instanceof Named named)) return false;
 
         if (named.name().equals("Mutex") || named.name().equals("MutexGuard")
-                || named.name().equals("Future") || named.name().equals("SharedMutex")) return false;
-        if (named.name().equals("DynamicStruct")) {
-            return named.arguments().size() == 1
-                    && isSharedSafe(named.arguments().getFirst(), seen, genericBindings);
-        }
+                || named.name().equals("Future") || named.name().equals("ActorSpawn")
+                || named.name().equals("SharedMutex")) return false;
         if (named.name().equals("OptionUnwrapError")) return named.arguments().isEmpty();
         if (named.name().equals("Option")) {
             return named.arguments().size() == 1 && isSharedSafe(named.arguments().getFirst(), seen, genericBindings);
@@ -1328,7 +1296,7 @@ public final class TypeChecker {
             // a parent T must never be resolved as an unrelated child T.
             for (Ast.FieldDecl field : klass.fields()) {
                 Type fieldType = resolveSharedGeneric(
-                        resolve(field.type(), classGenerics, nominal),
+                        classFieldType(klass, field),
                         classBindings);
                 if (!isSharedSafe(fieldType, seen, classBindings)) return false;
             }
@@ -1402,6 +1370,100 @@ public final class TypeChecker {
             };
         }
         return null;
+    }
+
+    private Type builtinActorHandleMember(Type receiver, String member) {
+        if (!(receiver instanceof Named named)) return null;
+        if (named.name().equals("ActorSpawn") && named.arguments().size() == 1) {
+            Type result = named.arguments().getFirst();
+            return switch (member) {
+                case "id" -> new Named("ActorId", List.of());
+                case "ready" -> new Named(
+                        "Future",
+                        List.of(new Named("ActorRef", List.of())));
+                case "done" -> new Named("Future", List.of(Primitive.BOOL));
+                case "result" -> {
+                    if (result == Primitive.VOID) {
+                        throw new IllegalArgumentException(
+                                "void actor callable has no result value; await spawn.done for completion");
+                    }
+                    yield new Named("Future", List.of(result));
+                }
+                default -> throw new IllegalArgumentException(
+                        "unknown ActorSpawn member '" + member + "'");
+            };
+        }
+        if (named.name().equals("ActorRef") && named.arguments().isEmpty()) {
+            return switch (member) {
+                case "id" -> new Named("ActorId", List.of());
+                case "is_alive" -> {
+                    if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
+                        throw new IllegalArgumentException(
+                                "untrusted actors cannot inspect ActorRef lifecycle state");
+                    }
+                    yield new Function(List.of(), Primitive.BOOL);
+                }
+                default -> throw new IllegalArgumentException(
+                        "unknown ActorRef member '" + member
+                                + "'; one-shot actor callables expose identity/control, not an application mailbox");
+            };
+        }
+        return null;
+    }
+
+    private Type builtinFutureMember(Type receiver, String member) {
+        if (!(receiver instanceof Named named)
+                || !named.name().equals("Future")
+                || named.arguments().size() != 1) {
+            return null;
+        }
+        return switch (member) {
+            case "is_done", "is_cancelled", "cancel" ->
+                    new Function(List.of(), Primitive.BOOL);
+            default -> null;
+        };
+    }
+
+    private Type futureCollectionPayload(Type collection, String operation) {
+        collection = deref(collection);
+        if (collection instanceof ListType list) {
+            return futurePayload(list.element(), operation);
+        }
+        if (collection instanceof Tuple tuple) {
+            if (tuple.elements().isEmpty()) return Unknown.INSTANCE;
+            Type payload = Unknown.INSTANCE;
+            for (Type element : tuple.elements()) {
+                Type next = futurePayload(element, operation);
+                payload = payload == Unknown.INSTANCE
+                        ? next
+                        : Types.unionOf(payload, next);
+            }
+            return payload;
+        }
+        throw new IllegalArgumentException(
+                operation + " expects a list/tuple of Future<T> values");
+    }
+
+    private Type futurePayload(Type type, String operation) {
+        type = deref(type);
+        if (type == Unknown.INSTANCE) return Unknown.INSTANCE;
+        if (type instanceof Named named
+                && named.name().equals("Future")
+                && named.arguments().size() == 1) {
+            return named.arguments().getFirst();
+        }
+        if (type instanceof Union union) {
+            Type payload = Unknown.INSTANCE;
+            for (Type option : union.options()) {
+                Type next = futurePayload(option, operation);
+                payload = payload == Unknown.INSTANCE
+                        ? next
+                        : Types.unionOf(payload, next);
+            }
+            return payload;
+        }
+        throw new IllegalArgumentException(
+                operation + " expects only Future<T> elements, found " + type);
     }
 
     private Type builtinMutexMember(Type receiver, String member) {
@@ -1615,10 +1677,7 @@ public final class TypeChecker {
         Set<String> classGenericNames = Set.copyOf(klass.genericParameters());
         for (int i = 0; i < arguments.size(); i++) {
             ResolvedField resolvedField = fields.get(i);
-            Type fieldPattern = resolve(
-                    resolvedField.field().type(),
-                    Set.copyOf(resolvedField.owner().genericParameters()),
-                    resolvedField.ownerType());
+            Type fieldPattern = classFieldType(resolvedField.owner(), resolvedField.field());
             fieldPattern = substituteGenerics(
                     fieldPattern,
                     classGenericBindings(resolvedField.owner(), resolvedField.ownerType()));
@@ -1918,6 +1977,8 @@ public final class TypeChecker {
             }
         } else if (expression instanceof Ast.AwaitExpr awaited) {
             rejectStaticClassGenericReferences(awaited.expression(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.SpawnExpr spawned) {
+            rejectStaticClassGenericReferences(spawned.call(), classGenerics, klass, method);
         } else if (expression instanceof Ast.ListExpr list) {
             for (Ast.Expr item : list.elements()) {
                 rejectStaticClassGenericReferences(item, classGenerics, klass, method);
@@ -1928,9 +1989,6 @@ public final class TypeChecker {
             }
         } else if (expression instanceof Ast.ObjectExpr object) {
             for (Ast.ObjectField field : object.fields()) {
-                if (field.isDynamic()) {
-                    rejectStaticClassGenericReferences(field.dynamicName(), classGenerics, klass, method);
-                }
                 rejectStaticClassGenericReferences(field.value(), classGenerics, klass, method);
             }
         } else if (expression instanceof Ast.LambdaExpr lambda) {
@@ -2193,14 +2251,6 @@ public final class TypeChecker {
             case "Array", "List" -> {
                 if (!ref.inferArguments() && ref.arguments().size() != 1) throw new IllegalArgumentException(ref.name() + " requires exactly one type argument");
                 yield new ListType(ref.arguments().isEmpty() ? Unknown.INSTANCE : resolve(ref.arguments().getFirst(), generics, self));
-            }
-            case "DynamicStruct" -> {
-                if (ref.inferArguments() || ref.arguments().size() != 1) {
-                    throw new IllegalArgumentException("DynamicStruct requires exactly one explicit value type");
-                }
-                Type value = resolve(ref.arguments().getFirst(), generics, self);
-                if (value == Primitive.VOID) throw new IllegalArgumentException("DynamicStruct<void> is invalid");
-                yield new Named("DynamicStruct", List.of(value));
             }
             case "Option" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Option requires exactly one explicit type argument");
@@ -2553,6 +2603,7 @@ public final class TypeChecker {
         else if (expr instanceof Ast.IndexExpr e) { collectCalls(e.receiver(), module, out); collectCalls(e.index(), module, out); }
         else if (expr instanceof Ast.NewExpr e) for (Ast.Expr arg : e.arguments()) collectCalls(arg, module, out);
         else if (expr instanceof Ast.AwaitExpr e) collectCalls(e.expression(), module, out);
+        else if (expr instanceof Ast.SpawnExpr e) collectCalls(e.call(), module, out);
         else if (expr instanceof Ast.ListExpr e) for (Ast.Expr item : e.elements()) collectCalls(item, module, out);
         else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr item : e.elements()) collectCalls(item, module, out);
         else if (expr instanceof Ast.ObjectExpr e) for (Ast.ObjectField f : e.fields()) collectCalls(f.value(), module, out);

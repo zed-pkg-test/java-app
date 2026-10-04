@@ -37,7 +37,7 @@ public final class Ast {
 
     public enum Visibility { PRIVATE, PUBLIC }
     public enum CallableKind { FNC, ROUTINE }
-    public enum ActorKind { NONE, PRIVATE, SHARED }
+    public enum ActorKind { NONE, PRIVATE, SHARED, UNTRUSTED }
 
     public record Annotation(String name, List<TypeRef> arguments) {
         public Annotation { arguments = List.copyOf(arguments); }
@@ -305,7 +305,7 @@ public final class Ast {
     }
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
-            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
+            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, SpawnExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
     public record LiteralExpr(Object value) implements Expr { }
     public record Imaginary(double coefficient) { }
@@ -343,6 +343,7 @@ public final class Ast {
     }
 
     public record AwaitExpr(Expr expression) implements Expr { }
+    public record SpawnExpr(CallExpr call) implements Expr { }
 
     public record ListExpr(List<Expr> elements) implements Expr {
         public ListExpr { elements = List.copyOf(elements); }
@@ -352,20 +353,7 @@ public final class Ast {
         public TupleExpr { elements = List.copyOf(elements); }
     }
 
-    public record ObjectField(String name, Expr dynamicName, Expr value) {
-        public ObjectField {
-            if ((name == null) == (dynamicName == null)) {
-                throw new IllegalArgumentException("object field must have exactly one static or dynamic key");
-            }
-        }
-        public static ObjectField named(String name, Expr value) {
-            return new ObjectField(java.util.Objects.requireNonNull(name, "name"), null, value);
-        }
-        public static ObjectField dynamic(Expr key, Expr value) {
-            return new ObjectField(null, java.util.Objects.requireNonNull(key, "key"), value);
-        }
-        public boolean isDynamic() { return dynamicName != null; }
-    }
+    public record ObjectField(String name, Expr value) { }
 
     public record ObjectExpr(List<ObjectField> fields) implements Expr {
         public ObjectExpr { fields = List.copyOf(fields); }
