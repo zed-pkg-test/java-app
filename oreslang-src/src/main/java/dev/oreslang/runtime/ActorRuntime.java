@@ -1732,7 +1732,8 @@ public final class ActorRuntime implements AutoCloseable {
         this.rootScheduler = OresScheduler.runtimeOwned(
                 "ores-root-" + Integer.toHexString(System.identityHashCode(this)),
                 rootParallelism,
-                this::executeRootSchedulerTurn);
+                this::dispatchRootSchedulerCarrier,
+                this::executeRootSchedulerGuestTurn);
     }
 
     public IsolatePolicy policyCeiling() { return policyCeiling; }
@@ -1752,20 +1753,38 @@ public final class ActorRuntime implements AutoCloseable {
         return rootScheduler;
     }
 
-    private void executeRootSchedulerTurn(Runnable turn) {
-        Objects.requireNonNull(turn, "turn");
+    /**
+     * Dispatch scheduler bookkeeping onto the VM CONTROL pool without entering
+     * the Truffle context. Guest context admission is deliberately narrower:
+     * only the actual scheduler turn is entered by
+     * {@link #executeRootSchedulerGuestTurn(Runnable)}.
+     */
+    private void dispatchRootSchedulerCarrier(Runnable carrierTask) {
+        Objects.requireNonNull(carrierTask, "carrierTask");
         dispatcherGroup.executeControlTask(() -> {
             ACTOR_CARRIER.set(Boolean.TRUE);
             CURRENT_ROOT_RUNTIME.set(ActorRuntime.this);
             try {
-                turnExecutor.execute(() -> {
-                    schedulerSafepoint();
-                    turn.run();
-                });
+                carrierTask.run();
             } finally {
                 CURRENT_ROOT_RUNTIME.remove();
                 ACTOR_CARRIER.remove();
             }
+        });
+    }
+
+    /**
+     * Enter the owning Oreslang/Truffle context for guest work only.
+     *
+     * <p>OresScheduler invokes its after-turn publication after this method
+     * returns. Therefore an awaited root Future cannot wake Context.eval() (or
+     * a host close) while this carrier is still entered in the context.</p>
+     */
+    private void executeRootSchedulerGuestTurn(Runnable turn) {
+        Objects.requireNonNull(turn, "turn");
+        turnExecutor.execute(() -> {
+            schedulerSafepoint();
+            turn.run();
         });
     }
 
