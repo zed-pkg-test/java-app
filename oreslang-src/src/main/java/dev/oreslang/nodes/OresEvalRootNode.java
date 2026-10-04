@@ -1022,7 +1022,8 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.NewExpr created) {
                 return asyncFlatMap(
                         asyncEvalArguments(created.arguments(), 0, env, new ArrayList<>()),
-                        args -> safePlan(() -> {
+                        rawArgs -> safePlan(() -> {
+                            List<Object> args = castObjectList(rawArgs);
                             if (created.type().name().equals("OresScheduler")) {
                                 if (args.size() != 1 || !(args.getFirst() instanceof Number number)) {
                                     throw new IllegalArgumentException(
