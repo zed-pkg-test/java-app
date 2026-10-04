@@ -794,7 +794,10 @@ public final class Parser {
             consumeStatementTerminator("defer statement should end with ';'");
             return new Ast.DeferStmt(expression);
         }
-        if (match(BLOCK)) return new Ast.BlockStmt(parseBlock());
+        if (check(BLOCK) && checkNext(LBRACE)) {
+            advance();
+            return new Ast.BlockStmt(parseBlock());
+        }
         if (match(BREAK)) {
             consumeStatementTerminator("break statement should end with ';'");
             return new Ast.BreakStmt();
@@ -805,7 +808,10 @@ public final class Parser {
         }
         if (match(IF)) return parseIf();
         if (match(TRY)) return parseTry();
-        if (match(LOOP)) return new Ast.LoopStmt(parseBlock());
+        if (check(LOOP) && checkNext(LBRACE)) {
+            advance();
+            return new Ast.LoopStmt(parseBlock());
+        }
         if (match(FOR)) return parseFor();
 
         Ast.Expr expression = parseExpression();
@@ -1204,7 +1210,9 @@ public final class Parser {
 
     private String consumeCallableName(String message) {
         Token token = peek();
-        if (token.type() == IDENT || isReservedCallableName(token.type())) {
+        if (token.type() == IDENT
+                || isReservedCallableName(token.type())
+                || isContextualStatementCallableName(token.type())) {
             advance();
             return token.lexeme();
         }
@@ -1223,6 +1231,10 @@ public final class Parser {
 
     private static boolean isReservedCallableName(Token.Type type) {
         return type == STOP || type == DO || type == DONE;
+    }
+
+    private static boolean isContextualStatementCallableName(Token.Type type) {
+        return type == LOOP || type == BLOCK;
     }
 
     private String consumeStaticObjectKeyName(String message) {
@@ -1281,7 +1293,8 @@ public final class Parser {
         // 'actor' remains reserved, but in expression position it names the
         // actor-local runtime namespace (actor.gc and future local primitives).
         if (match(ACTOR)) return new Ast.NameExpr("actor");
-        if (isReservedCallableName(peek().type())
+        if ((isReservedCallableName(peek().type())
+                || isContextualStatementCallableName(peek().type()))
                 && reservedCallableNameFollowedByInvocation(current)) {
             return new Ast.NameExpr(advance().lexeme());
         }
