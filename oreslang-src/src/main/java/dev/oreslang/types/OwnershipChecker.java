@@ -729,7 +729,7 @@ public final class OwnershipChecker {
                             + "' cannot return move-only state through a mutex guard/critical-section borrow");
                 }
                 Ast.TypeRef result = method.async()
-                                && owner.actorKind() == Ast.ActorKind.NONE
+                                && target.owner().actorKind() == Ast.ActorKind.NONE
                         ? new Ast.TypeRef("Future", List.of(signature.result()), false)
                         : signature.result();
                 return new ValueInfo(result, kindOfType(result), null);
