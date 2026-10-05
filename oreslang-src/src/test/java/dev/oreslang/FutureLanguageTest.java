@@ -114,6 +114,58 @@ final class FutureLanguageTest {
     }
 
     @Test
+    void returnAwaitMemberCallStillProjectsUserAwaitableWhenTailFusionDoesNotApply()
+            throws Exception {
+        String program = """
+                define module app
+                  define class ReadyValue implements Awaitable<int> as
+                    pub get_awaited() => Future<int> {
+                      return Future.from_callback<int>(|cb| -> {
+                        cb.resolve(42);
+                        return;
+                      });
+                    }
+                  end
+
+                  define class Provider as
+                    pub make() => ReadyValue {
+                      return new ReadyValue();
+                    }
+                  end
+
+                  async fnc read() => int {
+                    val provider = new Provider();
+                    return await provider.make();
+                  }
+
+                  pub async routine main() => void {
+                    stdio.println(await read());
+                    return;
+                  }
+                end
+                """;
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse(program)));
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(
+                        OresLanguage.ID,
+                        program,
+                        "awaitable-member-return.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("42"));
+    }
+
+    @Test
     void malformedAwaitableImplementationIsRejected() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
