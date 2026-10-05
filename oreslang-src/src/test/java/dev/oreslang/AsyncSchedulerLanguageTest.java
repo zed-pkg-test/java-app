@@ -315,6 +315,54 @@ final class AsyncSchedulerLanguageTest {
     }
 
     @Test
+    void synchronousSchedulerTaskCannotRaceMutableParentCapture() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          let counter = 0;
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(|| -> {
+                            counter = counter + 1;
+                            return;
+                          });
+                          counter = counter + 1;
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                failure.getMessage().contains("moved")
+                        || failure.getMessage().contains("capture"),
+                () -> "unexpected sync scheduler ownership error: " + failure.getMessage());
+    }
+
+    @Test
+    void synchronousSchedulerTaskCannotCaptureLinearGuard() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          val mutex = Mutex.new(1);
+                          val guard = mutex.lock();
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(|| -> {
+                            guard.release();
+                            return;
+                          });
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                failure.getMessage().contains("guard")
+                        || failure.getMessage().contains("capture"),
+                () -> "unexpected sync scheduler guard error: " + failure.getMessage());
+    }
+
+    @Test
     void synchronousSchedulerTaskRunsOnCustomPoolAndReturnsFuture() throws Exception {
         String program = """
                 pub async routine main() => void {
