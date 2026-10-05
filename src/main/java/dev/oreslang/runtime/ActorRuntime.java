@@ -56,6 +56,8 @@ public final class ActorRuntime implements AutoCloseable {
     private static final int MAX_ACTOR_GROUPS_PER_ACTOR = 64;
     private static final int MAX_ACTOR_GROUP_MEMBERSHIPS_PER_ACTOR = 256;
     private static final int MAX_EVENT_TOPICS_PER_GROUP = 1_024;
+    private static final long ACTOR_GROUP_EVENT_ENVELOPE_BYTES = 128L;
+    private static final long ACTOR_GROUP_EVENT_DELIVERY_BYTES = 256L;
     private static final long CLOSE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
     private static final int INTERNAL_CONTINUATION_SLOTS = 1_024;
     private static final ThreadLocal<Boolean> ACTOR_CARRIER = ThreadLocal.withInitial(() -> Boolean.FALSE);
@@ -2309,20 +2311,51 @@ public final class ActorRuntime implements AutoCloseable {
 
     static final class ActorGroupEventReservation implements AutoCloseable {
         private final AtomicReference<ActorRuntime> owner;
-        private final long bytes;
+        private final AtomicLong reservedBytes;
 
         private ActorGroupEventReservation(ActorRuntime owner, long bytes) {
             this.owner = new AtomicReference<>(Objects.requireNonNull(owner, "owner"));
             if (bytes < 0) throw new IllegalArgumentException("bytes cannot be negative");
-            this.bytes = bytes;
+            this.reservedBytes = new AtomicLong(bytes);
         }
 
-        long bytes() { return bytes; }
+        void reserveDeliveries(int count) {
+            if (count < 0) throw new IllegalArgumentException("count cannot be negative");
+            if (count == 0) return;
+
+            ActorRuntime runtime = owner.get();
+            if (runtime == null) {
+                throw new IllegalStateException("ActorGroup event reservation is closed");
+            }
+
+            final long extra;
+            try {
+                extra = Math.multiplyExact(
+                        ACTOR_GROUP_EVENT_DELIVERY_BYTES,
+                        (long) count);
+            } catch (ArithmeticException overflow) {
+                throw new IllegalStateException(
+                        "ActorGroup event delivery accounting overflow",
+                        overflow);
+            }
+
+            runtime.reserveSharedRuntimeBytes(
+                    extra,
+                    "ActorGroup event delivery fanout");
+            try {
+                reservedBytes.addAndGet(extra);
+            } catch (Throwable failure) {
+                runtime.releaseSharedRuntimeBytes(extra);
+                throw failure;
+            }
+        }
 
         @Override
         public void close() {
             ActorRuntime runtime = owner.getAndSet(null);
-            if (runtime != null) runtime.releaseSharedRuntimeBytes(bytes);
+            if (runtime == null) return;
+            long bytes = reservedBytes.getAndSet(0L);
+            runtime.releaseSharedRuntimeBytes(bytes);
         }
     }
 
@@ -2356,7 +2389,17 @@ public final class ActorRuntime implements AutoCloseable {
         long runtimeRemaining =
                 Math.max(0L, policyCeiling.maxHeapBytes() - actorMemoryBytes());
         long preflightLimit = Math.min(senderLimit, runtimeRemaining);
-        long estimatedBytes = estimateFrozenBytes(value);
+        long estimatedPayloadBytes = estimateFrozenBytes(value);
+        final long estimatedBytes;
+        try {
+            estimatedBytes = Math.addExact(
+                    estimatedPayloadBytes,
+                    ACTOR_GROUP_EVENT_ENVELOPE_BYTES);
+        } catch (ArithmeticException overflow) {
+            throw new IllegalStateException(
+                    "ActorGroup event payload accounting overflow",
+                    overflow);
+        }
         if (estimatedBytes > preflightLimit) {
             throw new IllegalStateException(
                     "ActorGroup event payload exceeds available memory policy: estimated="
@@ -2365,7 +2408,17 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         Object frozen = freeze(value);
-        long bytes = estimateFrozenBytes(frozen);
+        long payloadBytes = estimateFrozenBytes(frozen);
+        final long bytes;
+        try {
+            bytes = Math.addExact(
+                    payloadBytes,
+                    ACTOR_GROUP_EVENT_ENVELOPE_BYTES);
+        } catch (ArithmeticException overflow) {
+            throw new IllegalStateException(
+                    "ActorGroup event payload accounting overflow",
+                    overflow);
+        }
         if (bytes > senderLimit) {
             throw new IllegalStateException(
                     "ActorGroup event payload exceeds sender memory policy: bytes="
