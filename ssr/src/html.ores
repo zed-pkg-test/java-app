@@ -1,5 +1,6 @@
 import module markup from './markup';
 import type Markup from './markup';
+import type Stylesheet from './css';
 
 // Serialized HTML attributes.
 //
@@ -144,16 +145,23 @@ define module html as
     return element_trusted("title", attrs, children);
   }
 
-  // CSS is a distinct executable-ish context. Callers must pass only trusted
-  // CSS text until a structural Stylesheet-only helper is introduced.
-  pub fnc style_trusted(Attrs attrs, Markup css_text): Markup {
-    return element_trusted("style", attrs, css_text);
+  // CSS has its own context; accept a Stylesheet rather than generic Markup.
+  pub fnc style_sheet(Attrs attrs, Stylesheet sheet): Markup {
+    return element_trusted(
+      "style",
+      attrs,
+      markup.trusted_raw(sheet.css)
+    );
   }
 
-  // JavaScript has different escaping rules from HTML. Keep the helper
-  // explicitly trusted; do not present script content as ordinary safe Markup.
-  pub fnc script_trusted(Attrs attrs, Markup script_text): Markup {
-    return element_trusted("script", attrs, script_text);
+  // JavaScript has different escaping rules from HTML. Script source remains
+  // an explicitly trusted string until a structural JS/script model exists.
+  pub fnc script_trusted(Attrs attrs, string source): Markup {
+    return element_trusted(
+      "script",
+      attrs,
+      markup.trusted_raw(source)
+    );
   }
 
   pub fnc input(Attrs attrs): Markup {
