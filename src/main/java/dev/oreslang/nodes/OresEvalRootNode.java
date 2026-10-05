@@ -835,6 +835,12 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("routine " + fn.name()
                                 + " is direct-call-only and cannot be used as a first-class callable value");
                     }
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic fnc '" + fn.name()
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
+                    }
                     return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
                 }
                 throw new IllegalArgumentException("unknown name " + name.name());
@@ -1036,8 +1042,15 @@ public final class OresEvalRootNode extends RootNode {
                         Ast.Param param = lambda.parameters().get(i);
                         local.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
                     }
-                    if (lambda.expressionBody() != null) return eval(lambda.expressionBody(), local);
                     try {
+                        if (lambda.expressionBody() != null) {
+                            // An expression-bodied lambda's sole expression is
+                            // inherently in tail position. Route it through the
+                            // same tail-return lowering as an explicit
+                            // `return expr;` in a block-bodied lambda.
+                            returnFrom(lambda.expressionBody(), local, false);
+                            throw new AssertionError("lambda expression return did not transfer control");
+                        }
                         executeBlock(lambda.blockBody(), local);
                         return null;
                     } catch (TailCallSignal signal) {
@@ -1113,6 +1126,12 @@ public final class OresEvalRootNode extends RootNode {
                 List<Ast.MethodDecl> functions = klass.owner().findStaticFunctionsByName(klass.klass(), name, new LinkedHashSet<>());
                 if (functions.size() == 1) {
                     Ast.MethodDecl fn = functions.getFirst();
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic static fnc '" + klass.klass().name() + "." + name
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
+                    }
                     return klass.owner().tailCallable(
                             args -> klass.owner().callStaticFunctionRaw(fn, objectArguments(args)));
                 }
@@ -1408,6 +1427,11 @@ public final class OresEvalRootNode extends RootNode {
                     throw new IllegalArgumentException("import fnc requires a reifiable non-actor fnc; '" + name
                             + "' is direct-call-only or actor-scheduled");
                 }
+                if (!fn.genericParameters().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "import fnc requires a reifiable non-generic fnc; '" + name
+                                    + "' requires direct-call specialization");
+                }
                 return functionInvocation(fn, args);
             }
             if (kind == Ast.ImportKind.ALL) {
@@ -1431,6 +1455,12 @@ public final class OresEvalRootNode extends RootNode {
                     if (fn.kind() != Ast.CallableKind.FNC || fn.actorKind() != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException("import fnc requires a reifiable non-actor fnc; '" + name
                                 + "' is direct-call-only or actor-scheduled");
+                    }
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic fnc '" + name
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
                     }
                     yield tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
                 }
@@ -1464,6 +1494,12 @@ public final class OresEvalRootNode extends RootNode {
                     throw new IllegalArgumentException(
                             "actor callable '" + name
                                     + "' is scheduler-dispatched and cannot be extracted as a first-class callable value");
+                }
+                if (!fn.genericParameters().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "generic fnc '" + name
+                                    + "' must be specialized by a direct call; "
+                                    + "polymorphic function values are not supported yet");
                 }
                 return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
             }
@@ -1514,6 +1550,12 @@ public final class OresEvalRootNode extends RootNode {
                     if (fn.kind() == Ast.CallableKind.ROUTINE || fn.actorKind() != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException("callable '" + module.name() + "." + name
                                 + "' is direct-call-only and cannot be extracted as a value");
+                    }
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic fnc '" + module.name() + "." + name
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
                     }
                     return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
                 }

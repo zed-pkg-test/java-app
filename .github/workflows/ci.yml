@@ -59,7 +59,7 @@ jobs:
       - name: Run AOT proper tail-call stress
         run: |
           ./target/ores-aot --mode=aot --platform=linux examples/proper-tail-call.ores | tee /tmp/ores-aot-tail.out
-          grep -F "0|0" /tmp/ores-aot-tail.out
+          grep -F "0|0|0" /tmp/ores-aot-tail.out
 
   native-hybrid:
     runs-on: ubuntu-latest
@@ -84,7 +84,7 @@ jobs:
       - name: Run hybrid proper tail-call stress
         run: |
           ./target/ores-hybrid --mode=hybrid --platform=linux examples/proper-tail-call.ores | tee /tmp/ores-hybrid-tail.out
-          grep -F "0|0" /tmp/ores-hybrid-tail.out
+          grep -F "0|0|0" /tmp/ores-hybrid-tail.out
 
   polyglot-isolate:
     runs-on: ubuntu-latest

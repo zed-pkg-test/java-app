@@ -136,6 +136,7 @@ final class ImportGraph {
                         && fn.visibility() == Ast.Visibility.PUBLIC
                         && fn.kind() == Ast.CallableKind.FNC
                         && fn.actorKind() == Ast.ActorKind.NONE
+                        && fn.genericParameters().isEmpty()
                         && fn.name().equals(name)) {
                     matches++;
                 } else if (kind == Ast.ImportKind.CLASS
