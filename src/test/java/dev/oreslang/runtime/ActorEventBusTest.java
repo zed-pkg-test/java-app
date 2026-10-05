@@ -304,6 +304,35 @@ final class ActorEventBusTest {
     }
 
     @Test
+    void creatorOwnedGroupStillClosesAfterCreatorLeavesMembership()
+            throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CountDownLatch left = new CountDownLatch(1);
+            AtomicReference<ActorRuntime.ActorGroupId> groupId =
+                    new AtomicReference<>();
+
+            ActorRuntime.ActorRef<String> creator = runtime.spawnShared(
+                    () -> (message, context) -> {
+                        ActorRuntime.ActorGroup group =
+                                context.runtime().createActorGroup();
+                        groupId.set(group.id());
+                        group.leaveCurrent();
+                        left.countDown();
+                        context.self().stop();
+                    });
+
+            creator.send("create-leave-stop");
+
+            assertTrue(left.await(2, TimeUnit.SECONDS));
+            assertTrue(creator.awaitTermination(2, TimeUnit.SECONDS));
+            assertEquals(0, runtime.actorGroupCount());
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> runtime.actorGroup(groupId.get()));
+        }
+    }
+
+    @Test
     void terminatingActorIsRemovedFromEveryJoinedGroup() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             List<ActorRuntime.ActorGroup> groups = List.of(
