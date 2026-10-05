@@ -63,10 +63,26 @@ Runtime-only continuation envelopes use the same mailbox channel but are never
 visible as guest messages. They have bounded reserved headroom so a full user
 mailbox cannot silently discard a resumed `nb select` arm.
 
+Public `Channel<T>`, `SelectCase`, and `SelectSet` values are
+**execution-domain-local capabilities** in this version. They cannot be sent
+through an actor mailbox or used as actor-callable parameters/results.
+Actor-to-actor communication remains `ActorRef`/mailbox transport. This avoids
+letting a raw channel object bypass actor isolation and share mutable guest
+objects by reference. A future cross-actor channel capability would need an
+explicit copy/freeze/ownership-transfer contract before it can be admitted.
+
 ## Parent and child actors
 
 Parenthood is a **structured lifetime/supervision relation**, not a second
 hidden communication transport.
+
+Holding an `ActorRef` grants message-send authority, not arbitrary lateral
+termination authority. Inside actor code, lifecycle control is limited to the
+actor itself and its structured descendants. An actor cannot stop/cancel a
+parent, sibling, or unrelated actor merely because it was given that actor's
+reply/recipient reference. Host/supervisor code remains able to control any
+actor in its runtime. Actor-initiated child stop/cancel is nonblocking so it
+never parks a scheduler carrier waiting for child finalization.
 
 When actor A spawns actor B during A's turn:
 
@@ -249,8 +265,19 @@ detached `void` continuation scope:
 - `return value;` is invalid;
 - `break`/`continue` cannot escape into an enclosing loop that has already
   continued;
-- ownership checking rejects moving outer move-only state into a fire-and-forget
-  arm while the parent continuation still owns it.
+- Copy values and locally-copyable channel/select handles may be captured while
+  the current turn continues;
+- move-only owned locals referenced by any arm transfer into the armed
+  selection, so the continuing outer code cannot use them afterward;
+- mutable captures transfer exclusively into the continuation;
+- ordinary borrowed locals and MutexGuard-bearing values cannot outlive the
+  current turn through an `nb select` arm;
+- actor `self` is the deliberate borrowed exception because the arm can only
+  re-enter the same actor under its single-turn execution lease.
+
+Capture transfer is conservative across the whole arm set: if any possible arm
+owns a move-only value, that value belongs to the armed selection until one arm
+wins or the selection is cancelled.
 
 If the owning actor terminates before the select wins, actor teardown cancels
 the pending select Future and detaches all channel registrations.
@@ -314,7 +341,9 @@ Ordinary actor cancellation is structured:
 - mark the actor stopped immediately;
 - close its mailbox channel;
 - prevent new message/continuation admission;
-- cancel its pending deferred channel/select registrations;
+- cancel its pending actor-owned channel/select registrations, including raw
+  `nb readch`, `nb writech`, dynamic `nb select from ...`, and deferred
+  static-select continuations;
 - drain/release mailbox resource reservations;
 - cascade cancellation to structured child actors;
 - running trusted/co-resident actor code observes an uncatchable control-plane
@@ -326,7 +355,19 @@ Ordinary actor cancellation is structured:
 Cancellation is control flow, not a normal guest exception. An Oreslang
 `try/catch` cannot swallow the cancellation signal and keep the actor alive.
 
+Carrier-thread interruption is deliberately **not** an actor cancellation
+signal. Actors are multiplexed over shared carriers, so a Java/native worker
+interrupt caused by executor shutdown or host machinery cannot be attributed to
+the actor currently occupying that carrier. Structured cancellation is keyed by
+actor/runtime state; non-cooperative untrusted termination is keyed by the
+revocable isolate/domain boundary. This keeps carrier identity completely
+separate from actor identity.
+
 ### Force cancellation for untrusted actors
+
+Force cancellation is a **host/supervisor authority**, not an ordinary actor
+capability. Actor turns may request normal structured cancellation, but they
+cannot invoke the isolate-revocation hook themselves.
 
 Untrusted code cannot be expected to poll, yield, honor callbacks, or run
 cleanup. Therefore **untrusted actors must run inside a host-revocable execution
@@ -386,13 +427,18 @@ Implemented:
 - deterministic FAIR / explicit PRIORITY / opt-in RANDOM selection;
 - dynamic SelectSet from iterable/map;
 - mailbox transport backed by Channel<MessageEnvelope>;
-- static/dynamic parser + AST + type/ownership rules;
+- static/dynamic parser + AST + type/ownership rules, including complete
+  closure-capture scanning for channel/select syntax and explicit deferred
+  `nb select` capture transfer;
 - `nb select` serialized actor continuation re-entry;
-- actor-owned cleanup of pending nonblocking select registrations;
+- actor-owned cleanup of pending `nb readch`, `nb writech`, dynamic
+  `nb select from ...`, and deferred static-select registrations;
 - structured parent/child cancellation;
 - uncatchable actor cancellation safepoints;
 - force-cancel isolation-revocation contract;
-- bounded internal continuation headroom.
+- bounded internal continuation headroom that is accounted separately from
+  the configured user-message quota, so runtime control traffic cannot silently
+  shrink `maxMailboxMessages`.
 
 Remaining compiler/runtime integration:
 
