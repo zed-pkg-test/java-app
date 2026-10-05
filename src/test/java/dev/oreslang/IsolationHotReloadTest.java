@@ -342,16 +342,28 @@ final class IsolationHotReloadTest {
                     end
                     export entry Worker;
                     """;
-            var incompatible =
-                    hot.loadActorEntry("worker.ores", incompatibleSource, stringContract);
-            incompatible.start();
-
+            int liveBeforeDrift = hot.liveGenerations();
             IllegalStateException drift = assertThrows(
                     IllegalStateException.class,
-                    incompatible::activate);
+                    () -> hot.loadActorEntry(
+                            "worker.ores",
+                            incompatibleSource,
+                            stringContract));
             assertTrue(drift.getMessage().contains("ABI drift"));
+            assertEquals(liveBeforeDrift, hot.liveGenerations(),
+                    "ABI drift must fail before generation/context allocation");
             assertSame(compatible, hot.active("worker.ores"),
-                    "failed activation must leave the old generation active");
+                    "rejected admission must leave the old generation active");
+
+            IllegalStateException roleChange = assertThrows(
+                    IllegalStateException.class,
+                    () -> hot.loadEntry("worker.ores", """
+                            pub fnc run() -> void { return; }
+                            export entry run;
+                            """));
+            assertTrue(roleChange.getMessage().contains("persistent-actor"));
+            assertEquals(liveBeforeDrift, hot.liveGenerations(),
+                    "actor/non-actor role drift must fail before allocation");
         }
     }
 
@@ -392,6 +404,86 @@ final class IsolationHotReloadTest {
                     generation.executionDomain());
             assertFalse(generation.executionDomain().spawnedIsolate(),
                     "trusted isoactors stay inside the primary Graal isolate");
+        }
+    }
+
+
+    @Test
+    void actorEntryContractRejectsConstructorAndProtocolDriftBeforeAllocation() {
+        IsolatePolicy policy = IsolatePolicy.developer();
+        ActorEntryContract contract = ActorEntryContract.of(
+                "Worker",
+                Ast.ActorKind.SHARED,
+                List.of(Ast.TypeRef.simple("int")),
+                Ast.TypeRef.simple("int"),
+                Ast.TypeRef.simple("String"),
+                Ast.TypeRef.simple("String"));
+
+        try (HotReloadManager hot =
+                     new HotReloadManager(policy, ExecutionProfile.serverJit())) {
+            IllegalArgumentException constructorDrift = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> hot.loadActorEntry("worker.ores", """
+                            define class Worker extends Actor<int, String, String> as
+                              constructor(seed: String) { return; }
+                              pub receive(message: int): void { return; }
+                            end
+                            export entry Worker;
+                            """, contract));
+            assertTrue(constructorDrift.getMessage().contains("constructor"));
+
+            IllegalArgumentException protocolDrift = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> hot.loadActorEntry("worker.ores", """
+                            define class Worker extends Actor<int, int, String> as
+                              constructor(seed: int) { return; }
+                              pub receive(message: int): void { return; }
+                            end
+                            export entry Worker;
+                            """, contract));
+            assertTrue(protocolDrift.getMessage().contains("Actor<Message, Reply, Error>"));
+            assertEquals(0, hot.liveGenerations(),
+                    "contract mismatch must never allocate a generation");
+        }
+    }
+
+    @Test
+    void untrustedActorEntryRequiresSpawnedUntrustedDomain() {
+        IsolatePolicy supervisor = IsolatePolicy.developer();
+        String source = """
+                define class Worker extends UntrustedActor<int, String, String> as
+                  pub receive(message: int): void { return; }
+                end
+                export entry Worker;
+                """;
+        ActorEntryContract contract = ActorEntryContract.of(
+                "Worker",
+                Ast.ActorKind.UNTRUSTED,
+                List.of(),
+                Ast.TypeRef.simple("int"),
+                Ast.TypeRef.simple("String"),
+                Ast.TypeRef.simple("String"));
+
+        try (HotReloadManager wrong =
+                     new HotReloadManager(supervisor, ExecutionProfile.serverJit())) {
+            SecurityException failure = assertThrows(
+                    SecurityException.class,
+                    () -> wrong.loadActorEntry("worker.ores", source, contract));
+            assertTrue(failure.getMessage().contains("UNTRUSTED_JIT"));
+            assertEquals(0, wrong.liveGenerations());
+        }
+
+        try (HotReloadManager correct = new HotReloadManager(
+                supervisor,
+                IsolatePolicy.untrustedActor(),
+                ExecutionProfile.serverJit(),
+                HotReloadManager.ExecutionDomain.UNTRUSTED_JIT)) {
+            var generation = correct.loadActorEntry("worker.ores", source, contract);
+            assertEquals(
+                    HotReloadManager.ExecutionDomain.UNTRUSTED_JIT,
+                    generation.executionDomain());
+            assertTrue(generation.executionDomain().spawnedIsolate());
+            assertTrue(generation.guestPolicy().adversarial());
         }
     }
 

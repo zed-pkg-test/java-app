@@ -274,6 +274,10 @@ public final class HotReloadManager implements AutoCloseable {
             String sourceText,
             Ast.EntryExportDecl entryExport,
             String actorEntryAbiDigest) {
+        requireCompatibleCandidate(
+                activeByCodeUnit.get(codeUnitId),
+                codeUnitId,
+                actorEntryAbiDigest);
         enforceGenerationQuota(codeUnitId);
 
         long id = PROCESS_GENERATION_SEQUENCE.incrementAndGet();
@@ -602,17 +606,28 @@ public final class HotReloadManager implements AutoCloseable {
     private static void requireCompatibleReplacement(
             Generation previous,
             Generation next) {
-        if (previous == null || previous == next) return;
+        if (previous == next) return;
+        requireCompatibleCandidate(
+                previous,
+                next.codeUnitId(),
+                next.actorEntryAbiDigest);
+    }
+
+    private static void requireCompatibleCandidate(
+            Generation previous,
+            String codeUnitId,
+            String nextActorEntryAbiDigest) {
+        if (previous == null) return;
         Optional<String> before = previous.actorEntryAbiDigest();
-        Optional<String> after = next.actorEntryAbiDigest();
+        Optional<String> after = Optional.ofNullable(nextActorEntryAbiDigest);
         if (before.isPresent() != after.isPresent()) {
             throw new IllegalStateException(
-                    "hot reload cannot change code unit '" + next.codeUnitId()
+                    "hot reload cannot change code unit '" + codeUnitId
                             + "' between persistent-actor and non-actor entry ABI without explicit migration");
         }
         if (before.isPresent() && !before.get().equals(after.orElseThrow())) {
             throw new IllegalStateException(
-                    "hot reload rejected actor ABI drift for code unit '" + next.codeUnitId()
+                    "hot reload rejected actor ABI drift for code unit '" + codeUnitId
                             + "': active=" + before.get() + ", candidate=" + after.orElseThrow());
         }
     }
