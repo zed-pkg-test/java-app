@@ -480,6 +480,14 @@ public final class ActorEventBus implements AutoCloseable {
                             0, 0, 0, 0, OresFuture.completed(List.of()));
                 }
 
+                /*
+                 * Reserve conservative queue/select/Future bookkeeping before
+                 * fanout. In particular RELIABLE must fail here, before any
+                 * subscriber sees the event, if aggregate runtime memory cannot
+                 * admit the whole delivery set.
+                 */
+                frozenPayload.reservation().reserveDeliveries(active.size());
+
                 if (topic.policy == DeliveryPolicy.RELIABLE) {
                     List<Subscription<?>> reserved =
                             new ArrayList<>(active.size());
