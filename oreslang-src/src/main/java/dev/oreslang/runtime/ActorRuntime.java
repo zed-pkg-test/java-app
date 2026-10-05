@@ -392,16 +392,6 @@ public final class ActorRuntime implements AutoCloseable {
             return sharedParallelism;
         }
 
-        /**
-         * Ordinary/root Oreslang code gets two logical scheduler lanes by
-         * default while the remaining CONTROL carriers stay available for
-         * supervisors and ActorMailman work. Explicit tiny test configs still
-         * retain at least one root lane.
-         */
-        public int rootParallelism() {
-            return Math.max(1, Math.min(2, controlParallelism() - 1));
-        }
-
         public int maxControlParallelism() {
             try {
                 return Math.addExact(controlParallelism(), maxCompensatingThreads);
@@ -1300,7 +1290,7 @@ public final class ActorRuntime implements AutoCloseable {
             this.config = Objects.requireNonNull(config);
             this.maxActorMemoryBytes = configuredProcessActorMemoryLimit();
             int controlParallelism = config.controlParallelism();
-            int rootPermits = config.rootParallelism();
+            int rootPermits = Math.max(1, controlParallelism - 1);
             int readyQueueCapacity;
             try {
                 readyQueueCapacity = Math.addExact(config.maxActors(), rootPermits);
@@ -1738,7 +1728,7 @@ public final class ActorRuntime implements AutoCloseable {
         this.sharedRejectedTurns = dispatcherGroup.sharedRejectedTurns;
         this.untrustedRejectedTurns = dispatcherGroup.untrustedRejectedTurns;
 
-        int rootParallelism = dispatcherConfig.rootParallelism();
+        int rootParallelism = Math.max(1, dispatcherConfig.controlParallelism() - 1);
         this.rootScheduler = OresScheduler.runtimeOwned(
                 "ores-root-" + Integer.toHexString(System.identityHashCode(this)),
                 rootParallelism,
@@ -2952,12 +2942,11 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Internal two-phase actor spawn ticket used by compiler/runtime lowering.
+     * Two-phase source-level actor spawn handle.
      *
-     * <p>Ordinary source-level {@code spawn Foo(...)} projects this ticket to
-     * {@link ActorId} immediately. Direct {@code await spawn Foo(...)} keeps the
-     * ticket hidden until readiness succeeds, then exposes the started-actor
-     * control surface (identity/liveness/completion/result) to source code.</p>
+     * Creation returns after identity reservation and mailbox admission. The
+     * readiness future completes only after behavior initialization has
+     * succeeded; the result future tracks the one-shot actor callable itself.
      */
     public final class ActorSpawn<M, R> implements Awaitable<ActorRef<M>> {
         private final ActorRef<M> ref;
@@ -2978,7 +2967,6 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         public ActorId id() { return ref.id(); }
-        public boolean isAlive() { return ref.isAlive(); }
 
         @Override
         public OresFuture<ActorRef<M>> getAwaited() { return ready(); }
