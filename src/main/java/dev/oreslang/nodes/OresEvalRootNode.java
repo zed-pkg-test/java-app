@@ -132,6 +132,20 @@ public final class OresEvalRootNode extends RootNode {
         private StartupPhase startupPhase = StartupPhase.CREATED;
         private static final int TAIL_SAFEPOINT_INTERVAL = 64;
 
+        private static final Object NO_INTRINSIC = new Object();
+
+        private record EmbeddingBatchView(
+                int rows,
+                int dimensions,
+                List<Object> values) { }
+
+        private record TokenEmbeddingBatchView(
+                int rows,
+                int tokensPerRow,
+                int dimensions,
+                List<Object> values,
+                List<Object> attentionMask) { }
+
         private enum InvocationKind {
             FUNCTION,
             FUNCTION_BODY,
@@ -432,7 +446,17 @@ public final class OresEvalRootNode extends RootNode {
             }
             List<Object> normalized = normalizeFunctionArguments(fn, args);
             if (fn.actorKind() == Ast.ActorKind.NONE) {
-                if (!fn.async()) return callFunctionBodyRaw(fn, normalized);
+                if (!fn.async()) {
+                    try {
+                        Object intrinsic = tryInvokeIntrinsic(fn, normalized);
+                        if (intrinsic != NO_INTRINSIC) return intrinsic;
+                    } catch (IntrinsicShapeMismatch ignored) {
+                        // @Intrinsic is an optimization hint. If a declaration
+                        // does not match the runtime's expected representation,
+                        // preserve source semantics by executing its Oreslang body.
+                    }
+                    return callFunctionBodyRaw(fn, normalized);
+                }
 
                 List<?> detached = detachAsyncArguments(normalized);
                 return context.asyncRuntime().submit(() ->
@@ -464,6 +488,530 @@ public final class OresEvalRootNode extends RootNode {
                     normalized,
                     (delivered, actorContext) ->
                             invoke(functionBodyInvocation(fn, delivered)));
+        }
+
+
+        private Object tryInvokeIntrinsic(Ast.FunctionDecl fn, List<Object> args) {
+            String name = intrinsicName(fn);
+            if (name == null) return NO_INTRINSIC;
+
+            return switch (name) {
+                case "EmbeddingMeanPool" -> intrinsicMeanPool(args);
+                case "EmbeddingNormalizeRows" -> intrinsicNormalizeEmbeddingRows(args);
+                case "EmbeddingDotSimilarity" -> intrinsicDotSimilarity(args);
+                case "EmbeddingCosineSimilarity" -> intrinsicCosineSimilarity(args);
+                case "EmbeddingSquaredL2" -> intrinsicSquaredL2(args);
+                case "EmbeddingTopK" -> intrinsicTopK(args);
+                case "EmbeddingTopKDot" -> intrinsicTopKDot(args);
+                default -> NO_INTRINSIC;
+            };
+        }
+
+        private static String intrinsicName(Ast.FunctionDecl fn) {
+            String found = null;
+            for (Ast.Annotation annotation : fn.annotations()) {
+                if (!annotation.name().equals("Intrinsic")) continue;
+                if (annotation.arguments().size() != 1) return null;
+                Ast.TypeRef argument = annotation.arguments().getFirst();
+                if (argument.inferArguments() || !argument.arguments().isEmpty()) return null;
+                if (found != null) return null;
+                found = argument.name();
+            }
+            return found;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static EmbeddingBatchView embeddingBatchView(Object value) {
+            if (!(value instanceof OresObject object)) return null;
+            if (!object.klass.name().equals("EmbeddingBatch")) return null;
+
+            Object rowsValue = object.fields.get("rows");
+            Object dimensionsValue = object.fields.get("dimensions");
+            Object valuesValue = object.fields.get("values");
+            if (!(rowsValue instanceof Number rows)
+                    || !(dimensionsValue instanceof Number dimensions)
+                    || !(valuesValue instanceof List<?> values)) {
+                return null;
+            }
+
+            int rowCount;
+            int dimensionCount;
+            try {
+                rowCount = Math.toIntExact(rows.longValue());
+                dimensionCount = Math.toIntExact(dimensions.longValue());
+            } catch (ArithmeticException outOfRange) {
+                return null;
+            }
+
+            return new EmbeddingBatchView(
+                    rowCount,
+                    dimensionCount,
+                    (List<Object>) values);
+        }
+
+        @SuppressWarnings("unchecked")
+        private static TokenEmbeddingBatchView tokenEmbeddingBatchView(Object value) {
+            if (!(value instanceof OresObject object)) return null;
+            if (!object.klass.name().equals("TokenEmbeddingBatch")) return null;
+
+            Object rowsValue = object.fields.get("rows");
+            Object tokensValue = object.fields.get("tokens_per_row");
+            Object dimensionsValue = object.fields.get("dimensions");
+            Object valuesValue = object.fields.get("values");
+            Object maskValue = object.fields.get("attention_mask");
+            if (!(rowsValue instanceof Number rows)
+                    || !(tokensValue instanceof Number tokens)
+                    || !(dimensionsValue instanceof Number dimensions)
+                    || !(valuesValue instanceof List<?> values)
+                    || !(maskValue instanceof List<?> attentionMask)) {
+                return null;
+            }
+
+            try {
+                return new TokenEmbeddingBatchView(
+                        Math.toIntExact(rows.longValue()),
+                        Math.toIntExact(tokens.longValue()),
+                        Math.toIntExact(dimensions.longValue()),
+                        (List<Object>) values,
+                        (List<Object>) attentionMask);
+            } catch (ArithmeticException outOfRange) {
+                return null;
+            }
+        }
+
+        @SuppressWarnings("unchecked")
+        private static List<Object> mutableList(Object value) {
+            return value instanceof List<?> list ? (List<Object>) list : null;
+        }
+
+        private static Integer exactInt(Object value) {
+            if (!(value instanceof Number number)) return null;
+            try {
+                return Math.toIntExact(number.longValue());
+            } catch (ArithmeticException outOfRange) {
+                return null;
+            }
+        }
+
+        private static double numericValue(List<?> values, int index) {
+            Object value = values.get(index);
+            if (!(value instanceof Number number)) {
+                throw new IllegalArgumentException("numeric intrinsic received a non-numeric list element");
+            }
+            return number.doubleValue();
+        }
+
+        private static String embeddingShapeError(EmbeddingBatchView batch) {
+            if (batch.rows() < 0) return "embedding row count must be non-negative";
+            if (batch.dimensions() <= 0) return "embedding dimensions must be positive";
+            long expected = (long) batch.rows() * batch.dimensions();
+            if (expected != batch.values().size()) {
+                return "embedding storage length must equal rows * dimensions";
+            }
+            return null;
+        }
+
+        private static String tokenEmbeddingShapeError(TokenEmbeddingBatchView batch) {
+            if (batch.rows() < 0) return "token embedding row count must be non-negative";
+            if (batch.tokensPerRow() < 0) return "token count must be non-negative";
+            if (batch.dimensions() <= 0) return "token embedding dimensions must be positive";
+            long expectedValues = (long) batch.rows() * batch.tokensPerRow() * batch.dimensions();
+            if (expectedValues != batch.values().size()) {
+                return "token embedding storage length must equal rows * tokens * dimensions";
+            }
+            long expectedMask = (long) batch.rows() * batch.tokensPerRow();
+            if (expectedMask != batch.attentionMask().size()) {
+                return "attention mask length must equal rows * tokens";
+            }
+            return null;
+        }
+
+        private ResultValue intrinsicMeanPool(List<Object> args) {
+            if (args.size() != 3) return nullIntrinsicResult("mean-pool");
+            TokenEmbeddingBatchView batch = tokenEmbeddingBatchView(args.get(0));
+            List<Object> output = mutableList(args.get(1));
+            if (batch == null || output == null || !(args.get(2) instanceof Boolean normalizeOutput)) {
+                return nullIntrinsicResult("mean-pool");
+            }
+
+            if (tokenEmbeddingShapeError(batch) != null) {
+                return new ResultValue(false, "invalid token embedding batch");
+            }
+            if ((long) batch.rows() * batch.dimensions() != output.size()) {
+                return new ResultValue(false, "pooling output length must equal rows * dimensions");
+            }
+
+            for (int row = 0; row < batch.rows(); row++) {
+                int outputBase = row * batch.dimensions();
+                for (int col = 0; col < batch.dimensions(); col++) {
+                    if ((col & 1023) == 0) context.schedulerSafepoint();
+                    output.set(outputBase + col, 0.0d);
+                }
+
+                int activeTokens = 0;
+                for (int token = 0; token < batch.tokensPerRow(); token++) {
+                    if ((token & 255) == 0) context.schedulerSafepoint();
+                    int maskIndex = (row * batch.tokensPerRow()) + token;
+                    Object maskValue = batch.attentionMask().get(maskIndex);
+                    if (!(maskValue instanceof Boolean active)) {
+                        return nullIntrinsicResult("mean-pool");
+                    }
+                    if (!active) continue;
+
+                    activeTokens++;
+                    int tokenBase = ((row * batch.tokensPerRow()) + token) * batch.dimensions();
+                    for (int col = 0; col < batch.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        output.set(
+                                outputBase + col,
+                                numericValue(output, outputBase + col)
+                                        + numericValue(batch.values(), tokenBase + col));
+                    }
+                }
+
+                if (activeTokens == 0) {
+                    return new ResultValue(false, "mean pooling requires at least one unmasked token per row");
+                }
+
+                if (normalizeOutput) {
+                    double squaredNorm = 0.0d;
+                    for (int col = 0; col < batch.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        double value = numericValue(output, outputBase + col);
+                        squaredNorm += value * value;
+                    }
+
+                    double norm = Math.sqrt(squaredNorm);
+                    if (norm == 0.0d) {
+                        return new ResultValue(false, "cannot normalize a zero pooled embedding");
+                    }
+                    for (int col = 0; col < batch.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        output.set(
+                                outputBase + col,
+                                numericValue(output, outputBase + col) / norm);
+                    }
+                } else {
+                    double divisor = activeTokens;
+                    for (int col = 0; col < batch.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        output.set(
+                                outputBase + col,
+                                numericValue(output, outputBase + col) / divisor);
+                    }
+                }
+            }
+
+            return new ResultValue(true, output);
+        }
+
+        private ResultValue intrinsicNormalizeEmbeddingRows(List<Object> args) {
+            if (args.size() != 2) return nullIntrinsicResult("normalize");
+            EmbeddingBatchView batch = embeddingBatchView(args.get(0));
+            List<Object> output = mutableList(args.get(1));
+            if (batch == null || output == null) return nullIntrinsicResult("normalize");
+
+            String shapeError = embeddingShapeError(batch);
+            if (shapeError != null) return new ResultValue(false, "invalid embedding batch");
+            if ((long) batch.rows() * batch.dimensions() != output.size()) {
+                return new ResultValue(false, "normalization output length must equal rows * dimensions");
+            }
+
+            for (int row = 0; row < batch.rows(); row++) {
+                double squaredNorm = 0.0d;
+                int base = row * batch.dimensions();
+                for (int col = 0; col < batch.dimensions(); col++) {
+                    if ((col & 1023) == 0) context.schedulerSafepoint();
+                    double value = numericValue(batch.values(), base + col);
+                    squaredNorm += value * value;
+                }
+
+                double norm = Math.sqrt(squaredNorm);
+                if (norm == 0.0d) {
+                    return new ResultValue(false, "cannot normalize an embedding row with zero norm");
+                }
+
+                for (int col = 0; col < batch.dimensions(); col++) {
+                    if ((col & 1023) == 0) context.schedulerSafepoint();
+                    output.set(base + col, numericValue(batch.values(), base + col) / norm);
+                }
+            }
+
+            return new ResultValue(true, output);
+        }
+
+        private ResultValue intrinsicDotSimilarity(List<Object> args) {
+            if (args.size() != 3) return nullIntrinsicResult("dot");
+            EmbeddingBatchView queries = embeddingBatchView(args.get(0));
+            EmbeddingBatchView corpus = embeddingBatchView(args.get(1));
+            List<Object> output = mutableList(args.get(2));
+            if (queries == null || corpus == null || output == null) return nullIntrinsicResult("dot");
+
+            if (embeddingShapeError(queries) != null) {
+                return new ResultValue(false, "invalid query embedding batch");
+            }
+            if (embeddingShapeError(corpus) != null) {
+                return new ResultValue(false, "invalid corpus embedding batch");
+            }
+            if (queries.dimensions() != corpus.dimensions()) {
+                return new ResultValue(false, "embedding batches must have equal dimensions");
+            }
+            if ((long) queries.rows() * corpus.rows() != output.size()) {
+                return new ResultValue(false, "dot output length must equal query rows * corpus rows");
+            }
+
+            for (int queryRow = 0; queryRow < queries.rows(); queryRow++) {
+                int queryBase = queryRow * queries.dimensions();
+                for (int corpusRow = 0; corpusRow < corpus.rows(); corpusRow++) {
+                    int corpusBase = corpusRow * corpus.dimensions();
+                    double total = 0.0d;
+                    for (int col = 0; col < queries.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        total += numericValue(queries.values(), queryBase + col)
+                                * numericValue(corpus.values(), corpusBase + col);
+                    }
+                    output.set((queryRow * corpus.rows()) + corpusRow, total);
+                }
+            }
+
+            return new ResultValue(true, output);
+        }
+
+        private ResultValue intrinsicCosineSimilarity(List<Object> args) {
+            if (args.size() != 3) return nullIntrinsicResult("cosine");
+            EmbeddingBatchView queries = embeddingBatchView(args.get(0));
+            EmbeddingBatchView corpus = embeddingBatchView(args.get(1));
+            List<Object> output = mutableList(args.get(2));
+            if (queries == null || corpus == null || output == null) return nullIntrinsicResult("cosine");
+
+            if (embeddingShapeError(queries) != null) {
+                return new ResultValue(false, "invalid query embedding batch");
+            }
+            if (embeddingShapeError(corpus) != null) {
+                return new ResultValue(false, "invalid corpus embedding batch");
+            }
+            if (queries.dimensions() != corpus.dimensions()) {
+                return new ResultValue(false, "embedding batches must have equal dimensions");
+            }
+            if ((long) queries.rows() * corpus.rows() != output.size()) {
+                return new ResultValue(false, "cosine output length must equal query rows * corpus rows");
+            }
+
+            for (int queryRow = 0; queryRow < queries.rows(); queryRow++) {
+                int queryBase = queryRow * queries.dimensions();
+                for (int corpusRow = 0; corpusRow < corpus.rows(); corpusRow++) {
+                    int corpusBase = corpusRow * corpus.dimensions();
+                    double dot = 0.0d;
+                    double querySquared = 0.0d;
+                    double corpusSquared = 0.0d;
+                    for (int col = 0; col < queries.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        double queryValue = numericValue(queries.values(), queryBase + col);
+                        double corpusValue = numericValue(corpus.values(), corpusBase + col);
+                        dot += queryValue * corpusValue;
+                        querySquared += queryValue * queryValue;
+                        corpusSquared += corpusValue * corpusValue;
+                    }
+
+                    double queryNorm = Math.sqrt(querySquared);
+                    double corpusNorm = Math.sqrt(corpusSquared);
+                    if (queryNorm == 0.0d) {
+                        return new ResultValue(false, "cosine similarity is undefined for a zero query vector");
+                    }
+                    if (corpusNorm == 0.0d) {
+                        return new ResultValue(false, "cosine similarity is undefined for a zero corpus vector");
+                    }
+                    output.set((queryRow * corpus.rows()) + corpusRow, dot / (queryNorm * corpusNorm));
+                }
+            }
+
+            return new ResultValue(true, output);
+        }
+
+        private ResultValue intrinsicSquaredL2(List<Object> args) {
+            if (args.size() != 3) return nullIntrinsicResult("squared-l2");
+            EmbeddingBatchView queries = embeddingBatchView(args.get(0));
+            EmbeddingBatchView corpus = embeddingBatchView(args.get(1));
+            List<Object> output = mutableList(args.get(2));
+            if (queries == null || corpus == null || output == null) return nullIntrinsicResult("squared-l2");
+
+            if (embeddingShapeError(queries) != null) {
+                return new ResultValue(false, "invalid query embedding batch");
+            }
+            if (embeddingShapeError(corpus) != null) {
+                return new ResultValue(false, "invalid corpus embedding batch");
+            }
+            if (queries.dimensions() != corpus.dimensions()) {
+                return new ResultValue(false, "embedding batches must have equal dimensions");
+            }
+            if ((long) queries.rows() * corpus.rows() != output.size()) {
+                return new ResultValue(false, "distance output length must equal query rows * corpus rows");
+            }
+
+            for (int queryRow = 0; queryRow < queries.rows(); queryRow++) {
+                int queryBase = queryRow * queries.dimensions();
+                for (int corpusRow = 0; corpusRow < corpus.rows(); corpusRow++) {
+                    int corpusBase = corpusRow * corpus.dimensions();
+                    double total = 0.0d;
+                    for (int col = 0; col < queries.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        double delta = numericValue(queries.values(), queryBase + col)
+                                - numericValue(corpus.values(), corpusBase + col);
+                        total += delta * delta;
+                    }
+                    output.set((queryRow * corpus.rows()) + corpusRow, total);
+                }
+            }
+
+            return new ResultValue(true, output);
+        }
+
+        private ResultValue intrinsicTopK(List<Object> args) {
+            if (args.size() != 5) return nullIntrinsicResult("top-k");
+            List<Object> scores = mutableList(args.get(0));
+            Integer rows = exactInt(args.get(1));
+            Integer cols = exactInt(args.get(2));
+            Integer k = exactInt(args.get(3));
+            List<Object> output = mutableList(args.get(4));
+            if (scores == null || rows == null || cols == null || k == null || output == null) {
+                return nullIntrinsicResult("top-k");
+            }
+
+            if (rows < 0) return new ResultValue(false, "top-k row count must be non-negative");
+            if (cols < 0) return new ResultValue(false, "top-k column count must be non-negative");
+            if (k < 0) return new ResultValue(false, "top-k k must be non-negative");
+            if (k > cols) return new ResultValue(false, "top-k k cannot exceed the column count");
+            if ((long) rows * cols != scores.size()) {
+                return new ResultValue(false, "top-k score length must equal rows * cols");
+            }
+            if ((long) rows * k != output.size()) {
+                return new ResultValue(false, "top-k output length must equal rows * k");
+            }
+
+            for (int row = 0; row < rows; row++) {
+                int rowBase = row * k;
+                for (int rank = 0; rank < k; rank++) {
+                    context.schedulerSafepoint();
+                    boolean seen = false;
+                    int bestIndex = 0;
+                    double bestScore = 0.0d;
+
+                    for (int candidate = 0; candidate < cols; candidate++) {
+                        if ((candidate & 1023) == 0) context.schedulerSafepoint();
+                        boolean selected = false;
+                        for (int selectedRank = 0; selectedRank < rank; selectedRank++) {
+                            Object selectedValue = output.get(rowBase + selectedRank);
+                            if (selectedValue instanceof Number number
+                                    && number.intValue() == candidate) {
+                                selected = true;
+                                break;
+                            }
+                        }
+                        if (selected) continue;
+
+                        double score = numericValue(scores, (row * cols) + candidate);
+                        if (!seen || score > bestScore) {
+                            seen = true;
+                            bestIndex = candidate;
+                            bestScore = score;
+                        }
+                    }
+
+                    if (!seen) {
+                        return new ResultValue(false, "top-k could not select enough values");
+                    }
+                    output.set(rowBase + rank, (long) bestIndex);
+                }
+            }
+
+            return new ResultValue(true, output);
+        }
+
+        private ResultValue intrinsicTopKDot(List<Object> args) {
+            if (args.size() != 5) return nullIntrinsicResult("top-k-dot");
+            EmbeddingBatchView queries = embeddingBatchView(args.get(0));
+            EmbeddingBatchView corpus = embeddingBatchView(args.get(1));
+            Integer k = exactInt(args.get(2));
+            List<Object> topIndices = mutableList(args.get(3));
+            List<Object> topScores = mutableList(args.get(4));
+            if (queries == null || corpus == null || k == null
+                    || topIndices == null || topScores == null) {
+                return nullIntrinsicResult("top-k-dot");
+            }
+
+            if (embeddingShapeError(queries) != null) {
+                return new ResultValue(false, "invalid query embedding batch");
+            }
+            if (embeddingShapeError(corpus) != null) {
+                return new ResultValue(false, "invalid corpus embedding batch");
+            }
+            if (queries.dimensions() != corpus.dimensions()) {
+                return new ResultValue(false, "embedding batches must have equal dimensions");
+            }
+            if (k < 0) return new ResultValue(false, "top-k k must be non-negative");
+            if (k > corpus.rows()) {
+                return new ResultValue(false, "top-k k cannot exceed corpus row count");
+            }
+            if ((long) queries.rows() * k != topIndices.size()) {
+                return new ResultValue(false, "top-k index output length must equal query rows * k");
+            }
+            if ((long) queries.rows() * k != topScores.size()) {
+                return new ResultValue(false, "top-k score output length must equal query rows * k");
+            }
+
+            for (int queryRow = 0; queryRow < queries.rows(); queryRow++) {
+                int queryBase = queryRow * queries.dimensions();
+                int outputBase = queryRow * k;
+                int filled = 0;
+
+                for (int corpusRow = 0; corpusRow < corpus.rows(); corpusRow++) {
+                    double score = 0.0d;
+                    int corpusBase = corpusRow * corpus.dimensions();
+                    for (int col = 0; col < queries.dimensions(); col++) {
+                        if ((col & 1023) == 0) context.schedulerSafepoint();
+                        score += numericValue(queries.values(), queryBase + col)
+                                * numericValue(corpus.values(), corpusBase + col);
+                    }
+
+                    int insertion = filled;
+                    for (int scan = 0; scan < filled; scan++) {
+                        if (score > numericValue(topScores, outputBase + scan)) {
+                            insertion = scan;
+                            break;
+                        }
+                    }
+
+                    if (insertion < k) {
+                        int shift = Math.min(filled, k - 1);
+                        while (shift > insertion) {
+                            topScores.set(outputBase + shift, topScores.get(outputBase + shift - 1));
+                            topIndices.set(outputBase + shift, topIndices.get(outputBase + shift - 1));
+                            shift--;
+                        }
+
+                        topScores.set(outputBase + insertion, score);
+                        topIndices.set(outputBase + insertion, (long) corpusRow);
+                        if (filled < k) filled++;
+                    }
+                }
+            }
+
+            return new ResultValue(true, true);
+        }
+
+        private static ResultValue nullIntrinsicResult(String ignored) {
+            // This sentinel-shaped ResultValue is never returned to guest code.
+            // Callers use it only after the runtime type/arity guard has passed,
+            // so reaching this helper means the annotation was attached to an
+            // incompatible declaration. Fall back by signaling with a private
+            // exception rather than partially mutating arguments.
+            throw new IntrinsicShapeMismatch();
+        }
+
+        private static final class IntrinsicShapeMismatch extends RuntimeException {
+            private IntrinsicShapeMismatch() {
+                super(null, null, false, false);
+            }
         }
 
         private List<Object> normalizeFunctionArguments(Ast.FunctionDecl fn, List<?> args) {
