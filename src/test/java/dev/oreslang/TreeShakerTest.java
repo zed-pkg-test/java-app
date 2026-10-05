@@ -105,6 +105,37 @@ final class TreeShakerTest {
     }
 
     @Test
+    void reifiedModuleAliasRetainsItsRuntimeVisibleCallableSurface() {
+        TreeShaker.Result result = OresCompiler.compileForBuild("""
+                define module service
+                  pub fnc transform(int value): int {
+                    return value + 1;
+                  }
+
+                  pub routine direct_only(int value): int {
+                    return value + 2;
+                  }
+
+                  fnc private_helper(): int {
+                    return 99;
+                  }
+                end
+
+                pub routine main(): void {
+                  val alias = service;
+                  val Fnc<int, int> callback = alias.transform;
+                  stdio.stdout.write(callback(4));
+                  stdio.stdout.write(alias.direct_only(4));
+                  return;
+                }
+                """, BuildOptions.executable(Map.of()));
+
+        assertTrue(result.retained("service.transform"));
+        assertTrue(result.retained("service.direct_only"));
+        assertTrue(result.removed("service.private_helper"));
+    }
+
+    @Test
     void libraryBuildPreservesPublicApiButStillDropsPrivateDeadSymbols() {
         TreeShaker.Result result = OresCompiler.compileForBuild("""
                 pub fnc public_answer(): int { return 42; }

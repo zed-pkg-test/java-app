@@ -133,6 +133,7 @@ public final class TypeChecker {
         for (Ast.InterfaceDecl iface : interfaceOwners.keySet()) interfaceShape(iface, Set.copyOf(iface.genericParameters()), new LinkedHashSet<>());
 
         for (Ast.ModuleDecl module : program.modules()) {
+            validateModuleValueNamespace(module);
             checkModuleAdherence(module);
             for (Ast.Decl decl : module.declarations()) {
                 if (decl instanceof Ast.FunctionDecl fn) checkFunction(module.name(), fn);
@@ -143,6 +144,34 @@ public final class TypeChecker {
                     resolve(alias.target(), aliasGenerics, null);
                 }
                 else if (decl instanceof Ast.FieldDecl field) checkModuleBinding(field);
+            }
+        }
+    }
+
+    private void validateModuleValueNamespace(Ast.ModuleDecl module) {
+        Map<String, String> categories = new LinkedHashMap<>();
+        for (Ast.Decl decl : module.declarations()) {
+            String name;
+            String category;
+            if (decl instanceof Ast.FunctionDecl fn) {
+                name = fn.name();
+                category = fn.kind() == Ast.CallableKind.ROUTINE ? "routine" : "fnc";
+            } else if (decl instanceof Ast.ClassDecl klass) {
+                name = klass.name();
+                category = "class";
+            } else if (decl instanceof Ast.FieldDecl field) {
+                name = field.name();
+                category = "binding";
+            } else {
+                continue; // interfaces and aliases occupy the type namespace
+            }
+
+            String previous = categories.putIfAbsent(name, category);
+            if (previous != null && !previous.equals(category)) {
+                throw new IllegalArgumentException(
+                        "module value member '" + module.name() + "." + name
+                                + "' is ambiguous between " + previous + " and " + category
+                                + "; callable/class/binding names share one runtime value namespace");
             }
         }
     }
@@ -174,7 +203,15 @@ public final class TypeChecker {
                     && fn.actorKind() == Ast.ActorKind.NONE) {
                 Type signature = callableContractType(
                         fn.genericParameters(), fn.parameters(), fn.returnType(), fn.async(), Set.of(), null);
-                mergeMember(members, fn.name(), signature, "module " + module.name());
+
+                // Only concretely reifiable fnc declarations become raw
+                // function-valued namespace members. Routines remain
+                // direct-call-only, and generic fnc values still require
+                // direct-call specialization because polymorphic function
+                // values are not implemented.
+                if (fn.kind() == Ast.CallableKind.FNC && fn.genericParameters().isEmpty()) {
+                    mergeMember(members, fn.name(), signature, "module " + module.name());
+                }
                 mergeMember(members,
                         methodContractKey(fn.name(), fn.parameters().size(), fn.genericParameters().size()),
                         signature,
@@ -189,6 +226,20 @@ public final class TypeChecker {
 
     private void checkInterface(Ast.InterfaceDecl iface) {
         Set<String> generics = uniqueGenerics(iface.genericParameters(), "interface " + iface.name());
+
+        Set<String> interfaceFieldNames = new LinkedHashSet<>();
+        collectInterfaceFieldNames(iface, interfaceFieldNames, new LinkedHashSet<>());
+        Set<String> interfaceMethodNames = new LinkedHashSet<>();
+        collectInterfaceMethodNames(iface, interfaceMethodNames, new LinkedHashSet<>());
+        for (String name : interfaceFieldNames) {
+            if (interfaceMethodNames.contains(name)) {
+                throw new IllegalArgumentException(
+                        "interface member '" + iface.name() + "." + name
+                                + "' cannot be both a field and a method across inheritance; "
+                                + "member-value and direct-call syntax must remain unambiguous");
+            }
+        }
+
         Set<String> memberKeys = new HashSet<>();
         for (Ast.TypeRef parentRef : iface.parents()) {
             if (findInterface(parentRef.name()) == null) throw new IllegalArgumentException("unknown parent interface '" + parentRef.name() + "' for " + iface.name());
@@ -318,6 +369,22 @@ public final class TypeChecker {
                 throw new IllegalArgumentException("actor isolation kind must be preserved across inheritance: "
                         + klass.name() + " is " + klass.actorKind() + " but parent "
                         + resolvedParent.name() + " is " + resolvedParent.actorKind());
+            }
+        }
+
+        Set<String> effectiveFieldNames = new LinkedHashSet<>();
+        for (ResolvedField field : effectiveFieldTargets(
+                klass, nominalClassType(klass), new LinkedHashSet<>())) {
+            effectiveFieldNames.add(field.field().name());
+        }
+        Set<String> effectiveInstanceMethodNames = new LinkedHashSet<>();
+        collectInstanceMethodNames(klass, effectiveInstanceMethodNames, new LinkedHashSet<>());
+        for (String name : effectiveFieldNames) {
+            if (effectiveInstanceMethodNames.contains(name)) {
+                throw new IllegalArgumentException(
+                        "class member '" + klass.name() + "." + name
+                                + "' cannot be both a field and an instance method across inheritance; "
+                                + "member-value and direct-call syntax must remain unambiguous");
             }
         }
 
@@ -924,8 +991,44 @@ public final class TypeChecker {
                     }
                     Ast.ClassDecl klass = findClass(named.name());
                     if (klass != null) {
-                        ResolvedMethod target = findMethodTarget(klass, named, member.member(), call.arguments().size(), new LinkedHashSet<>());
-                        if (target == null) throw new IllegalArgumentException("no method '" + member.member() + "' with arity " + call.arguments().size() + " on " + named.name());
+                        ResolvedMethod target = findMethodTarget(
+                                klass, named, member.member(), call.arguments().size(), new LinkedHashSet<>());
+                        if (target == null) {
+                            ResolvedField field = findFieldTarget(
+                                    klass, named, member.member(), new LinkedHashSet<>());
+                            if (field != null) {
+                                if (call.typeArgumentsPresent()) {
+                                    throw new IllegalArgumentException(
+                                            "function-valued field '" + member.member()
+                                                    + "' does not accept call-site type arguments");
+                                }
+                                Type fieldType = substituteGenerics(
+                                        classFieldType(field.owner(), field.field()),
+                                        classGenericBindings(field.owner(), field.ownerType()));
+                                if (!(fieldType instanceof Function fn)) {
+                                    throw new IllegalArgumentException(
+                                            "field '" + member.member() + "' on " + named.name()
+                                                    + " is not callable");
+                                }
+                                if (fn.parameters().size() != call.arguments().size()) {
+                                    throw new IllegalArgumentException(
+                                            "function-valued field '" + member.member() + "' call arity mismatch");
+                                }
+                                for (int i = 0; i < fn.parameters().size(); i++) {
+                                    validateLambdaArgument(
+                                            call.arguments().get(i), fn.parameters().get(i), env, generics, self);
+                                    requireAssignable(
+                                            typeOf(call.arguments().get(i), env, generics, self),
+                                            fn.parameters().get(i),
+                                            "argument " + (i + 1));
+                                }
+                                return fn.result();
+                            }
+                            throw new IllegalArgumentException(
+                                    "no method or callable field '" + member.member()
+                                            + "' with arity " + call.arguments().size()
+                                            + " on " + named.name());
+                        }
                         Ast.MethodDecl method = target.method();
                         Ast.ClassDecl owner = target.owner();
                         Named ownerType = target.ownerType();
@@ -2052,6 +2155,51 @@ public final class TypeChecker {
         }
         seen.remove(iface);
         return false;
+    }
+
+    private void collectInstanceMethodNames(
+            Ast.ClassDecl klass,
+            Set<String> names,
+            Set<Ast.ClassDecl> seen) {
+        if (!seen.add(klass)) return;
+        for (Ast.MethodDecl method : klass.methods()) {
+            if (!method.isStatic()) names.add(method.name());
+        }
+        for (Ast.TypeRef parentRef : klass.parents()) {
+            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+            if (parent != null) collectInstanceMethodNames(parent, names, seen);
+        }
+        seen.remove(klass);
+    }
+
+    private void collectInterfaceFieldNames(
+            Ast.InterfaceDecl iface,
+            Set<String> names,
+            Set<Ast.InterfaceDecl> seen) {
+        if (!seen.add(iface)) return;
+        for (Ast.InterfaceMember member : iface.members()) {
+            if (member instanceof Ast.InterfaceFieldDecl field) names.add(field.name());
+        }
+        for (Ast.TypeRef parentRef : iface.parents()) {
+            Ast.InterfaceDecl parent = findInterface(parentRef.name());
+            if (parent != null) collectInterfaceFieldNames(parent, names, seen);
+        }
+        seen.remove(iface);
+    }
+
+    private void collectInterfaceMethodNames(
+            Ast.InterfaceDecl iface,
+            Set<String> names,
+            Set<Ast.InterfaceDecl> seen) {
+        if (!seen.add(iface)) return;
+        for (Ast.InterfaceMember member : iface.members()) {
+            if (member instanceof Ast.InterfaceFunctionDecl fn) names.add(fn.name());
+        }
+        for (Ast.TypeRef parentRef : iface.parents()) {
+            Ast.InterfaceDecl parent = findInterface(parentRef.name());
+            if (parent != null) collectInterfaceMethodNames(parent, names, seen);
+        }
+        seen.remove(iface);
     }
 
     private Ast.MethodDecl findStaticFunction(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {

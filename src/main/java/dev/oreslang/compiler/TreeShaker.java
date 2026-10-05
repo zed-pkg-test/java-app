@@ -817,6 +817,23 @@ public final class TreeShaker {
             if (id != null && symbols.containsKey(id) && retained.add(id)) work.addLast(id);
         }
 
+        private void markRuntimeModuleMembers(String moduleName) {
+            for (Ast.ModuleDecl module : input.modules()) {
+                if (!module.name().equals(moduleName)) continue;
+                for (Ast.Decl declaration : module.declarations()) {
+                    boolean exposed = declaration instanceof Ast.ClassDecl
+                            || declaration instanceof Ast.FunctionDecl fn
+                                    && fn.visibility() == Ast.Visibility.PUBLIC
+                            || declaration instanceof Ast.FieldDecl field
+                                    && field.visibility() == Ast.Visibility.PUBLIC;
+                    if (!exposed) continue;
+                    String name = declarationName(declaration);
+                    if (name != null) mark(qualify(module.name(), name));
+                }
+                return;
+            }
+        }
+
         private String resolveSymbol(String name, boolean preferRoot) {
             if (symbols.containsKey(name)) return name;
             if (!name.contains(".") && preferRoot) {
@@ -948,6 +965,16 @@ public final class TreeShaker {
             if (expression == null || expression instanceof Ast.LiteralExpr) return;
             if (expression instanceof Ast.NameExpr name) {
                 if (locals.contains(name.name())) return;
+
+                // Reifying a module namespace (for example `val api = service`)
+                // allows later member selection through a local alias, where
+                // this pass can no longer recover the original module name.
+                // Retain the module's runtime-visible surface conservatively.
+                if (moduleNames.contains(name.name())) {
+                    markRuntimeModuleMembers(name.name());
+                    return;
+                }
+
                 String internal = resolveSymbol(name.name(), false);
                 if (internal != null) mark(internal);
                 else externalBindings.add(name.name());
