@@ -1,0 +1,43 @@
+import module markup from '../src/markup';
+import module html from '../src/html';
+import module htmx from '../src/htmx';
+import module response from '../src/response';
+
+define module greeting_component as
+
+  pub fnc fragment(): {status: int, content_type: string, body: string} {
+    val card = html.div(
+      html.id_trusted("greeting"),
+      html.p(
+        html.attrs_empty(),
+        markup.trusted_raw("Hello from an Oreslang-rendered HTMX fragment.")
+      )
+    );
+
+    return response.fragment(card);
+  }
+
+end
+
+pub routine main(): void {
+  val load_attrs = html.attrs_join([
+    htmx.get_trusted("/fragments/greeting"),
+    htmx.target_trusted("#result"),
+    htmx.outer_html()
+  ]);
+
+  val page = html.fragment([
+    html.button(
+      load_attrs,
+      markup.trusted_raw("Load server fragment")
+    ),
+    html.div(
+      html.id_trusted("result"),
+      markup.trusted_raw("Waiting for the server...")
+    )
+  ]);
+
+  stdio.println(markup.render(page));
+  stdio.println(greeting_component.fragment().body);
+  return;
+}
