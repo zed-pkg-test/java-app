@@ -123,6 +123,76 @@ final class ImportGraph {
         }
     }
 
+    static Map<String, Map<String, Ast.Decl>> importedTypeBindings(
+            Map<String, Ast.Program> programs,
+            Map<String, Map<String, String>> importResolutions) {
+        Set<String> available = programs.keySet();
+        LinkedHashMap<String, Map<String, Ast.Decl>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, Ast.Program> entry : programs.entrySet()) {
+            LinkedHashMap<String, Ast.Decl> importedTypes = new LinkedHashMap<>();
+            for (Ast.ImportDecl imported : entry.getValue().imports()) {
+                if (imported.wildcard() || ImportRules.isJavaPath(imported.path())) continue;
+                String targetId = resolveImportUnitId(
+                        entry.getKey(), imported, available, importResolutions);
+                if (targetId == null) continue;
+                Ast.Program target = programs.get(targetId);
+                for (String sourceName : imported.names()) {
+                    Ast.Decl declaration = importedTypeDeclaration(target, imported.kind(), sourceName);
+                    if (declaration == null) continue;
+                    String localName = ImportRules.localName(imported, sourceName);
+                    if (importedTypes.putIfAbsent(localName, declaration) != null) {
+                        throw new IllegalArgumentException(
+                                "duplicate imported type binding '" + localName + "' in '" + entry.getKey() + "'");
+                    }
+                }
+            }
+            result.put(entry.getKey(), Map.copyOf(importedTypes));
+        }
+        return Map.copyOf(result);
+    }
+
+    private static Ast.Decl importedTypeDeclaration(
+            Ast.Program program,
+            Ast.ImportKind kind,
+            String name) {
+        Ast.Decl found = null;
+        for (Ast.ModuleDecl module : program.modules()) {
+            for (Ast.Decl declaration : module.declarations()) {
+                if (!matchesTypeImport(kind, declaration, name)) continue;
+                if (found != null && found != declaration) return null;
+                found = declaration;
+            }
+        }
+        return found;
+    }
+
+    private static boolean matchesTypeImport(
+            Ast.ImportKind kind,
+            Ast.Decl declaration,
+            String name) {
+        if (kind == Ast.ImportKind.CLASS
+                && declaration instanceof Ast.ClassDecl klass
+                && klass.actorKind() == Ast.ActorKind.NONE
+                && klass.name().equals(name)) {
+            return true;
+        }
+        if (kind == Ast.ImportKind.ACTOR
+                && declaration instanceof Ast.ClassDecl klass
+                && klass.actorKind() != Ast.ActorKind.NONE
+                && klass.name().equals(name)) {
+            return true;
+        }
+        if ((kind == Ast.ImportKind.INTERFACE || kind == Ast.ImportKind.TYPES)
+                && declaration instanceof Ast.InterfaceDecl iface
+                && iface.visibility() == Ast.Visibility.PUBLIC
+                && iface.name().equals(name)) {
+            return true;
+        }
+        return (kind == Ast.ImportKind.TYPE || kind == Ast.ImportKind.TYPES)
+                && declaration instanceof Ast.TypeAliasDecl alias
+                && alias.name().equals(name);
+    }
+
     private static int exportedMatches(Ast.Program program, Ast.ImportKind kind, String name) {
         int matches = 0;
         for (Ast.ModuleDecl module : program.modules()) {
@@ -136,11 +206,36 @@ final class ImportGraph {
                         && fn.visibility() == Ast.Visibility.PUBLIC
                         && fn.kind() == Ast.CallableKind.FNC
                         && fn.actorKind() == Ast.ActorKind.NONE
+                        && fn.genericParameters().isEmpty()
                         && fn.name().equals(name)) {
                     matches++;
                 } else if (kind == Ast.ImportKind.CLASS
                         && decl instanceof Ast.ClassDecl klass
+                        && klass.actorKind() == Ast.ActorKind.NONE
                         && klass.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.ACTOR
+                        && decl instanceof Ast.FunctionDecl fn
+                        && fn.visibility() == Ast.Visibility.PUBLIC
+                        && fn.actorKind() != Ast.ActorKind.NONE
+                        && fn.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.ACTOR
+                        && decl instanceof Ast.ClassDecl klass
+                        && klass.actorKind() != Ast.ActorKind.NONE
+                        && klass.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.INTERFACE
+                        && decl instanceof Ast.InterfaceDecl iface
+                        && iface.visibility() == Ast.Visibility.PUBLIC
+                        && iface.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.TYPE
+                        && decl instanceof Ast.TypeAliasDecl alias
+                        && alias.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.TYPES
+                        && matchesTypeImport(kind, decl, name)) {
                     matches++;
                 } else if (kind == Ast.ImportKind.ALL) {
                     if (decl instanceof Ast.FunctionDecl fn
