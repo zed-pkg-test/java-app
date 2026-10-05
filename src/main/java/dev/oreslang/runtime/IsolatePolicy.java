@@ -164,6 +164,20 @@ public record IsolatePolicy(
         return capabilities.contains(capability);
     }
 
+    /**
+     * True when this policy grants no more authority/resources than {@code ceiling}.
+     * This is the canonical delegation/subset relation for logical runtimes
+     * sharing one physical OresVM.
+     */
+    public boolean isNoMorePermissiveThan(IsolatePolicy ceiling) {
+        if (ceiling == null) return false;
+        if (!ceiling.capabilities.containsAll(capabilities)) return false;
+        if (maxHeapBytes > ceiling.maxHeapBytes) return false;
+        if (maxMailboxMessages > ceiling.maxMailboxMessages) return false;
+        if (maxWallTime.compareTo(ceiling.maxWallTime) > 0) return false;
+        return !ceiling.adversarial || adversarial;
+    }
+
     public void require(Capability capability, String api) {
         if (!allows(capability)) {
             throw new SecurityException("Oreslang isolate denies capability " + capability + " required by " + api);

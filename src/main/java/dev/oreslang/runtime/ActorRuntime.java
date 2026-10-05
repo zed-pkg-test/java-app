@@ -2866,19 +2866,11 @@ public final class ActorRuntime implements AutoCloseable {
         // root/control policy. Actor and mailman callers above remain exact-
         // runtime only.
         if (rootCaller.vm != this.vm
-                || !policyContains(rootCaller.policyCeiling, this.policyCeiling)) {
+                || !this.policyCeiling.isNoMorePermissiveThan(rootCaller.policyCeiling)) {
             throw new SecurityException(
                     "root/control execution cannot " + operation
                             + " through an unrelated or more-privileged ActorRuntime");
         }
-    }
-
-    private static boolean policyContains(IsolatePolicy ceiling, IsolatePolicy candidate) {
-        if (!ceiling.capabilities().containsAll(candidate.capabilities())) return false;
-        if (candidate.maxHeapBytes() > ceiling.maxHeapBytes()) return false;
-        if (candidate.maxMailboxMessages() > ceiling.maxMailboxMessages()) return false;
-        if (candidate.maxWallTime().compareTo(ceiling.maxWallTime()) > 0) return false;
-        return !ceiling.adversarial() || candidate.adversarial();
     }
 
     private static void requireSupervisorContext(String operation) {

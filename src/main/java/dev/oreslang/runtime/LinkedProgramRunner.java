@@ -29,6 +29,25 @@ import java.util.Map;
 public final class LinkedProgramRunner {
     private LinkedProgramRunner() { }
 
+    private static OutputStream forwardingStream(OutputStream delegate) {
+        return new OutputStream() {
+            @Override
+            public void write(int value) throws IOException {
+                delegate.write(value);
+            }
+
+            @Override
+            public void write(byte[] bytes, int offset, int length) throws IOException {
+                delegate.write(bytes, offset, length);
+            }
+
+            @Override
+            public void flush() throws IOException {
+                delegate.flush();
+            }
+        };
+    }
+
     public static IncrementalCompiler.BuildResult run(
             Path entryFile,
             IsolatePolicy policy,
@@ -92,25 +111,6 @@ public final class LinkedProgramRunner {
         });
 
         return build;
-    }
-
-    private static OutputStream forwardingStream(OutputStream delegate) {
-        return new OutputStream() {
-            @Override
-            public void write(int value) throws IOException {
-                delegate.write(value);
-            }
-
-            @Override
-            public void write(byte[] bytes, int offset, int length) throws IOException {
-                delegate.write(bytes, offset, length);
-            }
-
-            @Override
-            public void flush() throws IOException {
-                delegate.flush();
-            }
-        };
     }
 
     private static void collectRelativeImportClosure(
