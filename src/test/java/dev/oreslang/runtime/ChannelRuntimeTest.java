@@ -242,6 +242,29 @@ final class ChannelRuntimeTest {
     }
 
     @Test
+    void fairSelectRotatesPastClosedArmAfterTerminalFailure() {
+        ChannelRuntime.Channel<String> closed =
+                new ChannelRuntime.Channel<>(1);
+        ChannelRuntime.Channel<String> ready =
+                new ChannelRuntime.Channel<>(1);
+        closed.close();
+        ready.tryWrite("value");
+
+        ChannelRuntime.SelectSet set = ChannelRuntime.SelectSet.of(
+                ChannelRuntime.read(closed),
+                ChannelRuntime.read(ready));
+
+        assertThrows(
+                RuntimeException.class,
+                () -> set.selectAsync(ChannelRuntime.SelectPolicy.FAIR).join());
+
+        ChannelRuntime.SelectResult next =
+                set.selectAsync(ChannelRuntime.SelectPolicy.FAIR).join();
+        assertEquals(1, next.index());
+        assertEquals("value", next.value());
+    }
+
+    @Test
     void closeFailsPendingWaitersAndSelects() {
         ChannelRuntime.Channel<String> channel = new ChannelRuntime.Channel<>(0);
         OresFuture<String> read = channel.readAsync();
