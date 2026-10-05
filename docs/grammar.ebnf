@@ -17,6 +17,7 @@ top_level_item  = annotated_module_decl
                 | actor_callable_decl
                 | callable_decl
                 | class_decl
+                | component_decl
                 | interface_decl
                 | type_decl
                 | binding_decl ;
@@ -28,6 +29,7 @@ module_member   = actor_decl
                 | actor_callable_decl
                 | callable_decl
                 | class_decl
+                | component_decl
                 | interface_decl
                 | type_decl
                 | binding_decl ;
@@ -67,6 +69,11 @@ class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
 class_member    = field_decl
                 | method_decl
                 | static_function_decl ;
+
+component_decl  = visibility "define" "component" IDENT "as"
+                  { component_field_decl } "end" ;
+component_field_decl
+                = IDENT ":" type_ref stmt_terminator ;
 
 field_decl      = { annotation } visibility
                   ( binding_kind type_ref IDENT [ "=" expression ]
