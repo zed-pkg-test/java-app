@@ -92,28 +92,38 @@ final class ParserTest {
                   };
                 }
 
-                pub routine helper = || -> {
+                pub routine helper(): void {
                   return;
                 }
 
-                pub fnc no_result = || -> {
+                pub fnc no_result(): void {
                   helper();
                   return;
                 }
 
-                pub routine main = || -> void {
+                pub routine main(): void {
                   val (() => void) callback = run();
                   callback();
+
+                  let fnc local = || -> {
+                    helper();
+                    return;
+                  };
+                  local();
+
                   no_result();
                   return;
                 }
                 """)));
 
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                pub fnc bad_implicit_void = || -> {
-                  return 1;
-                }
-                """)));
+        IllegalArgumentException declarationExpression = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        pub fnc bad_implicit_void = || -> {
+                          return 1;
+                        }
+                        """));
+        assertTrue(declarationExpression.getMessage().contains("executable-scope-only"));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 pub fnc bad() => void { return; }
