@@ -150,8 +150,12 @@ public final class HungryActor<M> implements AutoCloseable {
     }
 
     private void requestStop() {
-        if (!stopRequested.compareAndSet(false, true)) return;
-        if (Thread.currentThread() != worker) {
+        boolean interruptWorker;
+        synchronized (lifecycleLock) {
+            if (!stopRequested.compareAndSet(false, true)) return;
+            interruptWorker = Thread.currentThread() != worker;
+        }
+        if (interruptWorker) {
             worker.interrupt();
         }
     }

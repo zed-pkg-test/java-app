@@ -101,4 +101,34 @@ final class HungryActorTest {
             assertEquals(java.util.List.of(1, 2), observed.get());
         }
     }
+
+    @Test
+    void mailboxCapacityIsEnforcedWithoutBlockingTheSender() throws Exception {
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+
+        try (HungryActor<String> actor = new HungryActor<>(
+                "bounded",
+                1,
+                (message, context) -> {
+                    if (message.equals("first")) {
+                        firstStarted.countDown();
+                        assertTrue(releaseFirst.await(2, TimeUnit.SECONDS));
+                    } else {
+                        context.release();
+                    }
+                })) {
+            actor.send("first");
+            assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+
+            actor.send("queued");
+            IllegalStateException full = assertThrows(
+                    IllegalStateException.class,
+                    () -> actor.send("overflow"));
+            assertTrue(full.getMessage().contains("mailbox limit exceeded"));
+
+            releaseFirst.countDown();
+            assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
 }
