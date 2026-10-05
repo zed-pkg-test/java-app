@@ -1,6 +1,7 @@
 package dev.oreslang.types;
 
 import dev.oreslang.ast.Ast;
+import dev.oreslang.ast.CallableSelector;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.Types.Function;
 import dev.oreslang.types.Types.Borrow;
@@ -30,6 +31,7 @@ import java.util.Set;
 public final class TypeChecker {
     private record ResolvedMethod(Ast.ClassDecl owner, Named ownerType, Ast.MethodDecl method) { }
     private record ResolvedField(Ast.ClassDecl owner, Named ownerType, Ast.FieldDecl field) { }
+    private record CallableTarget(Ast.ClassDecl owner, Ast.MethodDecl method) { }
     private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
     private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
     private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
@@ -110,6 +112,12 @@ public final class TypeChecker {
     }
 
     private void validate(Ast.Program program) {
+        // Validate closed-world overload slots before shape construction so a
+        // same-name/same-arity declaration is diagnosed as an overload error
+        // rather than as an incidental structural member conflict.
+        for (Ast.ClassDecl klass : classOwners.keySet()) validateLocalCallableSelectors(klass);
+        for (Ast.InterfaceDecl iface : interfaceOwners.keySet()) validateLocalInterfaceSelectors(iface);
+
         for (Ast.ClassDecl klass : classOwners.keySet()) classShape(klass, new LinkedHashSet<>());
         for (Ast.InterfaceDecl iface : interfaceOwners.keySet()) interfaceShape(iface, Set.copyOf(iface.genericParameters()), new LinkedHashSet<>());
 
@@ -178,7 +186,7 @@ public final class TypeChecker {
 
         for (Ast.InterfaceMember member : iface.members()) {
             if (member instanceof Ast.InterfaceFunctionDecl fn) {
-                String key = methodKey(fn.name(), fn.parameters().size());
+                String key = CallableSelector.instance(fn.name(), fn.parameters().size()).mangledName();
                 if (!memberKeys.add(key)) throw new IllegalArgumentException("duplicate interface method '" + iface.name() + "." + fn.name() + "' with arity " + fn.parameters().size());
                 Set<String> all = new HashSet<>(generics);
                 for (String generic : fn.genericParameters()) {
@@ -254,6 +262,34 @@ public final class TypeChecker {
         }
     }
 
+    private void validateLocalCallableSelectors(Ast.ClassDecl klass) {
+        Set<CallableSelector> selectors = new HashSet<>();
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            if (!selectors.add(selector)) {
+                String label = method.isStatic() ? "static function" : "method";
+                throw new IllegalArgumentException(
+                        label + " '" + klass.name() + "." + method.name()
+                                + "' already has arity " + method.arity()
+                                + "; class callables may overload only by arity within their own static/instance namespace");
+            }
+        }
+    }
+
+    private void validateLocalInterfaceSelectors(Ast.InterfaceDecl iface) {
+        Set<CallableSelector> selectors = new HashSet<>();
+        for (Ast.InterfaceMember member : iface.members()) {
+            if (!(member instanceof Ast.InterfaceFunctionDecl fn)) continue;
+            CallableSelector selector = CallableSelector.instance(fn.name(), fn.parameters().size());
+            if (!selectors.add(selector)) {
+                throw new IllegalArgumentException(
+                        "duplicate interface method '" + iface.name() + "." + fn.name()
+                                + "' with arity " + fn.parameters().size()
+                                + "; interface callables may overload only by arity");
+            }
+        }
+    }
+
     private void checkClass(String module, Ast.ClassDecl klass) {
         Set<String> classGenerics = uniqueGenerics(klass.genericParameters(), "class " + klass.name());
         Type self = nominalClassType(klass);
@@ -282,16 +318,11 @@ public final class TypeChecker {
             }
         }
 
-        Set<String> localMethodSignatures = new HashSet<>();
-        for (Ast.MethodDecl method : klass.methods()) {
-            String memberKind = method.isStatic() ? "static:" : "instance:";
-            String signature = memberKind + methodKey(method.name(), method.arity());
-            if (!localMethodSignatures.add(signature)) {
-                String label = method.isStatic() ? "static function" : "method";
-                throw new IllegalArgumentException(label + " '" + klass.name() + "." + method.name() + "' already has arity " + method.arity()
-                        + "; class callables may overload only by arity within their own static/instance namespace");
-            }
-        }
+        // Every effective (kind, name, arity) slot must have one statically
+        // determined implementation. This is the vtable/static-table contract
+        // shared by AOT and JIT. Multiple-inheritance collisions require the
+        // child to declare an explicit local override/hide for that slot.
+        effectiveCallableTargets(klass, new LinkedHashSet<>());
 
         for (Ast.FieldDecl field : klass.fields()) {
             if (klass.actorKind() != Ast.ActorKind.NONE && field.visibility() == Ast.Visibility.PUBLIC) {
@@ -1008,6 +1039,10 @@ public final class TypeChecker {
             validateLambdaAgainstExpected(lambda, fn, env, generics, self);
             return fn;
         }
+        if (expr instanceof Ast.MemberExpr member && expected instanceof Function fn) {
+            Type contextual = contextualCallableMemberType(member, fn, env, generics, self);
+            if (contextual != null) return contextual;
+        }
         if (expr instanceof Ast.ListExpr list) {
             if (expected instanceof Tuple) {
                 return new Tuple(list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList());
@@ -1018,6 +1053,89 @@ public final class TypeChecker {
             }
         }
         return typeOf(expr, env, generics, self);
+    }
+
+    /**
+     * Resolve a first-class class callable using the function type supplied by
+     * its context.  This is what makes doWork(self.someMethod) AOT-safe even
+     * when someMethod is overloaded: the expected callback arity selects the
+     * same closed-world CallableSelector slot that a direct call would use.
+     *
+     * <p>No runtime parameter types participate in selection.  Generic method
+     * values remain intentionally unsupported until Oreslang has an explicit
+     * method-value specialization surface.
+     */
+    private Type contextualCallableMemberType(
+            Ast.MemberExpr member,
+            Function expected,
+            Env env,
+            Set<String> generics,
+            Type self) {
+        Type receiver = typeOf(member.receiver(), env, generics, self);
+        Type normalized = deref(unwrapMutexGuard(receiver));
+        int arity = expected.parameters().size();
+
+        if (normalized instanceof ClassNamespace classNamespace) {
+            Ast.ClassDecl klass = findClass(classNamespace.className());
+            if (klass == null) return null;
+            Ast.MethodDecl fn = findStaticFunction(
+                    klass, member.member(), arity, new LinkedHashSet<>());
+            if (fn == null) {
+                if (!findStaticFunctionsByName(klass, member.member(), new LinkedHashSet<>()).isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "no overload of static function '" + klass.name() + "." + member.member()
+                                    + "' matches callback arity " + arity);
+                }
+                return null;
+            }
+            if (!fn.genericParameters().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "generic static function '" + klass.name() + "." + fn.name()
+                                + "' must be specialized by a direct call; polymorphic function values are not supported yet");
+            }
+            return functionType(fn.parameters(), fn.returnType(), Set.of(), null);
+        }
+
+        if (normalized instanceof Named named) {
+            Ast.ClassDecl klass = findClass(named.name());
+            if (klass == null) return null;
+
+            // Runtime member lookup gives fields precedence over methods.
+            if (findFieldTarget(klass, named, member.member(), new LinkedHashSet<>()) != null) {
+                return null;
+            }
+
+            ResolvedMethod target = findMethodTarget(
+                    klass, named, member.member(), arity, new LinkedHashSet<>());
+            if (target == null) {
+                if (!findMethodsByName(klass, member.member(), new LinkedHashSet<>()).isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "no overload of method '" + klass.name() + "." + member.member()
+                                    + "' matches callback arity " + arity);
+                }
+                return null;
+            }
+
+            Ast.MethodDecl method = target.method();
+            if (!method.genericParameters().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "generic method '" + target.owner().name() + "." + method.name()
+                                + "' must be specialized by a direct call; polymorphic bound-method values are not supported yet");
+            }
+
+            Set<String> memberGenerics = new HashSet<>(target.owner().genericParameters());
+            memberGenerics.addAll(method.genericParameters());
+            Type signature = functionType(
+                    method.parameters(),
+                    method.returnType(),
+                    memberGenerics,
+                    target.ownerType());
+            return substituteGenerics(
+                    signature,
+                    classGenericBindings(target.owner(), target.ownerType()));
+        }
+
+        return null;
     }
 
     private void defineDestructureBinding(Env env, Ast.DestructureBinding binding, Type type) {
@@ -1775,7 +1893,7 @@ public final class TypeChecker {
     private ResolvedMethod findMethodTarget(Ast.ClassDecl klass, Named concreteType, String name, int arity, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return null;
         for (Ast.MethodDecl method : klass.methods()) {
-            if (!method.isStatic() && method.name().equals(name) && method.arity() == arity) {
+            if (CallableSelector.instance(name, arity).matches(method)) {
                 seen.remove(klass);
                 return new ResolvedMethod(klass, concreteType, method);
             }
@@ -1797,7 +1915,12 @@ public final class TypeChecker {
     private List<Ast.MethodDecl> findMethodsByName(Ast.ClassDecl klass, String name, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return List.of();
         LinkedHashMap<Integer, Ast.MethodDecl> methods = new LinkedHashMap<>();
-        for (Ast.MethodDecl method : klass.methods()) if (!method.isStatic() && method.name().equals(name)) methods.put(method.arity(), method);
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            if (selector.kind() == CallableSelector.Kind.INSTANCE && selector.name().equals(name)) {
+                methods.put(selector.arity(), method);
+            }
+        }
         for (Ast.TypeRef parentRef : klass.parents()) {
             Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
             if (parent == null) continue;
@@ -1810,7 +1933,7 @@ public final class TypeChecker {
     private Ast.MethodDecl findStaticFunction(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return null;
         for (Ast.MethodDecl method : klass.methods()) {
-            if (method.isStatic() && method.name().equals(name) && method.arity() == arity) {
+            if (CallableSelector.staticFunction(name, arity).matches(method)) {
                 seen.remove(klass);
                 return method;
             }
@@ -1831,7 +1954,12 @@ public final class TypeChecker {
     private List<Ast.MethodDecl> findStaticFunctionsByName(Ast.ClassDecl klass, String name, Set<Ast.ClassDecl> seen) {
         if (!seen.add(klass)) return List.of();
         LinkedHashMap<Integer, Ast.MethodDecl> functions = new LinkedHashMap<>();
-        for (Ast.MethodDecl method : klass.methods()) if (method.isStatic() && method.name().equals(name)) functions.put(method.arity(), method);
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            if (selector.kind() == CallableSelector.Kind.STATIC && selector.name().equals(name)) {
+                functions.put(selector.arity(), method);
+            }
+        }
         for (Ast.TypeRef parentRef : klass.parents()) {
             Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
             if (parent == null) continue;
@@ -1839,6 +1967,52 @@ public final class TypeChecker {
         }
         seen.remove(klass);
         return List.copyOf(functions.values());
+    }
+
+    private Map<CallableSelector, CallableTarget> effectiveCallableTargets(
+            Ast.ClassDecl klass,
+            Set<Ast.ClassDecl> stack) {
+        if (!stack.add(klass)) {
+            throw new IllegalArgumentException("inheritance cycle involving class '" + klass.name() + "'");
+        }
+
+        Map<CallableSelector, CallableTarget> local = new LinkedHashMap<>();
+        for (Ast.MethodDecl method : klass.methods()) {
+            CallableSelector selector = CallableSelector.of(method);
+            CallableTarget previous = local.putIfAbsent(selector, new CallableTarget(klass, method));
+            if (previous != null) {
+                throw new IllegalArgumentException(
+                        "duplicate callable slot '" + selector.mangledName() + "' on class '" + klass.name() + "'");
+            }
+        }
+
+        Map<CallableSelector, CallableTarget> effective = new LinkedHashMap<>();
+        for (Ast.TypeRef parentRef : klass.parents()) {
+            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+            if (parent == null) continue;
+            Map<CallableSelector, CallableTarget> parentTargets =
+                    effectiveCallableTargets(parent, stack);
+            for (Map.Entry<CallableSelector, CallableTarget> entry : parentTargets.entrySet()) {
+                CallableSelector selector = entry.getKey();
+                if (local.containsKey(selector)) continue;
+
+                CallableTarget previous = effective.putIfAbsent(selector, entry.getValue());
+                if (previous != null && previous.method() != entry.getValue().method()) {
+                    String label = selector.kind() == CallableSelector.Kind.STATIC
+                            ? "static function" : "method";
+                    throw new IllegalArgumentException(
+                            "ambiguous inherited " + label + " slot '"
+                                    + selector.name() + "' with arity " + selector.arity()
+                                    + " on class '" + klass.name()
+                                    + "'; declare an explicit " + label
+                                    + " with that arity on the child");
+                }
+            }
+        }
+
+        effective.putAll(local);
+        stack.remove(klass);
+        return effective;
     }
 
     private Ast.ClassDecl resolveClassParent(Ast.TypeRef parentRef, Ast.ClassDecl child) {
@@ -2087,7 +2261,8 @@ public final class TypeChecker {
         List<Type> patterns = params.stream().map(p -> resolveParam(p, unique, callableSelf)).toList();
 
         for (int i = 0; i < arguments.size(); i++) {
-            Type actual = typeOf(arguments.get(i), env, callerGenerics, callerSelf);
+            Type actual = typeOfAgainstExpected(
+                    arguments.get(i), patterns.get(i), env, callerGenerics, callerSelf);
             inferGenericBindings(patterns.get(i), actual, bindings, fixedBindings, label);
         }
         Set<String> unbound = new HashSet<>(unique);
@@ -2099,7 +2274,10 @@ public final class TypeChecker {
                 throw new IllegalArgumentException("cannot infer all generic parameters for " + label + " from argument " + (i + 1));
             }
             validateLambdaArgument(arguments.get(i), expected, env, callerGenerics, callerSelf);
-            requireAssignable(typeOf(arguments.get(i), env, callerGenerics, callerSelf), expected, "argument " + (i + 1));
+            requireAssignable(
+                    typeOfAgainstExpected(arguments.get(i), expected, env, callerGenerics, callerSelf),
+                    expected,
+                    "argument " + (i + 1));
         }
 
         Type result = substituteGenerics(resolve(returnRef, unique, callableSelf), bindings);
@@ -2525,12 +2703,8 @@ public final class TypeChecker {
         if (!assignable(actual, expected)) throw new IllegalArgumentException(where + " has type " + actual + " but expected " + expected);
     }
 
-    private String methodKey(String name, int arity) {
-        return name + "$arity" + arity;
-    }
-
     private String methodContractKey(String name, int arity, int genericArity) {
-        return methodKey(name, arity) + "$generics" + genericArity;
+        return CallableSelector.instance(name, arity).contractKey(genericArity);
     }
 
     private void validateRoutineRecursion() {
