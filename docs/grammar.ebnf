@@ -134,6 +134,7 @@ statement       = binding_decl
                 | match_stmt
                 | switch_stmt
                 | try_stmt
+                | select_stmt
                 | defer_stmt
                 | for_stmt
                 | loop_stmt
@@ -174,6 +175,20 @@ switch_default  = "default" "->" block ;
 
 try_stmt        = "try" block "catch" "(" IDENT ")" block [ "finally" block ] ;
 
+select_stmt     = [ select_wait_mode ] "select" [ select_policy ]
+                  "{" select_arm { select_arm } [ select_default ] "}" ;
+select_wait_mode= "nb" | "try" ;
+select_policy   = "first" | "fair" | "random" ;
+select_arm      = "case" "readch" expression ":"
+                  [ binding_kind IDENT ] { statement }
+                | "case" "writech" expression "," expression ":"
+                  { statement } ;
+select_default  = "default" ":" { statement } ;
+
+(* In select_arm/select_default bodies, the next case/default or the closing
+   brace is a structural arm boundary and is not consumed as a nested
+   statement. At most one default arm is permitted. *)
+
 for_stmt        = "for" "(" for_of_head ")" loop_body
                 | "for" "(" c_for_head ")" loop_body
                 | "for" for_of_head loop_body
@@ -205,13 +220,21 @@ comparison      = additive
 additive        = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative  = unary { ( "*" | "/" | "%" ) unary } ;
 unary           = [ "!" | "-" | "+" | "await" ] postfix
-                | "&" [ "mut" ] unary ;
+                | "&" [ "mut" ] unary
+                | channel_expr ;
+
+channel_expr    = [ channel_wait_mode ] "readch" unary
+                | [ channel_wait_mode ] "writech" unary "," expression
+                | [ channel_wait_mode ] "select" [ select_policy ] "from" unary ;
+channel_wait_mode
+                = "nb" | "try" ;
 postfix         = primary { call_suffix | member_suffix | index_suffix } ;
 call_suffix     = "(" [ argument_list ] ")" ;
 member_suffix   = "." member_name ;
 member_name     = IDENT | "stop" | "do" | "done"
                 | "match" | "matches" | "is" | "when"
-                | "case" | "default" | "first" | "switch" ;
+                | "case" | "default" | "first" | "switch"
+                | "nb" | "select" | "readch" | "writech" ;
 index_suffix    = "[" expression "]" ;
 argument_list   = expression { "," expression } ;
 
@@ -289,6 +312,15 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    an expression is accepted.
 
    Semantic restrictions:
+   - Channel/select waiting has three distinct modes. Plain readch/writech/select
+     is suspending; nb registers and returns a Future/arms a detached static
+     select continuation; try probes once without leaving a waiter. Static
+     select defaults to deterministic fair rotation. "select first" is strict
+     lexical priority and "select random" is explicit opt-in randomness.
+     Static nb-select arms are detached void continuation scopes: return exits
+     only the selected arm and break/continue cannot target an already-
+     continued outer loop. Dynamic selection uses "select from cases" and
+     lowers to the same SelectSet primitive as static select.
    - "block" followed by "{" is a standalone lexical scope. It has no implicit
      scheduling behavior and declarations inside it do not escape the scope.
    - Unparenthesized C-style headers are distinguished by their semicolon
