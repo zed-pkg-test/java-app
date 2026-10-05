@@ -268,9 +268,11 @@ public final class OwnershipChecker {
             }
 
             // Case operands are evaluated once when the selection is armed.
-            // Channel references are borrowed for the registration lifetime;
-            // write payloads are transport-validated/frozen rather than
-            // implicitly moved out of the current actor.
+            // Public Channel/SelectSet capabilities are execution-domain local
+            // in the current model, so channel references are borrowed for the
+            // registration lifetime and cannot cross an actor boundary. This
+            // prevents writech from becoming an implicit shared-memory escape
+            // hatch while preserving ordinary actor-local channel use.
             List<Ast.TypeRef> elementTypes = new ArrayList<>(selected.arms().size());
             for (Ast.SelectArm arm : selected.arms()) {
                 if (arm.operation() == Ast.ChannelOperation.DEFAULT) {
@@ -288,6 +290,12 @@ public final class OwnershipChecker {
                 }
             }
 
+            List<CaptureSet> deferredArmCaptures = List.of();
+            if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                deferredArmCaptures =
+                        prepareDeferredSelectCaptures(selected, scope);
+            }
+
             Map<VarState, StateSnapshot> base = stateSnapshot(scope);
             List<Map<VarState, StateSnapshot>> exits = new ArrayList<>();
             boolean hasDefault = false;
@@ -295,7 +303,9 @@ public final class OwnershipChecker {
             for (int i = 0; i < selected.arms().size(); i++) {
                 Ast.SelectArm arm = selected.arms().get(i);
                 restoreState(base);
-                Scope armScope = new Scope(scope);
+                Scope armScope = selected.mode() == Ast.WaitMode.NONBLOCKING
+                        ? deferredSelectArmScope(deferredArmCaptures.get(i))
+                        : new Scope(scope);
                 if (arm.operation() == Ast.ChannelOperation.DEFAULT) {
                     hasDefault = true;
                 } else if (arm.operation() == Ast.ChannelOperation.READ
@@ -327,16 +337,15 @@ public final class OwnershipChecker {
                 armScope.close();
                 Map<VarState, StateSnapshot> exit = stateSnapshot(scope);
 
-                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
-                    rejectDeferredSelectMoves(base, exit);
-                } else {
+                if (selected.mode() != Ast.WaitMode.NONBLOCKING) {
                     exits.add(exit);
                 }
             }
 
             if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
-                // The current turn continues immediately; deferred arms must
-                // therefore not consume outer move-only state.
+                // Captures were transferred before base was snapshotted.
+                // Arm-local moves happen in detached capture scopes and do not
+                // mutate the continuing outer ownership state.
                 restoreState(base);
             } else {
                 if (selected.mode() == Ast.WaitMode.IMMEDIATE && !hasDefault) {
@@ -1189,6 +1198,37 @@ public final class OwnershipChecker {
                 caught.add(s.errorName());
                 scanStatements(s.catchBody(), caught, outer, recursiveBinding, captures);
                 scanStatements(s.finallyBody(), blockLocals, outer, recursiveBinding, captures);
+            } else if (stmt instanceof Ast.SelectStmt s) {
+                for (Ast.SelectArm arm : s.arms()) {
+                    Set<String> armLocals = new HashSet<>(blockLocals);
+                    if (arm.operation() != Ast.ChannelOperation.DEFAULT) {
+                        scanExpr(
+                                arm.channel(),
+                                blockLocals,
+                                outer,
+                                recursiveBinding,
+                                captures,
+                                false);
+                    }
+                    if (arm.operation() == Ast.ChannelOperation.WRITE) {
+                        scanExpr(
+                                arm.value(),
+                                blockLocals,
+                                outer,
+                                recursiveBinding,
+                                captures,
+                                false);
+                    }
+                    if (arm.bindingName() != null) {
+                        armLocals.add(arm.bindingName());
+                    }
+                    scanStatements(
+                            arm.body(),
+                            armLocals,
+                            outer,
+                            recursiveBinding,
+                            captures);
+                }
             } else if (stmt instanceof Ast.ForOfDestructureStmt s) {
                 scanExpr(s.iterable(), blockLocals, outer, recursiveBinding, captures, false);
                 Set<String> loop = new HashSet<>(blockLocals);
@@ -1245,6 +1285,15 @@ public final class OwnershipChecker {
             scanExpr(e.index(), locals, outer, recursiveBinding, captures, false);
         } else if (expr instanceof Ast.NewExpr e) for (Ast.Expr arg : e.arguments()) scanExpr(arg, locals, outer, recursiveBinding, captures, false);
         else if (expr instanceof Ast.AwaitExpr e) scanExpr(e.expression(), locals, outer, recursiveBinding, captures, false);
+        else if (expr instanceof Ast.ChannelOpExpr e) {
+            scanExpr(e.channel(), locals, outer, recursiveBinding, captures, false);
+            if (e.value() != null) {
+                scanExpr(e.value(), locals, outer, recursiveBinding, captures, false);
+            }
+        }
+        else if (expr instanceof Ast.DynamicSelectExpr e) {
+            scanExpr(e.cases(), locals, outer, recursiveBinding, captures, false);
+        }
         else if (expr instanceof Ast.ListExpr e) for (Ast.Expr item : e.elements()) scanExpr(item, locals, outer, recursiveBinding, captures, false);
         else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr item : e.elements()) scanExpr(item, locals, outer, recursiveBinding, captures, false);
         else if (expr instanceof Ast.ObjectExpr e) {
@@ -1746,20 +1795,91 @@ public final class OwnershipChecker {
         return Ast.TypeRef.inferred();
     }
 
-    private void rejectDeferredSelectMoves(
-            Map<VarState, StateSnapshot> base,
-            Map<VarState, StateSnapshot> exit) {
-        for (Map.Entry<VarState, StateSnapshot> entry : base.entrySet()) {
-            StateSnapshot after = exit.get(entry.getKey());
-            if (after == null) continue;
-            if (!entry.getValue().moved()
-                    && after.moved()
-                    && entry.getKey().kind != ValueKind.COPY) {
-                throw error("nb select arm cannot move outer value '"
-                        + entry.getKey().debugName
-                        + "' because the current actor turn continues before that arm runs");
+    private List<CaptureSet> prepareDeferredSelectCaptures(
+            Ast.SelectStmt selected,
+            Scope outer) {
+        ArrayList<CaptureSet> perArm =
+                new ArrayList<>(selected.arms().size());
+        CaptureSet union = new CaptureSet();
+
+        for (Ast.SelectArm arm : selected.arms()) {
+            CaptureSet captures = new CaptureSet();
+            Set<String> locals = new HashSet<>();
+            if (arm.bindingName() != null) locals.add(arm.bindingName());
+            scanStatements(arm.body(), locals, outer, null, captures);
+            perArm.add(captures);
+
+            for (Capture capture : captures.values.values()) {
+                union.add(capture.name, capture.source, capture.write);
             }
         }
+
+        for (Capture capture : union.values.values()) {
+            VarState source = capture.source;
+            source.debugName = capture.name;
+            requireUsable(source, capture.name, capture.write);
+
+            // self is a runtime-owned actor borrow. The continuation is
+            // guaranteed to re-enter the same actor under its single-turn
+            // execution lease, so this borrow may span the deferred arm.
+            if (isActorConfinedBorrow(source)) continue;
+
+            if (source.kind == ValueKind.IMM_BORROW
+                    || source.kind == ValueKind.MUT_BORROW
+                    || source.type.isBorrow()) {
+                throw error("nb select continuation cannot capture borrowed value '"
+                        + capture.name
+                        + "'; capture owned data or actor self instead");
+            }
+            if (containsMutexGuardType(source.type)) {
+                throw error("nb select continuation cannot capture guard-bearing value '"
+                        + capture.name + "'");
+            }
+
+            if (capture.write) {
+                if (!source.mutable) {
+                    throw error("nb select continuation cannot mutate immutable capture '"
+                            + capture.name + "'");
+                }
+                if (source.immutableBorrows > 0 || source.mutableBorrowed) {
+                    throw error("nb select continuation cannot capture '"
+                            + capture.name + "' mutably while borrowed");
+                }
+                move(source, capture.name);
+            } else if (source.kind == ValueKind.MOVE_ONLY) {
+                // Registration owns this value from this point forward.
+                move(source, capture.name);
+            }
+        }
+
+        return List.copyOf(perArm);
+    }
+
+    private Scope deferredSelectArmScope(CaptureSet captures) {
+        Scope continuation = new Scope(null);
+        for (Capture capture : captures.values.values()) {
+            VarState source = capture.source;
+
+            if (isActorConfinedBorrow(source)) {
+                VarState self = new VarState(
+                        source.type,
+                        false,
+                        ValueKind.MUT_BORROW,
+                        Origin.PARAM);
+                continuation.define(capture.name, self);
+                continue;
+            }
+
+            boolean mutable = capture.write;
+            continuation.define(
+                    capture.name,
+                    new VarState(
+                            source.type,
+                            mutable,
+                            source.kind,
+                            Origin.CAPTURE));
+        }
+        return continuation;
     }
 
     private Ast.TypeRef collectionElementType(Ast.TypeRef type) {
@@ -1846,7 +1966,8 @@ public final class OwnershipChecker {
         return switch (type.name()) {
             case "i8","i16","i32","i64","u8","u16","u32","u64","int","uint","bigint",
                     "f32","f64","float","decimal","complex64","complex128","complex",
-                    "bool","Bool","string","String","void","SharedMutex","OptionUnwrapError" -> true;
+                    "bool","Bool","string","String","void","SharedMutex",
+                    "Channel","SelectCase","SelectSet","OptionUnwrapError" -> true;
             case "Option" -> type.arguments().size() == 1 && isCopyType(type.arguments().getFirst());
             case "Result" -> type.arguments().size() == 2
                     && isCopyType(type.arguments().get(0))
