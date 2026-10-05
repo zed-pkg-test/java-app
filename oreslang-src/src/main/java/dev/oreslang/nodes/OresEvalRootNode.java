@@ -64,8 +64,10 @@ public final class OresEvalRootNode extends RootNode {
             return null;
         }
         if (isControl(arguments, INIT_ONLY_COMMAND)) {
+            // Legacy host-control spelling retained as a link-only no-op.
+            // Oreslang has no implicit file/module/class init lifecycle.
             current.link();
-            return current.initialize();
+            return null;
         }
         if (isControl(arguments, MAIN_ONLY_COMMAND)) {
             current.link();
@@ -78,7 +80,6 @@ public final class OresEvalRootNode extends RootNode {
         // entering Graal; direct embedders retain ownership of their entry
         // thread unless they opt into ActorRuntime.executeProcessRoot(...).
         current.link();
-        current.initialize();
         return current.executeMain(arguments);
     }
 
@@ -109,7 +110,6 @@ public final class OresEvalRootNode extends RootNode {
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
-        private boolean initialized;
 
         private Evaluator(Ast.Program program, OresContext context, String codeUnitId) {
             this.program = program;
@@ -170,14 +170,6 @@ public final class OresEvalRootNode extends RootNode {
             context.registerLinkedCodeUnit(codeUnitId, this);
         }
 
-        private synchronized Object initialize() {
-            if (initialized) return null;
-            // Mark before invocation so a recursive path cannot run init twice.
-            initialized = true;
-            Ast.FunctionDecl init = functions.get(Parser.ROOT_MODULE + ".init");
-            if (init == null) return null;
-            return callFunction(init, List.of());
-        }
 
         private Object executeMain(Object[] arguments) {
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
@@ -1146,7 +1138,7 @@ public final class OresEvalRootNode extends RootNode {
             if (!(target instanceof Evaluator evaluator)) {
                 throw new IllegalStateException(
                         "import target '" + imported.path() + "' for '" + codeUnitId
-                                + "' is not linked yet; all members of an import cycle must be linked before init");
+                                + "' is not linked yet; all members of an import cycle must be linked before cross-unit use");
             }
             return evaluator;
         }

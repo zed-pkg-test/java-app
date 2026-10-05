@@ -2498,32 +2498,12 @@ public final class ActorRuntime implements AutoCloseable {
         }
     }
 
-    private record ProtocolRequest(String method, OresFuture<Object> reply) {
-        private ProtocolRequest {
-            Objects.requireNonNull(method, "method");
-            Objects.requireNonNull(reply, "reply");
-        }
-    }
-
     private record MessageEnvelope(
             Object value,
-            Runnable release,
-            ProtocolRequest protocolRequest) implements AutoCloseable {
-        private MessageEnvelope(Object value, Runnable release) {
-            this(value, release, null);
-        }
-
+            Runnable release) implements AutoCloseable {
         @Override
         public void close() {
-            try {
-                if (protocolRequest != null && !protocolRequest.reply().isDone()) {
-                    protocolRequest.reply().failFromRuntime(
-                            new CancellationException(
-                                    "actor protocol call ended before producing a reply"));
-                }
-            } finally {
-                if (release != null) release.run();
-            }
+            if (release != null) release.run();
         }
     }
 
@@ -2699,37 +2679,6 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Compiler/interpreter-only typed protocol dispatcher for persistent source
-     * actor classes. Guest code never receives this callback or its reply
-     * capability; only validated method arguments cross the mailbox boundary.
-     */
-    @FunctionalInterface
-    public interface SourceProtocolBehavior {
-        Object invoke(
-                String method,
-                List<?> arguments,
-                ActorContext<Object> context) throws Exception;
-    }
-
-    @FunctionalInterface
-    public interface SourceProtocolBehaviorFactory {
-        SourceProtocolBehavior create(ActorContext<Object> context) throws Exception;
-    }
-
-    private interface ProtocolDispatchBehavior extends Behavior<Object> {
-        Object invokeProtocol(
-                String method,
-                List<?> arguments,
-                ActorContext<Object> context) throws Exception;
-
-        @Override
-        default void onMessage(Object message, ActorContext<Object> context) {
-            throw new SecurityException(
-                    "typed source actor protocol cannot receive raw mailbox messages");
-        }
-    }
-
-    /**
      * Compiler/interpreter callback for a one-shot source-level actor callable.
      * Guest code never receives this host callback object.
      */
@@ -2806,17 +2755,6 @@ public final class ActorRuntime implements AutoCloseable {
          * runtime-owned and exposes no guest callback execution surface.
          */
         void suspendOn(OresFuture<?> awaited, ActorContinuation continuation);
-
-        /**
-         * Compiler-lowering hook for a typed actor protocol method that
-         * suspended and later reaches its logical return point.
-         *
-         * <p>This is runtime reply plumbing, not a source-language capability.
-         * It is valid only while resuming the suspended mailbox envelope for a
-         * typed protocol request. Ordinary actor messages, timers, next-tick
-         * callbacks, and unsuspended protocol calls are rejected.</p>
-         */
-        void completeProtocolTurn(Object result);
 
         /**
          * Host-interop compatibility adapter. The stage is immediately
@@ -3124,60 +3062,6 @@ public final class ActorRuntime implements AutoCloseable {
                 defaultSpawnPolicy(),
                 behaviorFactory,
                 true);
-    }
-
-    /**
-     * Compiler/interpreter lowering target for the class-style typed actor
-     * protocol. The returned ActorRef is still one mailbox capability; public
-     * source methods are dispatched from runtime-private protocol metadata.
-     */
-    public ActorRef<Object> spawnSourceSharedProtocolActor(
-            SourceProtocolBehaviorFactory behaviorFactory) {
-        Objects.requireNonNull(behaviorFactory, "behaviorFactory");
-        requireCallerRuntimeAffinity("spawn source shared protocol actor classes");
-        return spawnInternal(
-                ActorKind.SHARED,
-                defaultSpawnPolicy(),
-                context -> {
-                    @SuppressWarnings("unchecked")
-                    ActorContext<Object> typedContext = (ActorContext<Object>) context;
-                    SourceProtocolBehavior source =
-                            Objects.requireNonNull(
-                                    behaviorFactory.create(typedContext),
-                                    "source protocol behaviorFactory returned null");
-                    return new ProtocolDispatchBehavior() {
-                        @Override
-                        public Object invokeProtocol(
-                                String method,
-                                List<?> arguments,
-                                ActorContext<Object> callContext) throws Exception {
-                            return source.invoke(method, arguments, callContext);
-                        }
-                    };
-                },
-                true);
-    }
-
-    /**
-     * Enqueue one typed source actor method call. Reply authority is kept in
-     * runtime-private envelope metadata; only user arguments are validated,
-     * frozen, quota-accounted, and delivered through the mailbox.
-     */
-    public OresFuture<Object> invokeSourceProtocol(
-            ActorRef<?> ref,
-            String method,
-            List<?> arguments) {
-        Objects.requireNonNull(method, "method");
-        Objects.requireNonNull(arguments, "arguments");
-        if (method.isBlank()) {
-            throw new IllegalArgumentException("actor protocol method cannot be blank");
-        }
-        OresFuture<Object> reply = new OresFuture<>();
-        enqueueMessage(
-                ref,
-                List.copyOf(arguments),
-                new ProtocolRequest(method, reply));
-        return reply;
     }
 
     /**
@@ -4180,14 +4064,13 @@ public final class ActorRuntime implements AutoCloseable {
 
     @SuppressWarnings("unchecked")
     public <M> void send(ActorRef<M> ref, M message) {
-        enqueueMessage(ref, message, null);
+        enqueueMessage(ref, message);
     }
 
     @SuppressWarnings("unchecked")
     private void enqueueMessage(
             ActorRef<?> ref,
-            Object message,
-            ProtocolRequest protocolRequest) {
+            Object message) {
         requireCallerRuntimeAffinity("send messages");
         if (closed.get()) throw new IllegalStateException("actor runtime is closed");
         Objects.requireNonNull(ref);
@@ -4275,7 +4158,7 @@ public final class ActorRuntime implements AutoCloseable {
             release = () -> cell.releaseSharedInbox(bytes);
         }
 
-        MessageEnvelope envelope = new MessageEnvelope(prepared, release, protocolRequest);
+        MessageEnvelope envelope = new MessageEnvelope(prepared, release);
         List<OresMutex.Shared<?>> sharedMutexReservations = List.of();
         boolean admitted = false;
         try {
@@ -6228,47 +6111,7 @@ public final class ActorRuntime implements AutoCloseable {
             schedule();
         }
 
-        private void completeProtocolTurn(Object result) {
-            if (currentActor.get() != this) {
-                throw new IllegalStateException(
-                        "protocol completion is only valid inside the owning actor turn");
-            }
-            MessageEnvelope envelope = suspendedInboxEnvelope;
-            if (envelope == null || envelope.protocolRequest() == null) {
-                throw new IllegalStateException(
-                        "protocol completion requires a suspended typed actor request");
-            }
-
-            ProtocolRequest protocol = envelope.protocolRequest();
-            if (protocol.reply().isDone()) {
-                // A caller may cancel its observation Future while the actor
-                // continues executing. Cancellation never grants authority to
-                // interrupt or rewind the actor turn.
-                if (protocol.reply().isCancelled()) return;
-                throw new IllegalStateException(
-                        "typed actor protocol reply was already completed");
-            }
-
-            validateMessageGraph(result);
-            requireOwnedActorRefs(result, new IdentityHashMap<>(), 0);
-            requireOwnedSharedHandles(result, new IdentityHashMap<>(), 0);
-            Object preparedReply = freezeForTransport(result);
-            if (!protocol.reply().completeFromRuntime(preparedReply)) {
-                throw new IllegalStateException(
-                        "typed actor protocol reply lost its exactly-once completion race");
-            }
-        }
-
-        private void failSuspendedProtocolTurn(Throwable failure) {
-            MessageEnvelope envelope = suspendedInboxEnvelope;
-            if (envelope == null || envelope.protocolRequest() == null) return;
-            ProtocolRequest protocol = envelope.protocolRequest();
-            if (!protocol.reply().isDone()) {
-                protocol.reply().failFromRuntime(failure);
-            }
-        }
-
-        private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {
+        private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {        private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {
             Objects.requireNonNull(awaited, "awaited");
             Objects.requireNonNull(continuation, "continuation");
             if (currentActor.get() != this) {
@@ -6474,9 +6317,6 @@ public final class ActorRuntime implements AutoCloseable {
                             ActorContinuation continuation) {
                         ActorCell.this.suspendOn(awaited, continuation);
                     }
-                    @Override public void completeProtocolTurn(Object result) {
-                        ActorCell.this.completeProtocolTurn(result);
-                    }
                     @Override public void nextTick(ActorContinuation continuation) {
                         ActorCell.this.nextTick(continuation);
                     }
@@ -6533,12 +6373,9 @@ public final class ActorRuntime implements AutoCloseable {
                                 context);
                     } catch (ActorTurnSuspendedSignal suspended) {
                         suspendedAgain = true;
-                    } catch (Throwable failure) {
-                        failSuspendedProtocolTurn(failure);
-                        throw failure;
                     } finally {
                         disarmMessageDeadline(continuationDeadline);
-                        if (!suspendedAgain) finishSuspendedInboxEnvelope();
+                        if (!suspendedAgain) closeSuspendedInboxEnvelope();
                     }
                     // await always ends a scheduling turn, even when the future
                     // was already complete. Do not consume another mailbox
@@ -6598,36 +6435,8 @@ public final class ActorRuntime implements AutoCloseable {
                         long messageDeadline = armMessageDeadline("inbox message");
                         try {
                             try {
-                                ProtocolRequest protocol = envelope.protocolRequest();
-                                if (protocol != null) {
-                                    if (!(behavior instanceof ProtocolDispatchBehavior dispatcher)) {
-                                        throw new SecurityException(
-                                                "ActorRef protocol call targeted an actor without a typed source protocol dispatcher");
-                                    }
-                                    if (!(envelope.value() instanceof List<?> arguments)) {
-                                        throw new IllegalStateException(
-                                                "typed actor protocol envelope must contain an argument list");
-                                    }
-                                    @SuppressWarnings("unchecked")
-                                    ActorContext<Object> protocolContext =
-                                            (ActorContext<Object>) context;
-                                    try {
-                                        Object result = dispatcher.invokeProtocol(
-                                                protocol.method(),
-                                                arguments,
-                                                protocolContext);
-                                        validateMessageGraph(result);
-                                        requireOwnedActorRefs(
-                                                result,
-                                                new IdentityHashMap<>(),
-                                                0);
-                                        requireOwnedSharedHandles(
-                                                result,
-                                                new IdentityHashMap<>(),
-                                                0);
-                                        Object preparedReply = freezeForTransport(result);
-                                        protocol.reply().completeFromRuntime(preparedReply);
-                                    } catch (ActorTurnSuspendedSignal suspended) {
+                                behavior.onMessage((M) envelope.value(), context);
+                            } catch (ActorTurnSuspendedSignal suspended) {
                                         throw suspended;
                                     } catch (Throwable failure) {
                                         protocol.reply().failFromRuntime(failure);
@@ -6697,22 +6506,7 @@ public final class ActorRuntime implements AutoCloseable {
             }
         }
 
-        private void finishSuspendedInboxEnvelope() {
-            MessageEnvelope envelope = suspendedInboxEnvelope;
-            if (envelope != null
-                    && envelope.protocolRequest() != null
-                    && !envelope.protocolRequest().reply().isDone()) {
-                IllegalStateException failure = new IllegalStateException(
-                        "typed actor protocol continuation returned without completing its runtime reply");
-                envelope.protocolRequest().reply().failFromRuntime(failure);
-                suspendedInboxEnvelope = null;
-                envelope.close();
-                throw failure;
-            }
-            closeSuspendedInboxEnvelope();
-        }
-
-        private void closeSuspendedInboxEnvelope() {
+        private void closeSuspendedInboxEnvelope() {        private void closeSuspendedInboxEnvelope() {
             MessageEnvelope envelope = suspendedInboxEnvelope;
             suspendedInboxEnvelope = null;
             if (envelope != null) envelope.close();

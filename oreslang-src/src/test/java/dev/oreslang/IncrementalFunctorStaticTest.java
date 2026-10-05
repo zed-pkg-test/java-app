@@ -103,6 +103,36 @@ final class IncrementalFunctorStaticTest {
     }
 
     @Test
+    void actorProtocolMetadataParticipatesInAbiInvalidation() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+        Map<String, String> first = Map.of(
+                "worker.ores", """
+                        define class Worker extends Actor<int, String, String> as
+                          pub receive(message: int): void { return; }
+                        end
+                        """,
+                "consumer.ores", """
+                        import actor Worker from "./worker.ores";
+                        pub fnc main() -> void { return; }
+                        """);
+        var initial = compiler.compile(first);
+        assertTrue(initial.rebuilt("worker.ores"));
+        assertTrue(initial.rebuilt("consumer.ores"));
+
+        Map<String, String> changed = Map.of(
+                "worker.ores", """
+                        define class Worker extends Actor<int, int, String> as
+                          pub receive(message: int): void { return; }
+                        end
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+        var rebuilt = compiler.compile(changed);
+        assertTrue(rebuilt.rebuilt("worker.ores"));
+        assertTrue(rebuilt.rebuilt("consumer.ores"),
+                "Reply/Error actor ABI drift must invalidate importers even when receive(Message) is unchanged");
+    }
+
+    @Test
     void inferredPublicBindingsParticipateInAbiInvalidation() {
         IncrementalCompiler compiler = new IncrementalCompiler();
         Map<String, String> first = Map.of(

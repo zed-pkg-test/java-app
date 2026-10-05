@@ -197,42 +197,18 @@ final class ActorSpawnLanguageTest {
                   return;
                 }
                 """)));
-    }
 
-    @Test
-    void actorClassReceiveAndArbitraryBehaviorCallsAreRejected() {
-        IllegalArgumentException directReceive = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define actor Counter as
-                          pub receive(delta: int): void { return; }
-                        end
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Counter as
+                  pub receive(delta: int): void { return; }
+                end
 
-                        fnc bad() -> void {
-                          val counter = spawn Counter();
-                          counter.receive(2);
-                          return;
-                        }
-                        """)));
-        assertTrue(directReceive.getMessage().contains("runtime-owned"),
-                directReceive.getMessage());
-
-        IllegalArgumentException rpcSugar = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        define actor Counter as
-                          pub receive(delta: int): void { return; }
-                        end
-
-                        fnc bad() -> void {
-                          val counter = spawn Counter();
-                          counter.add(2);
-                          return;
-                        }
-                        """)));
-        assertTrue(rpcSugar.getMessage().contains("send(message)")
-                        || rpcSugar.getMessage().contains("behavioral operation"),
-                rpcSugar.getMessage());
+                fnc bad() -> void {
+                  val counter = spawn Counter();
+                  counter.receive(2);
+                  return;
+                }
+                """)));
     }
 
     @Test

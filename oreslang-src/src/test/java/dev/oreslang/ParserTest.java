@@ -275,7 +275,7 @@ final class ParserTest {
     }
 
     @Test
-    void actorInheritancePreservesIsolationAndReceiveContract() {
+    void actorInheritancePreservesIsolationAndOneEffectiveReceive() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define actor Parent as
                   let int total = 0;
@@ -286,9 +286,8 @@ final class ParserTest {
                 end
 
                 define actor Child extends Parent as
-                  pub receive(value: int): void {
-                    self.total = self.total + value;
-                    return;
+                  private current(): int {
+                    return self.total;
                   }
                 end
 
@@ -299,19 +298,32 @@ final class ParserTest {
                 }
                 """)));
 
+        IllegalArgumentException narrowed = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define actor Parent as
+                          pub receive(value: int): void { return; }
+                        end
+
+                        define actor Child extends Parent as
+                          private receive(value: int): void { return; }
+                        end
+                        """)));
+        assertTrue(narrowed.getMessage().contains("cannot narrow inherited public receive"));
+
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 isoactor Parent {
                   pub receive(value: int): void { return; }
                 }
 
                 shared actor Child extends Parent {
-                  pub receive(value: int): void { return; }
+                  private helper(): int { return 1; }
                 }
                 """)));
     }
 
     @Test
-    void actorMayImplementReceiveInterfaceButActorRefBehaviorStaysConcrete() {
+    void actorRefProtocolInterfaceMustBeReceiveOnly() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define interface WorkerInbox
                   fnc receive(value: int): void;
@@ -322,40 +334,82 @@ final class ParserTest {
                 end
 
                 fnc exercise() -> void {
-                  val worker = spawn Worker();
-                  worker.send(41);
-                  return;
-                }
-                """)));
-
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                define interface WorkerInbox
-                  fnc receive(value: int): void;
-                end
-
-                define actor Worker implements WorkerInbox as
-                  pub receive(value: int): void { return; }
-                end
-
-                fnc bad() -> void {
                   val concrete = spawn Worker();
                   val ActorRef<WorkerInbox> narrowed = concrete;
                   narrowed.send(41);
                   return;
                 }
                 """)));
+
+        IllegalArgumentException methodBag = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define interface BadInbox
+                          fnc receive(value: int): void;
+                          fnc stop(): void;
+                        end
+
+                        define actor Worker implements BadInbox as
+                          pub receive(value: int): void { return; }
+                        end
+                        """)));
+        assertTrue(methodBag.getMessage().contains("exactly receive(Message): void"));
+
+        IllegalArgumentException malformedRef = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define interface BadInbox
+                          fnc receive(value: int): void;
+                          fnc stop(): void;
+                        end
+
+                        fnc bad(worker: ActorRef<BadInbox>) -> void {
+                          worker.send(1);
+                          return;
+                        }
+                        """)));
+        assertTrue(malformedRef.getMessage().contains("exactly receive(Message): void"));
     }
 
     @Test
     void actorWithoutReceiveIsRejected() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
-                () -> Parser.parse("""
+                () -> TypeChecker.check(Parser.parse("""
                         define actor Worker as
                           private helper(): int { return 1; }
                         end
-                        """));
+                        """)));
         assertTrue(failure.getMessage().contains("receive"), failure.getMessage());
+    }
+
+    @Test
+    void actorRejectsExtraPublicMethodRpcSurface() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        define actor Worker as
+                          pub receive(value: int): void { return; }
+                          pub status(): int { return 1; }
+                        end
+                        """));
+        assertTrue(failure.getMessage().contains("exactly one public receive"),
+                failure.getMessage());
+    }
+
+    @Test
+    void intrinsicActorAbiRequiresZeroOrThreeArguments() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Worker extends Actor<int, String, String> as
+                  pub receive(value: int): void { return; }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define class Bad extends Actor<int, String> as
+                  pub receive(value: int): void { return; }
+                end
+                """));
     }
 
     @Test
@@ -643,6 +697,19 @@ final class ParserTest {
                   return;
                 }
                 """));
+    }
+
+    @Test
+    void initIsAnOrdinaryFunctionName() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                pub fnc init(value: int) -> int {
+                  return value + 1;
+                }
+
+                fnc call_it() -> int {
+                  return init(41);
+                }
+                """)));
     }
 
     @Test
