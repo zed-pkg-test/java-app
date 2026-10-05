@@ -35,8 +35,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <ol>
  *   <li>load/stage: parse, type-check, capability-check, create a fresh context;</li>
- *   <li>start then activate: execute init/main readiness work, then atomically
- *       publish the generation for new work.</li>
+ *   <li>start then activate: explicitly evaluate the selected code-unit entry,
+ *       then atomically publish the generation for new work. Loading/linking
+ *       alone never invokes a magic init hook.</li>
  * </ol>
  *
  * <p>Existing requests/actors may pin an active generation with
