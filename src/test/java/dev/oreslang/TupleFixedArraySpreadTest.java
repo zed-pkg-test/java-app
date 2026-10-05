@@ -45,6 +45,21 @@ final class TupleFixedArraySpreadTest {
     }
 
     @Test
+    void tupleAndFixedArrayAngleSpellingsRemainCompatible() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app as
+                  fnc tuple_value(): Tuple<int, string> {
+                    return (1, "one");
+                  }
+
+                  fnc fixed_value(): FixedArray<int, 2> {
+                    return [1, 2];
+                  }
+                end
+                """)));
+    }
+
+    @Test
     void tupleGroupingOneElementAndEmptyTupleStayUnambiguous() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app as

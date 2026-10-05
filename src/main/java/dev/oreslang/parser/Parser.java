@@ -156,6 +156,9 @@ public final class Parser {
     private Ast.ModuleDecl parseModule(List<Ast.Annotation> annotations) {
         String name = consume(IDENT, "expected flat module name").lexeme();
         if (check(DOT)) throw error(peek(), "modules cannot be nested or dotted");
+        // Canonical spelling is "define module <name> as ... end".
+        // Keep the historical form without "as" parseable for source compatibility.
+        match(AS);
         List<Ast.Decl> declarations = new ArrayList<>();
         while (!check(END) && !check(EOF)) declarations.add(parseModuleMember());
         consume(END, "expected 'end' to close module " + name);
@@ -770,7 +773,12 @@ public final class Parser {
         else name = parseQualifiedName();
 
         if (name.equals("Tuple") && (check(LBRACKET) || check(LT))) {
-            Token.Type close = match(LBRACKET) ? RBRACKET : GT;
+            Token.Type close;
+            if (match(LBRACKET)) close = RBRACKET;
+            else {
+                consume(LT, "expected '[' or '<' after Tuple");
+                close = GT;
+            }
             List<Ast.TypeRef> elements = new ArrayList<>();
             if (!check(close)) {
                 do elements.add(parseTypeRef()); while (match(COMMA));
@@ -780,7 +788,12 @@ public final class Parser {
         }
 
         if (name.equals("FixedArray") && (check(LBRACKET) || check(LT))) {
-            Token.Type close = match(LBRACKET) ? RBRACKET : GT;
+            Token.Type close;
+            if (match(LBRACKET)) close = RBRACKET;
+            else {
+                consume(LT, "expected '[' or '<' after FixedArray");
+                close = GT;
+            }
             Ast.TypeRef element = parseTypeRef();
             consume(COMMA, "FixedArray requires element type and compile-time length");
             Token lengthToken = consume(INT, "FixedArray length must be a non-negative compile-time integer");
