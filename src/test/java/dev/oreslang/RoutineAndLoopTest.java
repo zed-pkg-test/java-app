@@ -285,7 +285,7 @@ final class RoutineAndLoopTest {
         String output = run("""
                 define module collections
                   define class Bag as
-                    [Symbol.iterator](): Array<int> {
+                    pub [Symbol.iterator](): Array<int> {
                       return arr[4, 5];
                     }
                   end
