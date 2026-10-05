@@ -1329,8 +1329,8 @@ public final class Parser {
         List<Ast.Param> params = parseParametersUntil(RPAREN);
         consume(RPAREN, "expected ')' after lambda parameters");
         consume(ARROW, "expected '->' after lambda parameters");
-        if (!check(LBRACE)) throw error(peek(), "lambdas always require a block body; use '-> { ... }'");
-        return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
+        if (check(LBRACE)) return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
+        return new Ast.LambdaExpr(params, parseExpression(), List.of(), nonLexical);
     }
 
     private Ast.LambdaExpr parsePipeLambda(boolean nonLexical) {
@@ -1351,8 +1351,8 @@ public final class Parser {
         }
         consume(PIPE, "expected closing '|' after lambda parameters");
         consume(ARROW, "lambdas use the slim arrow '->'");
-        if (!check(LBRACE)) throw error(peek(), "lambdas always require a block body; use '|args| -> { ... }'");
-        return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
+        if (check(LBRACE)) return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
+        return new Ast.LambdaExpr(params, parseExpression(), List.of(), nonLexical);
     }
 
     private boolean looksLikeLambda() {
