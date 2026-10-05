@@ -76,3 +76,32 @@ accidental dependency injection from a leading/trailing separator or `::`.
 The compiler records the resolved target for every loaded import and reuses
 that exact mapping during static linking and runtime linking. Compilation and
 execution therefore cannot disagree about which file a bare import names.
+
+
+### Import categories
+
+The source-level import category is checked against the declaration exported by
+the resolved file:
+
+```ores
+import * as util from "./util.ores";
+import module Math from "./math.ores";
+import class Box from "./box.ores";
+import actor Worker from "./worker.ores";
+import fnc parse from "./parse.ores";
+import interface Serializable from "./types.ores";
+import type Count from "./types.ores";
+import types Serializable, Count from "./types.ores";
+import types (Serializable, Count) from "./types.ores";
+```
+
+The comma and parenthesized `types` forms are equivalent. `types` is the
+grouped type-only category for `type`, `interface`, `trait`, and `struct`.
+The current v0.6 declaration grammar implements `type` and `interface`;
+`trait`/`struct` import spellings are accepted for forward compatibility but
+fail linked-import validation until those declaration forms land.
+
+`import actor` preserves actor scheduling/isolation semantics and never turns
+an actor callable into an ordinary first-class function. `import class` rejects
+actor classes. Type-only imports are compile-time symbols and cannot be used as
+runtime values or Java host imports.
