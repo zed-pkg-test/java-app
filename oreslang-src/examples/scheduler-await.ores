@@ -1,0 +1,21 @@
+pub async routine main() => void {
+  val scheduler = new OresScheduler(2);
+
+  val work = scheduler.start(async || -> {
+    val local = Mutex.new(41);
+    val guard = await local.lock_async();
+    guard.release();
+
+    val ready = Future.from_callback<int>(|cb| -> {
+      cb.resolve(42);
+      return;
+    });
+
+    return await ready;
+  });
+
+  val result = await work;
+  stdio.println(result);
+  scheduler.close();
+  return;
+}

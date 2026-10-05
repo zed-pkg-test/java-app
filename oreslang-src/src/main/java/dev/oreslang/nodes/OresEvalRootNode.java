@@ -194,20 +194,31 @@ public final class OresEvalRootNode extends RootNode {
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
-            Object result = callFunction(main, List.of(arguments));
+            final Ast.FunctionDecl entryMain = main;
 
-            // Direct host embedders expect Context.eval() to observe main's
-            // completed effects before returning. Waiting here is safe only
-            // when the caller is not itself an Ores carrier. Official launchers
-            // running inside a root carrier receive the Future and await it
-            // outside that carrier boundary.
-            if (result instanceof OresFuture<?> future
-                    && OresScheduler.current() == null
+            boolean hostEntry = OresScheduler.current() == null
                     && !ActorRuntime.inRootExecution()
-                    && !ActorRuntime.inActorExecution()) {
-                return future.join();
+                    && !ActorRuntime.inActorExecution();
+
+            if (hostEntry) {
+                List<?> normalized = normalizeFunctionArguments(
+                        entryMain,
+                        List.of(arguments));
+                OresFuture<Object> task = entryMain.async()
+                        ? startAsyncFunction(entryMain, normalized)
+                        : context.actors().rootScheduler().startSync(
+                                () -> callFunctionBody(entryMain, normalized));
+
+                // The host/embedder thread may block waiting for the root task;
+                // no Ores carrier is consumed. Completion is published only
+                // after the final scheduler turn fully unwinds.
+                return task.join();
             }
-            return result;
+
+            // Internal callers already executing under an Ores scheduler keep
+            // that scheduler. Async callables return their Future to the
+            // enclosing Ores frame, which may await it normally.
+            return callFunction(entryMain, List.of(arguments));
         }
 
         private Object callFunction(Ast.FunctionDecl fn, List<?> args) {

@@ -353,6 +353,11 @@ public final class OresScheduler implements AutoCloseable {
 
     @Override
     public void close() {
+        if (CURRENT.get() == this) {
+            throw new IllegalStateException(
+                    "OresScheduler cannot be closed from one of its own task turns; "
+                            + "close it from an outside/root scheduler task");
+        }
         if (!closed.compareAndSet(false, true)) return;
 
         for (TaskRunner<?> task : Set.copyOf(tasks)) {

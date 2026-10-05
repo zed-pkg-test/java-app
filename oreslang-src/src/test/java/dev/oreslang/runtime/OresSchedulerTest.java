@@ -248,4 +248,22 @@ final class OresSchedulerTest {
         }
     }
 
+    @Test
+    void schedulerCannotCloseItselfFromOwnTaskTurn() throws Exception {
+        OresScheduler scheduler = new OresScheduler(1);
+        try {
+            OresFuture<Boolean> result = scheduler.startSync(() -> {
+                IllegalStateException failure =
+                        assertThrows(IllegalStateException.class, scheduler::close);
+                return failure.getMessage().contains("outside/root");
+            });
+
+            assertTrue(result.get(5, TimeUnit.SECONDS));
+            assertFalse(scheduler.isClosed(),
+                    "failed self-close must leave scheduler usable");
+        } finally {
+            scheduler.close();
+        }
+    }
+
 }

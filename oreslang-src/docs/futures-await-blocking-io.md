@@ -218,7 +218,9 @@ io.close();
 zero-argument lambda and creates a task whose continuations remain
 scheduler-affine until completion. The context also closes any remaining user
 schedulers during teardown, so forgotten scheduler handles cannot leak carrier
-threads.
+threads. A scheduler cannot close itself from one of its own task turns; close
+is initiated from an outside/root task so teardown cannot self-cancel the turn
+that is performing teardown.
 
 Custom scheduler construction is forbidden from actor code: actors stay on
 their owning SHARED/ISOACTOR/UNTRUSTED_ACTOR scheduler domain. Adversarial
