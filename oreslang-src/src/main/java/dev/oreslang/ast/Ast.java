@@ -5,6 +5,18 @@ import java.util.List;
 public final class Ast {
     private Ast() { }
 
+    /**
+     * Stable source coordinate carried into compiler/runtime diagnostics.
+     * UNKNOWN is used by programmatically-constructed ASTs and legacy tests.
+     */
+    public record SourceSite(int line, int column) {
+        public static final SourceSite UNKNOWN = new SourceSite(-1, -1);
+
+        public boolean known() {
+            return line > 0 && column > 0;
+        }
+    }
+
     public record Program(String namespace, List<ImportDecl> imports, List<ModuleDecl> modules) {
         public Program {
             imports = List.copyOf(imports);
@@ -129,26 +141,38 @@ public final class Ast {
             List<Param> parameters,
             TypeRef returnType,
             List<Annotation> annotations,
-            List<Stmt> body) implements Decl {
+            List<Stmt> body,
+            SourceSite site) implements Decl {
         public FunctionDecl {
             genericParameters = List.copyOf(genericParameters);
             parameters = List.copyOf(parameters);
             annotations = List.copyOf(annotations);
             body = List.copyOf(body);
+            site = site == null ? SourceSite.UNKNOWN : site;
+        }
+        public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
+                            boolean nonLexical, ActorKind actorKind, List<String> genericParameters,
+                            List<Param> parameters, TypeRef returnType, List<Annotation> annotations,
+                            List<Stmt> body) {
+            this(name, kind, visibility, async, nonLexical, actorKind, genericParameters,
+                    parameters, returnType, annotations, body, SourceSite.UNKNOWN);
         }
         public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
                             ActorKind actorKind, List<String> genericParameters, List<Param> parameters,
                             TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, false, actorKind, genericParameters, parameters, returnType, annotations, body);
+            this(name, kind, visibility, async, false, actorKind, genericParameters, parameters,
+                    returnType, annotations, body, SourceSite.UNKNOWN);
         }
         public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
                             List<String> genericParameters, List<Param> parameters, TypeRef returnType,
                             List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, false, ActorKind.NONE, genericParameters, parameters, returnType, annotations, body);
+            this(name, kind, visibility, async, false, ActorKind.NONE, genericParameters, parameters,
+                    returnType, annotations, body, SourceSite.UNKNOWN);
         }
         public FunctionDecl(String name, Visibility visibility, boolean async, List<String> genericParameters,
                             List<Param> parameters, TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, CallableKind.FNC, visibility, async, false, ActorKind.NONE, genericParameters, parameters, returnType, annotations, body);
+            this(name, CallableKind.FNC, visibility, async, false, ActorKind.NONE, genericParameters,
+                    parameters, returnType, annotations, body, SourceSite.UNKNOWN);
         }
     }
 
@@ -228,12 +252,29 @@ public final class Ast {
             List<Param> parameters,
             TypeRef returnType,
             List<Annotation> annotations,
-            List<Stmt> body) {
+            List<Stmt> body,
+            SourceSite site) {
         public MethodDecl {
             genericParameters = List.copyOf(genericParameters);
             parameters = List.copyOf(parameters);
             annotations = List.copyOf(annotations);
             body = List.copyOf(body);
+            site = site == null ? SourceSite.UNKNOWN : site;
+        }
+        public MethodDecl(
+                String name,
+                Visibility visibility,
+                boolean isStatic,
+                boolean isAbstract,
+                boolean async,
+                TypeRef explicitReceiverType,
+                List<String> genericParameters,
+                List<Param> parameters,
+                TypeRef returnType,
+                List<Annotation> annotations,
+                List<Stmt> body) {
+            this(name, visibility, isStatic, isAbstract, async, explicitReceiverType,
+                    genericParameters, parameters, returnType, annotations, body, SourceSite.UNKNOWN);
         }
         public int arity() { return parameters.size(); }
     }
@@ -273,7 +314,14 @@ public final class Ast {
         }
     }
 
-    public record ReturnStmt(Expr value) implements Stmt { }
+    public record ReturnStmt(Expr value, SourceSite site) implements Stmt {
+        public ReturnStmt {
+            site = site == null ? SourceSite.UNKNOWN : site;
+        }
+        public ReturnStmt(Expr value) {
+            this(value, SourceSite.UNKNOWN);
+        }
+    }
     public record ExprStmt(Expr expression) implements Stmt { }
     public record DeferStmt(Expr expression) implements Stmt { }
 
@@ -342,7 +390,14 @@ public final class Ast {
         public NewExpr { arguments = List.copyOf(arguments); }
     }
 
-    public record AwaitExpr(Expr expression) implements Expr { }
+    public record AwaitExpr(Expr expression, SourceSite site) implements Expr {
+        public AwaitExpr {
+            site = site == null ? SourceSite.UNKNOWN : site;
+        }
+        public AwaitExpr(Expr expression) {
+            this(expression, SourceSite.UNKNOWN);
+        }
+    }
     public record SpawnExpr(CallExpr call) implements Expr { }
 
     public record ListExpr(List<Expr> elements) implements Expr {
