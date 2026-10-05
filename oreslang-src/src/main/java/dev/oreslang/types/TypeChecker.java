@@ -513,33 +513,40 @@ public final class TypeChecker {
     }
 
     private void validateActorReceiveContract(Ast.ClassDecl klass) {
-        List<Ast.MethodDecl> publicInstance = klass.methods().stream()
-                .filter(method -> !method.isStatic()
-                        && method.visibility() == Ast.Visibility.PUBLIC
-                        && !method.name().equals("constructor"))
-                .toList();
-
-        if (publicInstance.size() != 1
-                || !publicInstance.getFirst().name().equals("receive")) {
+        Named selfType = nominalClassType(klass);
+        ResolvedMethod target = findMethodTarget(
+                klass,
+                selfType,
+                "receive",
+                1,
+                new LinkedHashSet<>());
+        if (target == null
+                || target.method().visibility() != Ast.Visibility.PUBLIC
+                || target.method().isStatic()) {
             throw new IllegalArgumentException(
                     "actor '" + klass.name()
-                            + "' must expose exactly one public receive(message) mailbox ingress and no other public instance methods");
+                            + "' must expose exactly one effective public receive(message): void mailbox ingress");
         }
 
-        Ast.MethodDecl receive = publicInstance.getFirst();
+        Ast.MethodDecl receive = target.method();
+        if (receive.isAbstract() || receive.async()) {
+            throw new IllegalArgumentException(
+                    "actor receive method '" + target.owner().name()
+                            + ".receive' must be concrete; actor suspension is runtime-managed");
+        }
         if (!receive.genericParameters().isEmpty()) {
             throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name()
+                    "actor receive method '" + target.owner().name()
                             + ".receive' cannot declare method generic parameters");
         }
         if (receive.explicitReceiverType() != null) {
             throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name()
+                    "actor receive method '" + target.owner().name()
                             + ".receive' must use implicit self");
         }
         if (receive.parameters().size() != 1) {
             throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name()
+                    "actor receive method '" + target.owner().name()
                             + ".receive' must accept exactly one message parameter");
         }
         if (receive.parameters().getFirst().mutable()) {
@@ -547,25 +554,83 @@ public final class TypeChecker {
                     "actor receive message cannot be 'mut'; mutable caller authority cannot cross the mailbox boundary");
         }
 
-        Set<String> generics = new HashSet<>(klass.genericParameters());
-        Type self = nominalClassType(klass);
-        Type returns = resolve(receive.returnType(), generics, self);
-        if (returns != Primitive.VOID) {
+        Map<String, Type> bindings =
+                classGenericBindings(target.owner(), target.ownerType());
+        Set<String> ownerGenerics =
+                Set.copyOf(target.owner().genericParameters());
+        Type receiveMessage = substituteGenerics(
+                resolveParam(
+                        receive.parameters().getFirst(),
+                        ownerGenerics,
+                        target.ownerType()),
+                bindings);
+        Type receiveResult = substituteGenerics(
+                resolve(
+                        receive.returnType(),
+                        ownerGenerics,
+                        target.ownerType()),
+                bindings);
+        if (receiveResult != Primitive.VOID) {
             throw new IllegalArgumentException(
-                    "actor receive method '" + klass.name()
-                            + ".receive' returns void; replies/errors travel through explicit response capabilities");
+                    "actor receive method '" + target.owner().name()
+                            + ".receive' returns void; replies/errors use explicit response capabilities");
+        }
+
+        /*
+         * Check the effective public surface, not only local declarations.
+         * Inheritance may provide receive/1, but it must not smuggle any second
+         * public behavioral ingress into the child actor.
+         */
+        Record effectivePublic = publicClassShape(klass, new LinkedHashSet<>());
+        String receiveKey = methodContractKey("receive", 1, 0);
+        if (effectivePublic.members().size() != 1
+                || !effectivePublic.members().containsKey(receiveKey)) {
+            throw new IllegalArgumentException(
+                    "actor '" + klass.name()
+                            + "' effective public surface must contain only receive/1; "
+                            + "all other actor instance methods are private");
         }
 
         if (klass.actorProtocolTypes().size() == 3) {
+            Set<String> classGenerics = Set.copyOf(klass.genericParameters());
             Type declaredMessage = resolve(
-                    klass.actorProtocolTypes().getFirst(), generics, self);
-            Type receiveMessage = resolveParam(
-                    receive.parameters().getFirst(), generics, self);
+                    klass.actorProtocolTypes().getFirst(),
+                    classGenerics,
+                    selfType);
             if (!assignable(receiveMessage, declaredMessage)
                     || !assignable(declaredMessage, receiveMessage)) {
                 throw new IllegalArgumentException(
                         "actor '" + klass.name()
                                 + "' receive message type must exactly match Actor<Message, Reply, Error>'s Message type");
+            }
+        }
+
+        // A private local receive/1 must never narrow a public inherited
+        // receive and silently break the mailbox contract.
+        for (Ast.MethodDecl local : klass.methods()) {
+            if (local.isStatic()
+                    || local.visibility() == Ast.Visibility.PUBLIC
+                    || local.name().equals("constructor")) {
+                continue;
+            }
+            if (!local.name().equals("receive") || local.arity() != 1) continue;
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+                if (parent == null) continue;
+                Named parentType =
+                        concreteClassReference(parentRef, klass, selfType);
+                ResolvedMethod inherited = findMethodTarget(
+                        parent,
+                        parentType,
+                        "receive",
+                        1,
+                        new LinkedHashSet<>());
+                if (inherited != null
+                        && inherited.method().visibility() == Ast.Visibility.PUBLIC) {
+                    throw new IllegalArgumentException(
+                            "actor '" + klass.name()
+                                    + "' cannot narrow inherited public receive/1 to private");
+                }
             }
         }
     }

@@ -770,6 +770,23 @@ final class ParserTest {
                         """)));
         assertTrue(wrongMessage.getMessage().contains("ActorRef.send"),
                 wrongMessage.getMessage());
+
+        IllegalArgumentException narrowed = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        shared actor Parent {
+                          pub receive(value: int): void { return; }
+                        }
+
+                        shared actor Child extends Parent {
+                          private receive(value: int): void { return; }
+                        }
+                        """)));
+        assertTrue(
+                narrowed.getMessage().contains("receive")
+                        && (narrowed.getMessage().contains("public")
+                            || narrowed.getMessage().contains("narrow")),
+                narrowed.getMessage());
     }
 
     @Test
