@@ -37,6 +37,28 @@ public final class ActorEventBus implements AutoCloseable {
         MAX
     }
 
+    public static final class EventReadBackpressureException
+            extends IllegalStateException {
+        private final String topic;
+        private final ActorRuntime.ActorId subscriber;
+        private final int limit;
+
+        private EventReadBackpressureException(
+                String topic,
+                ActorRuntime.ActorId subscriber,
+                int limit) {
+            super("ActorGroup event read registration backlog is full for topic "
+                    + topic + ", subscriber=" + subscriber + ", limit=" + limit);
+            this.topic = topic;
+            this.subscriber = subscriber;
+            this.limit = limit;
+        }
+
+        public String topic() { return topic; }
+        public ActorRuntime.ActorId subscriber() { return subscriber; }
+        public int limit() { return limit; }
+    }
+
     public static final class EventBackpressureException extends IllegalStateException {
         private final String topic;
         private final ActorRuntime.ActorId subscriber;
@@ -186,6 +208,12 @@ public final class ActorEventBus implements AutoCloseable {
         String topicName = normalizeTopicName(name);
         Objects.requireNonNull(policy, "policy");
         validateCapacity(policy, capacity);
+        int queueLimit = group.eventQueueLimit();
+        if (capacity > queueLimit) {
+            throw new IllegalArgumentException(
+                    "ActorGroup event topic capacity exceeds creator policy: capacity="
+                            + capacity + " limit=" + queueLimit);
+        }
 
         synchronized (definitionLock) {
             requireOpen();
@@ -267,7 +295,11 @@ public final class ActorEventBus implements AutoCloseable {
                 }
 
                 Subscription<T> created =
-                        new Subscription<>(topic, subscriber, capacity);
+                        new Subscription<>(
+                                topic,
+                                subscriber,
+                                capacity,
+                                actorLimit);
                 Subscription<?> raced =
                         topic.subscriptions.putIfAbsent(subscriber, created);
                 if (raced != null) {
@@ -668,17 +700,25 @@ public final class ActorEventBus implements AutoCloseable {
         private final Object latestLock = new Object();
         private final AtomicInteger reliableOutstanding = new AtomicInteger();
         private final int reliableOutstandingLimit;
+        private final AtomicInteger pendingReads = new AtomicInteger();
+        private final int pendingReadLimit;
         private final AtomicBoolean subscriptionClosed = new AtomicBoolean();
 
         private Subscription(
                 TopicState topic,
                 ActorRuntime.ActorId subscriber,
-                int capacity) {
+                int capacity,
+                int actorLimit) {
             this.topic = topic;
             this.subscriber = subscriber;
             this.channel = new ChannelRuntime.Channel<>(capacity);
-            long bounded = Math.max((long) capacity + 1L, (long) capacity * 2L);
-            this.reliableOutstandingLimit = (int) Math.min(Integer.MAX_VALUE, bounded);
+            long desiredReliable = Math.max(
+                    (long) capacity + 1L,
+                    (long) capacity * 2L);
+            this.reliableOutstandingLimit = Math.max(
+                    1,
+                    (int) Math.min((long) actorLimit, desiredReliable));
+            this.pendingReadLimit = Math.max(1, actorLimit);
         }
 
         public String topic() {
@@ -719,9 +759,21 @@ public final class ActorEventBus implements AutoCloseable {
 
         public OresFuture<Event<T>> readAsync() {
             requireReadable();
-            OresFuture<Event<T>> read =
-                    runtime.ownCurrentActorFuture(channel.readAsync());
+            if (!reservePendingRead()) {
+                throw new EventReadBackpressureException(
+                        topic.name, subscriber, pendingReadLimit);
+            }
+
+            final OresFuture<Event<T>> read;
+            try {
+                read = runtime.ownCurrentActorFuture(channel.readAsync());
+            } catch (Throwable failure) {
+                releasePendingRead();
+                throw failure;
+            }
+
             read.whenCompleteRuntime((value, failure) -> {
+                releasePendingRead();
                 if (failure == null) {
                     if (topic.policy == DeliveryPolicy.RELIABLE) {
                         releaseReliableEvent();
@@ -730,6 +782,27 @@ public final class ActorEventBus implements AutoCloseable {
                 }
             });
             return read;
+        }
+
+        private boolean reservePendingRead() {
+            if (subscriptionClosed.get()) return false;
+            while (true) {
+                int current = pendingReads.get();
+                if (current >= pendingReadLimit) return false;
+                if (pendingReads.compareAndSet(current, current + 1)) {
+                    if (!subscriptionClosed.get()) return true;
+                    releasePendingRead();
+                    return false;
+                }
+            }
+        }
+
+        private void releasePendingRead() {
+            while (true) {
+                int current = pendingReads.get();
+                if (current == 0) return;
+                if (pendingReads.compareAndSet(current, current - 1)) return;
+            }
         }
 
         private boolean reserveReliableEvent() {
