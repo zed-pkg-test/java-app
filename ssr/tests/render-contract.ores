@@ -88,30 +88,19 @@ pub routine main(): void {
     )
   ));
 
-  match response.with_status(
+  val invalid_status = response.with_status(
     99,
     markup.trusted_raw("invalid")
-  )
-    Err(message) -> {
-      stdio.println(message);
-    }
-    Ok(_) -> {
-      stdio.println("unexpected-valid-status");
-    }
-  end
+  );
+  stdio.println(invalid_status.is_err());
 
-  match response.with_status(
+  val custom_status = response.with_status(
     418,
     markup.trusted_raw("teapot")
-  )
-    Ok(custom) -> {
-      stdio.println(custom.status);
-      stdio.println(custom.body);
-    }
-    Err(_) -> {
-      stdio.println("unexpected-invalid-status");
-    }
-  end
+  );
+  val custom = custom_status.unwrap();
+  stdio.println(custom.status);
+  stdio.println(custom.body);
 
   return;
 }
