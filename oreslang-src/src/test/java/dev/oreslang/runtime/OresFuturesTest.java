@@ -3,6 +3,7 @@ package dev.oreslang.runtime;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
@@ -26,6 +27,44 @@ final class OresFuturesTest {
     }
 
     @Test
+    void completionStageCancellationNormalizesToCancelledOresFuture() {
+        CompletableFuture<Integer> host = new CompletableFuture<>();
+        OresFuture<Integer> ores = OresFuture.from(host);
+
+        assertTrue(host.cancel(true));
+
+        assertTrue(ores.isCancelled());
+        assertThrows(CancellationException.class, ores::join);
+    }
+
+    @Test
+    void allPreservesChildCancellationIdentity() {
+        CompletableFuture<Integer> first = new CompletableFuture<>();
+        CompletableFuture<Integer> second = new CompletableFuture<>();
+        OresFuture<List<Integer>> all = OresFutures.all(List.of(first, second));
+
+        first.complete(1);
+        assertTrue(second.cancel(true));
+
+        assertTrue(all.isCancelled());
+        assertThrows(CancellationException.class, all::join);
+    }
+
+    @Test
+    void racePreservesFirstCancellationIdentity() {
+        CompletableFuture<Integer> cancelled = new CompletableFuture<>();
+        CompletableFuture<Integer> later = new CompletableFuture<>();
+        OresFuture<Integer> race = OresFutures.race(List.of(cancelled, later));
+
+        assertTrue(cancelled.cancel(true));
+
+        assertTrue(race.isCancelled());
+        assertThrows(CancellationException.class, race::join);
+        later.complete(9);
+        assertTrue(race.isCancelled());
+    }
+
+    @Test
     void allPropagatesFailure() {
         CompletableFuture<Integer> ok = new CompletableFuture<>();
         CompletableFuture<Integer> bad = new CompletableFuture<>();
@@ -36,6 +75,63 @@ final class OresFuturesTest {
 
         CompletionException failure = assertThrows(CompletionException.class, all::join);
         assertInstanceOf(IllegalStateException.class, failure.getCause());
+    }
+
+    @Test
+    void allFailureDetachesOtherChildWaitersWithoutCancellingSharedChildren() {
+        OresFuture<Integer> pending = new OresFuture<>();
+        OresFuture<Integer> failed = new OresFuture<>();
+
+        OresFuture<List<Integer>> all = OresFutures.all(List.of(pending, failed));
+        assertEquals(1, pending.pendingRuntimeWaiterCount());
+        assertEquals(1, failed.pendingRuntimeWaiterCount());
+
+        failed.failFromRuntime(new IllegalStateException("boom"));
+
+        CompletionException failure =
+                assertThrows(CompletionException.class, all::join);
+        assertInstanceOf(IllegalStateException.class, failure.getCause());
+        assertEquals(0, pending.pendingRuntimeWaiterCount(),
+                "terminal all() must detach from losing pending children");
+        assertEquals(0, failed.pendingRuntimeWaiterCount());
+        assertFalse(pending.isCancelled(),
+                "child failure must not cancel unrelated shared children");
+    }
+
+    @Test
+    void allChildCancellationDetachesOtherWaitersWithoutCancellingSharedChildren() {
+        OresFuture<Integer> pending = new OresFuture<>();
+        OresFuture<Integer> cancelled = new OresFuture<>();
+
+        OresFuture<List<Integer>> all =
+                OresFutures.all(List.of(pending, cancelled));
+        assertTrue(cancelled.cancel(false));
+
+        assertTrue(all.isCancelled());
+        assertThrows(CancellationException.class, all::join);
+        assertEquals(0, pending.pendingRuntimeWaiterCount());
+        assertEquals(0, cancelled.pendingRuntimeWaiterCount());
+        assertFalse(pending.isCancelled(),
+                "one child cancelling all() must not cancel a shared sibling");
+    }
+
+    @Test
+    void raceDetachesLosingWaitersWithoutCancellingSharedChildren() {
+        OresFuture<Integer> slow = new OresFuture<>();
+        OresFuture<Integer> fast = new OresFuture<>();
+
+        OresFuture<Integer> race = OresFutures.race(List.of(slow, fast));
+        assertEquals(1, slow.pendingRuntimeWaiterCount());
+        assertEquals(1, fast.pendingRuntimeWaiterCount());
+
+        fast.completeFromRuntime(7);
+
+        assertEquals(7, race.join());
+        assertEquals(0, slow.pendingRuntimeWaiterCount(),
+                "race winner must detach callbacks from losing children");
+        assertEquals(0, fast.pendingRuntimeWaiterCount());
+        assertFalse(slow.isCancelled(),
+                "race completion must not cancel a shared losing child");
     }
 
     @Test

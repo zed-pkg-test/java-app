@@ -225,8 +225,18 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         stage.whenComplete((value, failure) -> {
             if (failure == null) {
                 result.completeFromRuntime(value);
+                return;
+            }
+
+            Throwable terminalFailure = unwrap(failure);
+            boolean cancelled = stage instanceof Future<?> hostFuture
+                    ? hostFuture.isCancelled()
+                    : terminalFailure instanceof CancellationException;
+
+            if (cancelled) {
+                result.cancel(false);
             } else {
-                result.failFromRuntime(unwrap(failure));
+                result.failFromRuntime(terminalFailure);
             }
         });
         return result;
