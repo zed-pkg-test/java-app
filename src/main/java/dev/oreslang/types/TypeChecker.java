@@ -1894,6 +1894,11 @@ public final class TypeChecker {
                 ResolvedMethod iteratorTarget = findMethodTarget(klass, named, "Symbol.iterator", 0, new LinkedHashSet<>());
                 if (iteratorTarget != null) {
                     Ast.MethodDecl iterator = iteratorTarget.method();
+                    requireClassMemberVisible(
+                            iterator.visibility(),
+                            iteratorTarget.owner(),
+                            "method",
+                            iterator.name());
                     Set<String> iteratorGenerics = new HashSet<>(iteratorTarget.owner().genericParameters());
                     iteratorGenerics.addAll(iterator.genericParameters());
                     Type result = resolve(iterator.returnType(), iteratorGenerics, iteratorTarget.ownerType());

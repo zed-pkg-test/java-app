@@ -43,7 +43,7 @@ final class PrivateVisibilityTest {
                     return 7;
                   }
 
-                  pub read_other(Vault other): int {
+                  pub read_other(&Vault other): int {
                     return other.reveal();
                   }
 
@@ -68,7 +68,7 @@ final class PrivateVisibilityTest {
                   val right = new Vault();
                   val Fnc<int> callback = Vault.hidden_callback();
 
-                  stdio.stdout.write(left.read_other(right));
+                  stdio.stdout.write(left.read_other(&right));
                   stdio.stdout.write(":");
                   stdio.stdout.write(left.destructured(right));
                   stdio.stdout.write(":");
@@ -193,6 +193,50 @@ final class PrivateVisibilityTest {
                         end
                         """)));
         assertTrue(failure.getMessage().contains("private static function"));
+    }
+
+    @Test
+    void privateIteratorVisibilityIsEnforcedStaticallyButDeclaringClassMayDispatchIt() throws Exception {
+        IllegalArgumentException outside = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Bag as
+                          private [Symbol.iterator](): Array<int> {
+                            return arr[1, 2];
+                          }
+                        end
+
+                        fnc bad(Bag bag): void {
+                          for value of bag do
+                            stdio.stdout.write(value);
+                          done
+                          return;
+                        }
+                        """)));
+        assertTrue(outside.getMessage().contains("private method"));
+        assertTrue(outside.getMessage().contains("Symbol.iterator"));
+
+        String output = run("""
+                define class Bag as
+                  private [Symbol.iterator](): Array<int> {
+                    return arr[3, 4];
+                  }
+
+                  pub write_self(): void {
+                    for value of self do
+                      stdio.stdout.write(value);
+                    done
+                    return;
+                  }
+                end
+
+                pub routine main(): void {
+                  val bag = new Bag();
+                  bag.write_self();
+                  return;
+                }
+                """);
+        assertEquals("34", output);
     }
 
     @Test
