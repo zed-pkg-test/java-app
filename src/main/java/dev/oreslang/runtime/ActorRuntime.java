@@ -54,6 +54,7 @@ public final class ActorRuntime implements AutoCloseable {
     private static final int MAX_MESSAGE_GRAPH_DEPTH = 256;
     private static final int MAX_MESSAGE_GRAPH_NODES = 100_000;
     private static final int MAX_ACTOR_GROUPS_PER_ACTOR = 64;
+    private static final int MAX_ACTOR_GROUP_MEMBERSHIPS_PER_ACTOR = 256;
     private static final int MAX_EVENT_TOPICS_PER_GROUP = 1_024;
     private static final long CLOSE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
     private static final int INTERNAL_CONTINUATION_SLOTS = 1_024;
@@ -237,6 +238,9 @@ public final class ActorRuntime implements AutoCloseable {
 
     private final Map<ActorId, ActorCell<?>> actors = new ConcurrentHashMap<>();
     private final Map<ActorGroupId, ActorGroup> actorGroups = new ConcurrentHashMap<>();
+    private final Map<ActorId, Set<ActorGroupId>> actorGroupMemberships =
+            new ConcurrentHashMap<>();
+    private final Object actorGroupMembershipLock = new Object();
     private final AtomicInteger actorCount = new AtomicInteger();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicLong privateMemoryBytes = new AtomicLong();
@@ -1025,6 +1029,7 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorId creator;
         private final int memberLimit;
         private final int eventTopicLimit;
+        private final int eventQueueLimit;
         private final Set<ActorId> members = ConcurrentHashMap.newKeySet();
         private final AtomicBoolean groupClosed = new AtomicBoolean();
         private final Object authorityLock = new Object();
@@ -1048,8 +1053,9 @@ public final class ActorRuntime implements AutoCloseable {
                     Math.min(
                             MAX_EVENT_TOPICS_PER_GROUP,
                             creatorPolicy.maxMailboxMessages()));
+            this.eventQueueLimit = Math.max(
+                    1, creatorPolicy.maxMailboxMessages());
             this.eventBus = new ActorEventBus(ActorRuntime.this, this);
-            if (creator != null) members.add(creator);
         }
 
         public ActorGroupId id() { return id; }
@@ -1072,6 +1078,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         int eventTopicLimit() { return eventTopicLimit; }
+        int eventQueueLimit() { return eventQueueLimit; }
 
         public ActorEventBus events() {
             requireObserver("access ActorGroup events");
@@ -1129,15 +1136,38 @@ public final class ActorRuntime implements AutoCloseable {
                 if (cell == null || cell.stopped.get()) {
                     throw new IllegalStateException("actor is not alive: " + actorId);
                 }
-                if (!members.contains(actorId) && members.size() >= memberLimit) {
-                    throw new IllegalStateException(
-                            "ActorGroup member limit exceeded: maximum " + memberLimit);
-                }
-                members.add(actorId);
+                addMemberLocked(actorId, cell);
                 if (groupClosed.get() || cell.stopped.get()) {
                     members.remove(actorId);
                     throw new IllegalStateException("ActorGroup or actor closed during join");
                 }
+            }
+        }
+
+        private void addMemberLocked(ActorId actorId, ActorCell<?> cell) {
+            if (members.contains(actorId)) return;
+            if (members.size() >= memberLimit) {
+                throw new IllegalStateException(
+                        "ActorGroup member limit exceeded: maximum " + memberLimit);
+            }
+            registerActorGroupMembership(
+                    actorId,
+                    id,
+                    cell.policy.maxMailboxMessages());
+            if (!members.add(actorId)) {
+                unregisterActorGroupMembership(actorId, id);
+            }
+        }
+
+        private void addCreatorMembership(ActorId actorId) {
+            synchronized (authorityLock) {
+                requireOpen();
+                ActorCell<?> cell = actors.get(actorId);
+                if (cell == null || cell.stopped.get()) {
+                    throw new IllegalStateException(
+                            "ActorGroup creator is not alive: " + actorId);
+                }
+                addMemberLocked(actorId, cell);
             }
         }
 
@@ -1214,7 +1244,13 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void leaveId(ActorId actorId) {
-            if (members.remove(actorId)) eventBus.removeActor(actorId);
+            boolean removed;
+            synchronized (authorityLock) {
+                removed = members.remove(actorId);
+            }
+            if (!removed) return;
+            unregisterActorGroupMembership(actorId, id);
+            eventBus.removeActor(actorId);
         }
 
         private void actorTerminated(ActorId actorId) {
@@ -1235,14 +1271,19 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void closeFromRuntime() {
+            List<ActorId> departed;
             synchronized (authorityLock) {
                 if (!groupClosed.compareAndSet(false, true)) return;
                 // Revocation is part of close: even a capability held by code
                 // racing teardown can no longer pass validation.
                 joinSecret = UUID.randomUUID();
+                departed = List.copyOf(members);
+                members.clear();
+            }
+            for (ActorId actorId : departed) {
+                unregisterActorGroupMembership(actorId, id);
             }
             eventBus.closeFromGroup();
-            members.clear();
             actorGroups.remove(id, this);
         }
 
@@ -1258,6 +1299,7 @@ public final class ActorRuntime implements AutoCloseable {
      * live until explicitly closed or the ActorRuntime closes.
      */
     public int actorGroupCount() {
+        requireSupervisorContext("inspect ActorGroup count");
         return actorGroups.size();
     }
 
@@ -1314,8 +1356,61 @@ public final class ActorRuntime implements AutoCloseable {
                 ActorGroupId id = ActorGroupId.create();
                 ActorGroup group =
                         new ActorGroup(id, creator, creatorPolicy);
-                if (actorGroups.putIfAbsent(id, group) == null) return group;
+                if (actorGroups.putIfAbsent(id, group) == null) {
+                    try {
+                        if (creator != null) {
+                            group.addCreatorMembership(creator);
+                        }
+                        return group;
+                    } catch (Throwable failure) {
+                        actorGroups.remove(id, group);
+                        group.closeFromRuntime();
+                        throw failure;
+                    }
+                }
             }
+        }
+    }
+
+    private void registerActorGroupMembership(
+            ActorId actorId,
+            ActorGroupId groupId,
+            int actorMailboxLimit) {
+        synchronized (actorGroupMembershipLock) {
+            Set<ActorGroupId> groups = actorGroupMemberships.computeIfAbsent(
+                    actorId,
+                    ignored -> ConcurrentHashMap.newKeySet());
+            if (groups.contains(groupId)) return;
+
+            int limit = Math.max(
+                    1,
+                    Math.min(
+                            MAX_ACTOR_GROUP_MEMBERSHIPS_PER_ACTOR,
+                            actorMailboxLimit));
+            if (groups.size() >= limit) {
+                throw new IllegalStateException(
+                        "actor ActorGroup membership limit exceeded for "
+                                + actorId + ": maximum " + limit);
+            }
+            groups.add(groupId);
+        }
+    }
+
+    private void unregisterActorGroupMembership(
+            ActorId actorId,
+            ActorGroupId groupId) {
+        synchronized (actorGroupMembershipLock) {
+            Set<ActorGroupId> groups = actorGroupMemberships.get(actorId);
+            if (groups == null) return;
+            groups.remove(groupId);
+            if (groups.isEmpty()) actorGroupMemberships.remove(actorId, groups);
+        }
+    }
+
+    private Set<ActorGroupId> detachActorGroupMemberships(ActorId actorId) {
+        synchronized (actorGroupMembershipLock) {
+            Set<ActorGroupId> groups = actorGroupMemberships.remove(actorId);
+            return groups == null ? Set.of() : Set.copyOf(groups);
         }
     }
 
@@ -1859,8 +1954,11 @@ public final class ActorRuntime implements AutoCloseable {
 
     private void unregisterActor(ActorCell<?> cell) {
         if (actors.remove(cell.ref.id(), cell)) {
-            for (ActorGroup group : List.copyOf(actorGroups.values())) {
-                group.actorTerminated(cell.ref.id());
+            Set<ActorGroupId> memberships =
+                    detachActorGroupMemberships(cell.ref.id());
+            for (ActorGroupId groupId : memberships) {
+                ActorGroup group = actorGroups.get(groupId);
+                if (group != null) group.actorTerminated(cell.ref.id());
             }
             int remaining = actorCount.decrementAndGet();
             if (remaining < 0) {
@@ -3323,6 +3421,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         for (ActorGroup group : List.copyOf(actorGroups.values())) group.closeFromRuntime();
         actorGroups.clear();
+        actorGroupMemberships.clear();
         for (SyncCell<?> cell : List.copyOf(syncCells)) cell.invalidateFromRuntime();
         syncCells.clear();
         for (Shared<?> shared : List.copyOf(sharedValues)) shared.closeFromRuntime();
