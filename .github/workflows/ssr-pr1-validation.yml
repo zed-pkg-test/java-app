@@ -1,0 +1,47 @@
+name: oreslang-ssr-pr1-validation
+
+on:
+  push:
+    branches:
+      - test/oreslang-ssr-pr1-20261005
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+
+      - name: Compiler baseline
+        run: mvn -B -ntp verify
+
+      - name: Native SSR static audit
+        run: bash ssr/scripts/audit.sh
+
+      - name: Type-check SSR programs
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check ssr/examples/basic-page.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check ssr/examples/htmx-fragment.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check ssr/tests/render-contract.ores"
+
+      - name: Render contract in JIT profile
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/tests/render-contract.ores" > /tmp/ssr-jit.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-jit.out
+
+      - name: Render contract in AOT execution profile
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=aot --platform=linux ssr/tests/render-contract.ores" > /tmp/ssr-aot.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-aot.out
