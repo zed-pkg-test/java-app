@@ -1,0 +1,8 @@
+<div id="app" class="card"><span>hello</span></div>
+body{margin:0;color:#222;}
+<button hx-post="/counter" hx-target="#counter" hx-swap="outerHTML">Increment</button>
+<input disabled>
+<input>
+404
+text/html; charset=utf-8
+<p>missing</p>
