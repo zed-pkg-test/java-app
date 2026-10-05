@@ -845,6 +845,16 @@ public final class TypeChecker {
                                                 bindings,
                                                 label));
                             }
+                            Ast.MethodDecl staticTarget = findStaticFunction(
+                                    klass,
+                                    member.member(),
+                                    call.arguments().size(),
+                                    new LinkedHashSet<>());
+                            if (staticTarget != null) {
+                                throw new IllegalArgumentException(
+                                        "static function '" + klass.name() + "." + member.member()
+                                                + "' must be invoked through the class namespace, not an instance");
+                            }
                         }
                     }
                 }
@@ -954,6 +964,16 @@ public final class TypeChecker {
                         throw new IllegalArgumentException(
                                 "instance method '" + klass.name() + "." + member.member()
                                         + "' is not a first-class callback value; invoke it directly or wrap the call in an explicit fnc/lambda");
+                    }
+                    List<Ast.MethodDecl> staticFunctions =
+                            findStaticFunctionsByName(
+                                    klass,
+                                    member.member(),
+                                    new LinkedHashSet<>());
+                    if (!staticFunctions.isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "static function '" + klass.name() + "." + member.member()
+                                        + "' must be referenced through the class namespace, not an instance");
                     }
                 }
             }
