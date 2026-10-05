@@ -210,7 +210,7 @@ public final class Parser {
         List<String> generics = parseGenericParameters();
 
         if (match(EQUAL)) {
-            consume(PIPE, "lambda-style callable declarations use '= |...| -> ReturnType { ... }'");
+            consume(PIPE, "lambda-style callable declarations use '= |Type name, ...| -> [ReturnType] { ... }'");
             List<Ast.Param> params = parseDeclaredPipeParameters();
             consume(PIPE, "expected closing '|' in lambda-style callable declaration");
             consume(ARROW, "lambda-style callable declarations use the slim arrow '->'");
