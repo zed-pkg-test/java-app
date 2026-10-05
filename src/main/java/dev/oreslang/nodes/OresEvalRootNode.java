@@ -1387,12 +1387,6 @@ public final class OresEvalRootNode extends RootNode {
 
         private AsyncPlan asyncEval(Ast.Expr expr, Env env) {
             if (!containsAwait(expr)) {
-                if (expr instanceof Ast.LambdaExpr lambda && lambda.async()) {
-                    boolean nonLexical =
-                            lambda.nonLexical() || env.descendantsNonLexical();
-                    Env captured = nonLexical ? null : env.snapshot();
-                    return asyncPure(new AsyncLambdaValue(lambda, captured));
-                }
                 return new AsyncThunk(() ->
                         safePlan(() -> asyncPure(eval(expr, env))));
             }
@@ -1585,13 +1579,7 @@ public final class OresEvalRootNode extends RootNode {
                         object.fields().stream().anyMatch(Ast.ObjectField::isDynamic));
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
-                boolean nonLexical =
-                        lambda.nonLexical() || env.descendantsNonLexical();
-                Env captured = nonLexical ? null : env.snapshot();
-                return asyncPure(
-                        lambda.async()
-                                ? new AsyncLambdaValue(lambda, captured)
-                                : eval(lambda, env));
+                return asyncPure(eval(lambda, env));
             }
 
             return asyncFailure(new IllegalArgumentException(
