@@ -11,6 +11,7 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +33,7 @@ public final class OresContext implements AutoCloseable {
     private final AtomicLong schedulerSafepoints = new AtomicLong();
     private final IsolatePolicy isolatePolicy;
     private final ExecutionProfile executionProfile;
+    private final String codeGenerationId;
     private static final int MAX_USER_SCHEDULERS = 32;
     private static final int MAX_USER_SCHEDULER_PARALLELISM = 64;
     private static final int MAX_USER_SCHEDULER_CARRIERS = 256;
@@ -49,6 +51,7 @@ public final class OresContext implements AutoCloseable {
         this.output = new PrintWriter(env.out(), true);
         this.isolatePolicy = IsolatePolicy.fromApplicationArguments(env.getApplicationArguments());
         this.executionProfile = IsolatePolicy.executionProfileFromApplicationArguments(env.getApplicationArguments());
+        this.codeGenerationId = OresVM.generationDiagnosticId(env.getApplicationArguments());
         this.vm = OresVM.contextOwner(env.getApplicationArguments());
         ActorRuntime.ActorGenerationLeaseFactory generationLeaseFactory =
                 vm.generationLeaseFactory(env.getApplicationArguments());
@@ -79,6 +82,17 @@ public final class OresContext implements AutoCloseable {
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
     public ExecutionProfile executionProfile() { return executionProfile; }
+    public String codeGenerationId() { return codeGenerationId; }
+
+    /**
+     * Runtime-only host interop normalization. This method is public only
+     * because Truffle nodes live in a sibling Java package; it is not a guest
+     * Oreslang capability surface.
+     */
+    public <T> OresFuture<T> adaptHostFuture(
+            java.util.concurrent.Future<? extends T> future) {
+        return vm.adaptJavaFuture(Objects.requireNonNull(future, "future"));
+    }
 
     public void requireCapability(IsolatePolicy.Capability capability, String api) {
         IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
