@@ -193,10 +193,12 @@ public final class ActorEventBus implements AutoCloseable {
     }
 
     public int topicCount() {
+        group.requireObserver("inspect ActorGroup event topics");
         return topics.size();
     }
 
     public List<TopicInfo> topics() {
+        group.requireObserver("inspect ActorGroup event topics");
         return topics.values().stream()
                 .map(TopicState::info)
                 .sorted((left, right) -> left.name().compareTo(right.name()))
