@@ -152,7 +152,10 @@ public final class IncrementalCompiler {
     private static void appendAbi(StringBuilder abi, Ast.Decl decl) {
         if (decl instanceof Ast.FunctionDecl fn) {
             if (fn.visibility() != Ast.Visibility.PUBLIC) return;
-            abi.append(fn.actorKind()).append(' ').append(fn.kind()).append(" pub ").append(fn.name());
+            abi.append(fn.actorKind()).append(' ');
+            if (fn.async()) abi.append("async ");
+            if (fn.generator()) abi.append("generator ");
+            abi.append(fn.kind()).append(" pub ").append(fn.name());
             appendGenerics(abi, fn.genericParameters());
             appendParams(abi, fn.parameters());
             abi.append("=>").append(typeRef(fn.returnType())).append('\n');
