@@ -103,5 +103,7 @@ jobs:
           lib="$(find target -maxdepth 1 -type f \( -name 'oresvm.so' -o -name 'liboresvm.so' -o -name 'oresvm.dylib' -o -name 'liboresvm.dylib' \) | head -n1)"
           test -n "$lib"
           echo "path=$PWD/$lib" >> "$GITHUB_OUTPUT"
+      - name: Verify untrusted actor hot-load admission in spawned isolate
+        run: mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -Dtest=IsolationHotReloadTest#untrustedActorEntryLoadsWhenNativeIsolateLibraryIsAvailable test
       - name: Run strict program in Oreslang polyglot isolate
         run: mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"

@@ -478,12 +478,48 @@ final class IsolationHotReloadTest {
                 IsolatePolicy.untrustedActor(),
                 ExecutionProfile.serverJit(),
                 HotReloadManager.ExecutionDomain.UNTRUSTED_JIT)) {
-            var generation = correct.loadActorEntry("worker.ores", source, contract);
+            assertEquals(
+                    HotReloadManager.ExecutionDomain.UNTRUSTED_JIT,
+                    correct.executionDomain());
+            assertTrue(correct.executionDomain().spawnedIsolate());
+            assertTrue(correct.guestPolicy().adversarial());
+        }
+    }
+
+    @Test
+    void untrustedActorEntryLoadsWhenNativeIsolateLibraryIsAvailable() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                System.getProperty("polyglot.engine.IsolateLibrary") != null,
+                "positive spawned-isolate admission requires the native isolate library");
+
+        IsolatePolicy supervisor = IsolatePolicy.developer();
+        String source = """
+                define class Worker extends UntrustedActor<int, String, String> as
+                  pub receive(message: int): void { return; }
+                end
+                export entry Worker;
+                """;
+        ActorEntryContract contract = ActorEntryContract.of(
+                "Worker",
+                Ast.ActorKind.UNTRUSTED,
+                List.of(),
+                Ast.TypeRef.simple("int"),
+                Ast.TypeRef.simple("String"),
+                Ast.TypeRef.simple("String"));
+
+        try (HotReloadManager hot = new HotReloadManager(
+                supervisor,
+                IsolatePolicy.untrustedActor(),
+                ExecutionProfile.serverJit(),
+                HotReloadManager.ExecutionDomain.UNTRUSTED_JIT)) {
+            var generation = hot.loadActorEntry("worker.ores", source, contract);
             assertEquals(
                     HotReloadManager.ExecutionDomain.UNTRUSTED_JIT,
                     generation.executionDomain());
             assertTrue(generation.executionDomain().spawnedIsolate());
             assertTrue(generation.guestPolicy().adversarial());
+            assertFalse(generation.started(),
+                    "ABI admission must not execute the untrusted actor");
         }
     }
 
