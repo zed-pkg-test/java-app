@@ -8,7 +8,7 @@ import_spec     = "*" "as" IDENT
                 | "module" import_names
                 | "class" import_names
                 | "fnc" import_names ;
-import_names    = IDENT
+import_names    = IDENT [ "as" IDENT ]
                 | "{" IDENT { "," IDENT } "}"
                 | "*" "as" IDENT ;
 
@@ -17,7 +17,7 @@ top_level_item  = annotated_module_decl
                 | actor_callable_decl
                 | callable_decl
                 | class_decl
-                | interface_decl
+                | struct_decl\n                | interface_decl
                 | type_decl
                 | binding_decl ;
 
@@ -28,7 +28,7 @@ module_member   = actor_decl
                 | actor_callable_decl
                 | callable_decl
                 | class_decl
-                | interface_decl
+                | struct_decl\n                | interface_decl
                 | type_decl
                 | binding_decl ;
 
@@ -41,10 +41,10 @@ callable_decl   = { annotation } visibility { callable_modifier } callable_kind 
 callable_kind   = "fnc" | "routine" ;
 
 actor_callable_decl
-                = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" | "untrusted" ] "actor" "fnc" IDENT [ generic_params ]
+                = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" ] "actor" "fnc" IDENT [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
 
-actor_decl      = visibility [ "shared" | "untrusted" ] "actor" IDENT [ generic_params ]
+actor_decl      = visibility [ "shared" ] "actor" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
                   [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
                   actor_body ;
@@ -60,7 +60,10 @@ actor_method_decl
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
                   [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
-                  { class_member } "end" ;
+                  "as" { class_member } "end" ;
+
+struct_decl     = "define" "struct" IDENT [ generic_params ]
+                  "as" { field_decl } "end" ;
 
 class_member    = field_decl
                 | method_decl
@@ -150,12 +153,11 @@ equality        = comparison { ( "==" | "!=" ) comparison } ;
 comparison      = additive { ( "<" | "<=" | ">" | ">=" ) additive } ;
 additive        = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative  = unary { ( "*" | "/" | "%" ) unary } ;
-unary           = ( "!" | "-" | "+" | "await" | "spawn" ) unary
-                | "&" [ "mut" ] unary
-                | postfix ;
+unary           = [ "!" | "-" | "+" | "await" ] postfix
+                | "&" [ "mut" ] unary ;
 postfix         = primary { call_suffix | member_suffix | index_suffix } ;
 call_suffix     = "(" [ argument_list ] ")" ;
-member_suffix   = "." IDENT ;
+member_suffix   = "." member_name ;\nmember_name     = IDENT | "stop" | "do" | "done" ;
 index_suffix    = "[" expression "]" ;
 argument_list   = expression { "," expression } ;
 
@@ -180,7 +182,10 @@ tuple_literal   = "(" expression "," expression { "," expression } ")" ;
 array_literal   = "arr" "[" [ expression { "," expression } ] "]" ;
 legacy_array_literal = "[" [ expression { "," expression } ] "]" ;
 object_literal  = "obj" "{" [ object_field { "," object_field } ] "}" ;
-object_field    = ( IDENT | STRING_LITERAL ) ":" expression ;
+object_field    = static_object_key ":" expression
+                | "`" expression "`" ":" expression ;
+static_object_key
+                = member_name | STRING_LITERAL ;
 
 literal         = INT_LITERAL | FLOAT_LITERAL | IMAG_LITERAL | STRING_LITERAL
                 | "true" | "false" ;
@@ -226,6 +231,13 @@ stmt_terminator   = ";" | SAFE_STRUCTURAL_BOUNDARY ;
 member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
 
 (* Semantic restrictions:
+   - Single- and double-quoted object keys are equivalent static string keys.
+     Reserved stop/do/done are legal static object/map/member keys.
+   - A backtick-delimited object key evaluates its enclosed expression at
+     runtime and requires a string value.
+   - An obj{} literal containing any dynamic key has DynamicStruct<T> type,
+     where T is the joined value type. DynamicStruct<T> accepts arbitrary
+     string keys and values assignable to T.
    - Each source file is a separately versioned compilation/code unit and is the
      default package identity when no explicit namespace is declared.
    - Source namespaces are flat: namespace a.b; is illegal.
@@ -245,9 +257,7 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - "=>" belongs to named callable return declarations.
    - "->" belongs to function types and lambdas.
    - Unqualified "actor" declarations are private actors; "shared actor" opts
-     into the SHARED_MEMORY execution domain; "untrusted actor" opts into the
-     adversarial, memory-isolated, hard-budgeted sandbox domain. "shared" and
-     "untrusted" are mutually exclusive.
+     into the SHARED_MEMORY execution domain.
    - Actor fields are private mailbox-owned state; public actor API is exposed
      through actor methods/messages rather than public mutable fields.
    - Actor inheritance must preserve actor isolation kind.
@@ -262,9 +272,7 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - named class/interface types are nominal by default.
    - @Structural, name structural Type, or @AllowStructural(name) opt a
      parameter into public-shape compatibility.
-   - every loop iteration contains an injected scheduler safepoint; untrusted
-     actor statement/expression execution and call/recursion boundaries are
-     metered as additional checkpoints.
+   - every loop iteration contains an injected scheduler safepoint.
    - [Symbol.iterator]() may provide iterator behavior for for-of.
    - standalone null values are illegal.
    - null is a type marker only directly inside Option<null>.

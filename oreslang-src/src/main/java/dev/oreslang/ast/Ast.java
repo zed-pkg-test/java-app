@@ -37,7 +37,7 @@ public final class Ast {
 
     public enum Visibility { PRIVATE, PUBLIC }
     public enum CallableKind { FNC, ROUTINE }
-    public enum ActorKind { NONE, PRIVATE, SHARED, UNTRUSTED }
+    public enum ActorKind { NONE, PRIVATE, SHARED }
 
     public record Annotation(String name, List<TypeRef> arguments) {
         public Annotation { arguments = List.copyOf(arguments); }
@@ -155,6 +155,7 @@ public final class Ast {
     public record ClassDecl(
             String name,
             boolean isAbstract,
+            boolean isStruct,
             ActorKind actorKind,
             List<String> genericParameters,
             List<TypeRef> parents,
@@ -168,14 +169,19 @@ public final class Ast {
             fields = List.copyOf(fields);
             methods = List.copyOf(methods);
         }
+        public ClassDecl(String name, boolean isAbstract, ActorKind actorKind, List<String> genericParameters,
+                         List<TypeRef> parents, List<TypeRef> interfaces,
+                         List<FieldDecl> fields, List<MethodDecl> methods) {
+            this(name, isAbstract, false, actorKind, genericParameters, parents, interfaces, fields, methods);
+        }
         public ClassDecl(String name, boolean isAbstract, List<String> genericParameters,
                          List<TypeRef> parents, List<TypeRef> interfaces,
                          List<FieldDecl> fields, List<MethodDecl> methods) {
-            this(name, isAbstract, ActorKind.NONE, genericParameters, parents, interfaces, fields, methods);
+            this(name, isAbstract, false, ActorKind.NONE, genericParameters, parents, interfaces, fields, methods);
         }
         public ClassDecl(String name, boolean isAbstract, List<String> genericParameters,
                          List<FieldDecl> fields, List<MethodDecl> methods) {
-            this(name, isAbstract, ActorKind.NONE, genericParameters, List.of(), List.of(), fields, methods);
+            this(name, isAbstract, false, ActorKind.NONE, genericParameters, List.of(), List.of(), fields, methods);
         }
     }
 
@@ -215,7 +221,21 @@ public final class Ast {
             Visibility visibility,
             BindingKind bindingKind,
             TypeRef type,
-            Expr initializer) implements Decl { }
+            List<Annotation> annotations,
+            Expr initializer) implements Decl {
+        public FieldDecl {
+            annotations = List.copyOf(annotations);
+        }
+
+        public FieldDecl(
+                String name,
+                Visibility visibility,
+                BindingKind bindingKind,
+                TypeRef type,
+                Expr initializer) {
+            this(name, visibility, bindingKind, type, List.of(), initializer);
+        }
+    }
 
     public record MethodDecl(
             String name,
@@ -305,7 +325,7 @@ public final class Ast {
     }
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
-            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, SpawnExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
+            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
     public record LiteralExpr(Object value) implements Expr { }
     public record Imaginary(double coefficient) { }
@@ -343,7 +363,6 @@ public final class Ast {
     }
 
     public record AwaitExpr(Expr expression) implements Expr { }
-    public record SpawnExpr(CallExpr call) implements Expr { }
 
     public record ListExpr(List<Expr> elements) implements Expr {
         public ListExpr { elements = List.copyOf(elements); }
@@ -353,7 +372,20 @@ public final class Ast {
         public TupleExpr { elements = List.copyOf(elements); }
     }
 
-    public record ObjectField(String name, Expr value) { }
+    public record ObjectField(String name, Expr dynamicName, Expr value) {
+        public ObjectField {
+            if ((name == null) == (dynamicName == null)) {
+                throw new IllegalArgumentException("object field must have exactly one static or dynamic key");
+            }
+        }
+        public static ObjectField named(String name, Expr value) {
+            return new ObjectField(java.util.Objects.requireNonNull(name, "name"), null, value);
+        }
+        public static ObjectField dynamic(Expr key, Expr value) {
+            return new ObjectField(null, java.util.Objects.requireNonNull(key, "key"), value);
+        }
+        public boolean isDynamic() { return dynamicName != null; }
+    }
 
     public record ObjectExpr(List<ObjectField> fields) implements Expr {
         public ObjectExpr { fields = List.copyOf(fields); }

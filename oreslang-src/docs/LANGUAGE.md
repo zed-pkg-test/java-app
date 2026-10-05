@@ -26,13 +26,23 @@ Imports are explicit about what kind of symbol is entering the compilation unit:
 
 ```ores
 import module foo from "../xyz";
+import module foo as apiFoo from "../xyz";
 import module {foo, bar} from "../xyz";
-import class {x} from '../xyz';
-import fnc * as funcs from '../xyz';
-import * as x from './xyz';
+import class Widget as ApiWidget from "../xyz";
+import fnc add as apiAdd from "../xyz";
+import fnc * as funcs from "../xyz";
+import * as package from "./xyz";
 ```
 
-Wildcard imports always require a namespace alias. This avoids silently injecting an unbounded set of names into the local scope. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
+Wildcard imports always require a namespace alias. A single named module/class/function import may use `as` to choose its local binding; the original source name still controls export resolution. This avoids namespace pollution while supporting Kotlin-style disambiguation. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
+
+Java host classes use an explicit `java:` URI and the same alias syntax:
+
+```ores
+import class ArrayList as JArrayList from "java:java.util.ArrayList";
+```
+
+The selected name (`ArrayList`) must match the Java simple class name; `JArrayList` is only the Oreslang-local alias. Java imports never grant authority by themselves: runtime use additionally requires the `JAVA_INTEROP` capability and an exact host-class allowlist supplied by the launcher/embedder.
 
 ### Circular imports and file initialization
 
@@ -223,6 +233,26 @@ val user = obj{name: "Ada", age: 37};
 stdio.println(user.name);
 ```
 
+Static object/map keys may be identifiers, reserved member keys such as
+`stop`/`do`/`done`, or strings written with either single or double
+quotes. Backticks make the key dynamic: the expression between the backticks
+must evaluate to a string.
+
+```ores
+val key = "score";
+val stats = obj{
+  stop: 1,
+  'do': 2,
+  "done": 3,
+  `key`: 4
+};
+```
+
+An `obj{...}` containing a dynamic key has type `DynamicStruct<T>`, where
+`T` is the joined value type. A `DynamicStruct<T>` can also be created
+directly with `new DynamicStruct<T>()`; it accepts arbitrary string keys but
+only values assignable to `T`.
+
 Inline array:
 
 ```ores
@@ -382,47 +412,23 @@ try {
 
 `defer` executes in LIFO order when its lexical scope unwinds, including returns and exceptional exits.
 
+## Callable-only reserved keywords
+
+`stop`, `do`, and `done` are reserved language keywords. They cannot be used as ordinary identifiers for bindings, parameters, fields, types, classes, modules, or bare function references.
+
+They have one narrow compatibility exception: the three words may be declared as callable names and used when invoking that callable. This includes `fnc`/`routine` declarations, class/actor methods, interface function signatures, `import fnc` selections, direct calls such as `stop()`, and qualified calls such as `worker.done()`.
+
+The exception does not turn the keywords back into general identifiers. For example, `val stop = 1`, `fnc f(int do)`, `val callback = done`, and `val callback = worker.stop` are invalid.
+
 ## Async / await
 
-`Future<T>` is Oreslang's local asynchronous result handle. It is deliberately
-not actor-sendable and not shared-safe: a pending computation belongs to the
-execution domain that created it. `await future` is the only operation that
-extracts the future's result; Oreslang does not expose a blocking
-`Future.get()` / `join()` equivalent.
-
-The built-in `Futures` control-flow facade provides:
-
-```ores
-// first and second are Future<Response> values returned by an async API.
-val responses = await Futures.all([first, second]);
-```
-
-- `Futures.all([...])` returns one future, preserves input order, and fails if
-  one constituent future fails.
-- `Futures.race([...])` completes from the first constituent completion.
-- `future.is_done()`, `future.is_cancelled()`, and `future.cancel()` are
-  nonblocking state/control operations.
-- cancellation is cooperative with the host operation. A sandbox resource
-  permit is not considered free merely because guest code requested
-  cancellation; the underlying host operation must actually finish.
-
-For actor code, `await` is a **suspension point, never a carrier-thread
-blocking point**. Compiler backends must lower an incomplete actor await to a
-resumable continuation: the carrier returns to its dispatcher, the actor's
-current mailbox turn remains logically in progress, and no later mailbox
-message may mutate that actor's state until the continuation resumes and
-finishes. The reference JVM interpreter therefore rejects an incomplete
-actor-side `await` unless that continuation lowering is active rather than
-silently blocking a dispatcher worker.
-
-The scheduler remains separate from the language surface so actor isolation
-does not depend on a specific OS-thread implementation.
+`async` and `await` are reserved and parsed. `await` unwraps future-like runtime values. The scheduler is intentionally separate from the language surface so actor isolation does not depend on a specific OS-thread implementation.
 
 ## Actors
 
 Oreslang uses an Akka-style dispatcher model: an actor is **not** a thread. Every actor owns one mailbox, and at most one mailbox turn for a given actor may execute at a time. Actors are multiplexed over bounded thread pools, so the carrier thread may change between turns.
 
-There are three actor execution domains:
+There are two actor execution domains:
 
 ```ores
 pub actor fnc worker(int value) => int {
@@ -437,19 +443,11 @@ shared actor Account {
     return;
   }
 }
-
-untrusted actor RequestSandbox {
-  pub fnc handle() => void {
-    // The host may bind this actor to one bounded HTTP exchange.
-    return;
-  }
-}
 ```
 
-- an unqualified `actor` is **shared**; use `isoactor` for confined/private actor memory;
+- an unqualified `actor` is **private**;
 - `shared actor` is a **shared-memory-capable** actor;
-- `untrusted actor` is a **memory-isolated adversarial sandbox** with a hard lifetime/fuel/capability budget;
-- private, shared, and untrusted actors are scheduled on **different dispatcher pools** for bulkheading;
+- private and shared actors are scheduled on **different dispatcher pools** for bulkheading;
 - compiler-generated/context-aware actor factories are capture-free for **both** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
 - trusted host embedding has separately named supervisor-only construction escape hatches, and adversarial policies reject them;
 - both kinds still process their own mailbox serially;
@@ -458,49 +456,7 @@ untrusted actor RequestSandbox {
 - actor `self` and move-only state rooted at `self` cannot escape the mailbox turn by value or returned borrow; copy-like values such as integers, booleans, and strings may be returned normally;
 - synchronized shared memory requires the host-granted `SHARED_MEMORY` capability.
 
-Actor callables are entry points, not ordinary functions. They are invoked only
-with `spawn`:
-
-```ores
-val pending = spawn worker(41);
-
-// Available synchronously after identity reservation + spawn admission.
-stdio.println(pending.id);
-
-// READY means the actor runtime has initialized the actor and its mailbox/control
-// endpoint. It does not mean worker() has finished.
-val ref = await pending.ready;
-
-// Equivalent readiness shorthand:
-val other_ref = await spawn worker(1);
-
-// Completion is separate from readiness.
-val completed = await pending.done;
-
-// Actor functions additionally expose their returned value.
-val answer = await pending.result;
-```
-
-`spawn actor_fnc(...)` returns an `ActorSpawn<T>` ticket immediately after the
-runtime has reserved an `ActorId` and admitted the initial spawn/message. The
-fast path must not wait for actor behavior construction or actor-callable
-completion. `ActorSpawn<T>` exposes `id`, `ready: Future<ActorRef>`,
-and `done: Future<bool>`. `done` resolves to `true` only after normal actor
-callable completion and fails exceptionally on actor failure/cancellation.
-Any non-`void` actor callable—`fnc` or `routine`—additionally exposes
-`result: Future<T>`. A void actor callable has no result value and uses
-`done` when completion must be observed.
-
-`await spawn actor_fnc(...)` awaits **READY only** and yields an `ActorRef`.
-It never waits for the actor function/routine to finish. The ready reference
-exposes stable actor identity/control metadata such as `id` and
-`is_alive()`. One-shot actor callables do **not** expose an application
-mailbox: they terminate after their invocation, so accepting queued messages
-would be misleading. Typed mailboxes belong to persistent actor behavior/receive
-semantics rather than this one-shot callable launch primitive. Ordinary
-`worker(...)` calls are compile errors when `worker` is declared `actor`.
-
-Private and untrusted actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
+Private actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
 
 The slice has two simultaneous limits:
 
@@ -524,27 +480,7 @@ This preserves the central invariant:
 
 > Actor state is mutated through mailbox ownership. Shared mutable state outside an actor is exceptional and must use an explicit synchronization abstraction.
 
-Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into a private, shared, or untrusted actor invalidates dependent compiled units.
-
-An untrusted actor cannot obtain ambient network access. Its only permitted
-outbound network primitive is a host-owned **stateless HTTP/HTTPS capability**.
-The default hard per-actor limit is **5 in-flight outbound HTTP calls** and may
-be configured downward or upward by the supervisor within the runtime hard
-ceiling. The sixth call is rejected before it reaches the host transport; it is
-not hidden in an unbounded guest queue. `CONNECT`, WebSocket/protocol upgrades,
-non-HTTP schemes, raw TCP sockets, actor-visible connection-pool handles, cookie
-jars, and stateful session connections are forbidden. A host may reuse
-connections internally for normal HTTP efficiency, but that state never
-becomes an actor capability.
-
-This gives an untrusted actor useful I/O parallelism without letting it spawn
-more actors. It can start up to its HTTP limit, compose those futures with
-`Futures.all`, and suspend at `await`; the network operations continue while
-the actor consumes no carrier thread.
-
-For HTTP request handling, the host may instead bind exactly one accepted request/response exchange to the actor. The runtime exposes bounded, owner-only request-body and response-body stream capabilities through the actor turn context, allowing the HTTP server to stream directly from/to its socket or event-loop buffers without copying bulk body data through actor mailboxes. Body bytes and HTTP metadata have independent limits; request method/path/header access and response headers are bounded so metadata cannot be used to evade the body/mailbox quotas. When body data is staged in an actor-owned native block, the runtime can read/write that FFM-backed region directly through the HTTP capability without an intermediate heap byte array. The capability is deliberately higher-level than a raw fd so it remains safe for multiplexed HTTP/2 and HTTP/3 connections. HTTP capability handles themselves are non-Sendable and cannot escape through actor messages.
-
-If an untrusted actor is explicitly given an `ActorRef`, that grant authorizes bounded message sending, not lifecycle control: it cannot stop another actor or synchronously wait for another actor's termination. Prefer the narrower `Recipient<M>` capability for parent replies and one-way channels. A `Recipient<M>` can send only; it has no stop/wait/failure API and cannot cross into a different `ActorRuntime`. Supervisory control remains outside the untrusted actor.
+Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into a private or shared actor invalidates dependent compiled units.
 
 Shared writable handles use transactional publication. A `SharedMutex<T>` is reserved to the destination runtime before mailbox visibility, committed only after queue admission, and unbound again when first publication fails. This prevents failed sends from accidentally claiming a writable capability for the wrong runtime.
 
@@ -707,9 +643,9 @@ define class Bag as
 end
 ```
 
-The compiler/runtime inserts a scheduler safepoint on **every loop iteration**. For untrusted actors, statement/expression evaluation and callable/recursive execution are also metered. Each checkpoint rechecks the actor deadline and consumes execution fuel; exhausting fuel fails the actor. The runtime may yield a carrier as a scheduling optimization, but untrusted-system liveness does **not** depend on source code voluntarily calling `yield`.
+The compiler/runtime inserts a scheduler safepoint on **every loop iteration**. The current runtime hook checks cancellation/interruption and yields execution; it is intentionally centralized so actor supervisor/control-mailbox polling can evolve without changing source syntax. User code does not receive ambient thread-control capability.
 
-This means Oreslang does not require recursion as the only way to loop, and recursive code is not a loophole around sandbox scheduling. User code receives no ambient thread-control capability.
+This means Oreslang does not require recursion as the only way to loop, while still giving actor/isolate schedulers a compulsory cooperation point inside generated loop execution.
 
 ## Standard output
 
@@ -1099,3 +1035,19 @@ The same compiled program can target a secondary multi-threaded runtime because:
 - actor messages continue to cross actor boundaries only through the existing frozen/sendable contract.
 
 When explicit thread/task spawning is added, cross-thread transfer will require move semantics and a `Send`-equivalent capability; shared cross-thread references will additionally require a `Sync`-equivalent guarantee. Those marker traits are intentionally a future surface feature—the current source language has no ambient raw-thread API, so there is no unchecked escape hatch to bypass ownership.
+
+
+## Native core values and typed structs
+
+Guest-visible `List<T>`, `Map<K,V>`, object records, `DynamicStruct<T>`, typed structs, files, networking primitives, and thread primitives are Oreslang runtime values. Their storage and OS operations are implemented by the native runtime libraries rather than by `java.util`, `java.io`, `java.net`, or `java.lang.Thread`.
+
+```ores
+define struct Point as
+  pub let i64 x;
+  pub let i64 y;
+end
+
+val p = new Point(10, 20);
+```
+
+A typed struct is nominal and fixed-shape: it cannot gain fields at runtime. In v0 it is field-only and does not inherit or implement interfaces. Field mutation follows the normal `val`/`const`/`let` rules.

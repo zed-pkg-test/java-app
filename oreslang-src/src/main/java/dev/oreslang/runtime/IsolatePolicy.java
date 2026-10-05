@@ -10,6 +10,10 @@ import org.graalvm.polyglot.io.IOAccess;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.EnumSet;
@@ -37,6 +41,8 @@ public record IsolatePolicy(
         FILESYSTEM_WRITE,
         ENVIRONMENT,
         HOT_CODE_LOAD,
+        JAVA_INTEROP,
+        JAVA_SOURCE_INTEROP,
         FFI,
         NATIVE,
         REFLECTION,
@@ -57,6 +63,12 @@ public record IsolatePolicy(
         if (adversarial && capabilities.contains(Capability.THREAD_CREATE)) {
             throw new IllegalArgumentException("adversarial isolates cannot grant THREAD_CREATE");
         }
+        if (adversarial && capabilities.contains(Capability.JAVA_INTEROP)) {
+            throw new IllegalArgumentException("adversarial isolates cannot grant JAVA_INTEROP");
+        }
+        if (adversarial && capabilities.contains(Capability.JAVA_SOURCE_INTEROP)) {
+            throw new IllegalArgumentException("adversarial isolates cannot grant JAVA_SOURCE_INTEROP");
+        }
     }
 
     /**
@@ -67,16 +79,7 @@ public record IsolatePolicy(
         return new IsolatePolicy(Set.of(Capability.STDOUT), 128L * 1024 * 1024, 1024, Duration.ofSeconds(30), true);
     }
 
-    /**
-     * Default policy for a first-class UntrustedActor. Generic host powers are
-     * deliberately absent; request/response access is granted through narrow,
-     * owner-bound capabilities rather than NETWORK/filesystem/FFI authority.
-     */
-    public static IsolatePolicy untrustedActor() {
-        return new IsolatePolicy(Set.of(), 64L * 1024 * 1024, 128, Duration.ofSeconds(300), true);
-    }
-
-    /** Restricted local/test baseline. FFI/native/reflection/process spawning remain denied. */
+    /** Restricted local/test baseline. Java interop/FFI/native/reflection/process spawning remain denied. */
     public static IsolatePolicy developer() {
         return new IsolatePolicy(
                 Set.of(Capability.STDIN, Capability.STDOUT, Capability.PROCESS_INFO, Capability.GC_CONTROL,
@@ -113,16 +116,42 @@ public record IsolatePolicy(
      * available and enforces guest/isolate resource limits.
      */
     public Context.Builder restrictedContextBuilder() {
-        return restrictedContextBuilder(ExecutionProfile.serverJit());
+        return restrictedContextBuilder(ExecutionProfile.serverJit(), Set.of());
     }
 
     public Context.Builder restrictedContextBuilder(ExecutionProfile profile) {
-        HostAccess hostAccess = adversarial
-                ? HostAccess.newBuilder(HostAccess.NONE).allowMutableTargetMappings().methodScoping(true).build()
-                : HostAccess.NONE;
+        return restrictedContextBuilder(profile, Set.of());
+    }
+
+    /**
+     * Builds a deny-by-default Graal context. Java host classes require two
+     * independent grants: JAVA_INTEROP and this exact fully-qualified allowlist.
+     */
+    public Context.Builder restrictedContextBuilder(
+            ExecutionProfile profile,
+            Set<String> allowedHostClasses) {
+        Set<String> hostClasses = Set.copyOf(allowedHostClasses);
+        if (!hostClasses.isEmpty()) {
+            require(Capability.JAVA_INTEROP, "Java host imports");
+            if (adversarial) {
+                throw new SecurityException("Java host imports are disabled for adversarial isolates");
+            }
+            for (String className : hostClasses) validateHostClassAuthority(className);
+        }
+
+        HostAccess hostAccess;
+        if (!hostClasses.isEmpty()) {
+            hostAccess = explicitHostAccess(hostClasses);
+        } else {
+            hostAccess = adversarial
+                    ? HostAccess.newBuilder(HostAccess.NONE).allowMutableTargetMappings().methodScoping(true).build()
+                    : HostAccess.NONE;
+        }
 
         Context.Builder builder = Context.newBuilder(OresLanguage.ID)
                 .allowHostAccess(hostAccess)
+                .allowHostClassLookup(hostClasses.isEmpty() ? ignored -> false : hostClasses::contains)
+                .allowHostClassLoading(false)
                 .allowPolyglotAccess(PolyglotAccess.NONE)
                 .allowEnvironmentAccess(EnvironmentAccess.NONE)
                 .allowNativeAccess(false)
@@ -158,6 +187,86 @@ public record IsolatePolicy(
         }
 
         return builder;
+    }
+
+    private void validateHostClassAuthority(String className) {
+        if (className == null || className.isBlank()) {
+            throw new IllegalArgumentException("allowlisted Java host class name cannot be blank");
+        }
+
+        if (className.equals("java.lang.Class")
+                || className.equals("java.lang.ClassLoader")
+                || className.equals("java.lang.Module")
+                || className.equals("java.lang.Runtime")
+                || className.equals("java.lang.System")
+                || className.equals("java.lang.Process")
+                || className.equals("java.lang.ProcessBuilder")
+                || className.equals("java.lang.ProcessHandle")
+                || className.equals("java.lang.Thread")
+                || className.equals("java.lang.ThreadGroup")
+                || className.equals("java.lang.SecurityManager")
+                || className.equals("java.util.ServiceLoader")
+                || className.startsWith("java.lang.reflect.")
+                || className.startsWith("java.lang.invoke.")
+                || className.startsWith("java.beans.")
+                || className.startsWith("javax.script.")
+                || className.startsWith("javax.tools.")
+                || className.startsWith("jdk.")
+                || className.startsWith("sun.")
+                || className.startsWith("com.sun.")) {
+            throw new SecurityException("Java host class is blocked from class-level interop: " + className);
+        }
+
+        if (className.startsWith("java.io.") || className.startsWith("java.nio.file.")) {
+            require(Capability.FILESYSTEM_READ, "Java host class " + className);
+            require(Capability.FILESYSTEM_WRITE, "Java host class " + className);
+        }
+        if (className.startsWith("java.net.")) {
+            require(Capability.NETWORK, "Java host class " + className);
+        }
+        if (className.startsWith("java.nio.channels.")) {
+            require(Capability.NETWORK, "Java host class " + className);
+            require(Capability.FILESYSTEM_READ, "Java host class " + className);
+            require(Capability.FILESYSTEM_WRITE, "Java host class " + className);
+        }
+        if (className.startsWith("java.util.concurrent.")) {
+            require(Capability.THREAD_CREATE, "Java host class " + className);
+        }
+        if (className.startsWith("java.lang.foreign.")) {
+            require(Capability.NATIVE, "Java host class " + className);
+        }
+        if (className.startsWith("java.lang.management.")) {
+            require(Capability.PROCESS_INFO, "Java host class " + className);
+        }
+    }
+
+    private static HostAccess explicitHostAccess(Set<String> hostClasses) {
+        HostAccess.Builder access = HostAccess.newBuilder(HostAccess.NONE)
+                .allowAccessInheritance(false);
+        ClassLoader loader = Thread.currentThread().getContextClassLoader();
+
+        for (String className : hostClasses) {
+            final Class<?> type;
+            try {
+                type = Class.forName(className, false, loader);
+            } catch (ClassNotFoundException failure) {
+                throw new IllegalArgumentException("allowlisted Java host class is unavailable: " + className, failure);
+            }
+            if (!Modifier.isPublic(type.getModifiers())) {
+                throw new IllegalArgumentException("allowlisted Java host class must be public: " + className);
+            }
+
+            for (Constructor<?> constructor : type.getDeclaredConstructors()) {
+                if (Modifier.isPublic(constructor.getModifiers())) access.allowAccess(constructor);
+            }
+            for (Method method : type.getDeclaredMethods()) {
+                if (Modifier.isPublic(method.getModifiers())) access.allowAccess(method);
+            }
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isPublic(field.getModifiers())) access.allowAccess(field);
+            }
+        }
+        return access.build();
     }
 
     public boolean allows(Capability capability) {

@@ -1,6 +1,7 @@
 package dev.oreslang.compiler;
 
 import dev.oreslang.ast.Ast;
+import dev.oreslang.imports.ImportRules;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -25,19 +26,22 @@ final class ImportGraph {
     private ImportGraph() { }
 
     static String resolveImportUnitId(String unitId, Ast.ImportDecl imported, Set<String> available) {
+        ImportRules.validate(imported);
+        if (ImportRules.isJavaPath(imported.path())) return null;
         String raw = imported.path().replace('\\', '/');
         Path parent = Path.of(unitId).getParent();
         Path candidatePath = raw.startsWith(".")
                 ? (parent == null ? Path.of(raw) : parent.resolve(raw)).normalize()
                 : Path.of(raw).normalize();
         String candidate = normalizeUnitId(candidatePath.toString());
-        if (!available.contains(candidate) && !candidate.endsWith(".ores") && available.contains(candidate + ".ores")) {
-            candidate += ".ores";
+        if (!available.contains(candidate) && !candidate.endsWith(".ores") && !candidate.endsWith(".java")) {
+            if (available.contains(candidate + ".ores")) candidate += ".ores";
+            else if (available.contains(candidate + ".java")) candidate += ".java";
         }
         if (available.contains(candidate)) return candidate;
         if (raw.startsWith(".")) {
             throw new IllegalArgumentException("relative import '" + imported.path() + "' from '" + unitId
-                    + "' does not resolve to a supplied Oreslang source unit");
+                    + "' does not resolve to a supplied Oreslang/mixed source unit");
         }
         return null;
     }

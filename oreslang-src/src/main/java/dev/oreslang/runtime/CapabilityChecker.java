@@ -1,6 +1,7 @@
 package dev.oreslang.runtime;
 
 import dev.oreslang.ast.Ast;
+import dev.oreslang.imports.ImportRules;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -23,6 +24,7 @@ public final class CapabilityChecker {
     private final Set<String> ambiguousAliases = new HashSet<>();
     private final Set<String> ambiguousClasses = new HashSet<>();
     private final Set<String> ambiguousFunctions = new HashSet<>();
+    private final Map<String, String> javaImports = new HashMap<>();
     private final Set<Ast.FunctionDecl> callableStack =
             java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     private final Set<Ast.MethodDecl> methodStack =
@@ -31,6 +33,15 @@ public final class CapabilityChecker {
             java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     private CapabilityChecker(Ast.Program program) {
+        for (Ast.ImportDecl imported : program.imports()) {
+            ImportRules.validate(imported);
+            if (!ImportRules.isJavaPath(imported.path())) continue;
+            String className = ImportRules.javaClassName(imported.path());
+            for (String binding : ImportRules.exposedBindings(imported)) {
+                javaImports.put(binding, className);
+            }
+        }
+
         for (Ast.ModuleDecl module : program.modules()) {
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.TypeAliasDecl alias) {
@@ -135,6 +146,13 @@ public final class CapabilityChecker {
     }
 
     private void checkProgram(Ast.Program program, IsolatePolicy policy) {
+        for (Ast.ImportDecl imported : program.imports()) {
+            if (ImportRules.isJavaPath(imported.path())) {
+                require(policy, IsolatePolicy.Capability.JAVA_INTEROP,
+                        "Java host import " + ImportRules.javaClassName(imported.path()));
+            }
+        }
+
         for (Ast.ModuleDecl module : program.modules()) {
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.FunctionDecl fn) {
@@ -180,13 +198,12 @@ public final class CapabilityChecker {
     }
 
     private static IsolatePolicy actorPolicy(Ast.ActorKind kind, IsolatePolicy parent) {
-        return switch (kind) {
-            case PRIVATE -> parent.withoutCapabilities(
-                    IsolatePolicy.Capability.SHARED_MEMORY,
-                    IsolatePolicy.Capability.ACTOR_SHARE_READONLY);
-            case UNTRUSTED -> IsolatePolicy.untrustedActor();
-            default -> parent;
-        };
+        if (kind != Ast.ActorKind.PRIVATE) return parent;
+        return parent.withoutCapabilities(
+                IsolatePolicy.Capability.SHARED_MEMORY,
+                IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
+                IsolatePolicy.Capability.JAVA_INTEROP,
+                IsolatePolicy.Capability.JAVA_SOURCE_INTEROP);
     }
 
     private void checkCallableTypes(
@@ -202,6 +219,10 @@ public final class CapabilityChecker {
 
         if (type.name().equals("SharedMutex")) {
             require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex<T>");
+        }
+        String javaClass = javaImports.get(type.name());
+        if (javaClass != null) {
+            require(policy, IsolatePolicy.Capability.JAVA_INTEROP, "Java host import " + javaClass);
         }
         for (Ast.TypeRef argument : type.arguments()) checkType(argument, policy);
         if (type.isBorrow()) checkType(type.borrowedTarget(), policy);
@@ -273,6 +294,13 @@ public final class CapabilityChecker {
     }
 
     private void checkExpr(Ast.Expr expr, IsolatePolicy policy) {
+        if (expr instanceof Ast.NameExpr javaName) {
+            String javaClass = javaImports.get(javaName.name());
+            if (javaClass != null) {
+                require(policy, IsolatePolicy.Capability.JAVA_INTEROP, "Java host import " + javaClass);
+            }
+        }
+
         if (expr instanceof Ast.NameExpr n && n.name().equals("print")) {
             require(policy, IsolatePolicy.Capability.STDOUT, "print");
         } else if (expr instanceof Ast.NameExpr n && n.name().equals("SharedMutex")) {
@@ -308,9 +336,15 @@ public final class CapabilityChecker {
                 if (path.startsWith("process.share_readonly")) require(policy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, path);
                 if (path.equals("process.gc") || path.startsWith("process.gc.")) require(policy, IsolatePolicy.Capability.GC_CONTROL, path);
                 if (path.equals("SharedMutex") || path.startsWith("SharedMutex.")) require(policy, IsolatePolicy.Capability.SHARED_MEMORY, path);
-                if (path.startsWith("network.")) require(policy, IsolatePolicy.Capability.NETWORK, path);
-                if (path.startsWith("fs.read")) require(policy, IsolatePolicy.Capability.FILESYSTEM_READ, path);
-                if (path.startsWith("fs.write")) require(policy, IsolatePolicy.Capability.FILESYSTEM_WRITE, path);
+                if (path.startsWith("network.") || path.startsWith("net.") || path.startsWith("native_net.")) {
+                    require(policy, IsolatePolicy.Capability.NETWORK, path);
+                }
+                if (path.startsWith("fs.read") || path.startsWith("File.read")) {
+                    require(policy, IsolatePolicy.Capability.FILESYSTEM_READ, path);
+                }
+                if (path.startsWith("fs.write") || path.startsWith("File.write")) {
+                    require(policy, IsolatePolicy.Capability.FILESYSTEM_WRITE, path);
+                }
                 if (path.startsWith("env.")) require(policy, IsolatePolicy.Capability.ENVIRONMENT, path);
                 if (path.startsWith("ffi.")) require(policy, IsolatePolicy.Capability.FFI, path);
                 if (path.startsWith("polyglot.")) require(policy, IsolatePolicy.Capability.POLYGLOT, path);
@@ -331,10 +365,14 @@ public final class CapabilityChecker {
             for (Ast.Expr a : e.arguments()) checkExpr(a, policy);
         }
         else if (expr instanceof Ast.AwaitExpr e) checkExpr(e.expression(), policy);
-        else if (expr instanceof Ast.SpawnExpr e) checkExpr(e.call(), policy);
         else if (expr instanceof Ast.ListExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
         else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
-        else if (expr instanceof Ast.ObjectExpr e) for (Ast.ObjectField f : e.fields()) checkExpr(f.value(), policy);
+        else if (expr instanceof Ast.ObjectExpr e) {
+            for (Ast.ObjectField f : e.fields()) {
+                if (f.isDynamic()) checkExpr(f.dynamicName(), policy);
+                checkExpr(f.value(), policy);
+            }
+        }
         else if (expr instanceof Ast.LambdaExpr e) {
             if (e.expressionBody() != null) checkExpr(e.expressionBody(), policy);
             if (e.blockBody() != null) checkStatements(e.blockBody(), policy);

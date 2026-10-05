@@ -18,42 +18,51 @@ import static org.junit.jupiter.api.Assertions.*;
 final class ActorCallableKeywordTest {
 
     @Test
-    void actorIsSharedAndIsoactorIsPrivateForFunctionsRoutinesAndClasses() {
-        List<Token> tokens = new Lexer("actor isoactor").scan();
+    void actorIsPrivateSharedIsExplicitAndIsoactorIsPrivate() {
+        List<Token> tokens = new Lexer("actor isoactor shared").scan();
         assertEquals(Token.Type.ACTOR, tokens.get(0).type());
         assertEquals(Token.Type.ISOACTOR, tokens.get(1).type());
 
         Ast.Program program = Parser.parse("""
-                actor fnc shared_fnc() => void { return; }
-                actor routine shared_routine() => void { return; }
-                isoactor fnc private_fnc() => void { return; }
-                isoactor routine private_routine() => void { return; }
+                actor fnc private_fnc() => void { return; }
+                actor routine private_routine() => void { return; }
+                shared actor fnc shared_fnc() => void { return; }
+                shared actor routine shared_routine() => void { return; }
+                isoactor fnc isolated_fnc() => void { return; }
+                isoactor routine isolated_routine() => void { return; }
 
-                actor SharedBox {
+                actor PrivateBox {
                   let int value = 1;
                 }
 
-                isoactor PrivateBox {
+                shared actor SharedBox {
+                  let int value = 1;
+                }
+
+                isoactor IsolatedBox {
                   let int value = 1;
                 }
                 """);
 
         List<Ast.Decl> declarations = program.modules().getFirst().declarations();
 
-        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(0)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(0)).actorKind());
         assertEquals(Ast.CallableKind.FNC, ((Ast.FunctionDecl) declarations.get(0)).kind());
 
-        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(1)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(1)).actorKind());
         assertEquals(Ast.CallableKind.ROUTINE, ((Ast.FunctionDecl) declarations.get(1)).kind());
 
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(2)).actorKind());
+        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(2)).actorKind());
         assertEquals(Ast.CallableKind.FNC, ((Ast.FunctionDecl) declarations.get(2)).kind());
 
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(3)).actorKind());
+        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(3)).actorKind());
         assertEquals(Ast.CallableKind.ROUTINE, ((Ast.FunctionDecl) declarations.get(3)).kind());
 
-        assertEquals(Ast.ActorKind.SHARED, ((Ast.ClassDecl) declarations.get(4)).actorKind());
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.ClassDecl) declarations.get(5)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(4)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(5)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.ClassDecl) declarations.get(6)).actorKind());
+        assertEquals(Ast.ActorKind.SHARED, ((Ast.ClassDecl) declarations.get(7)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.ClassDecl) declarations.get(8)).actorKind());
     }
 
     @Test
@@ -78,20 +87,13 @@ final class ActorCallableKeywordTest {
                 }
 
                 pub routine main() => void {
-                  val add = spawn add_one(41);
-                  stdio.stdout.write(await add.result);
+                  stdio.stdout.write(add_one(41));
                   stdio.stdout.write(":");
-
-                  val shared = spawn shared_emit("shared");
-                  await shared.done;
+                  shared_emit("shared");
                   stdio.stdout.write(":");
-
-                  val doubled = spawn double_it(21);
-                  stdio.stdout.write(await doubled.result);
+                  stdio.stdout.write(double_it(21));
                   stdio.stdout.write(":");
-
-                  val private_spawn = spawn private_emit("private");
-                  await private_spawn.done;
+                  private_emit("private");
                   return;
                 }
                 """);
@@ -150,7 +152,7 @@ final class ActorCallableKeywordTest {
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                actor fnc valid(SharedMutex<int> value) => void { return; }
+                shared actor fnc valid(SharedMutex<int> value) => void { return; }
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
@@ -172,7 +174,7 @@ final class ActorCallableKeywordTest {
                         }
                         """)));
 
-        assertTrue(failure.getMessage().contains("spawn"));
+        assertTrue(failure.getMessage().contains("mailbox-oriented actor composition"));
     }
 
     private static String run(String program) throws Exception {

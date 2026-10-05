@@ -17,7 +17,7 @@ define class Helpers as
   }
 end
 
-isoactor InvalidPrivateCounter {
+actor InvalidPrivateCounter {
   // Type-alias laundering must be rejected.
   pub fnc accept_alias(SharedCounterCell cell) => void {
     return;

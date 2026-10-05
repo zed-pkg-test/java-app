@@ -1,0 +1,44 @@
+// Oreslang-owned core helpers.
+//
+// Java/Truffle may provide compiler/runtime primitives, but ordinary reusable
+// language behavior belongs here.
+
+define module core
+
+  pub fnc min_int(int left, int right): int {
+    if left < right; do
+      return left;
+    else
+      return right;
+    fi
+  }
+
+  pub fnc max_int(int left, int right): int {
+    if left > right; do
+      return left;
+    else
+      return right;
+    fi
+  }
+
+  pub fnc clamp_int(int value, int lower, int upper): int {
+    if lower > upper; do
+      return lower;
+    fi
+    if value < lower; do
+      return lower;
+    fi
+    if value > upper; do
+      return upper;
+    fi
+    return value;
+  }
+
+  pub fnc abs_int(int value): int {
+    if value < 0; do
+      return -value;
+    fi
+    return value;
+  }
+
+end

@@ -1,5 +1,6 @@
 module dev.oreslang {
     requires java.base;
+    requires java.compiler;
     requires java.logging;
     requires org.graalvm.polyglot;
     requires org.graalvm.truffle;

@@ -162,7 +162,7 @@ final class PrivateActorIsolationTest {
 
             var ref = runtime.<String>spawnPrivate(() -> (message, context) -> {
                 try {
-                    context.shareReadonly(List.of("inside"));
+                    context.runtime().shareReadonly(List.of("inside"));
                 } catch (Throwable failure) {
                     first.set(failure);
                 }
@@ -291,7 +291,7 @@ final class PrivateActorIsolationTest {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var parent = runtime.<String>spawnPrivate(factoryContext -> (message, context) -> {
                 try {
-                    context.spawnShared(
+                    context.runtime().spawnShared(
                             childContext -> (childMessage, childTurn) -> { });
                     throw new AssertionError("private actor spawned shared child");
                 } catch (SecurityException expected) {
@@ -310,7 +310,7 @@ final class PrivateActorIsolationTest {
     void privateChildInheritsParentStrippedCapabilities() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var parent = runtime.<String>spawnPrivate(factoryContext -> (message, context) -> {
-                ActorRuntime.ActorRef<String> child = context.spawnPrivate(childContext -> {
+                ActorRuntime.ActorRef<String> child = context.runtime().spawnPrivate(childContext -> {
                     if (childContext.policy().allows(IsolatePolicy.Capability.SHARED_MEMORY)) {
                         throw new AssertionError("private child regained SHARED_MEMORY");
                     }
@@ -330,15 +330,21 @@ final class PrivateActorIsolationTest {
     }
 
     @Test
-    void actorContextHasNoTrustedHostConstructionEscapeHatches() {
-        for (var method : ActorRuntime.ActorContext.class.getMethods()) {
-            assertFalse(method.getName().contains("Trusted"), method.toString());
-            for (Class<?> parameter : method.getParameterTypes()) {
-                assertNotEquals(
-                        java.util.function.Supplier.class,
-                        parameter,
-                        "actor context must not expose host Supplier construction: " + method);
-            }
+    void actorCodeCannotUseTrustedHostConstructionEscapeHatches() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var parent = runtime.<String>spawnPrivate(factoryContext -> (message, context) -> {
+                assertThrows(SecurityException.class, () ->
+                        context.runtime().spawnPrivateTrusted(
+                                childContext -> (childMessage, childTurn) -> { }));
+                assertThrows(SecurityException.class, () ->
+                        context.runtime().spawnPrivate(
+                                () -> (childMessage, childTurn) -> { }));
+                context.self().stop();
+            });
+
+            parent.send("check");
+            assertTrue(parent.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(parent.failure().isEmpty());
         }
     }
 
