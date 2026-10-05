@@ -390,16 +390,18 @@ execution domain that created it. `await future` is the only operation that
 extracts the future's result; Oreslang does not expose a blocking
 `Future.get()` / `join()` equivalent.
 
-The built-in `Futures` control-flow facade provides:
+The built-in `Future` type owns structured combinators:
 
 ```ores
-// first and second are Future<Response> values returned by an async API.
-val responses = await Futures.all([first, second]);
+// first and second start independently when their async calls are invoked.
+val responses = await Future.all([first, second]);
 ```
 
-- `Futures.all([...])` returns one future, preserves input order, and fails if
-  one constituent future fails.
-- `Futures.race([...])` completes from the first constituent completion.
+- `Future.all([...])` is the Promise.all-style primitive: all supplied Futures
+  may make progress concurrently, the aggregate preserves input order, and it
+  fails if one constituent future fails.
+- `Future.race([...])` completes from the first constituent completion.
+- `Futures.all/race` remain compatibility aliases for older source.
 - `future.is_done()`, `future.is_cancelled()`, and `future.cancel()` are
   nonblocking state/control operations.
 - cancellation is cooperative with the host operation. A sandbox resource
