@@ -184,11 +184,20 @@ final class ActorSpawnLanguageTest {
                 .mimeType(OresLanguage.MIME_TYPE)
                 .build();
 
-        try (Context context = Context.newBuilder(OresLanguage.ID)
+        Context context = Context.newBuilder(OresLanguage.ID)
                 .allowAllAccess(false)
                 .out(output)
-                .build()) {
+                .build();
+        try {
             context.eval(source);
+        } finally {
+            // The first plain spawn is deliberately detached: unlike
+            // `await spawn`, it does not join actor readiness or completion.
+            // A faster root await path can therefore return while that actor is
+            // still inside the shared Graal context. Polyglot Context.close()
+            // is intentionally non-cancelling and rejects that race; detached
+            // actor tests must use cancellation-aware host teardown.
+            context.close(true);
         }
 
         String rendered = output.toString(StandardCharsets.UTF_8);
