@@ -2,6 +2,7 @@ package dev.oreslang.compiler;
 
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
+import dev.oreslang.types.TypeChecker;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -94,7 +95,23 @@ public final class IncrementalCompiler {
                 continue;
             }
 
-            Ast.Program checked = OresCompiler.parseAndTypeCheck(normalized.get(id));
+            /*
+             * The normal single-unit checker intentionally never reads another
+             * source file. For a linked build, however, actor imports need a
+             * type-only ABI view so aliases such as
+             *
+             *   import actor {Worker as W} from "./workers.ores";
+             *   spawn W(...);
+             *
+             * are checked as actors rather than downgraded to unknown values.
+             * Build a synthetic view containing only imported actor ABI stubs:
+             * constructor signatures + the one receive(Message): void contract.
+             * No foreign implementation body/state is copied or executed.
+             */
+            Ast.Program linkedCheckView =
+                    linkedActorTypeCheckView(id, parsed.get(id), parsed);
+            TypeChecker.check(linkedCheckView);
+            Ast.Program checked = parsed.get(id);
             CompiledUnit unit = new CompiledUnit(
                     id,
                     packageId(id, checked),
@@ -115,6 +132,267 @@ public final class IncrementalCompiler {
                 Set.copyOf(rebuilt),
                 Set.copyOf(reused),
                 initializationGroups);
+    }
+
+    private static Ast.Program linkedActorTypeCheckView(
+            String unitId,
+            Ast.Program program,
+            Map<String, Ast.Program> programs) {
+        List<Ast.Decl> rootActorStubs = new ArrayList<>();
+        List<Ast.ModuleDecl> namespaceStubs = new ArrayList<>();
+
+        for (Ast.ImportDecl imported : program.imports()) {
+            String targetId =
+                    ImportGraph.resolveImportUnitId(unitId, imported, programs.keySet());
+            if (targetId == null) continue; // external package resolver owns it.
+            Ast.Program target = programs.get(targetId);
+            if (target == null) continue;
+
+            if (imported.kind() == Ast.ImportKind.ACTOR && !imported.wildcard()) {
+                for (String sourceName : imported.names()) {
+                    Ast.ClassDecl actor = uniqueActorExport(target, sourceName, targetId);
+                    rootActorStubs.add(actorImportStub(
+                            imported.localName(sourceName), actor, target, targetId));
+                }
+                continue;
+            }
+
+            if ((imported.kind() == Ast.ImportKind.ACTOR
+                            || imported.kind() == Ast.ImportKind.ALL)
+                    && imported.wildcard()) {
+                List<Ast.Decl> declarations = exportedActorStubs(target, targetId);
+                if (!declarations.isEmpty()) {
+                    namespaceStubs.add(
+                            new Ast.ModuleDecl(imported.namespace(), declarations));
+                }
+                continue;
+            }
+
+            if (imported.kind() == Ast.ImportKind.ENTRY) {
+                Ast.EntryExportDecl entry = uniqueEntryExport(target, targetId);
+                Ast.ClassDecl actor = findActorExport(target, entry.name());
+                if (actor != null) {
+                    String localName = imported.localName("$entry$");
+                    rootActorStubs.add(
+                            actorImportStub(localName, actor, target, targetId));
+                }
+            }
+        }
+
+        if (rootActorStubs.isEmpty() && namespaceStubs.isEmpty()) return program;
+
+        List<Ast.ModuleDecl> modules = new ArrayList<>(program.modules().size() + namespaceStubs.size());
+        boolean rootSeen = false;
+        for (Ast.ModuleDecl module : program.modules()) {
+            if (module.name().equals(Parser.ROOT_MODULE)) {
+                rootSeen = true;
+                List<Ast.Decl> declarations =
+                        new ArrayList<>(module.declarations().size() + rootActorStubs.size());
+                declarations.addAll(module.declarations());
+                declarations.addAll(rootActorStubs);
+                modules.add(new Ast.ModuleDecl(
+                        module.name(), module.annotations(), declarations));
+            } else {
+                modules.add(module);
+            }
+        }
+        if (!rootSeen && !rootActorStubs.isEmpty()) {
+            modules.add(new Ast.ModuleDecl(Parser.ROOT_MODULE, rootActorStubs));
+        }
+        modules.addAll(namespaceStubs);
+        return new Ast.Program(program.namespace(), program.imports(), modules);
+    }
+
+    private static List<Ast.Decl> exportedActorStubs(
+            Ast.Program target,
+            String targetId) {
+        LinkedHashMap<String, Ast.ClassDecl> actors = new LinkedHashMap<>();
+        for (Ast.ModuleDecl module : target.modules()) {
+            for (Ast.Decl decl : module.declarations()) {
+                if (!(decl instanceof Ast.ClassDecl klass)
+                        || klass.actorKind() == Ast.ActorKind.NONE) {
+                    continue;
+                }
+                Ast.ClassDecl previous = actors.putIfAbsent(klass.name(), klass);
+                if (previous != null && previous != klass) {
+                    throw new IllegalArgumentException(
+                            "wildcard actor import from '" + targetId
+                                    + "' is ambiguous for actor '" + klass.name() + "'");
+                }
+            }
+        }
+        List<Ast.Decl> result = new ArrayList<>(actors.size());
+        for (Map.Entry<String, Ast.ClassDecl> entry : actors.entrySet()) {
+            result.add(actorImportStub(
+                    entry.getKey(), entry.getValue(), target, targetId));
+        }
+        return List.copyOf(result);
+    }
+
+    private static Ast.ClassDecl uniqueActorExport(
+            Ast.Program target,
+            String name,
+            String targetId) {
+        Ast.ClassDecl actor = findActorExport(target, name);
+        if (actor == null) {
+            throw new IllegalArgumentException(
+                    "import actor '" + name + "' does not resolve in '" + targetId + "'");
+        }
+        int matches = 0;
+        for (Ast.ModuleDecl module : target.modules()) {
+            for (Ast.Decl decl : module.declarations()) {
+                if (decl instanceof Ast.ClassDecl klass
+                        && klass.actorKind() != Ast.ActorKind.NONE
+                        && klass.name().equals(name)) {
+                    matches++;
+                }
+            }
+        }
+        if (matches != 1) {
+            throw new IllegalArgumentException(
+                    "import actor '" + name + "' is ambiguous in '" + targetId + "'");
+        }
+        return actor;
+    }
+
+    private static Ast.ClassDecl findActorExport(
+            Ast.Program target,
+            String name) {
+        Ast.ClassDecl found = null;
+        for (Ast.ModuleDecl module : target.modules()) {
+            for (Ast.Decl decl : module.declarations()) {
+                if (!(decl instanceof Ast.ClassDecl klass)
+                        || klass.actorKind() == Ast.ActorKind.NONE
+                        || !klass.name().equals(name)) {
+                    continue;
+                }
+                if (found != null) return null;
+                found = klass;
+            }
+        }
+        return found;
+    }
+
+    private static Ast.EntryExportDecl uniqueEntryExport(
+            Ast.Program target,
+            String targetId) {
+        Ast.EntryExportDecl found = null;
+        for (Ast.ModuleDecl module : target.modules()) {
+            for (Ast.Decl decl : module.declarations()) {
+                if (!(decl instanceof Ast.EntryExportDecl entry)) continue;
+                if (found != null) {
+                    throw new IllegalArgumentException(
+                            "code unit '" + targetId + "' has multiple entry exports");
+                }
+                found = entry;
+            }
+        }
+        if (found == null) {
+            throw new IllegalArgumentException(
+                    "code unit '" + targetId + "' has no export entry");
+        }
+        return found;
+    }
+
+    private static Ast.ClassDecl actorImportStub(
+            String localName,
+            Ast.ClassDecl actor,
+            Ast.Program target,
+            String targetId) {
+        if (localName == null || localName.isBlank()) {
+            throw new IllegalArgumentException("imported actor alias cannot be blank");
+        }
+
+        Ast.MethodDecl receive = effectiveReceiveForImport(
+                actor, target, new LinkedHashSet<>());
+        if (receive == null) {
+            if (actor.actorProtocolTypes().size() != 3) {
+                throw new IllegalArgumentException(
+                        "imported actor '" + actor.name() + "' from '" + targetId
+                                + "' has no statically resolvable receive(Message): void ABI");
+            }
+            receive = syntheticReceive(actor.actorProtocolTypes().getFirst());
+        } else {
+            receive = signatureOnly(receive);
+        }
+
+        List<Ast.MethodDecl> methods = new ArrayList<>();
+        for (Ast.MethodDecl method : actor.methods()) {
+            if (!method.isStatic() && method.name().equals("constructor")) {
+                methods.add(signatureOnly(method));
+            }
+        }
+        methods.add(receive);
+
+        return new Ast.ClassDecl(
+                localName,
+                false,
+                actor.actorKind(),
+                actor.genericParameters(),
+                List.of(),
+                List.of(),
+                List.of(),
+                methods,
+                actor.actorProtocolTypes());
+    }
+
+    private static Ast.MethodDecl effectiveReceiveForImport(
+            Ast.ClassDecl actor,
+            Ast.Program target,
+            Set<Ast.ClassDecl> seen) {
+        if (!seen.add(actor)) {
+            throw new IllegalArgumentException(
+                    "actor inheritance cycle while resolving imported receive ABI for '"
+                            + actor.name() + "'");
+        }
+
+        for (Ast.MethodDecl method : actor.methods()) {
+            if (!method.isStatic()
+                    && method.visibility() == Ast.Visibility.PUBLIC
+                    && method.name().equals("receive")
+                    && method.arity() == 1) {
+                return method;
+            }
+        }
+
+        for (Ast.TypeRef parentRef : actor.parents()) {
+            Ast.ClassDecl parent = findActorExport(target, parentRef.name());
+            if (parent == null) continue;
+            Ast.MethodDecl inherited =
+                    effectiveReceiveForImport(parent, target, seen);
+            if (inherited != null) return inherited;
+        }
+        return null;
+    }
+
+    private static Ast.MethodDecl syntheticReceive(Ast.TypeRef messageType) {
+        return new Ast.MethodDecl(
+                "receive",
+                Ast.Visibility.PUBLIC,
+                false,
+                false,
+                false,
+                null,
+                List.of(),
+                List.of(new Ast.Param(messageType, "message", false, false)),
+                Ast.TypeRef.simple("void"),
+                List.of(),
+                List.of());
+    }
+
+    private static Ast.MethodDecl signatureOnly(Ast.MethodDecl method) {
+        return new Ast.MethodDecl(
+                method.name(),
+                method.visibility(),
+                method.isStatic(),
+                false,
+                false,
+                method.explicitReceiverType(),
+                method.genericParameters(),
+                method.parameters(),
+                method.returnType(),
+                method.annotations(),
+                List.of());
     }
 
     public synchronized void clear() {

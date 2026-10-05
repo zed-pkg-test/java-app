@@ -166,6 +166,76 @@ final class IncrementalFunctorStaticTest {
     }
 
     @Test
+    void linkedActorImportsCarryTypeOnlyAbiForAliasesNamespacesAndEntry() {
+        String actors = """
+                define actor Worker as
+                  let int count = 0;
+
+                  constructor(initial: int) {
+                    self.count = initial;
+                  }
+
+                  pub receive(delta: int): void {
+                    self.count = self.count + delta;
+                    return;
+                  }
+                end
+
+                export entry Worker;
+                """;
+
+        IncrementalCompiler namedCompiler = new IncrementalCompiler();
+        assertDoesNotThrow(() -> namedCompiler.compile(Map.of(
+                "actors.ores", actors,
+                "app.ores", """
+                        import actor {Worker as W} from "./actors.ores";
+
+                        pub routine main() -> void {
+                          val worker = spawn W(10);
+                          worker.send(2);
+                          return;
+                        }
+                        """)));
+
+        IncrementalCompiler namespaceCompiler = new IncrementalCompiler();
+        assertDoesNotThrow(() -> namespaceCompiler.compile(Map.of(
+                "actors.ores", actors,
+                "app.ores", """
+                        import actor * as Actors from "./actors.ores";
+
+                        pub routine main() -> void {
+                          val worker = spawn Actors.Worker(10);
+                          worker.send(2);
+                          return;
+                        }
+                        """)));
+
+        IncrementalCompiler entryCompiler = new IncrementalCompiler();
+        assertDoesNotThrow(() -> entryCompiler.compile(Map.of(
+                "actors.ores", actors,
+                "app.ores", """
+                        import entry as Plugin from "./actors.ores";
+
+                        pub routine main() -> void {
+                          val worker = spawn Plugin(10);
+                          worker.send(2);
+                          return;
+                        }
+                        """)));
+
+        IncrementalCompiler kindMismatch = new IncrementalCompiler();
+        IllegalArgumentException mismatch = assertThrows(
+                IllegalArgumentException.class,
+                () -> kindMismatch.compile(Map.of(
+                        "actors.ores", actors,
+                        "app.ores", """
+                                import class Worker from "./actors.ores";
+                                pub routine main() -> void { return; }
+                                """)));
+        assertTrue(mismatch.getMessage().contains("import class"), mismatch.getMessage());
+    }
+
+    @Test
     void staticClassFunctionsUseStaticFncAndDoNotReceiveSelf() throws Exception {
         String output = run("""
                 define module model
