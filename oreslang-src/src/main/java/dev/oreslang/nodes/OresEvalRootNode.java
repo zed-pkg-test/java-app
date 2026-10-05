@@ -232,11 +232,22 @@ public final class OresEvalRootNode extends RootNode {
             return callFunctionBody(fn, normalized);
         }
 
-        private Object spawnFunction(Ast.CallExpr call, Env env) {
+        private ActorRuntime.ActorSpawn<?, ?> spawnTicket(
+                Ast.CallExpr call,
+                Env env) {
             Ast.FunctionDecl fn = resolveSpawnTarget(call);
             List<Object> evaluated =
                     call.arguments().stream().map(arg -> eval(arg, env)).toList();
-            return spawnFunctionWithArguments(fn, evaluated);
+            Object raw = spawnFunctionWithArguments(fn, evaluated);
+            if (!(raw instanceof ActorRuntime.ActorSpawn<?, ?> spawn)) {
+                throw new IllegalStateException(
+                        "spawn lowering did not produce an internal ActorSpawn ticket");
+            }
+            return spawn;
+        }
+
+        private Object spawnFunction(Ast.CallExpr call, Env env) {
+            return spawnTicket(call, env).id();
         }
 
         private List<?> normalizeFunctionArguments(Ast.FunctionDecl fn, List<?> args) {
@@ -1012,6 +1023,30 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             if (expr instanceof Ast.AwaitExpr awaited) {
+                if (awaited.expression() instanceof Ast.SpawnExpr spawned) {
+                    Ast.FunctionDecl target = resolveSpawnTarget(spawned.call());
+                    return asyncFlatMap(
+                            asyncEvalArguments(
+                                    spawned.call().arguments(),
+                                    0,
+                                    env,
+                                    new ArrayList<>()),
+                            args -> safePlan(() -> {
+                                Object raw = spawnFunctionWithArguments(
+                                        target,
+                                        castObjectList(args));
+                                if (!(raw instanceof ActorRuntime.ActorSpawn<?, ?> spawn)) {
+                                    throw new IllegalStateException(
+                                            "await spawn lowering did not produce an internal ActorSpawn ticket");
+                                }
+                                return new AsyncAwait(
+                                        spawn.ready(),
+                                        (ready, failure) -> failure == null
+                                                ? asyncPure(spawn)
+                                                : asyncFailure(unwrapFutureFailure(failure)));
+                            }));
+                }
+
                 return asyncFlatMap(asyncEval(awaited.expression(), env), value -> {
                     OresFuture<?> future = awaitableFuture(value);
                     return new AsyncAwait(
@@ -1163,10 +1198,16 @@ public final class OresEvalRootNode extends RootNode {
                                 0,
                                 env,
                                 new ArrayList<>()),
-                        args -> safePlan(() ->
-                                asyncPure(spawnFunctionWithArguments(
-                                        target,
-                                        castObjectList(args)))));
+                        args -> safePlan(() -> {
+                            Object raw = spawnFunctionWithArguments(
+                                    target,
+                                    castObjectList(args));
+                            if (!(raw instanceof ActorRuntime.ActorSpawn<?, ?> spawn)) {
+                                throw new IllegalStateException(
+                                        "spawn lowering did not produce an internal ActorSpawn ticket");
+                            }
+                            return asyncPure(spawn.id());
+                        }));
             }
 
             if (expr instanceof Ast.ListExpr list) {
@@ -1751,7 +1792,14 @@ public final class OresEvalRootNode extends RootNode {
                 return spawnFunction(spawned.call(), env);
             }
             if (expr instanceof Ast.AwaitExpr awaited) {
-                OresFuture<?> future = awaitableFuture(eval(awaited.expression(), env));
+                ActorRuntime.ActorSpawn<?, ?> startedSpawn = null;
+                OresFuture<?> future;
+                if (awaited.expression() instanceof Ast.SpawnExpr spawned) {
+                    startedSpawn = spawnTicket(spawned.call(), env);
+                    future = startedSpawn.ready();
+                } else {
+                    future = awaitableFuture(eval(awaited.expression(), env));
+                }
 
                 // This recursive evaluator is only a host/root compatibility
                 // fallback. Actor and async source lowering must suspend into a
@@ -1766,7 +1814,8 @@ public final class OresEvalRootNode extends RootNode {
                             "await would block an adversarial serialized root context; "
                                     + "continuation lowering must suspend/resume before awaiting readiness/result");
                 }
-                return future.join();
+                Object result = future.join();
+                return startedSpawn == null ? result : startedSpawn;
             }
             if (expr instanceof Ast.ListExpr list) {
                 ArrayList<Object> result = new ArrayList<>(list.elements().size());
@@ -1870,6 +1919,10 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof ActorRuntime.ActorSpawn<?, ?> spawn) {
                 return switch (name) {
                     case "id" -> spawn.id();
+                    case "is_alive" -> (Invokable) args -> {
+                        requireZero(args, "StartedActor.is_alive");
+                        return spawn.isAlive();
+                    };
                     case "ready" -> spawn.ready();
                     case "done" -> spawn.done();
                     case "result" -> spawn.result();

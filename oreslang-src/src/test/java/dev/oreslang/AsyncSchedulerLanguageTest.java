@@ -419,4 +419,35 @@ final class AsyncSchedulerLanguageTest {
         assertTrue(output.toString(StandardCharsets.UTF_8).contains("7"));
     }
 
+    @Test
+    void schedulerStartPreservesInferredLambdaResultType() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc sync_work() => Future<int> {
+                  val scheduler = new OresScheduler(2);
+                  return scheduler.start(|| -> {
+                    return 7;
+                  });
+                }
+
+                fnc async_work() => Future<int> {
+                  val scheduler = new OresScheduler(2);
+                  return scheduler.start(async || -> {
+                    return 41;
+                  });
+                }
+                """)));
+
+        IllegalArgumentException mismatch = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => Future<string> {
+                          val scheduler = new OresScheduler(2);
+                          return scheduler.start(async || -> {
+                            return 41;
+                          });
+                        }
+                        """)));
+        assertTrue(mismatch.getMessage().contains("return"));
+    }
+
 }
