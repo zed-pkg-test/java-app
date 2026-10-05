@@ -176,8 +176,8 @@ final class ActorSpawnLanguageTest {
     }
 
     @Test
-    void sharedActorClassUsesMailboxSendSurface() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+    void sharedActorClassDispatchesMultipleTypedProtocolMethods() throws Exception {
+        String program = """
                 define actor Counter as
                   let int value = 0;
 
@@ -185,14 +185,49 @@ final class ActorSpawnLanguageTest {
                     self.value = initial;
                   }
 
-                  pub receive(delta: int): void {
+                  pub add(delta: int): void {
                     self.value = self.value + delta;
                     return;
+                  }
+
+                  pub current(): int {
+                    return self.value;
                   }
                 end
 
                 pub routine main() => void {
                   val counter = spawn Counter(40);
+                  await counter.add(2);
+                  val answer = await counter.current();
+                  stdio.println(answer);
+                  return;
+                }
+                """;
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "actor-class-protocol.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("42"));
+    }
+
+    @Test
+    void actorClassRawMailboxSurfaceIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define actor Counter as
+                  pub add(delta: int): void { return; }
+                end
+
+                fnc bad() -> void {
+                  val counter = spawn Counter();
                   counter.send(2);
                   return;
                 }
@@ -200,7 +235,7 @@ final class ActorSpawnLanguageTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define actor Counter as
-                  pub receive(delta: int): void { return; }
+                  pub add(delta: int): void { return; }
                 end
 
                 fnc bad() -> void {

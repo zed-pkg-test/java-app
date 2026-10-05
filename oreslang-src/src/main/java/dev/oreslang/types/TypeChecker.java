@@ -1050,7 +1050,18 @@ public final class TypeChecker {
                         if (actorClass == null || actorClass.actorKind() == Ast.ActorKind.NONE) {
                             throw new IllegalArgumentException(
                                     "ActorRef<" + actorType.name()
-                                            + "> must name a concrete actor class for mailbox send");
+                                            + "> must name a concrete actor class for mailbox operations");
+                        }
+                        if (member.member().equals("is_alive")) {
+                            if (!call.arguments().isEmpty()) {
+                                throw new IllegalArgumentException(
+                                        "ActorRef.is_alive expects no arguments");
+                            }
+                            if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
+                                throw new IllegalArgumentException(
+                                        "untrusted actors cannot inspect ActorRef lifecycle state");
+                            }
+                            return Primitive.BOOL;
                         }
                         if (member.member().equals("receive")) {
                             throw new IllegalArgumentException(

@@ -3113,8 +3113,8 @@ public final class ActorRuntime implements AutoCloseable {
 
     /**
      * Compiler/interpreter lowering target for persistent source-level SHARED
-     * actor classes. Source actor state is created only after the actor context
-     * is installed; guest code receives only the ActorRef mailbox capability.
+     * actor classes. This deliberately uses the normal mailbox Behavior path;
+     * guest code never receives the factory or actor-owned state object.
      */
     public <M> ActorRef<M> spawnSourceSharedActor(BehaviorFactory<M> behaviorFactory) {
         Objects.requireNonNull(behaviorFactory, "behaviorFactory");
@@ -6538,7 +6538,7 @@ public final class ActorRuntime implements AutoCloseable {
                         throw failure;
                     } finally {
                         disarmMessageDeadline(continuationDeadline);
-                        if (!suspendedAgain) closeSuspendedInboxEnvelope();
+                        if (!suspendedAgain) finishSuspendedInboxEnvelope();
                     }
                     // await always ends a scheduling turn, even when the future
                     // was already complete. Do not consume another mailbox
@@ -6695,6 +6695,21 @@ public final class ActorRuntime implements AutoCloseable {
                 releaseInboxSlot();
                 envelope.close();
             }
+        }
+
+        private void finishSuspendedInboxEnvelope() {
+            MessageEnvelope envelope = suspendedInboxEnvelope;
+            if (envelope != null
+                    && envelope.protocolRequest() != null
+                    && !envelope.protocolRequest().reply().isDone()) {
+                IllegalStateException failure = new IllegalStateException(
+                        "typed actor protocol continuation returned without completing its runtime reply");
+                envelope.protocolRequest().reply().failFromRuntime(failure);
+                suspendedInboxEnvelope = null;
+                envelope.close();
+                throw failure;
+            }
+            closeSuspendedInboxEnvelope();
         }
 
         private void closeSuspendedInboxEnvelope() {

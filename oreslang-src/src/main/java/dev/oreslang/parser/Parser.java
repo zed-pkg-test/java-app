@@ -303,6 +303,7 @@ public final class Parser {
         List<Ast.TypeRef> interfaces = match(IMPLEMENTS, IMPL) ? parseTypeRefList() : List.of();
         Ast.ActorKind actorKind = intrinsicActorKind(parents);
         List<Ast.TypeRef> actorProtocolTypes = intrinsicActorProtocolTypes(parents);
+
         if (actorKind != Ast.ActorKind.NONE) {
             if (isAbstract) throw error(previous(), "actor classes cannot be abstract");
             parents = parents.stream().filter(parent -> !isIntrinsicActorBase(parent)).toList();
@@ -364,6 +365,7 @@ public final class Parser {
 
         Ast.ActorKind inheritedMarker = intrinsicActorKind(parents);
         List<Ast.TypeRef> actorProtocolTypes = intrinsicActorProtocolTypes(parents);
+
         if (inheritedMarker != Ast.ActorKind.NONE && inheritedMarker != actorKind) {
             throw error(previous(), "actor base marker conflicts with the actor declaration's execution domain");
         }
@@ -531,6 +533,7 @@ public final class Parser {
             throw error(previous(),
                     "actor '" + actorName + "' must implement exactly one public receive(message) method");
         }
+
         long otherPublic = methods.stream()
                 .filter(method -> !method.isStatic()
                         && method.visibility() == Ast.Visibility.PUBLIC
@@ -539,12 +542,15 @@ public final class Parser {
                 .count();
         if (otherPublic != 0) {
             throw error(previous(),
-                    "actor '" + actorName + "' may expose only the public receive(message) mailbox ingress");
+                    "actor '" + actorName
+                            + "' may expose only the public receive(message) mailbox ingress");
         }
 
         if (actorProtocolTypes.size() == 3) {
             Ast.MethodDecl receive = receives.getFirst();
-            if (!sameType(receive.parameters().getFirst().type(), actorProtocolTypes.getFirst())) {
+            if (!sameType(
+                    receive.parameters().getFirst().type(),
+                    actorProtocolTypes.getFirst())) {
                 throw error(previous(),
                         "actor '" + actorName
                                 + "' receive message type must match Actor<Message, Reply, Error>'s Message type");

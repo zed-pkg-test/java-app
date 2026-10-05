@@ -228,21 +228,6 @@ public final class Ast {
         }
     }
 
-    public sealed interface InterfaceMember permits InterfaceFunctionDecl, InterfaceFieldDecl { }
-
-    public record InterfaceFunctionDecl(
-            String name,
-            List<String> genericParameters,
-            List<Param> parameters,
-            TypeRef returnType) implements InterfaceMember {
-        public InterfaceFunctionDecl {
-            genericParameters = List.copyOf(genericParameters);
-            parameters = List.copyOf(parameters);
-        }
-    }
-
-    public record InterfaceFieldDecl(String name, TypeRef type) implements InterfaceMember { }
-
     public record InterfaceDecl(
             String name,
             Visibility visibility,

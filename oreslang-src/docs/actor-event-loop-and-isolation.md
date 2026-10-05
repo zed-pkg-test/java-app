@@ -57,28 +57,32 @@ and deadlines. Arbitrary trusted native/JVM stacks are never asynchronously
 suspended at an unsafe instruction. A message that ignores safepoints is handled
 by the watchdog/fail-stop path rather than unsafe thread suspension.
 
-## Shared actors: one public mailbox ingress
+## Shared actors: typed protocol over one runtime mailbox
 
-Shared actors do not expose an object-style public method surface.
+Shared actors expose a typed public method surface while retaining exactly one
+runtime-owned mailbox and one active execution lease.
 
 A shared actor may declare:
 
-- private state;
-- private helper methods;
-- one runtime-owned mailbox ingress generated from the actor's public typed protocol methods.
+- private mailbox-owned state;
+- private helper methods called directly on `self` during a turn;
+- one or more public instance methods forming its typed protocol.
 
-All external interaction goes through the actor reference/mailbox. Public static
-helpers and additional public methods are rejected.
+The compiler lowers those public methods into a hidden tagged mailbox
+dispatcher. External `ActorRef<Protocol>.method(...)` calls enqueue typed
+requests; they do not concurrently invoke the mutable actor object. Protocol
+methods return `Future<T>` through the reference projection.
+
+Public static actor functions remain rejected. Protocol methods are not
+first-class bound method objects; use an explicit closure when callback capture
+is intended.
 
 This preserves semantic isolation even though the backing address space is
 shared: mutable actor-owned state is reachable only while that actor holds its
-execution lease. Cross-actor shared mutation must use explicit synchronized
-capabilities such as runtime-managed shared cells/mutexes; ordinary actor state
-does not become concurrently callable shared-object state.
+execution lease. Cross-actor shared mutation must use explicit checked
+capabilities, while ordinary actor state never becomes a concurrently callable
+shared object.
 
-The public ingress is deliberately singular so future typed message patterns can
-lower to one Erlang-style receive loop instead of many concurrently callable
-methods.
 
 ## Private / isoactors
 

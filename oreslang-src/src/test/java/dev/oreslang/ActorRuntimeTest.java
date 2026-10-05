@@ -137,6 +137,38 @@ final class ActorRuntimeTest {
     }
 
     @Test
+    void suspendedProtocolContinuationMustExplicitlyCompleteItsReply() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CompletableFuture<Integer> gate = new CompletableFuture<>();
+            CountDownLatch suspended = new CountDownLatch(1);
+
+            var ref = runtime.spawnSourceSharedProtocolActor(factoryContext ->
+                    (method, arguments, turnContext) -> {
+                        suspended.countDown();
+                        turnContext.suspendOn(gate, (value, failure, resumeContext) -> {
+                            // Simulate broken compiler lowering: continuation
+                            // returns without completing its runtime reply.
+                        });
+                        throw new AssertionError("suspendOn must unwind the current actor turn");
+                    });
+
+            var reply = runtime.invokeSourceProtocol(ref, "wait", List.of());
+            assertTrue(suspended.await(2, TimeUnit.SECONDS));
+            gate.complete(1);
+
+            ExecutionException failure = assertThrows(
+                    ExecutionException.class,
+                    () -> reply.get(2, TimeUnit.SECONDS));
+            assertTrue(failure.getCause().getMessage()
+                    .contains("returned without completing its runtime reply"));
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (ref.isAlive() && System.nanoTime() < deadline) Thread.sleep(2);
+            assertFalse(ref.isAlive(), "broken protocol lowering must fail closed");
+        }
+    }
+
+    @Test
     void protocolInvocationRejectsForeignRuntimeActorRefs() {
         try (ActorRuntime owner = new ActorRuntime();
              ActorRuntime foreign = new ActorRuntime()) {
