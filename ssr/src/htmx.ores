@@ -1,0 +1,71 @@
+import module html from './html';
+import type Attrs from './html';
+
+// HTMX is a natural fit for native Oreslang SSR: the browser receives HTML
+// fragments and performs requests/swaps without Oreslang needing JS/WASM.
+//
+// Values remain trusted until #246 provides the native string primitives
+// required for context-aware escaping.
+define module htmx as
+
+  pub fnc get_trusted(string url): Attrs {
+    return html.attr_trusted("hx-get", url);
+  }
+
+  pub fnc post_trusted(string url): Attrs {
+    return html.attr_trusted("hx-post", url);
+  }
+
+  pub fnc put_trusted(string url): Attrs {
+    return html.attr_trusted("hx-put", url);
+  }
+
+  pub fnc patch_trusted(string url): Attrs {
+    return html.attr_trusted("hx-patch", url);
+  }
+
+  pub fnc delete_trusted(string url): Attrs {
+    return html.attr_trusted("hx-delete", url);
+  }
+
+  pub fnc target_trusted(string selector): Attrs {
+    return html.attr_trusted("hx-target", selector);
+  }
+
+  pub fnc trigger_trusted(string trigger): Attrs {
+    return html.attr_trusted("hx-trigger", trigger);
+  }
+
+  pub fnc swap_trusted(string strategy): Attrs {
+    return html.attr_trusted("hx-swap", strategy);
+  }
+
+  pub fnc select_trusted(string selector): Attrs {
+    return html.attr_trusted("hx-select", selector);
+  }
+
+  pub fnc vals_trusted(string json): Attrs {
+    return html.attr_trusted("hx-vals", json);
+  }
+
+  pub fnc push_url_trusted(string url): Attrs {
+    return html.attr_trusted("hx-push-url", url);
+  }
+
+  pub fnc swap_oob_trusted(string strategy): Attrs {
+    return html.attr_trusted("hx-swap-oob", strategy);
+  }
+
+  pub fnc boost(bool enabled): Attrs {
+    return html.attr_trusted("hx-boost", enabled ? "true" : "false");
+  }
+
+  pub fnc outer_html(): Attrs {
+    return swap_trusted("outerHTML");
+  }
+
+  pub fnc inner_html(): Attrs {
+    return swap_trusted("innerHTML");
+  }
+
+end
