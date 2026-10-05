@@ -241,6 +241,105 @@ final class ChannelSelectSyntaxTest {
     }
 
     @Test
+    void channelAndSelectCapabilitiesCannotCrossActorBoundaries() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                pub actor fnc bad(Channel<int> channel): int {
+                  return 1;
+                }
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                pub actor fnc bad_result(Array<SelectCase> cases): SelectResult {
+                  return select from cases;
+                }
+                """)));
+    }
+
+    @Test
+    void nbSelectMovesMoveOnlyCapturesIntoDeferredContinuation() {
+        IllegalArgumentException moved = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad(Channel<int> input): void {
+                          val Array<int> owned = [1, 2, 3];
+
+                          nb select {
+                          case readch input: val value
+                            stdio.println(owned[0]);
+                          }
+
+                          stdio.println(owned[0]);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                moved.getMessage().contains("moved value")
+                        || moved.getMessage().contains("cannot use moved"),
+                moved::getMessage);
+    }
+
+    @Test
+    void nbSelectMayCaptureCopyValuesAndActorSelf() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc copy_capture(Channel<int> input): void {
+                  val int label = 7;
+
+                  nb select {
+                  case readch input: val value
+                    stdio.println(label + value);
+                  }
+
+                  stdio.println(label);
+                  return;
+                }
+
+                shared actor Counter {
+                  let int count = 0;
+
+                  pub tick(): void {
+                    val Channel<int> input = Channel.new<int>(1);
+
+                    nb select {
+                    case readch input: val value
+                      self.count = self.count + value;
+                    }
+
+                    return;
+                  }
+                }
+                """)));
+    }
+
+    @Test
+    void captureScannerTraversesNestedChannelAndSelectSyntax() {
+        IllegalArgumentException moved = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad(Channel<int> input): void {
+                          val Array<int> owned = [1, 2, 3];
+
+                          val (() => void) callback = || -> {
+                            nb select {
+                            case readch input: val value
+                              stdio.println(owned[0]);
+                            }
+                            return;
+                          };
+
+                          callback();
+                          stdio.println(owned[0]);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                moved.getMessage().contains("moved value")
+                        || moved.getMessage().contains("cannot use moved"),
+                moved::getMessage);
+    }
+
+    @Test
     void rejectsMalformedChannelAndSelectForms() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 fnc bad(Channel<int> ch): void {
