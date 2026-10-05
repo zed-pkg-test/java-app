@@ -1259,7 +1259,10 @@ public final class TypeChecker {
             }
             Type mutexMember = builtinMutexMember(receiver, member.member());
             if (mutexMember != null) return mutexMember;
-            receiver = unwrapMutexGuard(receiver);
+            // Ordinary read-only member access is valid through &T. Borrow
+            // wrappers are compile-time ownership metadata and do not erase
+            // the receiver's statically known fields/method namespace.
+            receiver = unwrapMutexGuard(deref(receiver));
             if (receiver instanceof Named named && named.name().equals("stdio.stdout") && member.member().equals("write")) {
                 return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             }
