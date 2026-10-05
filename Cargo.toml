@@ -1,14 +1,19 @@
 [package]
-name = "litegraph-node"
+name = "ores-zen-api-server"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-async-trait = "0.1"
 axum = "0.8"
-litegraph-gpu-host = { path = "vendor/litegraph-gpu-host" }
-litegraph-modeld = { path = "vendor/litegraph-modeld" }
-litegraph-runtime = { path = "vendor/litegraph-runtime" }
+base64 = "0.22"
+flags2env = { git = "https://github.com/flags-2-env/flags-2-env", rev = "20695c818a0ff4719306dd1dae922fc0cb60d38c", package = "flags2env" }
+hmac = "0.12"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tower-http = { version = "0.6", features = ["request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
