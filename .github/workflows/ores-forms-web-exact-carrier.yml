@@ -1,0 +1,40 @@
+name: ores-forms-web-exact-carrier
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.88.0
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Verify exact source and dependency trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:source-exact)" = "caf169f205fa28989dddeacfacf3cffa328818c5"
+          test "$(git rev-parse HEAD:vendor/ores-forms-lib-core)" = "912f858c21aff2d6029f6feba49d46ff5e254ab1"
+          diff -ru --exclude=Cargo.toml source-exact source-test
+          grep -F 'rev = "8a06ba585ee1a1388f3103b5566f3e5a736503d2"' source-exact/Cargo.toml
+          grep -F 'ores-forms-lib-core = { path = "../vendor/ores-forms-lib-core" }' source-test/Cargo.toml
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.88.0
+          components: rustfmt,clippy
+      - name: Format
+        run: cd source-test && cargo fmt --all -- --check
+      - name: Clippy
+        run: cd source-test && cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cd source-test && cargo test --all-targets
