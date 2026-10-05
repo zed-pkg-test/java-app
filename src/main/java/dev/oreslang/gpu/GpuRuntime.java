@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class GpuRuntime {
     private static final AtomicReference<Backend> PROCESS_BACKEND = new AtomicReference<>();
+    private static final int MAX_AFFINITY_KEY_LENGTH = 256;
 
     public enum CallableKind { FNC, ROUTINE }
 
@@ -36,6 +37,7 @@ public final class GpuRuntime {
             if (deviceOrdinal != null && deviceOrdinal < 0) throw new IllegalArgumentException("GPU device ordinal must be non-negative");
             if (partitionOrdinal != null && partitionOrdinal < 0) throw new IllegalArgumentException("GPU partition ordinal must be non-negative");
             if (affinityKey != null && affinityKey.isBlank()) throw new IllegalArgumentException("GPU affinity key cannot be blank");
+            if (affinityKey != null && affinityKey.length() > MAX_AFFINITY_KEY_LENGTH) throw new IllegalArgumentException("GPU affinity key cannot exceed " + MAX_AFFINITY_KEY_LENGTH + " characters");
         }
 
         public static Placement any() { return new Placement(null, null, null); }
@@ -171,7 +173,9 @@ public final class GpuRuntime {
             DispatchContext dispatchContext) {
         public Invocation {
             Objects.requireNonNull(callable, "callable");
+            if (callable.isBlank()) throw new IllegalArgumentException("GPU callable cannot be blank");
             Objects.requireNonNull(callableKind, "callableKind");
+            Objects.requireNonNull(arguments, "arguments");
             dispatchContext = dispatchContext == null ? DispatchContext.host() : dispatchContext;
             arguments = freezeArguments(arguments);
         }
