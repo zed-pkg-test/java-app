@@ -187,6 +187,9 @@ public final class TreeShaker {
         private boolean containsLambda(Ast.Expr expression) {
             if (expression == null) return false;
             if (expression instanceof Ast.LambdaExpr) return true;
+            if (expression instanceof Ast.TypeTestExpr test) return containsLambda(test.value());
+            if (expression instanceof Ast.PatternTestExpr test) return containsLambda(test.value());
+            if (expression instanceof Ast.CastExpr cast) return containsLambda(cast.value());
             if (expression instanceof Ast.BinaryExpr binary) {
                 return containsLambda(binary.left()) || containsLambda(binary.right());
             }
@@ -255,6 +258,23 @@ public final class TreeShaker {
                     return substitutions.get(name.name());
                 }
                 return expression;
+            }
+            if (expression instanceof Ast.TypeTestExpr test) {
+                return new Ast.TypeTestExpr(
+                        substitute(test.value(), substitutions, shadowed),
+                        test.targetType(),
+                        test.binding());
+            }
+            if (expression instanceof Ast.PatternTestExpr test) {
+                return new Ast.PatternTestExpr(
+                        substitute(test.value(), substitutions, shadowed),
+                        test.pattern());
+            }
+            if (expression instanceof Ast.CastExpr cast) {
+                return new Ast.CastExpr(
+                        substitute(cast.value(), substitutions, shadowed),
+                        cast.targetType(),
+                        cast.mode());
             }
             if (expression instanceof Ast.BinaryExpr binary) {
                 return new Ast.BinaryExpr(
@@ -483,6 +503,7 @@ public final class TreeShaker {
                         function.kind(),
                         function.visibility(),
                         function.async(),
+                        function.generator(),
                         function.nonLexical(),
                         function.actorKind(),
                         function.genericParameters(),
@@ -577,6 +598,10 @@ public final class TreeShaker {
                 return List.of(new Ast.ReturnStmt(
                         rewriteExpression(returned.value(), module, locals)));
             }
+            if (statement instanceof Ast.YieldStmt yielded) {
+                return List.of(new Ast.YieldStmt(
+                        rewriteExpression(yielded.value(), module, locals)));
+            }
             if (statement instanceof Ast.ExprStmt expression) {
                 return List.of(new Ast.ExprStmt(
                         rewriteExpression(expression.expression(), module, locals)));
@@ -627,6 +652,36 @@ public final class TreeShaker {
                 }
                 return List.of(new Ast.IfStmt(branches, elseBody));
             }
+            if (statement instanceof Ast.MatchStmt matched) {
+                Ast.Expr subject = rewriteExpression(matched.subject(), module, locals);
+                List<Ast.MatchArm> arms = new ArrayList<>();
+                for (Ast.MatchArm arm : matched.arms()) {
+                    LinkedHashMap<String, Object> armLocals = new LinkedHashMap<>(locals);
+                    addPatternLocals(arm.pattern(), armLocals);
+                    arms.add(new Ast.MatchArm(
+                            arm.pattern(),
+                            rewriteExpression(arm.guard(), module, armLocals),
+                            rewriteStatements(arm.body(), module, armLocals)));
+                }
+                return List.of(new Ast.MatchStmt(subject, matched.ordered(), arms));
+            }
+            if (statement instanceof Ast.SwitchStmt switched) {
+                Ast.Expr subject = rewriteExpression(switched.subject(), module, locals);
+                List<Ast.SwitchCase> cases = new ArrayList<>();
+                for (Ast.SwitchCase arm : switched.cases()) {
+                    List<Ast.Expr> constants = new ArrayList<>();
+                    for (Ast.Expr constant : arm.constants()) {
+                        constants.add(rewriteExpression(constant, module, locals));
+                    }
+                    cases.add(new Ast.SwitchCase(
+                            constants,
+                            rewriteStatements(arm.body(), module, new LinkedHashMap<>(locals))));
+                }
+                return List.of(new Ast.SwitchStmt(
+                        subject,
+                        cases,
+                        rewriteStatements(switched.defaultBody(), module, new LinkedHashMap<>(locals))));
+            }
             if (statement instanceof Ast.TryStmt tried) {
                 LinkedHashMap<String, Object> catchLocals = new LinkedHashMap<>(locals);
                 if (tried.errorName() != null) catchLocals.put(tried.errorName(), UNKNOWN);
@@ -645,6 +700,7 @@ public final class TreeShaker {
                 return List.of(new Ast.ForOfDestructureStmt(
                         loop.bindings(),
                         iterable,
+                        loop.asyncIteration(),
                         rewriteStatements(loop.body(), module, bodyLocals)));
             }
             if (statement instanceof Ast.ForOfStmt loop) {
@@ -655,6 +711,7 @@ public final class TreeShaker {
                         loop.bindingKind(),
                         loop.bindingName(),
                         iterable,
+                        loop.asyncIteration(),
                         rewriteStatements(loop.body(), module, bodyLocals)));
             }
             if (statement instanceof Ast.ForStmt loop) {
@@ -685,6 +742,23 @@ public final class TreeShaker {
             if (constant != UNKNOWN) return new Ast.LiteralExpr(constant);
 
             if (expression instanceof Ast.LiteralExpr || expression instanceof Ast.NameExpr) return expression;
+            if (expression instanceof Ast.TypeTestExpr test) {
+                return new Ast.TypeTestExpr(
+                        rewriteExpression(test.value(), module, locals),
+                        test.targetType(),
+                        test.binding());
+            }
+            if (expression instanceof Ast.PatternTestExpr test) {
+                return new Ast.PatternTestExpr(
+                        rewriteExpression(test.value(), module, locals),
+                        test.pattern());
+            }
+            if (expression instanceof Ast.CastExpr cast) {
+                return new Ast.CastExpr(
+                        rewriteExpression(cast.value(), module, locals),
+                        cast.targetType(),
+                        cast.mode());
+            }
             if (expression instanceof Ast.BinaryExpr binary) {
                 Ast.Expr left = rewriteExpression(binary.left(), module, locals);
                 Ast.Expr right = rewriteExpression(binary.right(), module, locals);
@@ -960,6 +1034,8 @@ public final class TreeShaker {
                     }
                 } else if (statement instanceof Ast.ReturnStmt returned) {
                     scanExpression(module, returned.value(), locals);
+                } else if (statement instanceof Ast.YieldStmt yielded) {
+                    scanExpression(module, yielded.value(), locals);
                 } else if (statement instanceof Ast.ExprStmt expression) {
                     scanExpression(module, expression.expression(), locals);
                 } else if (statement instanceof Ast.DeferStmt deferred) {
@@ -974,6 +1050,22 @@ public final class TreeShaker {
                         scanStatements(module, branch.body(), new LinkedHashSet<>(locals));
                     }
                     scanStatements(module, conditional.elseBody(), new LinkedHashSet<>(locals));
+                } else if (statement instanceof Ast.MatchStmt matched) {
+                    scanExpression(module, matched.subject(), locals);
+                    for (Ast.MatchArm arm : matched.arms()) {
+                        LinkedHashSet<String> armLocals = new LinkedHashSet<>(locals);
+                        addPatternLocalNames(arm.pattern(), armLocals);
+                        scanPatternTypes(arm.pattern());
+                        scanExpression(module, arm.guard(), armLocals);
+                        scanStatements(module, arm.body(), armLocals);
+                    }
+                } else if (statement instanceof Ast.SwitchStmt switched) {
+                    scanExpression(module, switched.subject(), locals);
+                    for (Ast.SwitchCase arm : switched.cases()) {
+                        for (Ast.Expr constant : arm.constants()) scanExpression(module, constant, locals);
+                        scanStatements(module, arm.body(), new LinkedHashSet<>(locals));
+                    }
+                    scanStatements(module, switched.defaultBody(), new LinkedHashSet<>(locals));
                 } else if (statement instanceof Ast.TryStmt tried) {
                     scanStatements(module, tried.body(), new LinkedHashSet<>(locals));
                     LinkedHashSet<String> catchLocals = new LinkedHashSet<>(locals);
@@ -1038,7 +1130,16 @@ public final class TreeShaker {
                 scanExpression(module, member.receiver(), locals);
                 return;
             }
-            if (expression instanceof Ast.BinaryExpr binary) {
+            if (expression instanceof Ast.TypeTestExpr test) {
+                scanExpression(module, test.value(), locals);
+                scanType(test.targetType());
+            } else if (expression instanceof Ast.PatternTestExpr test) {
+                scanExpression(module, test.value(), locals);
+                scanPatternTypes(test.pattern());
+            } else if (expression instanceof Ast.CastExpr cast) {
+                scanExpression(module, cast.value(), locals);
+                scanType(cast.targetType());
+            } else if (expression instanceof Ast.BinaryExpr binary) {
                 scanExpression(module, binary.left(), locals);
                 scanExpression(module, binary.right(), locals);
             } else if (expression instanceof Ast.UnaryExpr unary) {
@@ -1079,6 +1180,34 @@ public final class TreeShaker {
                 }
                 scanExpression(module, lambda.expressionBody(), nested);
                 if (lambda.blockBody() != null) scanStatements(module, lambda.blockBody(), nested);
+            }
+        }
+
+        private void addPatternLocals(Ast.Pattern pattern, Map<String, Object> locals) {
+            if (pattern instanceof Ast.BindingPattern binding) {
+                locals.put(binding.name(), UNKNOWN);
+            } else if (pattern instanceof Ast.TypePattern typed && typed.binding() != null) {
+                locals.put(typed.binding(), UNKNOWN);
+            } else if (pattern instanceof Ast.ConstructorPattern constructor) {
+                for (Ast.Pattern nested : constructor.arguments()) addPatternLocals(nested, locals);
+            }
+        }
+
+        private void addPatternLocalNames(Ast.Pattern pattern, Set<String> locals) {
+            if (pattern instanceof Ast.BindingPattern binding) {
+                locals.add(binding.name());
+            } else if (pattern instanceof Ast.TypePattern typed && typed.binding() != null) {
+                locals.add(typed.binding());
+            } else if (pattern instanceof Ast.ConstructorPattern constructor) {
+                for (Ast.Pattern nested : constructor.arguments()) addPatternLocalNames(nested, locals);
+            }
+        }
+
+        private void scanPatternTypes(Ast.Pattern pattern) {
+            if (pattern instanceof Ast.TypePattern typed) {
+                scanType(typed.type());
+            } else if (pattern instanceof Ast.ConstructorPattern constructor) {
+                for (Ast.Pattern nested : constructor.arguments()) scanPatternTypes(nested);
             }
         }
 
