@@ -41,11 +41,7 @@ public final class OresFutures {
             children.get(index).whenCompleteRuntime((value, failure) -> {
                 if (result.isDone()) return;
                 if (failure != null) {
-                    if (children.get(slot).isCancelled()) {
-                        result.cancel(false);
-                    } else {
-                        result.failFromRuntime(OresFuture.unwrap(failure));
-                    }
+                    result.failFromRuntime(OresFuture.unwrap(failure));
                     return;
                 }
                 values.set(slot, value);
@@ -76,8 +72,6 @@ public final class OresFutures {
             child.whenCompleteRuntime((value, failure) -> {
                 if (failure == null) {
                     result.completeFromRuntime(value);
-                } else if (child.isCancelled()) {
-                    result.cancel(false);
                 } else {
                     result.failFromRuntime(OresFuture.unwrap(failure));
                 }
