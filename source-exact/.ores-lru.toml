@@ -1,0 +1,21 @@
+protocol = "ores.lru-config.v1"
+namespace = "ores-forms-web-server"
+roles = ["server"]
+
+[redis]
+urlEnv = "REDIS_URL"
+keyPrefix = "ores:lru:ores-forms:web"
+pubsubChannel = "ores:lru:ores-forms:web:events"
+reconcileIntervalMs = 180000
+reconnectMinMs = 1000
+reconnectMaxMs = 30000
+
+[defaults]
+capacity = 512
+syncMode = "read_only"
+overflowMode = "reject_and_reconcile"
+failOpenOnStartup = false
+
+[[caches]]
+name = "runtime-env"
+role = "server"

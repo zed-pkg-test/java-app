@@ -1,0 +1,19 @@
+[package]
+name = "ores-forms-web-server"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Read-only JSON, SSR, and component web server for Ores Forms"
+repository = "https://github.com/ores-forms/ores-forms-web-server.rs"
+rust-version = "1.88"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+next-loggers = { package = "oresoftware-next-loggers", git = "https://github.com/ores-otel/ores.otel.log.git", rev = "a5ec8812df692ccc3bdcaaf89d984c44714970d5" }
+ores-forms-lib-core = { git = "https://github.com/ores-forms/ores-forms-lib-core.git", rev = "8a06ba585ee1a1388f3103b5566f3e5a736503d2" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
+
+[lints.rust]
+unsafe_code = "forbid"
