@@ -75,6 +75,10 @@ final class OresSchedulerTest {
 
             assertEquals(8, result.get(5, TimeUnit.SECONDS));
             assertEquals(2, state.get());
+            assertEquals(
+                    0,
+                    completed.pendingRuntimeWaiterCount(),
+                    "awaiting an already-settled Future must not retain a claimed continuation waiter");
         }
     }
 
