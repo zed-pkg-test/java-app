@@ -33,7 +33,17 @@ if grep -R -nE --include='*.ores' 'pub fnc (text|attr|element|void_element|bool_
 fi
 
 if grep -R -nE --include='*.ores' 'pub fnc (style|script)\(' src 2>/dev/null; then
-  fail "style/script contexts must remain explicitly trusted"
+  fail "style/script contexts must remain explicit"
+fi
+
+# Until #248 provides an opaque Markup type, application-facing examples/tests
+# must not fabricate or inspect the backing {html: string} representation.
+if grep -R -nE --include='*.ores' 'obj[[:space:]]*\{[[:space:]]*html[[:space:]]*:' examples tests 2>/dev/null; then
+  fail "application code must not forge the provisional Markup representation"
+fi
+
+if grep -R -nE --include='*.ores' '\.html([^A-Za-z0-9_]|$)' examples tests 2>/dev/null; then
+  fail "application code must render Markup through the public API"
 fi
 
 echo "audit: native SSR invariants passed"
