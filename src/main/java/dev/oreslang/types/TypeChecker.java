@@ -593,14 +593,21 @@ public final class TypeChecker {
         if (stmt instanceof Ast.DestructureStmt destructure) {
             Type source = deref(typeOf(destructure.initializer(), env, generics, self));
             if (destructure.kind() == Ast.DestructureKind.SEQUENCE) {
-                List<Type> elementTypes = sequenceDestructureTypes(source, destructure.bindings().size());
+                List<Type> elementTypes = sequenceDestructureTypes(source, destructure.bindings());
                 for (int i = 0; i < destructure.bindings().size(); i++) {
                     defineDestructureBinding(env, destructure.bindings().get(i), elementTypes.get(i));
                 }
             } else {
+                Set<String> selectedMembers = new LinkedHashSet<>();
+                for (Ast.DestructureBinding binding : destructure.bindings()) {
+                    if (!binding.isDiscard() && !binding.rest()) selectedMembers.add(binding.name());
+                }
                 for (Ast.DestructureBinding binding : destructure.bindings()) {
                     if (binding.isDiscard()) continue;
-                    env.define(binding.name(), objectDestructureMemberType(source, binding.name()), binding.kind());
+                    Type bindingType = binding.rest()
+                            ? objectDestructureRestType(source, selectedMembers)
+                            : objectDestructureMemberType(source, binding.name());
+                    env.define(binding.name(), bindingType, binding.kind());
                 }
             }
             return;
@@ -674,7 +681,7 @@ public final class TypeChecker {
         if (stmt instanceof Ast.ForOfDestructureStmt loop) {
             Type iterable = typeOf(loop.iterable(), env, generics, self);
             Type element = iterableElementType(iterable);
-            List<Type> elementTypes = sequenceDestructureTypes(element, loop.bindings().size());
+            List<Type> elementTypes = sequenceDestructureTypes(element, loop.bindings());
             Env loopEnv = new Env(env);
             for (int i = 0; i < loop.bindings().size(); i++) {
                 defineDestructureBinding(loopEnv, loop.bindings().get(i), elementTypes.get(i));
@@ -1496,31 +1503,86 @@ public final class TypeChecker {
         if (!binding.isDiscard()) env.define(binding.name(), type, binding.kind());
     }
 
-    private List<Type> sequenceDestructureTypes(Type source, int arity) {
-        source = deref(source);
+    private List<Type> sequenceDestructureTypes(Type source, List<Ast.DestructureBinding> bindings) {
+        source = sequenceDestructureSourceType(deref(source));
+        int restIndex = restBindingIndex(bindings);
+        int fixedArity = restIndex >= 0 ? restIndex : bindings.size();
+
         if (source instanceof Tuple tuple) {
-            if (tuple.elements().size() != arity) {
+            if (restIndex < 0 && tuple.elements().size() != fixedArity) {
                 throw new IllegalArgumentException("destructure arity mismatch: tuple has " + tuple.elements().size()
-                        + " element(s), pattern has " + arity);
+                        + " element(s), pattern has " + fixedArity);
             }
-            return tuple.elements();
+            if (restIndex >= 0 && tuple.elements().size() < fixedArity) {
+                throw new IllegalArgumentException("destructure arity mismatch: tuple has " + tuple.elements().size()
+                        + " element(s), pattern requires at least " + fixedArity + " before rest");
+            }
+
+            List<Type> result = new ArrayList<>(bindings.size());
+            for (int i = 0; i < fixedArity; i++) result.add(tuple.elements().get(i));
+            if (restIndex >= 0) {
+                result.add(new Tuple(tuple.elements().subList(fixedArity, tuple.elements().size())));
+            }
+            return List.copyOf(result);
         }
+
         if (source instanceof ListType list) {
-            return java.util.Collections.nCopies(arity, list.element());
+            List<Type> result = new ArrayList<>(bindings.size());
+            for (int i = 0; i < fixedArity; i++) result.add(list.element());
+            if (restIndex >= 0) result.add(new ListType(list.element()));
+            return List.copyOf(result);
         }
+
         if (source instanceof Union union) {
             List<List<Type>> alternatives = new ArrayList<>(union.options().size());
             for (Type option : union.options()) {
-                alternatives.add(sequenceDestructureTypes(option, arity));
+                alternatives.add(sequenceDestructureTypes(option, bindings));
             }
-            List<Type> joined = new ArrayList<>(arity);
-            for (int i = 0; i < arity; i++) {
+            List<Type> joined = new ArrayList<>(bindings.size());
+            for (int i = 0; i < bindings.size(); i++) {
                 final int slot = i;
                 joined.add(Types.unionOf(alternatives.stream().map(items -> items.get(slot)).toList()));
             }
             return List.copyOf(joined);
         }
-        throw new IllegalArgumentException("sequence destructuring requires a tuple or array/list value");
+
+        throw new IllegalArgumentException(
+                "sequence destructuring requires a tuple, array/list, or statically typed iterable value");
+    }
+
+    private Type sequenceDestructureSourceType(Type source) {
+        if (!(source instanceof Named named)) return source;
+        Ast.ClassDecl klass = findClass(named.name());
+        if (klass == null) return source;
+
+        ResolvedMethod iteratorTarget =
+                findMethodTarget(klass, named, "Symbol.iterator", 0, new LinkedHashSet<>());
+        if (iteratorTarget == null) return source;
+
+        Ast.MethodDecl iterator = iteratorTarget.method();
+        requireClassMemberVisible(
+                iterator.visibility(),
+                iteratorTarget.owner(),
+                "method",
+                iterator.name());
+
+        Set<String> iteratorGenerics = new HashSet<>(iteratorTarget.owner().genericParameters());
+        iteratorGenerics.addAll(iterator.genericParameters());
+        Type result = resolve(iterator.returnType(), iteratorGenerics, iteratorTarget.ownerType());
+        result = substituteGenerics(
+                result,
+                classGenericBindings(iteratorTarget.owner(), iteratorTarget.ownerType()));
+
+        if (result instanceof ListType || result instanceof Tuple) return result;
+        throw new IllegalArgumentException(
+                "[Symbol.iterator]() used for destructuring must return Array<T>, List<T>, or a finite tuple");
+    }
+
+    private int restBindingIndex(List<Ast.DestructureBinding> bindings) {
+        for (int i = 0; i < bindings.size(); i++) {
+            if (bindings.get(i).rest()) return i;
+        }
+        return -1;
     }
 
     private Type objectDestructureMemberType(Type source, String memberName) {
@@ -1553,6 +1615,28 @@ public final class TypeChecker {
         }
         if (source == Unknown.INSTANCE) return Unknown.INSTANCE;
         throw new IllegalArgumentException("object destructuring requires a record/map-like value");
+    }
+
+    private Type objectDestructureRestType(Type source, Set<String> selectedMembers) {
+        source = deref(source);
+        if (source instanceof Record record) {
+            Map<String, Type> remainder = new LinkedHashMap<>();
+            for (Map.Entry<String, Type> member : record.members().entrySet()) {
+                if (!selectedMembers.contains(member.getKey())) {
+                    remainder.put(member.getKey(), member.getValue());
+                }
+            }
+            return new Record(remainder);
+        }
+        if (source instanceof Union union) {
+            List<Type> alternatives = new ArrayList<>(union.options().size());
+            for (Type option : union.options()) {
+                alternatives.add(objectDestructureRestType(option, selectedMembers));
+            }
+            return Types.unionOf(alternatives);
+        }
+        throw new IllegalArgumentException(
+                "object rest destructuring requires a statically known record type");
     }
 
     private void validateMutexCallback(Ast.LambdaExpr lambda, Type expectedParameter, Env parent, Set<String> generics, Type self) {
