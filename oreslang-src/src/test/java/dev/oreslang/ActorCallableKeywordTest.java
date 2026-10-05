@@ -78,19 +78,19 @@ final class ActorCallableKeywordTest {
                 }
 
                 pub async routine main() => void {
-                  val add = await spawn add_one(41);
+                  val add = spawn add_one(41);
                   stdio.stdout.write(await add.result);
                   stdio.stdout.write(":");
 
-                  val shared = await spawn shared_emit("shared");
+                  val shared = spawn shared_emit("shared");
                   await shared.done;
                   stdio.stdout.write(":");
 
-                  val doubled = await spawn double_it(21);
+                  val doubled = spawn double_it(21);
                   stdio.stdout.write(await doubled.result);
                   stdio.stdout.write(":");
 
-                  val private_spawn = await spawn private_emit("private");
+                  val private_spawn = spawn private_emit("private");
                   await private_spawn.done;
                   return;
                 }
