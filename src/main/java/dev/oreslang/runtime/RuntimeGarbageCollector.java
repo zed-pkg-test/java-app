@@ -214,6 +214,11 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
         return sweep(null, false, Integer.MAX_VALUE);
     }
 
+    /** Diagnostic count of completed explicit/periodic collection passes. */
+    public long collectionCount() {
+        return collections.get();
+    }
+
     /**
      * Retires one semantic actor domain. Actor-local runtime resources are
      * deterministic actor-lifetime resources: actor termination makes them

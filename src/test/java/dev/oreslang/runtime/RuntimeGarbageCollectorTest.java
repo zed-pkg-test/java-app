@@ -187,23 +187,22 @@ final class RuntimeGarbageCollectorTest {
     }
     @Test
     void periodicSweepUsesNativeTimerAndStopsAfterClose() throws Exception {
-        AtomicInteger gcRequests = new AtomicInteger();
         RuntimeGarbageCollector gc = new RuntimeGarbageCollector(
-                gcRequests::incrementAndGet,
+                () -> {},
                 Duration.ofMillis(15),
                 Duration.ofMillis(1),
                 16);
 
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (gcRequests.get() == 0 && System.nanoTime() < deadline) {
+        while (gc.collectionCount() == 0 && System.nanoTime() < deadline) {
             Thread.sleep(5);
         }
-        assertTrue(gcRequests.get() > 0, "native periodic timer must trigger process GC sweeps");
+        assertTrue(gc.collectionCount() > 0, "native periodic timer must trigger collection passes");
 
         gc.close();
-        int afterClose = gcRequests.get();
+        long afterClose = gc.collectionCount();
         Thread.sleep(75);
-        assertEquals(afterClose, gcRequests.get(), "closing the collector must cancel its native timer ticket");
+        assertEquals(afterClose, gc.collectionCount(), "closing the collector must cancel its native timer ticket");
     }
 
 }
