@@ -423,6 +423,67 @@ final class OresObservableTest {
     }
 
     @Test
+    void schedulerBoundMapPreservesUpstreamCancellation() {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source = new OresFuture<>();
+            OresSubscription<Integer> subscription =
+                    OresObservable.fromFuture(source)
+                            .map(scheduler, value -> value + 1)
+                            .subscribe();
+
+            OresFuture<OresNotification<Integer>> pull = subscription.next();
+            assertTrue(source.cancel(true));
+
+            assertThrows(
+                    CancellationException.class,
+                    () -> pull.get(5, TimeUnit.SECONDS));
+            assertTrue(pull.isCancelled(),
+                    "scheduler-bound map must preserve upstream cancellation identity");
+            assertTrue(subscription.isTerminated());
+        }
+    }
+
+    @Test
+    void schedulerBoundFilterPreservesUpstreamCancellation() {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source = new OresFuture<>();
+            OresSubscription<Integer> subscription =
+                    OresObservable.fromFuture(source)
+                            .filter(scheduler, value -> true)
+                            .subscribe();
+
+            OresFuture<OresNotification<Integer>> pull = subscription.next();
+            assertTrue(source.cancel(true));
+
+            assertThrows(
+                    CancellationException.class,
+                    () -> pull.get(5, TimeUnit.SECONDS));
+            assertTrue(pull.isCancelled(),
+                    "scheduler-bound filter must preserve upstream cancellation identity");
+            assertTrue(subscription.isTerminated());
+        }
+    }
+
+    @Test
+    void schedulerBoundMapDoesNotMisclassifyCancellationExceptionFailure() {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source =
+                    OresFuture.failed(new CancellationException("domain failure"));
+            OresFuture<OresNotification<Integer>> pull =
+                    OresObservable.fromFuture(source)
+                            .map(scheduler, value -> value + 1)
+                            .subscribe()
+                            .next();
+
+            CompletionException failure =
+                    assertThrows(CompletionException.class, pull::join);
+            assertInstanceOf(CancellationException.class, failure.getCause());
+            assertFalse(pull.isCancelled(),
+                    "domain failure identity comes from Future state, not exception class");
+        }
+    }
+
+    @Test
     void filterYieldsBetweenRejectedImmediateItems() throws Exception {
         try (OresScheduler scheduler = new OresScheduler(1)) {
             java.util.ArrayList<Long> dispatches = new java.util.ArrayList<>();
