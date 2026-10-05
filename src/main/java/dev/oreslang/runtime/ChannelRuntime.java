@@ -534,7 +534,7 @@ public final class ChannelRuntime {
 
                     if (channel.closed) {
                         commitFailureLocked(
-                                chosen.selection,
+                                chosen,
                                 channel.closedFailure(),
                                 completions);
                         progressed = true;
@@ -553,7 +553,7 @@ public final class ChannelRuntime {
                 } else {
                     if (channel.closed) {
                         commitFailureLocked(
-                                chosen.selection,
+                                chosen,
                                 channel.closedFailure(),
                                 completions);
                         progressed = true;
@@ -765,11 +765,17 @@ public final class ChannelRuntime {
     }
 
     private static void commitFailureLocked(
-            SelectRegistration selection,
+            CaseRegistration registration,
             Throwable failure,
             List<Runnable> completions) {
+        SelectRegistration selection = registration.selection;
         if (selection.decided) return;
+
+        // A terminally ready case still wins selection. FAIR reuse must rotate
+        // past it exactly as it does after a successful read/write; otherwise a
+        // permanently closed arm can monopolize a reusable SelectSet forever.
         selection.decided = true;
+        selection.set.selected(registration.index, selection.policy);
         unregisterLocked(selection);
         completions.add(() ->
                 selection.future.failFromRuntime(failure));
