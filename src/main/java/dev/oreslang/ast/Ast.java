@@ -255,15 +255,22 @@ public final class Ast {
             ForOfStmt, ForOfDestructureStmt, ForStmt, LoopStmt { }
 
     public record BindingStmt(BindingKind kind, TypeRef declaredType, String name, Expr initializer) implements Stmt { }
-    public record DestructureBinding(BindingKind kind, String name) {
+    public record DestructureBinding(BindingKind kind, String name, boolean rest) {
+        public DestructureBinding(BindingKind kind, String name) {
+            this(kind, name, false);
+        }
+
         public DestructureBinding {
             if (name == null || name.isBlank()) {
                 throw new IllegalArgumentException("destructure binding name cannot be blank");
             }
+            if (rest && "_".equals(name)) {
+                throw new IllegalArgumentException("rest destructure binding cannot be a discard");
+            }
         }
 
         public static DestructureBinding discard() {
-            return new DestructureBinding(BindingKind.VAL, "_");
+            return new DestructureBinding(BindingKind.VAL, "_", false);
         }
 
         public boolean isDiscard() {
@@ -274,7 +281,10 @@ public final class Ast {
     public enum DestructureKind { SEQUENCE, OBJECT }
 
     public record DestructureStmt(DestructureKind kind, List<DestructureBinding> bindings, Expr initializer) implements Stmt {
-        public DestructureStmt { bindings = List.copyOf(bindings); }
+        public DestructureStmt {
+            bindings = List.copyOf(bindings);
+            validateRestBinding(bindings, "destructure");
+        }
         public DestructureStmt(List<DestructureBinding> bindings, Expr initializer) {
             this(DestructureKind.SEQUENCE, bindings, initializer);
         }
@@ -364,6 +374,19 @@ public final class Ast {
             if (bindings.isEmpty()) {
                 throw new IllegalArgumentException("for-of destructure pattern cannot be empty");
             }
+            validateRestBinding(bindings, "for-of destructure");
+        }
+    }
+
+    private static void validateRestBinding(List<DestructureBinding> bindings, String context) {
+        int restIndex = -1;
+        for (int i = 0; i < bindings.size(); i++) {
+            if (!bindings.get(i).rest()) continue;
+            if (restIndex >= 0) throw new IllegalArgumentException(context + " may contain at most one rest binding");
+            restIndex = i;
+        }
+        if (restIndex >= 0 && restIndex != bindings.size() - 1) {
+            throw new IllegalArgumentException(context + " rest binding must be last");
         }
     }
 
