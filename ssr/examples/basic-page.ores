@@ -30,9 +30,9 @@ pub routine main(): void {
       html.attrs_empty(),
       markup.trusted_raw("Oreslang SSR")
     ),
-    html.style_trusted(
+    html.style_sheet(
       html.attrs_empty(),
-      markup.trusted_raw(css.render(sheet))
+      sheet
     )
   ]);
 
