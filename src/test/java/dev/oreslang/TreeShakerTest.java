@@ -136,6 +136,24 @@ final class TreeShakerTest {
     }
 
     @Test
+    void directOnlyRoutineCallsAreEligibleForConstantInlining() {
+        TreeShaker.Result result = OresCompiler.compileForBuild("""
+                routine plus_one(int value): int {
+                  return value + 1;
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(plus_one(41));
+                  return;
+                }
+                """, BuildOptions.executable(Map.of()));
+
+        assertTrue(
+                result.removed(Parser.ROOT_MODULE + ".plus_one"),
+                "direct-only routines should be at least as inlineable as reifiable fnc declarations");
+    }
+
+    @Test
     void libraryBuildPreservesPublicApiButStillDropsPrivateDeadSymbols() {
         TreeShaker.Result result = OresCompiler.compileForBuild("""
                 pub fnc public_answer(): int { return 42; }
