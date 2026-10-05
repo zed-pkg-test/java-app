@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 /**
@@ -205,24 +206,38 @@ public abstract class OresObservable<T> {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(mapper, "mapper");
 
-        OresFuture<O> result = propagateCancellation
-                ? new OresFuture<>(() -> source.cancel(true))
-                : new OresFuture<>();
+        AtomicReference<OresFuture.RuntimeWaiterRegistration> waiter =
+                new AtomicReference<>();
 
-        source.whenCompleteRuntime((value, failure) -> {
-            if (result.isDone()) {
-                return;
-            }
-            if (failure != null) {
-                result.failFromRuntime(OresFuture.unwrap(failure));
-                return;
-            }
-            try {
-                result.completeFromRuntime(mapper.apply(value));
-            } catch (Throwable mappingFailure) {
-                result.failFromRuntime(mappingFailure);
-            }
+        OresFuture<O> result = new OresFuture<>(() -> {
+            OresFuture.RuntimeWaiterRegistration registration =
+                    waiter.getAndSet(null);
+            if (registration != null) registration.detach();
+            if (propagateCancellation) source.cancel(true);
         });
+
+        OresFuture.RuntimeWaiterRegistration registration =
+                source.whenCompleteRuntimeCancellable((value, failure) -> {
+                    if (result.isDone()) {
+                        return;
+                    }
+                    if (failure != null) {
+                        result.failFromRuntime(OresFuture.unwrap(failure));
+                        return;
+                    }
+                    try {
+                        result.completeFromRuntime(mapper.apply(value));
+                    } catch (Throwable mappingFailure) {
+                        result.failFromRuntime(mappingFailure);
+                    }
+                });
+
+        waiter.set(registration);
+        if (result.isDone()) {
+            OresFuture.RuntimeWaiterRegistration completed =
+                    waiter.getAndSet(null);
+            if (completed != null) completed.detach();
+        }
 
         return result;
     }
