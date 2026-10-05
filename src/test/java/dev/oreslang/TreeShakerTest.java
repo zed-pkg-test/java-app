@@ -146,6 +146,7 @@ final class TreeShakerTest {
                     val hidden = 1;
                     stdio.stdout.write(hidden);
                   }
+                  fi
                   return;
                 }
                 """, BuildOptions.executable(Map.of("enabled", "true")));

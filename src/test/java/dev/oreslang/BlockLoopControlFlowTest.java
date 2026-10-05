@@ -60,10 +60,12 @@ final class BlockLoopControlFlowTest {
                     if item == 2 {
                       continue;
                     }
+                    fi
                     stdio.stdout.write(item);
                     if item == 3 {
                       break;
                     }
+                    fi
                   }
                 }
                 """);
@@ -79,6 +81,7 @@ final class BlockLoopControlFlowTest {
                     if remaining == 0 {
                       return 7;
                     }
+                    fi
                     loop {
                       return countdown(remaining - 1);
                     }
@@ -103,9 +106,11 @@ final class BlockLoopControlFlowTest {
                     if i == 2 {
                       continue;
                     }
+                    fi
                     if i == 4 {
                       break;
                     }
+                    fi
                     stdio.stdout.write(i);
                   }
                   stdio.stdout.write(process.descriptor.scheduler_safepoints);
@@ -185,12 +190,14 @@ final class BlockLoopControlFlowTest {
                       if inner == 1 {
                         continue;
                       }
+                      fi
                       break;
                     }
                     stdio.stdout.write(outer);
                     if outer == 2 {
                       break;
                     }
+                    fi
                   }
                 }
                 """);
@@ -207,6 +214,7 @@ final class BlockLoopControlFlowTest {
                     if i < 2 {
                       continue;
                     }
+                    fi
                     seen = i;
                   }
                   stdio.stdout.write(seen);
@@ -254,6 +262,7 @@ final class BlockLoopControlFlowTest {
                     if i == 1 {
                       continue;
                     }
+                    fi
                     break;
                   }
                   finish();
@@ -297,6 +306,7 @@ final class BlockLoopControlFlowTest {
                   } else {
                     stdio.stdout.write("c");
                   }
+                  fi
                 }
                 """);
         assertEquals("b", braces);

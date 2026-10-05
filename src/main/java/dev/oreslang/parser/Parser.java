@@ -1226,7 +1226,7 @@ public final class Parser {
     }
 
     private Ast.MatchStmt parseMatch() {
-        boolean ordered = match(FIRST);
+        boolean ordered = matchContextualFirst();
         Ast.Expr subject = parseExpression();
         match(SEMICOLON);
 
@@ -1785,6 +1785,15 @@ public final class Parser {
     private boolean matchContextualShared() {
         if (match(SHARED)) return true;
         if (check(IDENT) && peek().lexeme().equals("shared")) {
+            advance();
+            return true;
+        }
+        return false;
+    }
+
+    private boolean matchContextualFirst() {
+        if (match(FIRST)) return true;
+        if (check(IDENT) && peek().lexeme().equals("first")) {
             advance();
             return true;
         }

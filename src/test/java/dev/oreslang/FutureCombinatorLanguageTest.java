@@ -52,12 +52,12 @@ final class FutureCombinatorLanguageTest {
     void futureRaceReturnsFirstSettledFuture() throws Exception {
         String program = """
                 define module app
-                  async fnc first(): int {
+                  async fnc nine(): int {
                     return 9;
                   }
 
                   pub fnc main(): void {
-                    val winner = await Future.race([first()]);
+                    val winner = await Future.race([nine()]);
                     stdio.println(winner);
                     return;
                   }
