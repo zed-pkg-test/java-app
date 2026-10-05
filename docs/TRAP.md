@@ -153,15 +153,18 @@ successfully returned or an ordinary exception has been converted to the trap
 result. Ordinary callables and function expressions remain eligible for normal
 proper-tail-call lowering where no such boundary is active.
 
-## Panic and fatal failures
+## Panic, cancellation, and fatal failures
 
-The current runtime explicitly lets `OresPanic` bypass `trap`. Java
-`Error`/fatal VM failures are not converted to ordinary trap results either.
+The current runtime explicitly lets `OresPanic` and
+`CancellationException` bypass `trap`. Cancellation is scheduler/lifetime
+control flow, not an ordinary guest failure, so a trap must never turn a
+cancelled actor/task into `[None, Some(error)]`. Java `Error`/fatal VM
+failures are not converted to ordinary trap results either.
 
-The trap wrapper currently catches the runtime's ordinary
-`RuntimeException` failure channel. Future first-class `throw`, `raise`,
-`recover`, cancellation, and typed guest-safe error payloads must preserve the
-same distinction between ordinary trappable failure and supervisory/fatal
+The trap wrapper catches the runtime's remaining ordinary `RuntimeException`
+failure channel. Future first-class `throw`, `raise`, `recover`, typed
+guest-safe error payloads, and richer cancellation/fuel control must preserve
+the same distinction between ordinary trappable failure and supervisory/fatal
 control.
 
 ## Interaction with `pure`
@@ -180,7 +183,7 @@ This implementation does **not** yet claim:
 - a nominal unforgeable `TrapResult<T>`;
 - a normalized guest-safe structured `TrapError` value;
 - first-class `raise`/`recover` semantics;
-- cancellation/fuel-exhaustion conversion.
+- typed cancellation/fuel-exhaustion control effects across scheduler boundaries.
 
 Those features require explicit scheduler, ABI, and control-effect design. Until
 then the compiler rejects combinations whose semantics would otherwise be

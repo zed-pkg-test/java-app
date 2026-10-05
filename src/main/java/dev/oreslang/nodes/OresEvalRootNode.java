@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionStage;
 
 /** Executable Truffle root. Parsing and static checks happen before this node is created. */
@@ -587,6 +588,9 @@ public final class OresEvalRootNode extends RootNode {
             } catch (OresPanic panic) {
                 // Panic is an invariant/recovery channel, not an ordinary throw.
                 throw panic;
+            } catch (CancellationException cancelled) {
+                // Cancellation is scheduler/lifetime control flow, not an ordinary guest error.
+                throw cancelled;
             } catch (RuntimeException failure) {
                 return List.of(
                         new OptionValue(false, null),
@@ -627,6 +631,8 @@ public final class OresEvalRootNode extends RootNode {
                         new OptionValue(false, null));
             } catch (OresPanic panic) {
                 throw panic;
+            } catch (CancellationException cancelled) {
+                throw cancelled;
             } catch (RuntimeException failure) {
                 return List.of(
                         new OptionValue(false, null),

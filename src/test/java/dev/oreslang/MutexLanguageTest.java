@@ -285,7 +285,7 @@ final class MutexLanguageTest {
 
                 define module app
                   fnc bad(): void {
-                    val shared = SharedMutex.new(new UnsafeBox());
+                    val shared = SharedMutex.new(new UnsafeBox(Mutex.new(1)));
                     stdio.println(shared.is_poisoned());
                     return;
                   }

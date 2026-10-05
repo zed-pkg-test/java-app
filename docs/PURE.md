@@ -155,6 +155,18 @@ unproven call targets fail closed until their effect metadata can be resolved.
 This rule is intentionally conservative. It is safer to reject an unproven
 call than to let an indirect call hide an external write.
 
+## Construction
+
+Object construction currently fails closed inside a `pure` callable. A class
+constructor evaluates field initializers, and those initializers do not yet
+carry effect summaries. Therefore `new Foo(...)` cannot be proven transitive-
+pure merely by checking its argument expressions.
+
+Literal/list/tuple/object values whose subexpressions pass the ordinary pure
+checker remain available. Once constructor and field-initializer effects are
+typed, `new` may be admitted when the complete construction path is proven
+pure.
+
 ## Interaction with `trap`
 
 `pure` and `trap` are orthogonal:

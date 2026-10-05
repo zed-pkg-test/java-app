@@ -1154,7 +1154,7 @@ Static data fields are intentionally not part of v0.5 yet; `static` on a class b
 The arrows have distinct jobs:
 
 - `:` declares the return type of a **named executable callable/method**.
-- `->` is executable syntax for lambdas and lambda-style callable declarations.
+- `->` is executable syntax for function expressions and is also accepted as a return-type separator on named executable callables.
 - `=>` is type-level syntax for function types and interface callable signatures.
 
 Function aliases can use `typeof fnc`:

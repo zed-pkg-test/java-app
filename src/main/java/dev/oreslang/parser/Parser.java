@@ -231,20 +231,13 @@ public final class Parser {
         List<String> generics = parseGenericParameters();
 
         if (match(EQUAL)) {
-            consume(PIPE, "lambda-style callable declarations use '= |Type name, ...| -> [ReturnType] { ... }'");
-            List<Ast.Param> params = parseDeclaredPipeParameters();
-            consume(PIPE, "expected closing '|' in lambda-style callable declaration");
-            consume(ARROW, "lambda-style callable declarations use the slim arrow '->'");
-            Ast.TypeRef returnType = check(LBRACE)
-                    ? Ast.TypeRef.simple("void")
-                    : parseTypeRef();
-            List<Ast.Stmt> body = parseBlock();
-            return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.nonLexical,
-                    modifiers.pure, modifiers.trapped, actorKind, generics, params,
-                    returnType, annotations, body);
+            throw error(previous(),
+                    "function expressions are executable-scope-only; named fnc/routine declarations "
+                            + "must use '(...)' parameters, while local callable values use "
+                            + "'let fnc name = || -> { ... };'");
         }
 
-        consume(LPAREN, "expected '(' after callable name or '=' for lambda-style declaration");
+        consume(LPAREN, "expected '(' after callable name");
         java.util.Set<String> structuralNames = structuralAnnotationNames(annotations);
         List<Ast.Param> params = applyStructuralAnnotations(parseParametersUntil(RPAREN, structuralNames), annotations);
         consume(RPAREN, "expected ')' after parameters");
@@ -650,18 +643,6 @@ public final class Parser {
             throw error(previous(), "@Ret type and declared return type disagree");
         }
         return declared != null ? declared : annotated != null ? annotated : Ast.TypeRef.simple("void");
-    }
-
-    private List<Ast.Param> parseDeclaredPipeParameters() {
-        if (check(PIPE)) return List.of();
-        List<Ast.Param> params = new ArrayList<>();
-        do {
-            Ast.TypeRef type = parseTypeRef();
-            boolean mutable = match(MUT);
-            String name = consume(IDENT, "lambda-style callable declaration parameters require 'Type name'").lexeme();
-            params.add(new Ast.Param(type, name, false, mutable));
-        } while (match(COMMA));
-        return List.copyOf(params);
     }
 
     private boolean sameType(Ast.TypeRef a, Ast.TypeRef b) {

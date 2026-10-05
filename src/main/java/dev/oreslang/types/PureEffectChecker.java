@@ -507,7 +507,8 @@ public final class PureEffectChecker {
             for (Ast.Expr argument : created.arguments()) {
                 checkExpr(argument, scope, module, callable);
             }
-            return;
+            throw error("pure callable '" + callable
+                    + "' cannot construct with 'new' until constructor and field-initializer effects are typed");
         }
         if (expr instanceof Ast.AwaitExpr) {
             throw error("pure callable '" + callable

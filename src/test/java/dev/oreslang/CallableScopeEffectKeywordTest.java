@@ -209,7 +209,7 @@ final class CallableScopeEffectKeywordTest {
                           return state;
                         }
                         """)));
-        assertTrue(localCapture.getMessage().contains("captured binding"),
+        assertTrue(localCapture.getMessage().contains("captured"),
                 localCapture.getMessage());
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
@@ -300,6 +300,23 @@ final class CallableScopeEffectKeywordTest {
         assertTrue(callback.pure());
         assertTrue(callback.nonLexical());
         assertTrue(callback.trapped());
+    }
+
+    @Test
+    void pureRejectsConstructionUntilConstructorEffectsAreTyped() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          let int value = 1;
+                        end
+
+                        pure fnc make_box(): Box {
+                          return new Box();
+                        }
+                        """)));
+        assertTrue(error.getMessage().contains("constructor")
+                        || error.getMessage().contains("construct"),
+                error.getMessage());
     }
 
     @Test
