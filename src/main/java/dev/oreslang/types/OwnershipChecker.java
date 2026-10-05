@@ -39,6 +39,7 @@ public final class OwnershipChecker {
     private final Set<String> ambiguousFunctions = new HashSet<>();
     private final Set<String> ambiguousClasses = new HashSet<>();
     private int mutexCriticalSectionDepth;
+    private int loopDepth;
 
     private OwnershipChecker(Ast.Program program) {
         index(program);
@@ -122,6 +123,15 @@ public final class OwnershipChecker {
         scope.close();
     }
 
+    private void checkLoopBlock(List<Ast.Stmt> body, Scope parent, Ast.TypeRef returnType) {
+        loopDepth++;
+        try {
+            checkBlock(body, parent, returnType);
+        } finally {
+            loopDepth--;
+        }
+    }
+
     private void checkStatement(Ast.Stmt stmt, Scope scope, Ast.TypeRef returnType) {
         if (stmt instanceof Ast.BindingStmt binding) {
             checkBinding(binding, scope);
@@ -142,6 +152,18 @@ public final class OwnershipChecker {
                         bindingKind,
                         Origin.LOCAL));
             }
+            return;
+        }
+        if (stmt instanceof Ast.BlockStmt block) {
+            checkBlock(block.body(), scope, returnType);
+            return;
+        }
+        if (stmt instanceof Ast.BreakStmt) {
+            if (loopDepth == 0) throw error("'break' may only appear inside loop or for");
+            return;
+        }
+        if (stmt instanceof Ast.ContinueStmt) {
+            if (loopDepth == 0) throw error("'continue' may only appear inside loop or for");
             return;
         }
         if (stmt instanceof Ast.ReturnStmt ret) {
@@ -210,12 +232,37 @@ public final class OwnershipChecker {
             checkBlock(attempted.finallyBody(), scope, returnType);
             return;
         }
-        if (stmt instanceof Ast.ForOfStmt loop) {
-            checkExpr(loop.iterable(), scope, false);
+        if (stmt instanceof Ast.ForOfDestructureStmt loop) {
+            ValueInfo iterable = checkExpr(loop.iterable(), scope, false);
+            Ast.TypeRef elementType = iterableElementType(iterable.type);
             Map<VarState,Boolean> before = movedSnapshot(scope);
             Scope loopScope = new Scope(scope);
-            loopScope.define(loop.bindingName(), new VarState(Ast.TypeRef.inferred(), loop.bindingKind() == Ast.BindingKind.LET, ValueKind.MOVE_ONLY, Origin.LOCAL));
-            checkBlock(loop.body(), loopScope, returnType);
+            for (int i = 0; i < loop.bindings().size(); i++) {
+                Ast.DestructureBinding binding = loop.bindings().get(i);
+                if (binding.isDiscard()) continue;
+                Ast.TypeRef bindingType = sequenceDestructureBindingType(elementType, i);
+                loopScope.define(binding.name(), new VarState(
+                        bindingType,
+                        binding.kind() == Ast.BindingKind.LET,
+                        kindOfType(bindingType),
+                        Origin.LOCAL));
+            }
+            checkLoopBlock(loop.body(), loopScope, returnType);
+            loopScope.close();
+            rejectLoopMoves(before, scope);
+            return;
+        }
+        if (stmt instanceof Ast.ForOfStmt loop) {
+            ValueInfo iterable = checkExpr(loop.iterable(), scope, false);
+            Ast.TypeRef elementType = iterableElementType(iterable.type);
+            Map<VarState,Boolean> before = movedSnapshot(scope);
+            Scope loopScope = new Scope(scope);
+            loopScope.define(loop.bindingName(), new VarState(
+                    elementType,
+                    loop.bindingKind() == Ast.BindingKind.LET,
+                    kindOfType(elementType),
+                    Origin.LOCAL));
+            checkLoopBlock(loop.body(), loopScope, returnType);
             loopScope.close();
             rejectLoopMoves(before, scope);
             return;
@@ -225,10 +272,16 @@ public final class OwnershipChecker {
             if (loop.initializer() != null) checkStatement(loop.initializer(), loopScope, returnType);
             if (loop.condition() != null) checkExpr(loop.condition(), loopScope, false);
             Map<VarState,Boolean> before = movedSnapshot(scope);
-            checkBlock(loop.body(), loopScope, returnType);
+            checkLoopBlock(loop.body(), loopScope, returnType);
             if (loop.update() != null) checkExpr(loop.update(), loopScope, false);
             rejectLoopMoves(before, scope);
             loopScope.close();
+            return;
+        }
+        if (stmt instanceof Ast.LoopStmt loop) {
+            Map<VarState,Boolean> before = movedSnapshot(scope);
+            checkLoopBlock(loop.body(), scope, returnType);
+            rejectLoopMoves(before, scope);
         }
     }
 
@@ -435,11 +488,19 @@ public final class OwnershipChecker {
             return awaitedValue;
         }
         if (expr instanceof Ast.ListExpr list) {
+            Ast.TypeRef elementType = null;
             for (Ast.Expr item : list.elements()) {
                 ValueInfo info = checkExpr(item, scope, true);
                 if (containsMutexGuardType(info.type)) throw error("MutexGuard cannot be stored in an array/list");
+                elementType = elementType == null
+                        ? info.type
+                        : joinConditionalType(elementType, info.type);
             }
-            return new ValueInfo(Ast.TypeRef.simple("Array"), ValueKind.MOVE_ONLY, null);
+            if (elementType == null) elementType = Ast.TypeRef.inferred();
+            return new ValueInfo(
+                    new Ast.TypeRef("Array", List.of(elementType), false),
+                    ValueKind.MOVE_ONLY,
+                    null);
         }
         if (expr instanceof Ast.TupleExpr tuple) {
             boolean copy = true;
@@ -878,8 +939,14 @@ public final class OwnershipChecker {
         }
 
         for (Ast.Param param : lambda.parameters()) closure.define(param.name(), stateForParam(param));
-        for (Ast.Stmt stmt : lambda.blockBody()) checkStatement(stmt, closure, Ast.TypeRef.inferred());
-        closure.close();
+        int previousLoopDepth = loopDepth;
+        loopDepth = 0;
+        try {
+            for (Ast.Stmt stmt : lambda.blockBody()) checkStatement(stmt, closure, Ast.TypeRef.inferred());
+        } finally {
+            loopDepth = previousLoopDepth;
+            closure.close();
+        }
         return new ValueInfo(Ast.TypeRef.simple("Fnc"), ValueKind.MOVE_ONLY, null);
     }
 
@@ -906,7 +973,11 @@ public final class OwnershipChecker {
                 scanExpr(ret.value(), blockLocals, outer, recursiveBinding, captures, false);
             } else if (stmt instanceof Ast.ExprStmt e) scanExpr(e.expression(), blockLocals, outer, recursiveBinding, captures, false);
             else if (stmt instanceof Ast.DeferStmt e) scanExpr(e.expression(), blockLocals, outer, recursiveBinding, captures, false);
-            else if (stmt instanceof Ast.IfStmt s) {
+            else if (stmt instanceof Ast.BlockStmt s) {
+                scanStatements(s.body(), blockLocals, outer, recursiveBinding, captures);
+            } else if (stmt instanceof Ast.LoopStmt s) {
+                scanStatements(s.body(), blockLocals, outer, recursiveBinding, captures);
+            } else if (stmt instanceof Ast.IfStmt s) {
                 for (Ast.IfBranch b : s.branches()) {
                     scanExpr(b.condition(), blockLocals, outer, recursiveBinding, captures, false);
                     scanStatements(b.body(), blockLocals, outer, recursiveBinding, captures);
@@ -918,6 +989,13 @@ public final class OwnershipChecker {
                 caught.add(s.errorName());
                 scanStatements(s.catchBody(), caught, outer, recursiveBinding, captures);
                 scanStatements(s.finallyBody(), blockLocals, outer, recursiveBinding, captures);
+            } else if (stmt instanceof Ast.ForOfDestructureStmt s) {
+                scanExpr(s.iterable(), blockLocals, outer, recursiveBinding, captures, false);
+                Set<String> loop = new HashSet<>(blockLocals);
+                for (Ast.DestructureBinding binding : s.bindings()) {
+                    if (!binding.isDiscard()) loop.add(binding.name());
+                }
+                scanStatements(s.body(), loop, outer, recursiveBinding, captures);
             } else if (stmt instanceof Ast.ForOfStmt s) {
                 scanExpr(s.iterable(), blockLocals, outer, recursiveBinding, captures, false);
                 Set<String> loop = new HashSet<>(blockLocals);
@@ -1381,13 +1459,23 @@ public final class OwnershipChecker {
         return Ast.TypeRef.inferred();
     }
 
+    private Ast.TypeRef sequenceDestructureBindingType(Ast.TypeRef source, int index) {
+        if (source == null) return Ast.TypeRef.inferred();
+        Ast.TypeRef concrete = source.isBorrow() ? source.borrowedTarget() : source;
+        if (concrete.isTupleType() && index < concrete.arguments().size()) {
+            return concrete.arguments().get(index);
+        }
+        if ((concrete.name().equals("Array") || concrete.name().equals("List"))
+                && concrete.arguments().size() == 1) {
+            return concrete.arguments().getFirst();
+        }
+        return Ast.TypeRef.inferred();
+    }
+
     private Ast.TypeRef destructureBindingType(Ast.DestructureStmt destructure, Ast.TypeRef source, int index, String name) {
         if (source == null) return Ast.TypeRef.inferred();
         if (destructure.kind() == Ast.DestructureKind.SEQUENCE) {
-            if (source.isTupleType() && index < source.arguments().size()) return source.arguments().get(index);
-            if ((source.name().equals("Array") || source.name().equals("List")) && source.arguments().size() == 1) {
-                return source.arguments().getFirst();
-            }
+            return sequenceDestructureBindingType(source, index);
         } else {
             Ast.TypeRef concrete = source.isBorrow() ? source.borrowedTarget() : source;
             if (concrete.isRecordType()) {
@@ -1406,6 +1494,15 @@ public final class OwnershipChecker {
                             genericBindings(target.owner().genericParameters(), target.ownerType().arguments()));
                 }
             }
+        }
+        return Ast.TypeRef.inferred();
+    }
+
+    private Ast.TypeRef iterableElementType(Ast.TypeRef iterableType) {
+        if (iterableType == null) return Ast.TypeRef.inferred();
+        if ((iterableType.name().equals("Array") || iterableType.name().equals("List"))
+                && iterableType.arguments().size() == 1) {
+            return iterableType.arguments().getFirst();
         }
         return Ast.TypeRef.inferred();
     }

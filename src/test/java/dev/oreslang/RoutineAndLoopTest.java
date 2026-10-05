@@ -185,6 +185,102 @@ final class RoutineAndLoopTest {
     }
 
     @Test
+    void doDoneBodiesAndIteratorShorthandRemainUnambiguous() throws Exception {
+        String output = run("""
+                fnc done(): void {
+                  stdio.stdout.write("d");
+                  return;
+                }
+
+                pub routine main(): void {
+                  for item of arr[1, 2] do
+                    done()
+                    stdio.stdout.write(item)
+                  done
+
+                  for (let i = 0; i < 2; i = i + 1) do
+                    stdio.stdout.write(i)
+                  done
+
+                  let n = 0;
+                  loop do
+                    n = n + 1;
+                    if n == 2 {
+                      break;
+                    }
+                  done
+
+                  stdio.stdout.write(n)
+                  return;
+                }
+                """);
+
+        assertEquals("d1d2012", output);
+    }
+
+    @Test
+    void forOfSequencePatternsDestructureTupleElements() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  for [key, value] of arr[(1, "a"), (2, "b")] do
+                    stdio.stdout.write(key)
+                    stdio.stdout.write(value)
+                  done
+
+                  for [_, let value] of arr[(9, 3), (8, 4)] {
+                    value = value + 1;
+                    stdio.stdout.write(value)
+                  }
+                  return;
+                }
+                """);
+
+        assertEquals("1a2b45", output);
+    }
+
+    @Test
+    void forOfSequencePatternsRejectKnownArityMismatch() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        pub routine main(): void {
+                          for [a, b, c] of arr[(1, 2)] do
+                            stdio.stdout.write(a)
+                          done
+                          return;
+                        }
+                        """)));
+
+        assertTrue(failure.getMessage().contains("destructure arity mismatch"));
+    }
+
+    @Test
+    void typedUnparenthesizedForHeadersSupportPostfixUpdates() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  for int i = 0; i < 3; i++ do
+                    stdio.stdout.write(i)
+                  done
+
+                  for int j = 3; j > 0; j-- {
+                    stdio.stdout.write(j)
+                  }
+
+                  for (let k = 0; k < 2; k++) {
+                    stdio.stdout.write(k)
+                  }
+
+                  for (int q = 0; q < 2; q++) do
+                    stdio.stdout.write(q)
+                  done
+                  return;
+                }
+                """);
+
+        assertEquals("0123210101", output);
+    }
+
+    @Test
     void customJavascriptStyleIteratorDrivesForOf() throws Exception {
         String output = run("""
                 define module collections

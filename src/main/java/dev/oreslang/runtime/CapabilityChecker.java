@@ -271,6 +271,8 @@ public final class CapabilityChecker {
             else if (stmt instanceof Ast.ReturnStmt s && s.value() != null) checkExpr(s.value(), policy);
             else if (stmt instanceof Ast.ExprStmt s) checkExpr(s.expression(), policy);
             else if (stmt instanceof Ast.DeferStmt s) checkExpr(s.expression(), policy);
+            else if (stmt instanceof Ast.BlockStmt s) checkStatements(s.body(), policy);
+            else if (stmt instanceof Ast.LoopStmt s) checkStatements(s.body(), policy);
             else if (stmt instanceof Ast.IfStmt s) {
                 for (Ast.IfBranch b : s.branches()) {
                     checkExpr(b.condition(), policy);

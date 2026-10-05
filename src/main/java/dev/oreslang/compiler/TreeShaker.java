@@ -585,6 +585,17 @@ public final class TreeShaker {
                 return List.of(new Ast.DeferStmt(
                         rewriteExpression(deferred.expression(), module, locals)));
             }
+            if (statement instanceof Ast.BlockStmt block) {
+                return List.of(new Ast.BlockStmt(
+                        rewriteStatements(block.body(), module, new LinkedHashMap<>(locals))));
+            }
+            if (statement instanceof Ast.BreakStmt || statement instanceof Ast.ContinueStmt) {
+                return List.of(statement);
+            }
+            if (statement instanceof Ast.LoopStmt loop) {
+                return List.of(new Ast.LoopStmt(
+                        rewriteStatements(loop.body(), module, new LinkedHashMap<>(locals))));
+            }
             if (statement instanceof Ast.IfStmt conditional) {
                 List<Ast.IfBranch> branches = new ArrayList<>();
                 List<Ast.Stmt> elseBody = rewriteStatements(
@@ -596,13 +607,24 @@ public final class TreeShaker {
                             branch.body(), module, new LinkedHashMap<>(locals));
                     if (known instanceof Boolean value) {
                         if (!value) continue;
-                        if (branches.isEmpty()) return body;
+                        if (branches.isEmpty()) {
+                            // A selected if/elseif body is still a lexical scope.
+                            // Never flatten it into the parent statement list:
+                            // doing so would leak bindings and change defer/lifetime timing.
+                            return List.of(new Ast.BlockStmt(body));
+                        }
                         elseBody = body;
                         break;
                     }
                     branches.add(new Ast.IfBranch(condition, body));
                 }
-                if (branches.isEmpty()) return elseBody;
+                if (branches.isEmpty()) {
+                    // The else arm has the same lexical-scope semantics as any
+                    // other conditional body, even when the condition folds.
+                    return elseBody.isEmpty()
+                            ? List.of()
+                            : List.of(new Ast.BlockStmt(elseBody));
+                }
                 return List.of(new Ast.IfStmt(branches, elseBody));
             }
             if (statement instanceof Ast.TryStmt tried) {
@@ -613,6 +635,17 @@ public final class TreeShaker {
                         tried.errorName(),
                         rewriteStatements(tried.catchBody(), module, catchLocals),
                         rewriteStatements(tried.finallyBody(), module, new LinkedHashMap<>(locals))));
+            }
+            if (statement instanceof Ast.ForOfDestructureStmt loop) {
+                Ast.Expr iterable = rewriteExpression(loop.iterable(), module, locals);
+                LinkedHashMap<String, Object> bodyLocals = new LinkedHashMap<>(locals);
+                for (Ast.DestructureBinding binding : loop.bindings()) {
+                    if (!binding.isDiscard()) bodyLocals.put(binding.name(), UNKNOWN);
+                }
+                return List.of(new Ast.ForOfDestructureStmt(
+                        loop.bindings(),
+                        iterable,
+                        rewriteStatements(loop.body(), module, bodyLocals)));
             }
             if (statement instanceof Ast.ForOfStmt loop) {
                 Ast.Expr iterable = rewriteExpression(loop.iterable(), module, locals);
@@ -931,6 +964,10 @@ public final class TreeShaker {
                     scanExpression(module, expression.expression(), locals);
                 } else if (statement instanceof Ast.DeferStmt deferred) {
                     scanExpression(module, deferred.expression(), locals);
+                } else if (statement instanceof Ast.BlockStmt block) {
+                    scanStatements(module, block.body(), new LinkedHashSet<>(locals));
+                } else if (statement instanceof Ast.LoopStmt loop) {
+                    scanStatements(module, loop.body(), new LinkedHashSet<>(locals));
                 } else if (statement instanceof Ast.IfStmt conditional) {
                     for (Ast.IfBranch branch : conditional.branches()) {
                         scanExpression(module, branch.condition(), locals);
@@ -943,6 +980,13 @@ public final class TreeShaker {
                     if (tried.errorName() != null) catchLocals.add(tried.errorName());
                     scanStatements(module, tried.catchBody(), catchLocals);
                     scanStatements(module, tried.finallyBody(), new LinkedHashSet<>(locals));
+                } else if (statement instanceof Ast.ForOfDestructureStmt loop) {
+                    scanExpression(module, loop.iterable(), locals);
+                    LinkedHashSet<String> bodyLocals = new LinkedHashSet<>(locals);
+                    for (Ast.DestructureBinding binding : loop.bindings()) {
+                        if (!binding.isDiscard()) bodyLocals.add(binding.name());
+                    }
+                    scanStatements(module, loop.body(), bodyLocals);
                 } else if (statement instanceof Ast.ForOfStmt loop) {
                     scanExpression(module, loop.iterable(), locals);
                     LinkedHashSet<String> bodyLocals = new LinkedHashSet<>(locals);

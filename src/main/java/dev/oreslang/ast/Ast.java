@@ -251,7 +251,7 @@ public final class Ast {
     public enum BindingKind { CONST, VAL, LET }
 
     public sealed interface Stmt permits BindingStmt, DestructureStmt, ReturnStmt, ExprStmt, DeferStmt,
-            IfStmt, TryStmt, ForOfStmt, ForStmt { }
+            BlockStmt, BreakStmt, ContinueStmt, IfStmt, TryStmt, ForOfStmt, ForOfDestructureStmt, ForStmt, LoopStmt { }
 
     public record BindingStmt(BindingKind kind, TypeRef declaredType, String name, Expr initializer) implements Stmt { }
     public record DestructureBinding(BindingKind kind, String name) {
@@ -283,6 +283,12 @@ public final class Ast {
     public record ExprStmt(Expr expression) implements Stmt { }
     public record DeferStmt(Expr expression) implements Stmt { }
 
+    public record BlockStmt(List<Stmt> body) implements Stmt {
+        public BlockStmt { body = List.copyOf(body); }
+    }
+    public record BreakStmt() implements Stmt { }
+    public record ContinueStmt() implements Stmt { }
+
     public record IfBranch(Expr condition, List<Stmt> body) {
         public IfBranch { body = List.copyOf(body); }
     }
@@ -306,8 +312,25 @@ public final class Ast {
         public ForOfStmt { body = List.copyOf(body); }
     }
 
+    public record ForOfDestructureStmt(
+            List<DestructureBinding> bindings,
+            Expr iterable,
+            List<Stmt> body) implements Stmt {
+        public ForOfDestructureStmt {
+            bindings = List.copyOf(bindings);
+            body = List.copyOf(body);
+            if (bindings.isEmpty()) {
+                throw new IllegalArgumentException("for-of destructure pattern cannot be empty");
+            }
+        }
+    }
+
     public record ForStmt(Stmt initializer, Expr condition, Expr update, List<Stmt> body) implements Stmt {
         public ForStmt { body = List.copyOf(body); }
+    }
+
+    public record LoopStmt(List<Stmt> body) implements Stmt {
+        public LoopStmt { body = List.copyOf(body); }
     }
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
