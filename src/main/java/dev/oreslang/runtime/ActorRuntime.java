@@ -53,6 +53,8 @@ import java.util.function.UnaryOperator;
 public final class ActorRuntime implements AutoCloseable {
     private static final int MAX_MESSAGE_GRAPH_DEPTH = 256;
     private static final int MAX_MESSAGE_GRAPH_NODES = 100_000;
+    private static final int MAX_ACTOR_GROUPS_PER_ACTOR = 64;
+    private static final int MAX_EVENT_TOPICS_PER_GROUP = 1_024;
     private static final long CLOSE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
     private static final int INTERNAL_CONTINUATION_SLOTS = 1_024;
     private static final ThreadLocal<Boolean> ACTOR_CARRIER = ThreadLocal.withInitial(() -> Boolean.FALSE);
@@ -95,6 +97,11 @@ public final class ActorRuntime implements AutoCloseable {
     public static ActorKind currentActorKind() {
         ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
         return current == null ? null : current.kind();
+    }
+
+    public static Optional<ActorId> currentActorId() {
+        ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
+        return current == null ? Optional.empty() : Optional.of(current.actorId());
     }
 
     public static Object currentExecutionDomain() {
@@ -175,6 +182,11 @@ public final class ActorRuntime implements AutoCloseable {
         public static ActorId create() { return new ActorId(UUID.randomUUID()); }
     }
 
+    public record ActorGroupId(UUID value) {
+        public ActorGroupId { Objects.requireNonNull(value); }
+        public static ActorGroupId create() { return new ActorGroupId(UUID.randomUUID()); }
+    }
+
     public static final class ActorTerminatedException extends IllegalStateException {
         private final ActorId actorId;
         private final ActorKind actorKind;
@@ -224,6 +236,7 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private final Map<ActorId, ActorCell<?>> actors = new ConcurrentHashMap<>();
+    private final Map<ActorGroupId, ActorGroup> actorGroups = new ConcurrentHashMap<>();
     private final AtomicInteger actorCount = new AtomicInteger();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicLong privateMemoryBytes = new AtomicLong();
@@ -762,6 +775,10 @@ public final class ActorRuntime implements AutoCloseable {
         IsolatePolicy policy();
         ActorKind kind();
         Optional<ActorMemorySlice> privateMemory();
+
+        default ActorGroup actorGroup(ActorGroupId id) {
+            return runtime().actorGroup(id);
+        }
     }
 
     /**
@@ -798,6 +815,41 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
+     * Bind a cancellable runtime Future to the lifetime of the currently
+     * executing actor. Channel/select registrations created by nb forms use
+     * this so structured actor teardown detaches them even when guest code
+     * drops the Future without explicitly cancelling it.
+     *
+     * <p>Outside an actor turn the Future is returned unchanged; root/external
+     * execution domains own their lifetimes separately.</p>
+     */
+    public <T> OresFuture<T> ownCurrentActorFuture(OresFuture<T> future) {
+        Objects.requireNonNull(future, "future");
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null) return future;
+        ownFuture(cell, future);
+        return future;
+    }
+
+    private boolean ownFuture(ActorCell<?> cell, OresFuture<?> future) {
+        if (cell.stopped.get() || cell.finalized || closed.get()) {
+            future.cancel(false);
+            return false;
+        }
+
+        cell.pendingOperations.add(future);
+        if (cell.stopped.get() || cell.finalized || closed.get()) {
+            cell.pendingOperations.remove(future);
+            future.cancel(false);
+            return false;
+        }
+
+        future.whenCompleteRuntime((ignored, failure) ->
+                cell.pendingOperations.remove(future));
+        return true;
+    }
+
+    /**
      * Register scheduler plumbing only. Future completion enqueues the supplied
      * continuation back to the captured actor; the callback body itself is not
      * run on the producer/completion thread.
@@ -811,22 +863,10 @@ public final class ActorRuntime implements AutoCloseable {
         Objects.requireNonNull(continuation, "continuation");
 
         ActorCell<?> cell = actors.get(target.actorId());
-        if (cell == null || cell.stopped.get()) {
-            future.cancel(false);
-            return;
-        }
+        if (cell == null || !ownFuture(cell, future)) return;
 
-        cell.pendingContinuations.add(future);
-        if (cell.stopped.get()) {
-            cell.pendingContinuations.remove(future);
-            future.cancel(false);
-            return;
-        }
-
-        future.whenCompleteRuntime((value, failure) -> {
-            cell.pendingContinuations.remove(future);
-            target.enqueue(() -> continuation.accept(value, failure));
-        });
+        future.whenCompleteRuntime((value, failure) ->
+                target.enqueue(() -> continuation.accept(value, failure)));
     }
 
     private boolean enqueueContinuation(ActorId actorId, Runnable continuation) {
@@ -850,7 +890,7 @@ public final class ActorRuntime implements AutoCloseable {
             if (admitted) cell.schedule();
             return admitted;
         } finally {
-            if (!admitted) cell.releaseMailboxSlot();
+            if (!admitted) cell.releaseMailboxSlot(true);
         }
     }
 
@@ -924,6 +964,361 @@ public final class ActorRuntime implements AutoCloseable {
         }
     }
 
+    /**
+     * Unforgeable join authority for one ActorGroup. Capabilities may cross
+     * actor mailboxes but are runtime-affine and cannot be reconstructed from a
+     * group id.
+     */
+    public final class ActorGroupJoinCapability {
+        private final ActorGroupId groupId;
+        private final UUID secret;
+
+        private ActorGroupJoinCapability(ActorGroupId groupId, UUID secret) {
+            this.groupId = Objects.requireNonNull(groupId, "groupId");
+            this.secret = Objects.requireNonNull(secret, "secret");
+        }
+
+        public ActorGroupId groupId() { return groupId; }
+
+        private boolean ownedBy(ActorRuntime runtime) {
+            return ActorRuntime.this == runtime;
+        }
+
+        /**
+         * Resolve this capability in its owning runtime. Possessing the
+         * capability does not itself grant event access until the actor joins.
+         */
+        public ActorGroup group() {
+            requireCallerRuntimeAffinity("resolve an ActorGroup capability");
+            ActorGroup group = actorGroups.get(groupId);
+            if (group == null || group.closed()) {
+                throw new IllegalStateException("ActorGroup is closed: " + groupId);
+            }
+            group.requireCapability(this);
+            return group;
+        }
+
+        /**
+         * Join the current actor and return the group handle for immediate use.
+         */
+        public ActorGroup join() {
+            ActorGroup group = group();
+            group.joinCurrent(this);
+            return group;
+        }
+
+        @Override
+        public String toString() {
+            return "ActorGroupJoinCapability[" + groupId.value() + "]";
+        }
+    }
+
+    /**
+     * Cooperation domain orthogonal to the supervision tree.
+     *
+     * <p>An ActorGroup owns membership/capability state and one runtime event
+     * bus. It does not own a dispatcher and is not itself an actor, so group
+     * communication never serializes through a central mailbox.</p>
+     */
+    public final class ActorGroup implements AutoCloseable {
+        private final ActorGroupId id;
+        private final ActorId creator;
+        private final int memberLimit;
+        private final int eventTopicLimit;
+        private final Set<ActorId> members = ConcurrentHashMap.newKeySet();
+        private final AtomicBoolean groupClosed = new AtomicBoolean();
+        private final Object authorityLock = new Object();
+        private final ActorEventBus eventBus;
+        private UUID joinSecret = UUID.randomUUID();
+
+        private ActorGroup(
+                ActorGroupId id,
+                ActorId creator,
+                IsolatePolicy creatorPolicy) {
+            this.id = Objects.requireNonNull(id, "id");
+            this.creator = creator;
+            Objects.requireNonNull(creatorPolicy, "creatorPolicy");
+            this.memberLimit = Math.max(
+                    1,
+                    Math.min(
+                            dispatcherConfig.maxActors(),
+                            creatorPolicy.maxMailboxMessages()));
+            this.eventTopicLimit = Math.max(
+                    1,
+                    Math.min(
+                            MAX_EVENT_TOPICS_PER_GROUP,
+                            creatorPolicy.maxMailboxMessages()));
+            this.eventBus = new ActorEventBus(ActorRuntime.this, this);
+            if (creator != null) members.add(creator);
+        }
+
+        public ActorGroupId id() { return id; }
+
+        public Optional<ActorId> creatorId() {
+            requireObserver("inspect ActorGroup creator");
+            return Optional.ofNullable(creator);
+        }
+
+        public boolean closed() { return groupClosed.get(); }
+
+        public int memberCount() {
+            requireObserver("inspect ActorGroup membership");
+            return members.size();
+        }
+
+        public Set<ActorId> memberIds() {
+            requireObserver("inspect ActorGroup membership");
+            return Set.copyOf(members);
+        }
+
+        int eventTopicLimit() { return eventTopicLimit; }
+
+        public ActorEventBus events() {
+            requireObserver("access ActorGroup events");
+            requireOpen();
+            return eventBus;
+        }
+
+        public ActorGroupJoinCapability joinCapability() {
+            requireManager("issue ActorGroup join capabilities");
+            synchronized (authorityLock) {
+                requireOpen();
+                return new ActorGroupJoinCapability(id, joinSecret);
+            }
+        }
+
+        /**
+         * Invalidates previously issued join capabilities without disturbing
+         * actors that are already members. Rotation and join admission are
+         * linearized on authorityLock so a stale capability cannot validate
+         * immediately before rotation and join immediately after it.
+         */
+        public ActorGroupJoinCapability rotateJoinCapability() {
+            requireManager("rotate ActorGroup join capabilities");
+            synchronized (authorityLock) {
+                requireOpen();
+                joinSecret = UUID.randomUUID();
+                return new ActorGroupJoinCapability(id, joinSecret);
+            }
+        }
+
+        public void joinCurrent(ActorGroupJoinCapability capability) {
+            ActorId actorId = currentActorId().orElseThrow(() ->
+                    new SecurityException("joinCurrent requires an actor execution context"));
+            joinId(actorId, capability);
+        }
+
+        public void join(ActorRef<?> ref, ActorGroupJoinCapability capability) {
+            Objects.requireNonNull(ref, "ref");
+            requireCallerRuntimeAffinity("join an ActorGroup");
+            if (!ref.ownedBy(ActorRuntime.this)) {
+                throw new IllegalArgumentException("ActorRef belongs to a different ActorRuntime");
+            }
+            ActorId caller = currentActorId().orElse(null);
+            if (caller != null && !caller.equals(ref.id())) {
+                throw new SecurityException("actor code may only join itself to an ActorGroup");
+            }
+            joinId(ref.id(), capability);
+        }
+
+        private void joinId(ActorId actorId, ActorGroupJoinCapability capability) {
+            synchronized (authorityLock) {
+                requireOpen();
+                requireCapabilityLocked(capability);
+                ActorCell<?> cell = actors.get(actorId);
+                if (cell == null || cell.stopped.get()) {
+                    throw new IllegalStateException("actor is not alive: " + actorId);
+                }
+                if (!members.contains(actorId) && members.size() >= memberLimit) {
+                    throw new IllegalStateException(
+                            "ActorGroup member limit exceeded: maximum " + memberLimit);
+                }
+                members.add(actorId);
+                if (groupClosed.get() || cell.stopped.get()) {
+                    members.remove(actorId);
+                    throw new IllegalStateException("ActorGroup or actor closed during join");
+                }
+            }
+        }
+
+        public void leaveCurrent() {
+            ActorId actorId = requireCurrentMember("leave an ActorGroup");
+            leaveId(actorId);
+        }
+
+        public boolean contains(ActorRef<?> ref) {
+            Objects.requireNonNull(ref, "ref");
+            requireObserver("inspect ActorGroup membership");
+            if (!ref.ownedBy(ActorRuntime.this)) return false;
+            return members.contains(ref.id());
+        }
+
+        private void requireObserver(String operation) {
+            requireCallerRuntimeAffinity(operation);
+            ActorId caller = currentActorId().orElse(null);
+            if (caller != null && !isMember(caller)) {
+                throw new SecurityException(
+                        operation + " requires ActorGroup membership");
+            }
+        }
+
+        boolean isMember(ActorId actorId) {
+            return !groupClosed.get() && members.contains(actorId);
+        }
+
+        ActorId requireCurrentMember(String operation) {
+            requireCallerRuntimeAffinity(operation);
+            ActorId actorId = currentActorId().orElseThrow(() ->
+                    new SecurityException(operation + " requires an actor execution context"));
+            if (!isMember(actorId)) {
+                throw new SecurityException("actor " + actorId + " is not a member of ActorGroup " + id);
+            }
+            return actorId;
+        }
+
+        ActorId currentMemberOrSystem(String operation) {
+            requireCallerRuntimeAffinity(operation);
+            ActorId actorId = currentActorId().orElse(null);
+            if (actorId != null && !isMember(actorId)) {
+                throw new SecurityException("actor " + actorId + " is not a member of ActorGroup " + id);
+            }
+            return actorId;
+        }
+
+        void requireManager(String operation) {
+            requireCallerRuntimeAffinity(operation);
+            ActorId caller = currentActorId().orElse(null);
+            if (caller != null && !Objects.equals(caller, creator)) {
+                throw new SecurityException(
+                        operation + " requires the ActorGroup creator or host/supervisor");
+            }
+        }
+
+        void requireSupervisor(String operation) {
+            requireSupervisorContext(operation);
+        }
+
+        private void requireCapability(ActorGroupJoinCapability capability) {
+            synchronized (authorityLock) {
+                requireCapabilityLocked(capability);
+            }
+        }
+
+        private void requireCapabilityLocked(ActorGroupJoinCapability capability) {
+            Objects.requireNonNull(capability, "capability");
+            if (!capability.ownedBy(ActorRuntime.this)
+                    || !id.equals(capability.groupId)
+                    || !joinSecret.equals(capability.secret)) {
+                throw new SecurityException("invalid or revoked ActorGroup join capability");
+            }
+        }
+
+        private void leaveId(ActorId actorId) {
+            if (members.remove(actorId)) eventBus.removeActor(actorId);
+        }
+
+        private void actorTerminated(ActorId actorId) {
+            leaveId(actorId);
+            if (Objects.equals(creator, actorId)) closeFromRuntime();
+        }
+
+        private void requireOpen() {
+            if (groupClosed.get() || closed.get()) {
+                throw new IllegalStateException("ActorGroup is closed: " + id);
+            }
+        }
+
+        @Override
+        public void close() {
+            requireManager("close an ActorGroup");
+            closeFromRuntime();
+        }
+
+        private void closeFromRuntime() {
+            synchronized (authorityLock) {
+                if (!groupClosed.compareAndSet(false, true)) return;
+                // Revocation is part of close: even a capability held by code
+                // racing teardown can no longer pass validation.
+                joinSecret = UUID.randomUUID();
+            }
+            eventBus.closeFromGroup();
+            members.clear();
+            actorGroups.remove(id, this);
+        }
+
+        @Override
+        public String toString() {
+            return "ActorGroup[" + id.value() + ",closed=" + groupClosed.get() + "]";
+        }
+    }
+
+    /**
+     * Create a cooperation domain. An actor-created group is structurally owned
+     * by that actor and closes when its creator terminates. Host-created groups
+     * live until explicitly closed or the ActorRuntime closes.
+     */
+    public int actorGroupCount() {
+        return actorGroups.size();
+    }
+
+    /**
+     * Resolve a live group by id. Actor callers must already be members; the
+     * host/supervisor may inspect any group in its runtime.
+     */
+    public ActorGroup actorGroup(ActorGroupId id) {
+        Objects.requireNonNull(id, "id");
+        requireCallerRuntimeAffinity("access an ActorGroup");
+        ActorGroup group = actorGroups.get(id);
+        if (group == null || group.closed()) {
+            throw new IllegalArgumentException("unknown or closed ActorGroup: " + id);
+        }
+        group.currentMemberOrSystem("access ActorGroup " + id);
+        return group;
+    }
+
+    public ActorGroup createActorGroup() {
+        requireCallerRuntimeAffinity("create an ActorGroup");
+        if (closed.get()) throw new IllegalStateException("actor runtime is closed");
+
+        ActorId creator = currentActorId().orElse(null);
+        IsolatePolicy creatorPolicy =
+                currentActorPolicy() == null ? policyCeiling : currentActorPolicy();
+        if (creator != null && !actors.containsKey(creator)) {
+            throw new IllegalStateException("current actor is no longer registered");
+        }
+
+        synchronized (runtimeLifecycleLock) {
+            if (closed.get()) throw new IllegalStateException("actor runtime is closed");
+            if (actorGroups.size() >= dispatcherConfig.maxActors()) {
+                throw new IllegalStateException(
+                        "ActorGroup runtime limit exceeded: maximum "
+                                + dispatcherConfig.maxActors());
+            }
+            if (creator != null) {
+                long ownedGroups = actorGroups.values().stream()
+                        .filter(group -> creator.equals(group.creator))
+                        .filter(group -> !group.closed())
+                        .count();
+                int ownerLimit = Math.max(
+                        1,
+                        Math.min(
+                                MAX_ACTOR_GROUPS_PER_ACTOR,
+                                creatorPolicy.maxMailboxMessages()));
+                if (ownedGroups >= ownerLimit) {
+                    throw new IllegalStateException(
+                            "actor-owned ActorGroup limit exceeded for "
+                                    + creator + ": maximum " + ownerLimit);
+                }
+            }
+            while (true) {
+                ActorGroupId id = ActorGroupId.create();
+                ActorGroup group =
+                        new ActorGroup(id, creator, creatorPolicy);
+                if (actorGroups.putIfAbsent(id, group) == null) return group;
+            }
+        }
+    }
+
     private void requireCallerRuntimeAffinity(String operation) {
         ActorRuntime caller = currentActorRuntime();
         if (caller != null && caller != this) {
@@ -937,6 +1332,29 @@ public final class ActorRuntime implements AutoCloseable {
             throw new SecurityException(
                     "actor code cannot " + operation + "; this operation belongs to the host/supervisor");
         }
+    }
+
+    private void requireActorLifecycleAuthority(
+            ActorRef<?> target,
+            String operation) {
+        ActorCell<?> caller = currentActor.get();
+        if (caller == null) return; // host/supervisor authority
+
+        ActorCell<?> targetCell = actors.get(target.id());
+        if (targetCell == null) return; // already terminated; operation is a no-op
+        if (caller == targetCell) return;
+
+        for (ActorCell<?> ancestor = targetCell.parent;
+             ancestor != null;
+             ancestor = ancestor.parent) {
+            if (ancestor == caller) return;
+        }
+
+        throw new SecurityException(
+                "actor " + caller.ref.id()
+                        + " cannot " + operation + " unrelated actor "
+                        + target.id()
+                        + "; actor lifecycle authority is limited to self and structured descendants");
     }
 
     private IsolatePolicy defaultSpawnPolicy() {
@@ -1441,6 +1859,9 @@ public final class ActorRuntime implements AutoCloseable {
 
     private void unregisterActor(ActorCell<?> cell) {
         if (actors.remove(cell.ref.id(), cell)) {
+            for (ActorGroup group : List.copyOf(actorGroups.values())) {
+                group.actorTerminated(cell.ref.id());
+            }
             int remaining = actorCount.decrementAndGet();
             if (remaining < 0) {
                 actorCount.incrementAndGet();
@@ -1596,15 +2017,16 @@ public final class ActorRuntime implements AutoCloseable {
         if (!ref.ownedBy(this)) {
             throw new IllegalArgumentException("ActorRef belongs to a different ActorRuntime");
         }
+        requireActorLifecycleAuthority(ref, "stop");
         ActorCell<?> cell = actors.get(ref.id());
         if (cell == null) return;
 
         cell.stop();
 
-        // A host/supervisor stop is a synchronization point: once it returns,
-        // the actor and its structured children have finalized. A self-stop
-        // cannot wait for itself; endTurn() completes the unwind later.
-        if (currentActor.get() == cell) return;
+        // Only a host/supervisor stop is a synchronization point. Actor turns
+        // may stop self/descendants but must never park a bounded carrier while
+        // waiting for another actor to finalize.
+        if (currentActor.get() != null) return;
 
         try {
             cell.awaitFinalized(CLOSE_WAIT_NANOS);
@@ -1629,9 +2051,13 @@ public final class ActorRuntime implements AutoCloseable {
         requireCallerRuntimeAffinity("cancel actors");
         Objects.requireNonNull(ref, "ref");
         Objects.requireNonNull(mode, "mode");
+        if (mode == CancellationMode.FORCE_ISOLATED) {
+            requireSupervisorContext("force-cancel isolated actors");
+        }
         if (!ref.ownedBy(this)) {
             throw new IllegalArgumentException("ActorRef belongs to a different ActorRuntime");
         }
+        requireActorLifecycleAuthority(ref, "cancel");
 
         ActorCell<?> cell = actors.get(ref.id());
         if (cell == null || cell.finalized()) return false;
@@ -1758,7 +2184,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
         cell.schedule();
         } finally {
-            if (!mailboxSlotTransferred) cell.releaseMailboxSlot();
+            if (!mailboxSlotTransferred) cell.releaseMailboxSlot(false);
         }
     }
 
@@ -1772,10 +2198,86 @@ public final class ActorRuntime implements AutoCloseable {
         if (cell != null && cell.stopped.get()) {
             throw new ActorCancellationSignal("actor execution stopped");
         }
-        if (Thread.currentThread().isInterrupted()) {
-            throw new ActorCancellationSignal("actor execution interrupted");
-        }
+
+        // Carrier identity is not actor identity. A shared carrier thread may
+        // be interrupted by executor shutdown, host code, or unrelated runtime
+        // machinery; that interrupt must never be reinterpreted as cancellation
+        // of whichever actor happens to be multiplexed onto the carrier now.
+        // Structured actor cancellation is represented by ActorCell/runtime
+        // state above. Non-cooperative untrusted termination belongs to the
+        // host-owned revocable isolate boundary used by FORCE_ISOLATED.
         Thread.yield();
+    }
+
+    static final class ActorGroupEventReservation implements AutoCloseable {
+        private final AtomicReference<ActorRuntime> owner;
+        private final long bytes;
+
+        private ActorGroupEventReservation(ActorRuntime owner, long bytes) {
+            this.owner = new AtomicReference<>(Objects.requireNonNull(owner, "owner"));
+            if (bytes < 0) throw new IllegalArgumentException("bytes cannot be negative");
+            this.bytes = bytes;
+        }
+
+        long bytes() { return bytes; }
+
+        @Override
+        public void close() {
+            ActorRuntime runtime = owner.getAndSet(null);
+            if (runtime != null) runtime.releaseSharedRuntimeBytes(bytes);
+        }
+    }
+
+    record FrozenActorGroupEventPayload(
+            Object value,
+            ActorGroupEventReservation reservation) {
+        FrozenActorGroupEventPayload {
+            Objects.requireNonNull(value, "value");
+            Objects.requireNonNull(reservation, "reservation");
+        }
+    }
+
+    /**
+     * Freeze a data-only ActorGroup event payload once and reserve its retained
+     * bus memory against the same OresVM aggregate budget used by actor
+     * mailboxes/shared runtime state. A bounded preflight runs before the deep
+     * copy so an oversized publication cannot allocate its full immutable copy
+     * before policy admission.
+     */
+    FrozenActorGroupEventPayload freezeActorGroupEventPayload(Object value) {
+        requireCallerRuntimeAffinity("publish ActorGroup event payloads");
+        if (closed.get()) throw new IllegalStateException("actor runtime is closed");
+        Objects.requireNonNull(value, "Oreslang events cannot carry null; use Option<T>");
+
+        validateMessageGraph(value);
+        rejectDataFreezeCapabilities(value, new IdentityHashMap<>(), 0);
+
+        IsolatePolicy caller = currentActorPolicy();
+        long senderLimit =
+                caller == null ? policyCeiling.maxHeapBytes() : caller.maxHeapBytes();
+        long runtimeRemaining =
+                Math.max(0L, policyCeiling.maxHeapBytes() - actorMemoryBytes());
+        long preflightLimit = Math.min(senderLimit, runtimeRemaining);
+        long estimatedBytes = estimateFrozenBytes(value);
+        if (estimatedBytes > preflightLimit) {
+            throw new IllegalStateException(
+                    "ActorGroup event payload exceeds available memory policy: estimated="
+                            + estimatedBytes + " senderLimit=" + senderLimit
+                            + " runtimeRemaining=" + runtimeRemaining);
+        }
+
+        Object frozen = freeze(value);
+        long bytes = estimateFrozenBytes(frozen);
+        if (bytes > senderLimit) {
+            throw new IllegalStateException(
+                    "ActorGroup event payload exceeds sender memory policy: bytes="
+                            + bytes + " limit=" + senderLimit);
+        }
+
+        reserveSharedRuntimeBytes(bytes, "ActorGroup event payload");
+        return new FrozenActorGroupEventPayload(
+                frozen,
+                new ActorGroupEventReservation(this, bytes));
     }
 
     @SuppressWarnings("unchecked")
@@ -1809,7 +2311,16 @@ public final class ActorRuntime implements AutoCloseable {
             IdentityHashMap<Object, Boolean> visiting,
             int depth) {
         requireGraphDepth(depth);
-        if (value == null || isScalar(value) || value instanceof ActorRuntime.ActorRef<?>) return;
+        if (value == null || isScalar(value)
+                || value instanceof ActorRuntime.ActorRef<?>
+                || value instanceof ActorRuntime.ActorGroupJoinCapability) return;
+        if (value instanceof ChannelRuntime.Channel<?>
+                || value instanceof ChannelRuntime.SelectCase
+                || value instanceof ChannelRuntime.SelectSet) {
+            throw new IllegalArgumentException(
+                    "Channel/SelectSet capabilities are execution-domain local and cannot cross actor mailboxes; "
+                            + "send data through ActorRef/mailbox transport instead");
+        }
         if (value instanceof OresMutex.Local<?>) {
             throw new IllegalArgumentException("Mutex<T> is actor-local state and cannot cross actor mailboxes");
         }
@@ -1880,6 +2391,10 @@ public final class ActorRuntime implements AutoCloseable {
                         "SharedMutex payload contains ActorRef from another ActorRuntime");
             }
             return;
+        }
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability) {
+            throw new IllegalArgumentException(
+                    "SharedMutex payload cannot contain ActorGroup join capabilities");
         }
         if (value instanceof Shared<?> shared) {
             if (!shared.ownedBy(this)) {
@@ -1959,6 +2474,13 @@ public final class ActorRuntime implements AutoCloseable {
             }
             return;
         }
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability capability) {
+            if (!capability.ownedBy(this)) {
+                throw new IllegalArgumentException(
+                        "ActorGroup capability belongs to a different ActorRuntime");
+            }
+            return;
+        }
         if (value instanceof Shared<?> shared) {
             requireOwnedActorRefs(shared.value(), visiting, depth + 1);
             return;
@@ -2005,6 +2527,13 @@ public final class ActorRuntime implements AutoCloseable {
             if (!ref.ownedBy(this)) {
                 throw new IllegalArgumentException(
                         "ActorRef belongs to a different ActorRuntime; cross-runtime actor channels require an explicit bridge");
+            }
+            return;
+        }
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability capability) {
+            if (!capability.ownedBy(this)) {
+                throw new IllegalArgumentException(
+                        "ActorGroup capability belongs to a different ActorRuntime");
             }
             return;
         }
@@ -2201,6 +2730,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
         if (value == null || isScalar(value)
                 || value instanceof ActorRuntime.ActorRef<?>
+                || value instanceof ActorRuntime.ActorGroupJoinCapability
                 || value instanceof Shared<?>
                 || value instanceof SyncCell<?>
                 || value instanceof OresMutex.Shared<?>) {
@@ -2274,6 +2804,7 @@ public final class ActorRuntime implements AutoCloseable {
         requireGraphDepth(depth);
         if (value == null || isScalar(value)) return;
         if (value instanceof ActorRuntime.ActorRef<?>
+                || value instanceof ActorRuntime.ActorGroupJoinCapability
                 || value instanceof Shared<?>
                 || value instanceof SyncCell<?>
                 || value instanceof OresMutex.Lock<?>
@@ -2316,6 +2847,7 @@ public final class ActorRuntime implements AutoCloseable {
             return shared;
         }
         if (value instanceof ActorRuntime.ActorRef<?> ref) return ref;
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability capability) return capability;
         if (value instanceof ActorRuntime.SyncCell<?> cell) return cell;
         if (value instanceof OresMutex.Shared<?> sharedMutex) return sharedMutex;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
@@ -2383,6 +2915,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
         if (value instanceof Shared<?> shared) return isolateCopy(shared.value(), visiting, depth + 1);
         if (value instanceof ActorRuntime.ActorRef<?> ref) return ref;
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability capability) return capability;
 
         if (visiting.put(value, Boolean.TRUE) != null) {
             throw new IllegalArgumentException("cyclic values cannot cross private actor boundaries");
@@ -2437,6 +2970,9 @@ public final class ActorRuntime implements AutoCloseable {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
         }
         if (value instanceof ActorRuntime.ActorRef<?>) return requireWithinLimit(48L, limit);
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability) {
+            return requireWithinLimit(48L, limit);
+        }
 
         if (visiting.put(value, Boolean.TRUE) != null) {
             throw new IllegalArgumentException("cyclic values cannot cross actor boundaries");
@@ -2504,6 +3040,7 @@ public final class ActorRuntime implements AutoCloseable {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
         }
         if (value instanceof ActorRuntime.ActorRef<?>) return 48L;
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability) return 48L;
         if (seen.put(value, Boolean.TRUE) != null) return 0L;
 
         long bytes = 24L;
@@ -2555,6 +3092,9 @@ public final class ActorRuntime implements AutoCloseable {
             return estimatePrivateTransportBytes(shared.value(), visiting, depth + 1, limit);
         }
         if (value instanceof ActorRuntime.ActorRef<?>) return requireWithinLimit(48L, limit);
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability) {
+            return requireWithinLimit(48L, limit);
+        }
 
         if (visiting.put(value, Boolean.TRUE) != null) {
             throw new IllegalArgumentException("cyclic values cannot cross private actor boundaries");
@@ -2616,7 +3156,7 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof BigInteger integer) return 32L + integer.toByteArray().length;
         if (value instanceof BigDecimal decimal) return 48L + decimal.unscaledValue().toByteArray().length;
         if (value instanceof String string) return 40L + (long) string.length() * 2L;
-        if (value instanceof UUID || value instanceof ActorId) return 40L;
+        if (value instanceof UUID || value instanceof ActorId || value instanceof ActorGroupId) return 40L;
         if (value instanceof Enum<?>) return 24L;
         return -1L;
     }
@@ -2667,9 +3207,10 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof BigInteger integer) return 32L + integer.toByteArray().length;
         if (value instanceof BigDecimal decimal) return 48L + decimal.unscaledValue().toByteArray().length;
         if (value instanceof String string) return 40L + (long) string.length() * 2L;
-        if (value instanceof UUID || value instanceof ActorId) return 40L;
+        if (value instanceof UUID || value instanceof ActorId || value instanceof ActorGroupId) return 40L;
         if (value instanceof Enum<?>) return 24L;
         if (value instanceof ActorRuntime.ActorRef<?>) return 48L;
+        if (value instanceof ActorRuntime.ActorGroupJoinCapability) return 48L;
         if (value instanceof ActorRuntime.SyncCell<?>) return 64L;
         if (value instanceof OresMutex.Shared<?>) return 64L;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
@@ -2713,7 +3254,8 @@ public final class ActorRuntime implements AutoCloseable {
         return value == null || value instanceof String || value instanceof Boolean || value instanceof Character
                 || value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long
                 || value instanceof Float || value instanceof Double || value instanceof BigInteger || value instanceof BigDecimal
-                || value instanceof Enum<?> || value instanceof UUID || value instanceof ActorId;
+                || value instanceof Enum<?> || value instanceof UUID || value instanceof ActorId
+                || value instanceof ActorGroupId;
     }
 
     @Override
@@ -2729,9 +3271,11 @@ public final class ActorRuntime implements AutoCloseable {
         for (ActorCell<?> cell : snapshot) cell.stop();
 
         if (firstClose) {
-            // Interrupt carrier workers. Actor turns that deliberately consume
-            // the interrupt are still tracked below and prevent close from
-            // reporting success until they actually leave the runtime.
+            // Stop executor carriers so queued work is rejected/removed and
+            // blocked host-side executor operations can wake. This interrupt is
+            // backend shutdown mechanics only; it is never an actor
+            // cancellation identity. Every ActorCell above was already marked
+            // stopped through the structured runtime lifecycle.
             privateDispatcher.shutdownNow();
             sharedDispatcher.shutdownNow();
 
@@ -2777,6 +3321,8 @@ public final class ActorRuntime implements AutoCloseable {
             }
         }
 
+        for (ActorGroup group : List.copyOf(actorGroups.values())) group.closeFromRuntime();
+        actorGroups.clear();
         for (SyncCell<?> cell : List.copyOf(syncCells)) cell.invalidateFromRuntime();
         syncCells.clear();
         for (Shared<?> shared : List.copyOf(sharedValues)) shared.closeFromRuntime();
@@ -2878,14 +3424,16 @@ public final class ActorRuntime implements AutoCloseable {
         private final boolean trustedFactory;
         private final ActorCell<?> parent;
         private final Set<ActorCell<?>> children = ConcurrentHashMap.newKeySet();
-        private final Set<OresFuture<?>> pendingContinuations = ConcurrentHashMap.newKeySet();
+        private final Set<OresFuture<?>> pendingOperations = ConcurrentHashMap.newKeySet();
         /** Mailbox transport is a bounded Oreslang channel of runtime envelopes. */
         private final ChannelRuntime.Channel<MessageEnvelope> mailbox;
         private final ActorMemorySlice memorySlice;
         private final AtomicBoolean scheduled = new AtomicBoolean();
         private final AtomicBoolean stopped = new AtomicBoolean();
-        private final AtomicInteger queuedMessages = new AtomicInteger();
         private final AtomicLong sharedMailboxBytes = new AtomicLong();
+        private final Object mailboxAccountingLock = new Object();
+        private int queuedMessages;
+        private int queuedUserMessages;
         private final Object lifecycleLock = new Object();
         private final Object executionDomain = new Object();
         private int activeTurns;
@@ -2916,32 +3464,52 @@ public final class ActorRuntime implements AutoCloseable {
                     : null;
         }
 
+        private int mailboxCapacityWithControlHeadroom() {
+            return policy.maxMailboxMessages() >
+                            Integer.MAX_VALUE - INTERNAL_CONTINUATION_SLOTS
+                    ? Integer.MAX_VALUE
+                    : policy.maxMailboxMessages() + INTERNAL_CONTINUATION_SLOTS;
+        }
+
+        /**
+         * User-message capacity and runtime-control capacity are distinct.
+         * Continuations may consume only the reserved control headroom; they
+         * must never reduce the actor's configured user mailbox allowance.
+         */
         private boolean reserveMailboxSlot() {
-            while (true) {
-                int current = queuedMessages.get();
-                if (current >= policy.maxMailboxMessages()) return false;
-                if (queuedMessages.compareAndSet(current, current + 1)) return true;
+            synchronized (mailboxAccountingLock) {
+                if (queuedUserMessages >= policy.maxMailboxMessages()) return false;
+                if (queuedMessages >= mailboxCapacityWithControlHeadroom()) return false;
+                queuedUserMessages++;
+                queuedMessages++;
+                return true;
             }
         }
 
         private boolean reserveContinuationSlot() {
-            int limit = policy.maxMailboxMessages() >
-                            Integer.MAX_VALUE - INTERNAL_CONTINUATION_SLOTS
-                    ? Integer.MAX_VALUE
-                    : policy.maxMailboxMessages() + INTERNAL_CONTINUATION_SLOTS;
-            while (true) {
-                int current = queuedMessages.get();
-                if (current >= limit) return false;
-                if (queuedMessages.compareAndSet(current, current + 1)) return true;
+            synchronized (mailboxAccountingLock) {
+                if (queuedMessages >= mailboxCapacityWithControlHeadroom()) return false;
+                queuedMessages++;
+                return true;
             }
         }
 
-        private void releaseMailboxSlot() {
-            int remaining = queuedMessages.decrementAndGet();
-            if (remaining < 0) {
-                queuedMessages.incrementAndGet();
-                throw new IllegalStateException(
-                        "actor mailbox accounting underflow for " + ref.id());
+        private void releaseMailboxSlot(boolean continuation) {
+            synchronized (mailboxAccountingLock) {
+                if (queuedMessages <= 0) {
+                    throw new IllegalStateException(
+                            "actor mailbox accounting underflow for " + ref.id());
+                }
+                queuedMessages--;
+
+                if (!continuation) {
+                    if (queuedUserMessages <= 0) {
+                        queuedMessages++;
+                        throw new IllegalStateException(
+                                "actor user-mailbox accounting underflow for " + ref.id());
+                    }
+                    queuedUserMessages--;
+                }
             }
         }
 
@@ -3150,8 +3718,20 @@ public final class ActorRuntime implements AutoCloseable {
                 while (processed < dispatcherConfig.throughput() && !stopped.get()) {
                     MessageEnvelope envelope = mailbox.tryRead().orElse(null);
                     if (envelope == null) break;
-                    releaseMailboxSlot();
+                    releaseMailboxSlot(envelope.isContinuation());
                     try (envelope) {
+                        /*
+                         * Linearize queued-work start against stop/cancel.
+                         * If cancellation acquired lifecycleLock first, this
+                         * envelope is discarded and no new guest work begins.
+                         * If this gate wins first, the envelope is already-active
+                         * actor work; a later cancellation is observed at the
+                         * normal scheduler safepoints.
+                         */
+                        synchronized (lifecycleLock) {
+                            if (stopped.get() || finalized) break;
+                        }
+
                         if (envelope.isContinuation()) {
                             envelope.continuation().run();
                         } else {
@@ -3192,7 +3772,7 @@ public final class ActorRuntime implements AutoCloseable {
         private void drainMailboxReservations() {
             MessageEnvelope envelope;
             while ((envelope = mailbox.tryRead().orElse(null)) != null) {
-                releaseMailboxSlot();
+                releaseMailboxSlot(envelope.isContinuation());
                 envelope.close();
             }
         }
@@ -3222,8 +3802,8 @@ public final class ActorRuntime implements AutoCloseable {
                 else mailbox.close(cause);
                 drainMailboxReservations();
                 descendants = List.copyOf(children);
-                pending = List.copyOf(pendingContinuations);
-                pendingContinuations.clear();
+                pending = List.copyOf(pendingOperations);
+                pendingOperations.clear();
                 finalizeStopLocked();
                 lifecycleLock.notifyAll();
             }
