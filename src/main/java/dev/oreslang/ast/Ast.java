@@ -252,7 +252,7 @@ public final class Ast {
 
     public sealed interface Stmt permits BindingStmt, DestructureStmt, ReturnStmt, ExprStmt, DeferStmt,
             BlockStmt, BreakStmt, ContinueStmt, IfStmt, MatchStmt, SwitchStmt, TryStmt,
-            ForOfStmt, ForOfDestructureStmt, ForStmt, LoopStmt { }
+            ForOfStmt, ForOfDestructureStmt, ForStmt, LoopStmt, SelectStmt { }
 
     public record BindingStmt(BindingKind kind, TypeRef declaredType, String name, Expr initializer) implements Stmt { }
     public record DestructureBinding(BindingKind kind, String name) {
@@ -375,9 +375,57 @@ public final class Ast {
         public LoopStmt { body = List.copyOf(body); }
     }
 
+    public enum ChannelOperation { READ, WRITE, DEFAULT }
+    public enum WaitMode { BLOCKING, NONBLOCKING, IMMEDIATE }
+    public enum SelectPolicy { FAIR, PRIORITY, RANDOM }
+
+    public record SelectArm(
+            ChannelOperation operation,
+            Expr channel,
+            Expr value,
+            BindingKind bindingKind,
+            String bindingName,
+            List<Stmt> body) {
+        public SelectArm {
+            body = List.copyOf(body);
+            if (operation == ChannelOperation.DEFAULT) {
+                if (channel != null || value != null || bindingKind != null || bindingName != null) {
+                    throw new IllegalArgumentException("default select arm cannot carry channel/value/binding metadata");
+                }
+            } else {
+                if (channel == null) throw new IllegalArgumentException("channel select arm requires a channel");
+                if (operation == ChannelOperation.READ && value != null) {
+                    throw new IllegalArgumentException("read select arm cannot carry a write value");
+                }
+                if (operation == ChannelOperation.WRITE && value == null) {
+                    throw new IllegalArgumentException("write select arm requires a value");
+                }
+                if ((bindingKind == null) != (bindingName == null)) {
+                    throw new IllegalArgumentException("select binding kind/name must appear together");
+                }
+                if (operation == ChannelOperation.WRITE && bindingName != null) {
+                    throw new IllegalArgumentException("write select arm cannot bind a read value");
+                }
+            }
+        }
+    }
+
+    public record SelectStmt(
+            WaitMode mode,
+            SelectPolicy policy,
+            List<SelectArm> arms) implements Stmt {
+        public SelectStmt {
+            arms = List.copyOf(arms);
+            if (arms.isEmpty()) throw new IllegalArgumentException("select requires at least one arm");
+            long defaults = arms.stream().filter(arm -> arm.operation() == ChannelOperation.DEFAULT).count();
+            if (defaults > 1) throw new IllegalArgumentException("select permits at most one default arm");
+        }
+    }
+
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
             TypeTestExpr, PatternTestExpr, CastExpr,
-            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
+            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ChannelOpExpr, DynamicSelectExpr,
+            ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
     public record LiteralExpr(Object value) implements Expr { }
     public record Imaginary(double coefficient) { }
@@ -426,6 +474,39 @@ public final class Ast {
     }
 
     public record AwaitExpr(Expr expression) implements Expr { }
+
+    public record ChannelOpExpr(
+            ChannelOperation operation,
+            WaitMode mode,
+            Expr channel,
+            Expr value) implements Expr {
+        public ChannelOpExpr {
+            if (operation == ChannelOperation.DEFAULT) {
+                throw new IllegalArgumentException("default is not a standalone channel operation");
+            }
+            if (channel == null) throw new IllegalArgumentException("channel operation requires a channel");
+            if (operation == ChannelOperation.READ && value != null) {
+                throw new IllegalArgumentException("readch cannot carry a write value");
+            }
+            if (operation == ChannelOperation.WRITE && value == null) {
+                throw new IllegalArgumentException("writech requires a value");
+            }
+        }
+    }
+
+    /**
+     * Dynamic select operates on a runtime SelectSet or iterable/map of
+     * SelectCase values. Static select remains a statement so branch control
+     * flow (return/break/continue) is checked in its enclosing callable.
+     */
+    public record DynamicSelectExpr(
+            WaitMode mode,
+            SelectPolicy policy,
+            Expr cases) implements Expr {
+        public DynamicSelectExpr {
+            if (cases == null) throw new IllegalArgumentException("dynamic select requires a case collection");
+        }
+    }
 
     public record ListExpr(List<Expr> elements) implements Expr {
         public ListExpr { elements = List.copyOf(elements); }
