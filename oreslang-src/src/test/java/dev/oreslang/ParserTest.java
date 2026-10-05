@@ -227,11 +227,11 @@ final class ParserTest {
         assertEquals(3, actor.actorProtocolTypes().size());
         assertEquals("int", actor.actorProtocolTypes().getFirst().name());
 
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define class Bad extends Actor<String, void, String> as
                   pub receive(value: int): void { return; }
                 end
-                """));
+                """)));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define class Bad extends Actor<int, void> as

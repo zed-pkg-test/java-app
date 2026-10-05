@@ -29,7 +29,7 @@ final class ActorRuntimeTest {
             CountDownLatch laterProcessed = new CountDownLatch(1);
             List<String> events = java.util.Collections.synchronizedList(new ArrayList<>());
 
-            var ref = runtime.<String>spawnShared(factoryContext ->
+            var ref = runtime.<String>spawnShared(() ->
                     (message, turnContext) -> {
                         if (message.equals("wait")) {
                             events.add("start");
@@ -75,7 +75,7 @@ final class ActorRuntimeTest {
             CompletableFuture<Integer> gate = new CompletableFuture<>();
             CountDownLatch suspended = new CountDownLatch(1);
 
-            var ref = runtime.<String>spawnShared(factoryContext ->
+            var ref = runtime.<String>spawnShared(() ->
                     (message, turnContext) -> {
                         suspended.countDown();
                         turnContext.suspendOn(gate, (value, failure, resumeContext) -> {
