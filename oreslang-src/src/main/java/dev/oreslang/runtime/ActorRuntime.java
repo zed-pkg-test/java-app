@@ -2121,15 +2121,37 @@ public final class ActorRuntime implements AutoCloseable {
         rootTask.finishRootDeadline();
         if (!rootTasks.remove(rootTask)) return;
         dispatcherGroup.rootSlots.release();
-        synchronized (runtimeLifecycleLock) {
-            int remaining = activeRootTasks.decrementAndGet();
-            if (remaining < 0) {
-                activeRootTasks.incrementAndGet();
-                throw new IllegalStateException("root task lifecycle accounting underflow");
+
+        RuntimeException runtimeFailure = null;
+        Error errorFailure = null;
+        try {
+            // Keep activeRootTasks published until the code-generation pin has
+            // actually been released. Runtime/VM teardown must not observe
+            // quiescence while this logical task can still keep a draining
+            // Graal Context alive.
+            rootTask.releaseGenerationLease();
+        } catch (RuntimeException failure) {
+            runtimeFailure = failure;
+        } catch (Error failure) {
+            errorFailure = failure;
+        } finally {
+            synchronized (runtimeLifecycleLock) {
+                int remaining = activeRootTasks.decrementAndGet();
+                if (remaining < 0) {
+                    activeRootTasks.incrementAndGet();
+                    IllegalStateException underflow =
+                            new IllegalStateException(
+                                    "root task lifecycle accounting underflow");
+                    if (errorFailure != null) errorFailure.addSuppressed(underflow);
+                    else if (runtimeFailure != null) runtimeFailure.addSuppressed(underflow);
+                    else runtimeFailure = underflow;
+                }
+                runtimeLifecycleLock.notifyAll();
             }
-            runtimeLifecycleLock.notifyAll();
         }
-        rootTask.releaseGenerationLease();
+
+        if (errorFailure != null) throw errorFailure;
+        if (runtimeFailure != null) throw runtimeFailure;
     }
 
     private final class RootTask<T> implements Runnable {

@@ -848,4 +848,73 @@ final class OresVMTest {
     }
 
 
+    @Test
+    void rootTaskQuiescencePublishesOnlyAfterGenerationLeaseRelease() throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(1),
+                0,
+                16);
+
+        OresVM vm = OresVM.dedicated(config);
+        CountDownLatch leaseCloseEntered = new CountDownLatch(1);
+        CountDownLatch allowLeaseClose = new CountDownLatch(1);
+        AtomicInteger leaseReleases = new AtomicInteger();
+        ActorRuntime runtime = vm.newActorRuntime(
+                IsolatePolicy.developer(),
+                ActorRuntime.TurnExecutor.direct(),
+                () -> () -> {
+                    leaseCloseEntered.countDown();
+                    try {
+                        allowLeaseClose.await();
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(
+                                "generation lease release was interrupted",
+                                interrupted);
+                    }
+                    leaseReleases.incrementAndGet();
+                });
+
+        try {
+            OresFuture<Integer> task =
+                    runtime.submitAsyncRootTask(() -> 7);
+            assertEquals(7, task.get(2, TimeUnit.SECONDS));
+            assertTrue(
+                    leaseCloseEntered.await(2, TimeUnit.SECONDS),
+                    "root finalization must reach generation lease release");
+
+            Field activeRootTasksField =
+                    ActorRuntime.class.getDeclaredField("activeRootTasks");
+            activeRootTasksField.setAccessible(true);
+            AtomicInteger activeRootTasks =
+                    (AtomicInteger) activeRootTasksField.get(runtime);
+
+            assertEquals(
+                    1,
+                    activeRootTasks.get(),
+                    "runtime must remain non-quiescent while the generation lease is still closing");
+
+            allowLeaseClose.countDown();
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (activeRootTasks.get() != 0
+                    && System.nanoTime() - deadline < 0) {
+                Thread.onSpinWait();
+            }
+
+            assertEquals(0, activeRootTasks.get());
+            assertEquals(1, leaseReleases.get());
+        } finally {
+            allowLeaseClose.countDown();
+            try {
+                runtime.close();
+            } finally {
+                vm.shutdownNow();
+            }
+        }
+    }
+
+
 }
