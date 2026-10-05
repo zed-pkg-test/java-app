@@ -152,7 +152,7 @@ public final class IncrementalCompiler {
             abi.append(klass.actorKind()).append(" class ").append(klass.name());
             appendGenerics(abi, klass.genericParameters());
             if (!klass.actorProtocolTypes().isEmpty()) {
-                abi.append(" actor-protocol<");
+                abi.append(" actor-contract<");
                 for (Ast.TypeRef protocolType : klass.actorProtocolTypes()) {
                     abi.append(typeRef(protocolType)).append(',');
                 }
@@ -170,8 +170,13 @@ public final class IncrementalCompiler {
                         .append(' ').append(field.name()).append('\n');
             }
             for (Ast.MethodDecl method : klass.methods()) {
-                if (method.visibility() != Ast.Visibility.PUBLIC) continue;
-                abi.append(method.isStatic() ? " static-fnc " : " method ")
+                boolean actorConstructor = klass.actorKind() != Ast.ActorKind.NONE
+                        && !method.isStatic()
+                        && method.name().equals("constructor");
+                if (method.visibility() != Ast.Visibility.PUBLIC && !actorConstructor) continue;
+                abi.append(actorConstructor
+                                ? " actor-constructor "
+                                : (method.isStatic() ? " static-fnc " : " method "))
                         .append(method.name());
                 appendGenerics(abi, method.genericParameters());
                 appendParams(abi, method.parameters());
