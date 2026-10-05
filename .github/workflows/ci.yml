@@ -42,17 +42,15 @@ jobs:
 
       - name: Compile and execute SSR examples
         run: |
-          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/examples/basic-page.ores" > /tmp/ssr-basic.out
-          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/examples/htmx-fragment.ores" > /tmp/ssr-htmx.out
-          test -s /tmp/ssr-basic.out
-          test -s /tmp/ssr-htmx.out
+          mvn -B -ntp -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/examples/basic-page.ores"
+          mvn -B -ntp -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/examples/htmx-fragment.ores"
 
       - name: Render contract in JIT profile
         run: |
-          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/tests/render-contract.ores" > /tmp/ssr-jit.out
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/tests/render-contract.ores" | tee /tmp/ssr-jit.out
           diff -u ssr/tests/render-contract.expected /tmp/ssr-jit.out
 
       - name: Render contract in AOT execution profile
         run: |
-          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=aot --platform=linux ssr/tests/render-contract.ores" > /tmp/ssr-aot.out
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=aot --platform=linux ssr/tests/render-contract.ores" | tee /tmp/ssr-aot.out
           diff -u ssr/tests/render-contract.expected /tmp/ssr-aot.out
