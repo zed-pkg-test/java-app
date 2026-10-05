@@ -350,7 +350,7 @@ public final class Parser {
         }
         consume(END, "expected 'end' to close class " + name);
         if (actorKind != Ast.ActorKind.NONE) {
-            validateActorReceiveContract(name, methods, actorProtocolTypes);
+            validateActorReceiveContract(name, methods, parents, actorProtocolTypes);
         }
         return new Ast.ClassDecl(
                 name, isAbstract, actorKind, generics, parents, interfaces, fields, methods, actorProtocolTypes);
@@ -410,7 +410,7 @@ public final class Parser {
         consume(terminator, braceStyle
                 ? "expected '}' to close actor " + name
                 : "expected 'end' to close actor " + name);
-        validateActorReceiveContract(name, methods, actorProtocolTypes);
+        validateActorReceiveContract(name, methods, parents, actorProtocolTypes);
         return new Ast.ClassDecl(
                 name, false, actorKind, generics, parents, interfaces, fields, methods, actorProtocolTypes);
     }
@@ -523,15 +523,23 @@ public final class Parser {
     private void validateActorReceiveContract(
             String actorName,
             List<Ast.MethodDecl> methods,
+            List<Ast.TypeRef> parents,
             List<Ast.TypeRef> actorProtocolTypes) {
         List<Ast.MethodDecl> receives = methods.stream()
                 .filter(method -> !method.isStatic()
                         && method.visibility() == Ast.Visibility.PUBLIC
                         && method.name().equals("receive"))
                 .toList();
-        if (receives.size() != 1) {
+
+        if (receives.size() > 1) {
             throw error(previous(),
-                    "actor '" + actorName + "' must implement exactly one public receive(message) method");
+                    "actor '" + actorName
+                            + "' cannot declare more than one public receive(message) method");
+        }
+        if (receives.isEmpty() && parents.isEmpty()) {
+            throw error(previous(),
+                    "actor '" + actorName
+                            + "' must implement public receive(message) or inherit it from an actor parent");
         }
 
         long otherPublic = methods.stream()
@@ -546,7 +554,13 @@ public final class Parser {
                             + "' may expose only the public receive(message) mailbox ingress");
         }
 
-        if (actorProtocolTypes.size() == 3) {
+        /*
+         * The parser can validate a local receive against an intrinsic
+         * Actor<Message, Reply, Error> contract immediately. If receive is
+         * inherited, defer exact effective-method resolution and generic
+         * substitution to TypeChecker, which has the parent declarations.
+         */
+        if (!receives.isEmpty() && actorProtocolTypes.size() == 3) {
             Ast.MethodDecl receive = receives.getFirst();
             if (!sameType(
                     receive.parameters().getFirst().type(),
