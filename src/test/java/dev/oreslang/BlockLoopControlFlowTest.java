@@ -35,6 +35,65 @@ final class BlockLoopControlFlowTest {
     }
 
     @Test
+    void blockHasIndependentShadowingAndDeferLifetime() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  val value = "outer";
+                  block {
+                    val value = "inner";
+                    stdio.stdout.write(value);
+                    defer stdio.stdout.write("-defer");
+                  }
+                  stdio.stdout.write("-");
+                  stdio.stdout.write(value);
+                }
+                """);
+
+        assertEquals("inner-defer-outer", output);
+    }
+
+    @Test
+    void forOfBreakAndContinueTargetTheIteratorLoop() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  for (val item of arr[1, 2, 3, 4]) {
+                    if item == 2 {
+                      continue;
+                    }
+                    stdio.stdout.write(item);
+                    if item == 3 {
+                      break;
+                    }
+                  }
+                }
+                """);
+
+        assertEquals("13", output);
+    }
+
+    @Test
+    void blockAndLoopPreserveProperTailCallPosition() throws Exception {
+        String output = run("""
+                fnc countdown(int remaining): int {
+                  block {
+                    if remaining == 0 {
+                      return 7;
+                    }
+                    loop {
+                      return countdown(remaining - 1);
+                    }
+                  }
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(countdown(20000));
+                }
+                """);
+
+        assertEquals("7", output);
+    }
+
+    @Test
     void loopSupportsBreakContinueAndMandatorySafepoints() throws Exception {
         String output = run("""
                 pub routine main(): void {
