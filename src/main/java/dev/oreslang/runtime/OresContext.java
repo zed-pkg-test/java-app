@@ -23,6 +23,7 @@ public final class OresContext implements AutoCloseable {
     private final BufferedReader input;
     private final PrintWriter output;
     private final ActorRuntime actors;
+    private final AsyncRuntime asyncRuntime;
     private final RuntimeGarbageCollector garbageCollector;
     private final UUID contextId = UUID.randomUUID();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
@@ -43,6 +44,7 @@ public final class OresContext implements AutoCloseable {
                 isolatePolicy,
                 ActorRuntime.DispatcherConfig.defaults(),
                 this::executeActorTurn);
+        this.asyncRuntime = new AsyncRuntime(this::executeAsyncTurn);
         this.garbageCollector = new RuntimeGarbageCollector();
         this.actors.setActorExitHook(garbageCollector::retireActorDomain);
     }
@@ -56,6 +58,7 @@ public final class OresContext implements AutoCloseable {
     public BufferedReader input() { return input; }
     public PrintWriter output() { return output; }
     public ActorRuntime actors() { return actors; }
+    public AsyncRuntime asyncRuntime() { return asyncRuntime; }
     public RuntimeGarbageCollector garbageCollector() { return garbageCollector; }
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
@@ -173,7 +176,23 @@ public final class OresContext implements AutoCloseable {
     }
 
     private void executeActorTurn(Runnable turn) {
-        boolean serialize = isolatePolicy.adversarial();
+        executeGuestTurn(turn, isolatePolicy.adversarial());
+    }
+
+    private void executeAsyncTurn(Runnable turn) {
+        // The current interpreter executes an async callable as one virtual-
+        // thread task. Holding the adversarial actor serialization lock across
+        // an await could deadlock a nested async task, so strict/adversarial
+        // profiles fail closed until compiler continuation lowering can release
+        // the guest turn at each await suspension point.
+        if (isolatePolicy.adversarial()) {
+            throw new SecurityException(
+                    "async callable execution in adversarial contexts requires continuation lowering");
+        }
+        executeGuestTurn(turn, false);
+    }
+
+    private void executeGuestTurn(Runnable turn, boolean serialize) {
         if (serialize) adversarialActorTurnLock.lock();
         TruffleContext truffleContext = env.getContext();
         Object previous = null;
@@ -201,8 +220,17 @@ public final class OresContext implements AutoCloseable {
 
     @Override
     public void close() {
+        RuntimeException failure = null;
+        try {
+            asyncRuntime.close();
+        } catch (RuntimeException asyncFailure) {
+            failure = asyncFailure;
+        }
         try {
             actors.close();
+        } catch (RuntimeException actorFailure) {
+            if (failure == null) failure = actorFailure;
+            else failure.addSuppressed(actorFailure);
         } finally {
             synchronized (this) {
                 linkedCodeUnits.clear();
@@ -211,5 +239,6 @@ public final class OresContext implements AutoCloseable {
             garbageCollector.close();
             output.flush();
         }
+        if (failure != null) throw failure;
     }
 }

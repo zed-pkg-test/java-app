@@ -992,6 +992,60 @@ final class ActorRuntimeTest {
     }
 
     @Test
+    void closeWaitsForCarrierToLeaveTurnExecutorAfterActorFinalizes() throws Exception {
+        CountDownLatch turnExecutorAfterGuestTurn = new CountDownLatch(1);
+        CountDownLatch releaseCarrier = new CountDownLatch(1);
+
+        ActorRuntime.TurnExecutor turnExecutor = turn -> {
+            turn.run();
+            turnExecutorAfterGuestTurn.countDown();
+
+            boolean released = false;
+            while (!released) {
+                try {
+                    released = releaseCarrier.await(25, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ignored) {
+                    // shutdownNow() interrupts the carrier. Keep the wrapper
+                    // entered until the test explicitly releases it.
+                }
+            }
+        };
+
+        ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8),
+                turnExecutor);
+        CountDownLatch handled = new CountDownLatch(1);
+        var ref = runtime.<String>spawnShared(() -> (message, context) -> handled.countDown());
+
+        ref.send("ping");
+        assertTrue(handled.await(2, TimeUnit.SECONDS));
+        assertTrue(turnExecutorAfterGuestTurn.await(2, TimeUnit.SECONDS));
+
+        AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+        Thread closer = new Thread(() -> {
+            try {
+                runtime.close();
+            } catch (Throwable failure) {
+                closeFailure.set(failure);
+            }
+        });
+        closer.start();
+
+        Thread.sleep(50);
+        assertTrue(
+                closer.isAlive(),
+                "close must wait until the carrier exits the host turn executor/Truffle boundary");
+
+        releaseCarrier.countDown();
+        closer.join(1000);
+
+        assertFalse(closer.isAlive());
+        assertNull(closeFailure.get());
+        assertThrows(IllegalStateException.class, () -> ref.send("after-close"));
+    }
+
+    @Test
     void closeStopsActorEvenWhenBehaviorClearsInterruptBeforeReturning() throws Exception {
         ActorRuntime runtime = new ActorRuntime();
         CountDownLatch started = new CountDownLatch(1);
