@@ -45,6 +45,8 @@ public final class IncrementalCompiler {
             }
         }
 
+        StandardLibraryResolver.augmentSources(normalized);
+
         Map<String, String> hashes = new LinkedHashMap<>();
         Map<String, String> abiHashes = new LinkedHashMap<>();
         Map<String, Ast.Program> parsed = new LinkedHashMap<>();
