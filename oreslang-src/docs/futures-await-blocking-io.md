@@ -75,9 +75,33 @@ declarations; the language-design notation may spell this callable return with
 `->` once that syntax migration lands.)
 
 The runtime equivalent is `Awaitable<T>.getAwaited() -> OresFuture<T>`.
-`Future<T>` implements `Awaitable<T>` by returning itself. The two-phase
-`ActorSpawn` control handle implements `Awaitable<ActorRef>` by returning its
-readiness Future.
+`Future<T>` implements `Awaitable<T>` by returning itself.
+
+Actor startup uses the same runtime protocol without exposing the internal
+two-phase ticket as an ordinary source value:
+
+```ores
+val id = spawn Worker();              // ActorId immediately; does not wait for READY
+val started = await spawn Worker();   // scheduler yield + wait for READY
+```
+
+The runtime internally creates an `ActorSpawn<R>` ticket whose readiness Future
+implements the await projection. Plain `spawn` immediately projects that ticket
+to its copyable `ActorId`. Only the direct syntactic form `await spawn ...`
+retains the hidden ticket across the scheduling boundary; after READY it exposes
+a compiler-managed `StartedActor<R>` control value with identity/liveness and
+completion/result Futures.
+
+An `ActorId` is deliberately **not** Awaitable:
+
+```ores
+val id = spawn Worker();
+val bad = await id; // compile error: ActorId does not implement Awaitable<T>
+```
+
+This prevents a plain identity token from silently retaining startup Future or
+result authority. If startup synchronization or the one-shot actor result is
+needed, request it at creation with `await spawn`.
 
 User classes may implement the same contract:
 
@@ -102,6 +126,36 @@ val nope = await 123; // compile error: await requires Awaitable<T>
 
 Dynamically imported/hot-loaded values whose static type is unresolved are
 checked again at runtime before suspension.
+
+## Actor spawn readiness and completion
+
+For a non-void one-shot actor callable:
+
+```ores
+val started = await spawn compute(41);
+
+val id = started.id;
+val alive = started.is_alive();
+val answer = await started.result;
+```
+
+For a void actor callable, use `started.done` when completion matters:
+
+```ores
+val started = await spawn background_job();
+await started.done;
+```
+
+By contrast, fire-and-forget startup intentionally keeps only identity:
+
+```ores
+val id = spawn background_job();
+```
+
+The source type `StartedActor<R>` is compiler-managed and cannot be written as
+a user declaration/parameter type or transported across actor boundaries. It is
+the narrow post-READY control projection of the runtime ticket, not an
+application mailbox and not general VM authority.
 
 ## Callback-only API adaptation
 
