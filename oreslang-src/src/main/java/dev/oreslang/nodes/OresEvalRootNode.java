@@ -400,15 +400,11 @@ public final class OresEvalRootNode extends RootNode {
                     case "start" -> (Invokable) args -> {
                         requireOne(args, "OresScheduler.start");
                         Object work = args.getFirst();
-                        if (work instanceof AsyncLambdaValue asyncLambda) {
-                            return asyncLambda.startOn(scheduler, List.of());
+                        if (!(work instanceof AsyncLambdaValue asyncLambda)) {
+                            throw new IllegalArgumentException(
+                                    "OresScheduler.start currently requires an async zero-argument lambda");
                         }
-                        if (work instanceof Invokable synchronous) {
-                            return scheduler.startSync(
-                                    () -> synchronous.call(List.of()));
-                        }
-                        throw new IllegalArgumentException(
-                                "OresScheduler.start requires a zero-argument lambda");
+                        return asyncLambda.startOn(scheduler, List.of());
                     };
                     case "parallelism" -> (Invokable) args -> {
                         requireZero(args, "OresScheduler.parallelism");
