@@ -672,23 +672,22 @@ public final class OresEvalRootNode extends RootNode {
             if (stmt instanceof Ast.DestructureStmt destructure) {
                 Object value = eval(destructure.initializer(), env);
                 if (destructure.kind() == Ast.DestructureKind.SEQUENCE) {
-                    List<?> items = asSequence(value);
-                    if (items.size() != destructure.bindings().size()) {
-                        throw new IllegalArgumentException("destructure arity mismatch: value has " + items.size()
-                                + " element(s), pattern has " + destructure.bindings().size());
-                    }
-                    for (int i = 0; i < items.size(); i++) {
-                        Ast.DestructureBinding binding = destructure.bindings().get(i);
-                        if (!binding.isDiscard()) env.define(binding.name(), items.get(i), binding.kind());
-                    }
+                    bindSequenceDestructure(
+                            iterableValues(value, env),
+                            destructure.bindings(),
+                            env,
+                            "destructure");
                 } else {
+                    Set<String> selectedMembers = new LinkedHashSet<>();
                     for (Ast.DestructureBinding binding : destructure.bindings()) {
-                        if (!binding.isDiscard()) {
-                            env.define(
-                                    binding.name(),
-                                    destructureMember(value, binding.name(), env),
-                                    binding.kind());
-                        }
+                        if (!binding.isDiscard() && !binding.rest()) selectedMembers.add(binding.name());
+                    }
+                    for (Ast.DestructureBinding binding : destructure.bindings()) {
+                        if (binding.isDiscard()) continue;
+                        Object bound = binding.rest()
+                                ? destructureRestObject(value, selectedMembers)
+                                : destructureMember(value, binding.name(), env);
+                        env.define(binding.name(), bound, binding.kind());
                     }
                 }
                 return;
@@ -832,19 +831,12 @@ public final class OresEvalRootNode extends RootNode {
                 Object iterable = eval(loop.iterable(), env);
                 for (Object item : iterableValues(iterable, env)) {
                     context.schedulerSafepoint();
-                    List<?> items = asSequence(item);
-                    if (items.size() != loop.bindings().size()) {
-                        throw new IllegalArgumentException(
-                                "for-of destructure arity mismatch: value has " + items.size()
-                                        + " element(s), pattern has " + loop.bindings().size());
-                    }
                     Env iteration = new Env(env);
-                    for (int i = 0; i < items.size(); i++) {
-                        Ast.DestructureBinding binding = loop.bindings().get(i);
-                        if (!binding.isDiscard()) {
-                            iteration.define(binding.name(), items.get(i), binding.kind());
-                        }
-                    }
+                    bindSequenceDestructure(
+                            iterableValues(item, env),
+                            loop.bindings(),
+                            iteration,
+                            "for-of destructure");
                     try {
                         executeBlock(
                                 loop.body(),
@@ -2464,6 +2456,58 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private List<?> asSequence(Object value) { if (value instanceof List<?> l) return l; if (value instanceof Object[] a) return List.of(a); throw new IllegalArgumentException("value is not sequence-destructurable"); }
+
+        private void bindSequenceDestructure(
+                List<?> items,
+                List<Ast.DestructureBinding> bindings,
+                Env destination,
+                String label) {
+            int restIndex = -1;
+            for (int i = 0; i < bindings.size(); i++) {
+                if (bindings.get(i).rest()) {
+                    restIndex = i;
+                    break;
+                }
+            }
+
+            int fixedArity = restIndex >= 0 ? restIndex : bindings.size();
+            if (restIndex < 0 && items.size() != fixedArity) {
+                throw new IllegalArgumentException(label + " arity mismatch: value has " + items.size()
+                        + " element(s), pattern has " + fixedArity);
+            }
+            if (restIndex >= 0 && items.size() < fixedArity) {
+                throw new IllegalArgumentException(label + " arity mismatch: value has " + items.size()
+                        + " element(s), pattern requires at least " + fixedArity + " before rest");
+            }
+
+            for (int i = 0; i < fixedArity; i++) {
+                Ast.DestructureBinding binding = bindings.get(i);
+                if (!binding.isDiscard()) destination.define(binding.name(), items.get(i), binding.kind());
+            }
+            if (restIndex >= 0) {
+                Ast.DestructureBinding rest = bindings.get(restIndex);
+                destination.define(
+                        rest.name(),
+                        new ArrayList<>(items.subList(restIndex, items.size())),
+                        rest.kind());
+            }
+        }
+
+        private Object destructureRestObject(Object value, Set<String> selectedMembers) {
+            if (value instanceof Map<?, ?> map) {
+                LinkedHashMap<String, Object> remainder = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    if (!(entry.getKey() instanceof String key)) {
+                        throw new IllegalArgumentException(
+                                "object rest destructuring requires statically named string fields");
+                    }
+                    if (!selectedMembers.contains(key)) remainder.put(key, entry.getValue());
+                }
+                return Map.copyOf(remainder);
+            }
+            throw new IllegalArgumentException(
+                    "object rest destructuring requires a statically known record value");
+        }
 
         private Object destructureMember(Object value, String name, Env env) {
             if (value instanceof OresObject object) {
