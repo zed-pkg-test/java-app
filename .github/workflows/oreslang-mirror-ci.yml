@@ -1,0 +1,26 @@
+name: oreslang mirror fast-ci
+
+on:
+  push:
+    branches:
+      - "ci/oreslang-**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Compile and run focused regressions
+        run: mvn -B -ntp -Dores.runtime.carriers=native -Dtest=TupleFixedArraySpreadTest,ReturnedDestructuringTest,ParserTest,TreeShakerTest,OwnershipAndClosureTest test
