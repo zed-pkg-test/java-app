@@ -76,6 +76,78 @@ final class OresFutureCallbackTest {
     }
 
     @Test
+    void attachedCallbackPreservesSharedSourceCancellation() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source = new OresFuture<>();
+            AtomicBoolean registrarCalled = new AtomicBoolean();
+
+            OresFuture<Integer> chained = source.attachCallback(
+                    scheduler,
+                    (value, callback) -> {
+                        registrarCalled.set(true);
+                        callback.resolve(value + 1);
+                    });
+
+            assertTrue(source.cancel(true));
+
+            assertThrows(
+                    java.util.concurrent.CancellationException.class,
+                    () -> chained.get(5, TimeUnit.SECONDS));
+            assertTrue(chained.isCancelled());
+            assertFalse(registrarCalled.get(),
+                    "callback registrar must not run after its source was cancelled");
+        }
+    }
+
+    @Test
+    void attachedCallbackPreservesCallbackCancellation() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> chained = OresFuture.completed(40)
+                    .attachCallback(
+                            scheduler,
+                            (value, callback) -> callback.cancel());
+
+            assertThrows(
+                    java.util.concurrent.CancellationException.class,
+                    () -> chained.get(5, TimeUnit.SECONDS));
+            assertTrue(chained.isCancelled());
+        }
+    }
+
+    @Test
+    void cancellingAttachedChainDoesNotCancelSharedSourceAndDropsLateCallback()
+            throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source = OresFuture.completed(40);
+            AtomicReference<OresFuture.Callback<Integer>> callbackRef =
+                    new AtomicReference<>();
+
+            OresFuture<Integer> chained = source.attachCallback(
+                    scheduler,
+                    (value, callback) -> callbackRef.set(callback));
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (callbackRef.get() == null && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertNotNull(callbackRef.get());
+
+            assertTrue(chained.cancel(true));
+            assertTrue(chained.isCancelled());
+            assertFalse(source.isCancelled(),
+                    "cancelling a callback chain must not cancel its shared source");
+
+            OresFuture.Callback<Integer> callback = callbackRef.get();
+            assertDoesNotThrow(() -> callback.resolve(41),
+                    "first late foreign callback after chain cancellation is dropped");
+            assertThrows(
+                    OresFuture.AlreadySettledException.class,
+                    () -> callback.resolve(42),
+                    "a true duplicate callback remains a programming error");
+        }
+    }
+
+    @Test
     void synchronousAttachedCallbackCannotCompleteChainOnRegistrarStack() throws Exception {
         try (OresScheduler scheduler = new OresScheduler(1)) {
             AtomicBoolean insideRegistrar = new AtomicBoolean();

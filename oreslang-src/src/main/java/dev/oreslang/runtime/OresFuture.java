@@ -246,10 +246,10 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         Objects.requireNonNull(scheduler, "scheduler");
         Objects.requireNonNull(registrar, "registrar");
         OresFuture<T> source = this;
+        AtomicReference<OresFuture<U>> dependentRef = new AtomicReference<>();
 
-        return scheduler.start(new OresScheduler.Task<>() {
+        OresFuture<U> task = scheduler.start(new OresScheduler.Task<>() {
             private int pc;
-            private OresFuture<U> dependent;
 
             @Override
             public OresScheduler.Step<U> resume(OresScheduler.Resume resume) {
@@ -268,8 +268,9 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
                     }
                     @SuppressWarnings("unchecked")
                     T value = (T) resume.value();
-                    dependent = OresFuture.fromCallback(
+                    OresFuture<U> dependent = OresFuture.fromCallback(
                             callback -> registrar.accept(value, callback));
+                    dependentRef.set(dependent);
                     pc = 2;
                     return OresScheduler.await(dependent);
                 }
@@ -295,6 +296,58 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
                 return new RuntimeException(unwrapped);
             }
         });
+
+        AtomicReference<RuntimeWaiterRegistration> taskWaiter =
+                new AtomicReference<>();
+
+        Runnable detach = () -> {
+            RuntimeWaiterRegistration registration =
+                    taskWaiter.getAndSet(null);
+            if (registration != null) registration.detach();
+        };
+
+        OresFuture<U> exposed = new OresFuture<>(() -> {
+            detach.run();
+            task.cancel(true);
+
+            // The callback-produced Future belongs to this chain. Marking it
+            // cancelled prevents a late foreign callback from reviving work;
+            // OresFuture.fromCallback safely drops the first such late callback.
+            OresFuture<U> dependent = dependentRef.getAndSet(null);
+            if (dependent != null) dependent.cancel(false);
+
+            // The source may be shared by other consumers, so chain
+            // cancellation deliberately never cancels it.
+        });
+
+        RuntimeWaiterRegistration registration =
+                task.whenCompleteRuntimeCancellable((value, failure) -> {
+                    try {
+                        if (exposed.isDone()) return;
+
+                        OresFuture<U> dependent = dependentRef.get();
+                        if (failure == null) {
+                            exposed.completeFromRuntime(value);
+                        } else if (task.isCancelled()
+                                || source.isCancelled()
+                                || (dependent != null && dependent.isCancelled())) {
+                            exposed.cancel(false);
+                        } else {
+                            exposed.failFromRuntime(OresFuture.unwrap(failure));
+                        }
+                    } finally {
+                        detach.run();
+                        dependentRef.set(null);
+                    }
+                });
+
+        taskWaiter.set(registration);
+        if (exposed.isDone()) {
+            detach.run();
+            dependentRef.set(null);
+        }
+
+        return exposed;
     }
 
     boolean completeFromRuntime(T value) {
