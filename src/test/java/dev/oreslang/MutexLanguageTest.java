@@ -591,15 +591,15 @@ final class MutexLanguageTest {
     }
 
     @Test
-    void directGuardedCopyReturningMethodCallIsAllowed() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+    void directGuardedCopyReturningMethodCallIsAllowed() throws Exception {
+        String program = """
                 define module model
                   define class Counter as
                     pub read(): int { return 7; }
                   end
                 end
                 define module app
-                  fnc good(): void {
+                  pub fnc main(): void {
                     val mutex = Mutex.new(new Counter());
                     val guard = mutex.lock();
                     val value = guard.read();
@@ -608,7 +608,21 @@ final class MutexLanguageTest {
                     return;
                   }
                 end
-                """)));
+                """;
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse(program)));
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "guard-method.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+        assertTrue(output.toString(StandardCharsets.UTF_8).lines().anyMatch("7"::equals));
     }
 
     @Test

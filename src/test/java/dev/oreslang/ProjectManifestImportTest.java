@@ -4,6 +4,7 @@ import dev.oreslang.config.OresProjectConfig;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.LinkedProgramRunner;
+import org.graalvm.polyglot.PolyglotException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -68,6 +69,164 @@ final class ProjectManifestImportTest {
 
         assertEquals(2, build.units().size());
         assertTrue(out.toString(StandardCharsets.UTF_8).contains("manifest-path"));
+    }
+
+    @Test
+    void importedWildcardActorCallableCannotBypassActorCompositionBoundary() throws Exception {
+        Path app = temp.resolve("actor-import");
+        Files.createDirectories(app);
+        Path child = app.resolve("child.ores");
+        Path main = app.resolve("main.ores");
+
+        Files.writeString(child, """
+                pub actor fnc child(int value): int {
+                  return value + 1;
+                }
+                """);
+
+        Files.writeString(main, """
+                import * as external from "./child.ores";
+
+                actor fnc parent(int value): int {
+                  return external.child(value);
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(parent(1));
+                  return;
+                }
+                """);
+
+        PolyglotException failure = assertThrows(
+                PolyglotException.class,
+                () -> LinkedProgramRunner.run(
+                        main,
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        Map.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+
+        assertTrue(failure.getMessage().contains("mailbox-oriented actor composition"));
+    }
+
+    @Test
+    void wildcardNamespaceCannotExtractRoutineOrActorCallableValues() throws Exception {
+        Path app = temp.resolve("wildcard-direct-only");
+        Files.createDirectories(app);
+        Path child = app.resolve("child.ores");
+        Path routineMain = app.resolve("routine-main.ores");
+        Path actorMain = app.resolve("actor-main.ores");
+
+        Files.writeString(child, """
+                pub routine direct_only(int value): int {
+                  return value + 1;
+                }
+
+                pub actor fnc actor_only(int value): int {
+                  return value + 1;
+                }
+                """);
+
+        Files.writeString(routineMain, """
+                import * as external from "./child.ores";
+
+                pub routine main(): void {
+                  val callback = external.direct_only;
+                  return;
+                }
+                """);
+
+        Files.writeString(actorMain, """
+                import * as external from "./child.ores";
+
+                pub routine main(): void {
+                  val callback = external.actor_only;
+                  return;
+                }
+                """);
+
+        PolyglotException routineFailure = assertThrows(
+                PolyglotException.class,
+                () -> LinkedProgramRunner.run(
+                        routineMain,
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        Map.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+        assertTrue(routineFailure.getMessage().contains("direct-call-only"));
+
+        PolyglotException actorFailure = assertThrows(
+                PolyglotException.class,
+                () -> LinkedProgramRunner.run(
+                        actorMain,
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        Map.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+        assertTrue(actorFailure.getMessage().contains("scheduler-dispatched"));
+        assertTrue(actorFailure.getMessage().contains("cannot be extracted"));
+    }
+
+    @Test
+    void importedTailCallsPreserveCallerReturnContracts() throws Exception {
+        Path app = temp.resolve("tail-contract-import");
+        Files.createDirectories(app);
+        Path child = app.resolve("child.ores");
+        Path namedMain = app.resolve("named-main.ores");
+        Path wildcardMain = app.resolve("wildcard-main.ores");
+
+        Files.writeString(child, """
+                pub fnc wrong(): String {
+                  return "not-an-int";
+                }
+                """);
+
+        Files.writeString(namedMain, """
+                import fnc wrong from "./child.ores";
+
+                fnc wrapped(): int {
+                  return wrong();
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(wrapped());
+                  return;
+                }
+                """);
+
+        Files.writeString(wildcardMain, """
+                import * as external from "./child.ores";
+
+                fnc wrapped(): int {
+                  return external.wrong();
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(wrapped());
+                  return;
+                }
+                """);
+
+        for (Path entry : List.of(namedMain, wildcardMain)) {
+            PolyglotException failure = assertThrows(
+                    PolyglotException.class,
+                    () -> LinkedProgramRunner.run(
+                            entry,
+                            IsolatePolicy.developer(),
+                            ExecutionProfile.serverJit(),
+                            Set.of(),
+                            Map.of(),
+                            new ByteArrayOutputStream(),
+                            new ByteArrayOutputStream()));
+            assertTrue(failure.getMessage().contains("function wrapped returned String"));
+            assertTrue(failure.getMessage().contains("name=int"));
+        }
     }
 
     @Test

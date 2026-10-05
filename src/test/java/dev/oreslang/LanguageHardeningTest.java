@@ -265,6 +265,124 @@ final class LanguageHardeningTest {
     }
 
     @Test
+    void fieldAndInstanceMethodNamesCannotCollideLocallyOrThroughInheritance() {
+        IllegalArgumentException local = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Bad as
+                          pub val int value = 1;
+
+                          pub value(): int {
+                            return 2;
+                          }
+                        end
+                        """)));
+        assertTrue(local.getMessage().contains("both a field and an instance method"));
+
+        IllegalArgumentException inherited = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class HasField as
+                          pub val int value = 1;
+                        end
+
+                        define class HasMethod as
+                          pub value(): int {
+                            return 2;
+                          }
+                        end
+
+                        define class Bad extends HasField, HasMethod as
+                        end
+                        """)));
+        assertTrue(inherited.getMessage().contains("both a field and an instance method"));
+
+        IllegalArgumentException iface = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define interface HasField
+                          val int value;
+                        end
+
+                        define interface HasMethod
+                          fnc value() => int;
+                        end
+
+                        define interface Bad extends HasField, HasMethod
+                        end
+                        """)));
+        assertTrue(iface.getMessage().contains("both a field and a method"));
+    }
+
+    @Test
+    void moduleAliasesPreserveFncReifiabilityButKeepRoutinesDirectOnly() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module service
+                  pub fnc transform(int value): int {
+                    return value + 1;
+                  }
+
+                  pub routine direct_only(int value): int {
+                    return value + 2;
+                  }
+                end
+
+                fnc good(): int {
+                  val alias = service;
+                  val Fnc<int, int> callback = alias.transform;
+                  return callback(40) + alias.direct_only(0);
+                }
+                """)));
+
+        IllegalArgumentException routineValue = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module service
+                          pub routine direct_only(int value): int {
+                            return value + 1;
+                          }
+                        end
+
+                        fnc bad(): void {
+                          val alias = service;
+                          val Fnc<int, int> callback = alias.direct_only;
+                          return;
+                        }
+                        """)));
+        assertTrue(routineValue.getMessage().contains("direct-call-only"));
+    }
+
+    @Test
+    void moduleRuntimeValueNamespaceRejectsCrossCategoryNameCollisions() {
+        IllegalArgumentException fncVsBinding = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module bad
+                          fnc value(): int {
+                            return 1;
+                          }
+
+                          val int value = 2;
+                        end
+                        """)));
+        assertTrue(fncVsBinding.getMessage().contains("runtime value namespace"));
+
+        IllegalArgumentException classVsRoutine = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module bad
+                          define class Worker as
+                          end
+
+                          routine Worker(): void {
+                            return;
+                          }
+                        end
+                        """)));
+        assertTrue(classVsRoutine.getMessage().contains("runtime value namespace"));
+    }
+
+    @Test
     void moduleAdherenceRejectsMissingExports() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module contracts
