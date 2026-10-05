@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -106,6 +107,172 @@ final class ActorEventBusTest {
             assertTrue(staleFailure.get() instanceof SecurityException);
             assertTrue(joined.get());
             assertEquals(1, group.memberCount());
+        }
+    }
+
+    @Test
+    void capabilityHolderCannotInspectGroupBeforeJoining() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            ActorRuntime.ActorGroup group = runtime.createActorGroup();
+            ActorRuntime.ActorGroupJoinCapability capability =
+                    group.joinCapability();
+
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<Throwable> inspectionFailure = new AtomicReference<>();
+
+            ActorRuntime.ActorRef<ActorRuntime.ActorGroupJoinCapability> actor =
+                    runtime.spawnShared(() -> (joinCapability, context) -> {
+                        ActorRuntime.ActorGroup resolved = joinCapability.group();
+                        try {
+                            resolved.events();
+                        } catch (Throwable failure) {
+                            inspectionFailure.set(failure);
+                        }
+                        resolved.joinCurrent(joinCapability);
+                        done.countDown();
+                    });
+
+            actor.send(capability);
+
+            assertTrue(done.await(2, TimeUnit.SECONDS));
+            assertTrue(inspectionFailure.get() instanceof SecurityException);
+            assertEquals(1, group.memberCount());
+        }
+    }
+
+    @Test
+    void asyncReadRegistrationsAreBoundedAndCancellationReleasesQuota()
+            throws Exception {
+        IsolatePolicy developer = IsolatePolicy.developer();
+        IsolatePolicy tinyMailbox = new IsolatePolicy(
+                developer.capabilities(),
+                developer.maxHeapBytes(),
+                2,
+                Duration.ofMinutes(1),
+                false);
+
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            ActorRuntime.ActorGroup group = runtime.createActorGroup();
+            ActorRuntime.ActorGroupJoinCapability capability =
+                    group.joinCapability();
+            group.events().defineTopic(
+                    "reads",
+                    ActorEventBus.DeliveryPolicy.RELIABLE,
+                    1);
+
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<Throwable> overflow = new AtomicReference<>();
+            AtomicReference<Boolean> quotaRecovered = new AtomicReference<>(false);
+
+            ActorRuntime.ActorRef<String> actor = runtime.spawnShared(
+                    tinyMailbox,
+                    () -> (message, context) -> {
+                        capability.join();
+                        ActorEventBus.Subscription<Integer> subscription =
+                                group.events().subscribe("reads");
+
+                        OresFuture<ActorEventBus.Event<Integer>> first =
+                                subscription.readAsync();
+                        OresFuture<ActorEventBus.Event<Integer>> second =
+                                subscription.readAsync();
+                        try {
+                            subscription.readAsync();
+                        } catch (Throwable failure) {
+                            overflow.set(failure);
+                        }
+
+                        first.cancel(false);
+                        second.cancel(false);
+
+                        OresFuture<ActorEventBus.Event<Integer>> afterCancel =
+                                subscription.readAsync();
+                        quotaRecovered.set(!afterCancel.isDone());
+                        afterCancel.cancel(false);
+                        done.countDown();
+                    });
+
+            actor.send("run");
+
+            assertTrue(done.await(2, TimeUnit.SECONDS));
+            assertTrue(
+                    overflow.get()
+                            instanceof ActorEventBus.EventReadBackpressureException);
+            assertTrue(quotaRecovered.get());
+        }
+    }
+
+    @Test
+    void actorCreatedGroupCapsTopicCapacityAtCreatorPolicy() throws Exception {
+        IsolatePolicy developer = IsolatePolicy.developer();
+        IsolatePolicy tinyMailbox = new IsolatePolicy(
+                developer.capabilities(),
+                developer.maxHeapBytes(),
+                2,
+                Duration.ofMinutes(1),
+                false);
+
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CountDownLatch created = new CountDownLatch(1);
+            AtomicReference<ActorRuntime.ActorGroup> createdGroup =
+                    new AtomicReference<>();
+
+            ActorRuntime.ActorRef<String> creator = runtime.spawnShared(
+                    tinyMailbox,
+                    () -> (message, context) -> {
+                        createdGroup.set(context.runtime().createActorGroup());
+                        created.countDown();
+                    });
+
+            creator.send("create");
+            assertTrue(created.await(2, TimeUnit.SECONDS));
+
+            ActorRuntime.ActorGroup group = createdGroup.get();
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> group.events().defineTopic(
+                            "too_large",
+                            ActorEventBus.DeliveryPolicy.LOSSY,
+                            3));
+            assertDoesNotThrow(
+                    () -> group.events().defineTopic(
+                            "allowed",
+                            ActorEventBus.DeliveryPolicy.LOSSY,
+                            2));
+
+            creator.stop();
+            assertTrue(creator.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void terminatingActorIsRemovedFromEveryJoinedGroup() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            List<ActorRuntime.ActorGroup> groups = List.of(
+                    runtime.createActorGroup(),
+                    runtime.createActorGroup(),
+                    runtime.createActorGroup());
+            List<ActorRuntime.ActorGroupJoinCapability> capabilities =
+                    groups.stream()
+                            .map(ActorRuntime.ActorGroup::joinCapability)
+                            .toList();
+
+            CountDownLatch joined = new CountDownLatch(1);
+            ActorRuntime.ActorRef<String> actor = runtime.spawnShared(
+                    () -> (message, context) -> {
+                        for (ActorRuntime.ActorGroupJoinCapability capability
+                                : capabilities) {
+                            capability.join();
+                        }
+                        joined.countDown();
+                        context.self().stop();
+                    });
+
+            actor.send("join");
+            assertTrue(joined.await(2, TimeUnit.SECONDS));
+            assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+            for (ActorRuntime.ActorGroup group : groups) {
+                assertEquals(0, group.memberCount());
+            }
         }
     }
 
