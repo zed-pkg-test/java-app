@@ -1,0 +1,61 @@
+import module markup from '../src/markup';
+import module html from '../src/html';
+import module css from '../src/css';
+import module response from '../src/response';
+
+pub routine main(): void {
+  val sheet = css.join([
+    css.rule_trusted(
+      "body",
+      css.declarations([
+        css.declaration_trusted("font-family", "system-ui, sans-serif"),
+        css.declaration_trusted("margin", "2rem"),
+        css.declaration_trusted("line-height", "1.5")
+      ])
+    ),
+    css.rule_trusted(
+      ".card",
+      css.declarations([
+        css.declaration_trusted("max-width", "42rem"),
+        css.declaration_trusted("padding", "1rem"),
+        css.declaration_trusted("border", "1px solid #ddd"),
+        css.declaration_trusted("border-radius", "0.75rem")
+      ])
+    )
+  ]);
+
+  val head = markup.join([
+    html.meta(html.attr_trusted("charset", "utf-8")),
+    html.title(
+      html.attrs_empty(),
+      markup.trusted_raw("Oreslang SSR")
+    ),
+    html.style_sheet(
+      html.attrs_empty(),
+      sheet
+    )
+  ]);
+
+  val body = html.main(
+    html.class_trusted("card"),
+    markup.join([
+      html.h1(
+        html.attrs_empty(),
+        markup.trusted_raw("Native Oreslang SSR")
+      ),
+      html.p(
+        html.attrs_empty(),
+        markup.trusted_raw(
+          "HTML and CSS generated from Oreslang source with no Java templates."
+        )
+      )
+    ])
+  );
+
+  val page = html.document(head, body);
+  val page_response = response.ok(page);
+
+  stdio.println(page_response.content_type);
+  stdio.println(page_response.body);
+  return;
+}
