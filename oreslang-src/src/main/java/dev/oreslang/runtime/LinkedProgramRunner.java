@@ -24,7 +24,9 @@ import java.util.Map;
  *
  * Guest import statements never read the filesystem. The host discovers the
  * reachable relative-import closure, compiles the whole graph, links every
- * code unit into one Truffle context, runs init barriers, then starts main.
+ * code unit into one Truffle context, then starts the explicitly selected
+ * program entry. Linking is inert: function names such as init have no magic
+ * lifecycle behavior.
  */
 public final class LinkedProgramRunner {
     private LinkedProgramRunner() { }
@@ -62,7 +64,7 @@ public final class LinkedProgramRunner {
                 List<String> ids = new ArrayList<>(build.units().keySet());
                 ids.sort(String::compareTo);
 
-                // Parse every unit before executing any guest lifecycle hook.
+                // Parse every unit before linking. Parsing/linking are inert.
                 for (String id : ids) {
                     IncrementalCompiler.CompiledUnit unit = build.units().get(id);
                     Source source = Source.newBuilder(OresLanguage.ID, unit.sourceText(), id)
@@ -78,14 +80,10 @@ public final class LinkedProgramRunner {
                     parsedUnits.get(id).execute(OresEvalRootNode.LINK_ONLY_COMMAND);
                 }
 
-                // Dependencies initialize before importers. All members of an SCC
-                // have already been linked before the first init in that SCC runs.
-                for (List<String> group : build.initializationGroups()) {
-                    for (String id : group) {
-                        parsedUnits.get(id).execute(OresEvalRootNode.INIT_ONLY_COMMAND);
-                    }
-                }
-
+                // initializationGroups is historical naming for the dependency-first
+                // SCC/link plan. Every member is already linked above; no implicit
+                // lifecycle function is executed. Startup/hot-load behavior must be
+                // selected explicitly (main or export entry).
                 Value entryPoint = parsedUnits.get(entryId);
                 if (entryPoint == null) {
                     throw new IllegalStateException("entry unit was not linked: " + entryId);

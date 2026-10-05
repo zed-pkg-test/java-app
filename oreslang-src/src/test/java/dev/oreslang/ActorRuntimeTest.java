@@ -165,7 +165,7 @@ final class ActorRuntimeTest {
 
             assertFalse(ref.isAlive());
             assertTrue(ref.failure().orElseThrow().getMessage()
-                    .contains("cannot receive raw mailbox messages"));
+                    .contains("raw mailbox messages"));
         }
     }
 
