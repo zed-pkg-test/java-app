@@ -24,8 +24,8 @@ final class EmbeddingIntrinsicRuntimeTest {
 
                 @Intrinsic(EmbeddingDotSimilarity)
                 fnc dot_similarity_into(
-                  &EmbeddingBatch queries,
-                  &EmbeddingBatch corpus,
+                  EmbeddingBatch queries,
+                  EmbeddingBatch corpus,
                   List<float> mut output
                 ): Result<List<float>, String> {
                   return Err("fallback dot body executed");
@@ -33,8 +33,8 @@ final class EmbeddingIntrinsicRuntimeTest {
 
                 @Intrinsic(EmbeddingTopKDot)
                 fnc top_k_dot_into(
-                  &EmbeddingBatch queries,
-                  &EmbeddingBatch corpus,
+                  EmbeddingBatch queries,
+                  EmbeddingBatch corpus,
                   int k,
                   List<int> mut top_indices,
                   List<float> mut top_scores
@@ -72,12 +72,12 @@ final class EmbeddingIntrinsicRuntimeTest {
 
                   val List<float> similarities = arr[0.0, 0.0, 0.0];
                   val Result<List<float>, String> dot_result =
-                    dot_similarity_into(&queries, &corpus, similarities);
+                    dot_similarity_into(queries, corpus, similarities);
                   val List<float> dots = dot_result.expect("dot intrinsic failed");
 
                   val List<int> indices = arr[0, 0];
                   val List<float> scores = arr[0.0, 0.0];
-                  top_k_dot_into(&queries, &corpus, 2, indices, scores)
+                  top_k_dot_into(queries, corpus, 2, indices, scores)
                     .expect("top-k intrinsic failed");
 
                   stdio.stdout.write(dots[0]);
@@ -117,7 +117,7 @@ final class EmbeddingIntrinsicRuntimeTest {
 
                 @Intrinsic(EmbeddingMeanPool)
                 fnc mean_pool_token_embeddings_into(
-                  &TokenEmbeddingBatch batch,
+                  TokenEmbeddingBatch batch,
                   List<float> mut output,
                   bool normalize_output
                 ): Result<List<float>, String> {
@@ -147,12 +147,12 @@ final class EmbeddingIntrinsicRuntimeTest {
 
                   val List<float> mean_output = arr[0.0, 0.0, 0.0, 0.0];
                   val List<float> means =
-                    mean_pool_token_embeddings_into(&tokens, mean_output, false)
+                    mean_pool_token_embeddings_into(tokens, mean_output, false)
                       .expect("mean pool intrinsic failed");
 
                   val List<float> normalized_output = arr[0.0, 0.0, 0.0, 0.0];
                   val List<float> normalized =
-                    mean_pool_token_embeddings_into(&tokens, normalized_output, true)
+                    mean_pool_token_embeddings_into(tokens, normalized_output, true)
                       .expect("normalized mean pool intrinsic failed");
 
                   stdio.stdout.write(means[0]);
@@ -187,7 +187,7 @@ final class EmbeddingIntrinsicRuntimeTest {
 
                 @Intrinsic(EmbeddingNormalizeRows)
                 fnc normalize_embedding_rows_into(
-                  &EmbeddingBatch batch,
+                  EmbeddingBatch batch,
                   List<float> mut output
                 ): Result<List<float>, String> {
                   return Err("fallback normalize body executed");
@@ -204,7 +204,7 @@ final class EmbeddingIntrinsicRuntimeTest {
                   );
                   val List<float> normalized_output = arr[0.0, 0.0];
                   val List<float> normalized =
-                    normalize_embedding_rows_into(&valid, normalized_output)
+                    normalize_embedding_rows_into(valid, normalized_output)
                       .expect("normalize intrinsic failed");
 
                   val EmbeddingBatch zero = new EmbeddingBatch(
@@ -217,7 +217,7 @@ final class EmbeddingIntrinsicRuntimeTest {
                   );
                   val List<float> zero_output = arr[0.0, 0.0];
                   val Result<List<float>, String> zero_result =
-                    normalize_embedding_rows_into(&zero, zero_output);
+                    normalize_embedding_rows_into(zero, zero_output);
 
                   stdio.stdout.write(normalized[0]);
                   stdio.stdout.write(":");
