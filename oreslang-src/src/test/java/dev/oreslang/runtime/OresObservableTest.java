@@ -436,4 +436,69 @@ final class OresObservableTest {
                 "take(1).first() must consume exactly one iterable value");
     }
 
+
+    @Test
+    void notificationAndFutureBridgesRejectStandaloneNullValues() {
+        assertThrows(NullPointerException.class, () -> OresNotification.next(null));
+
+        OresFuture<Integer> source = new OresFuture<>();
+        OresSubscription<Integer> subscription =
+                OresObservable.fromFuture(source).subscribe();
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+
+        source.completeFromRuntime(null);
+
+        CompletionException failure =
+                assertThrows(CompletionException.class, pull::join);
+        assertInstanceOf(NullPointerException.class, failure.getCause());
+        assertTrue(subscription.isTerminated());
+        assertTrue(subscription.next().join().isComplete());
+    }
+
+    @Test
+    void cancellingIterableSubscriptionDoesNotInitializeOrDrainSource() {
+        AtomicInteger iterators = new AtomicInteger();
+        AtomicInteger consumed = new AtomicInteger();
+
+        Iterable<Integer> source = () -> {
+            iterators.incrementAndGet();
+            return new java.util.Iterator<>() {
+                @Override
+                public boolean hasNext() {
+                    return true;
+                }
+
+                @Override
+                public Integer next() {
+                    consumed.incrementAndGet();
+                    return 1;
+                }
+            };
+        };
+
+        OresSubscription<Integer> subscription =
+                OresObservable.fromIterable(source).subscribe();
+        assertTrue(subscription.cancel());
+        assertEquals(0, iterators.get(),
+                "cancelling before demand must not initialize the iterable");
+        assertEquals(0, consumed.get(),
+                "cancelling before demand must not consume values");
+        assertTrue(subscription.next().join().isComplete());
+    }
+
+    @Test
+    void takeZeroDoesNotTouchIterableSource() {
+        AtomicInteger iterators = new AtomicInteger();
+        Iterable<Integer> source = () -> {
+            iterators.incrementAndGet();
+            return List.of(1, 2, 3).iterator();
+        };
+
+        OresSubscription<Integer> subscription =
+                OresObservable.fromIterable(source).take(0).subscribe();
+        assertTrue(subscription.next().join().isComplete());
+        assertEquals(0, iterators.get(),
+                "take(0) must short-circuit without subscribing to the iterable");
+    }
+
 }
