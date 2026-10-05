@@ -1074,7 +1074,8 @@ public final class OresEvalRootNode extends RootNode {
                                 ? new OptionValue(true, value.get())
                                 : new OptionValue(false, null);
                     }
-                    case NONBLOCKING -> channel.readAsync();
+                    case NONBLOCKING -> context.actors()
+                            .ownCurrentActorFuture(channel.readAsync());
                     case BLOCKING -> awaitBlockingChannelFuture(
                             channel.readAsync(),
                             "readch");
@@ -1084,7 +1085,8 @@ public final class OresEvalRootNode extends RootNode {
             Object value = eval(operation.value(), env);
             return switch (operation.mode()) {
                 case IMMEDIATE -> channel.tryWrite(value);
-                case NONBLOCKING -> channel.writeAsync(value);
+                case NONBLOCKING -> context.actors()
+                        .ownCurrentActorFuture(channel.writeAsync(value));
                 case BLOCKING -> {
                     awaitBlockingChannelFuture(
                             channel.writeAsync(value),
@@ -1594,7 +1596,9 @@ public final class OresEvalRootNode extends RootNode {
 
                 OresFuture<ChannelRuntime.SelectResult> future =
                         set.selectAsync(policy);
-                if (selected.mode() == Ast.WaitMode.NONBLOCKING) return future;
+                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                    return context.actors().ownCurrentActorFuture(future);
+                }
                 return awaitBlockingChannelFuture(future, "dynamic select");
             }
             if (expr instanceof Ast.ListExpr list) {
