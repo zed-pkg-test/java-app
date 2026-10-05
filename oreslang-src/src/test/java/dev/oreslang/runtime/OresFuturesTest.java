@@ -124,6 +124,27 @@ final class OresFuturesTest {
     }
 
     @Test
+    void terminalFutureDoesNotRetainLateRuntimeWaiters() {
+        OresFuture<Integer> future = OresFuture.completed(7);
+        java.util.concurrent.atomic.AtomicInteger callbacks =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        for (int i = 0; i < 1_000; i++) {
+            future.whenCompleteRuntime((value, failure) -> {
+                assertNull(failure);
+                assertEquals(7, value);
+                callbacks.incrementAndGet();
+            });
+        }
+
+        assertEquals(1_000, callbacks.get());
+        assertEquals(
+                0,
+                future.pendingRuntimeWaiterCount(),
+                "already-terminal Futures must not retain delivered runtime waiters");
+    }
+
+    @Test
     void raceCompletesWithFirstCompletion() {
         CompletableFuture<Integer> slow = new CompletableFuture<>();
         CompletableFuture<Integer> fast = new CompletableFuture<>();

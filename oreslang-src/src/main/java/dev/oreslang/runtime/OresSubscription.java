@@ -25,7 +25,9 @@ public abstract class OresSubscription<T> {
      * Request exactly one next stream notification.
      *
      * <p>Calling next concurrently is a programming error. After cancellation
-     * or terminal completion, next returns COMPLETE.</p>
+     * or terminal completion, next returns COMPLETE. Cancelling the returned
+     * pull Future is terminal for this subscription: cancelled demand is not
+     * silently retried or replaced.</p>
      */
     public final OresFuture<OresNotification<T>> next() {
         synchronized (gate) {
@@ -56,48 +58,65 @@ public abstract class OresSubscription<T> {
         OresFuture<OresNotification<T>> exposed =
                 new OresFuture<>(() -> source.cancel(true));
 
+        boolean rejectPull;
         synchronized (gate) {
-            if (cancelled || terminal) {
+            rejectPull = cancelled || terminal;
+            if (rejectPull) {
                 pulling = false;
-                source.cancel(true);
-                return OresFuture.completed(OresNotification.complete());
+            } else {
+                active = exposed;
             }
-            active = exposed;
+        }
+
+        if (rejectPull) {
+            source.cancel(true);
+            cancelRuntimeOnce();
+            return OresFuture.completed(OresNotification.complete());
         }
 
         source.whenCompleteRuntime((notification, failure) -> {
-            boolean shouldCancelRuntime = false;
+            Throwable terminalFailure =
+                    failure == null ? null : OresFuture.unwrap(failure);
+            boolean terminalTransition = false;
+
+            synchronized (gate) {
+                // Keep active/pulling claimed until the exposed Future itself
+                // is terminal. Releasing the slot before publication would let
+                // another next() overlap the previous demand and could let a
+                // concurrent cancel() miss the in-flight pull.
+                if (terminalFailure != null) {
+                    terminal = true;
+                    terminalTransition = true;
+                } else if (notification == null) {
+                    terminal = true;
+                    terminalTransition = true;
+                    terminalFailure = new IllegalStateException(
+                            "rx-ores source completed a pull with null notification");
+                } else if (notification.isComplete()) {
+                    terminal = true;
+                    terminalTransition = true;
+                }
+            }
+
+            if (terminalTransition) {
+                cancelRuntimeOnce();
+            }
+
+            if (!exposed.isDone()) {
+                if (terminalFailure == null) {
+                    exposed.completeFromRuntime(notification);
+                } else if (source.isCancelled()) {
+                    exposed.cancel(true);
+                } else {
+                    exposed.failFromRuntime(terminalFailure);
+                }
+            }
+
             synchronized (gate) {
                 if (active == exposed) {
                     active = null;
                 }
                 pulling = false;
-
-                if (failure != null) {
-                    terminal = true;
-                    shouldCancelRuntime = true;
-                } else if (notification == null) {
-                    terminal = true;
-                    shouldCancelRuntime = true;
-                    failure = new IllegalStateException(
-                            "rx-ores source completed a pull with null notification");
-                } else if (notification.isComplete()) {
-                    terminal = true;
-                    shouldCancelRuntime = true;
-                }
-            }
-
-            if (shouldCancelRuntime) {
-                cancelRuntimeOnce();
-            }
-
-            if (exposed.isDone()) {
-                return;
-            }
-            if (failure == null) {
-                exposed.completeFromRuntime(notification);
-            } else {
-                exposed.failFromRuntime(OresFuture.unwrap(failure));
             }
         });
 
@@ -106,11 +125,15 @@ public abstract class OresSubscription<T> {
 
     /**
      * Cancel this subscription and any currently outstanding pull.
+     *
+     * <p>Cancellation wins only while the subscription is live. Cancelling an
+     * already-terminal subscription returns false. Runtime cleanup remains
+     * exactly-once across cancellation, completion, failure, and races.</p>
      */
     public final boolean cancel() {
         OresFuture<OresNotification<T>> toCancel;
         synchronized (gate) {
-            if (cancelled) {
+            if (cancelled || terminal) {
                 return false;
             }
             cancelled = true;
@@ -160,7 +183,12 @@ public abstract class OresSubscription<T> {
     protected abstract OresFuture<OresNotification<T>> nextFromRuntime();
 
     /**
-     * Runtime cancellation hook. Implementations should be idempotent.
+     * Runtime source cleanup/cancellation hook.
+     *
+     * <p>The subscription substrate invokes this hook at most once. It may be
+     * triggered by explicit cancellation, terminal COMPLETE, source failure,
+     * invalid source output, or pull cancellation. It must not execute guest
+     * code.</p>
      */
     protected void cancelFromRuntime() {
         // Default no-op.
