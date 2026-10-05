@@ -18,7 +18,11 @@ public record OresNotification<T>(Kind kind, T value) {
 
     public OresNotification {
         Objects.requireNonNull(kind, "kind");
-        if (kind == Kind.COMPLETE && value != null) {
+        if (kind == Kind.NEXT) {
+            Objects.requireNonNull(
+                    value,
+                    "NEXT notifications cannot carry standalone null values");
+        } else if (value != null) {
             throw new IllegalArgumentException("COMPLETE notifications cannot carry a value");
         }
     }
