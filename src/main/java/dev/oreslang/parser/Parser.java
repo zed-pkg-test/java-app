@@ -802,6 +802,12 @@ public final class Parser {
     }
 
     private Ast.Stmt parseStatement() {
+        if (looksLikeStaticSelectStatement()) return parseStaticSelectStatement();
+        if (looksLikeImmediateChannelExpression()) {
+            Ast.Expr expression = parseExpression();
+            consumeStatementTerminator("channel probe expression should end with ';'");
+            return new Ast.ExprStmt(expression);
+        }
         if (isBindingKind(peek().type()) && looksLikePrefixedDestructure()) {
             Ast.BindingKind inherited = parseBindingKind();
             return parseDestructure(check(LBRACKET) ? Ast.DestructureKind.SEQUENCE : Ast.DestructureKind.OBJECT, inherited);
@@ -844,6 +850,118 @@ public final class Parser {
         Ast.Expr expression = parseExpression();
         consumeStatementTerminator("expression statement should end with ';'");
         return new Ast.ExprStmt(expression);
+    }
+
+    private boolean looksLikeImmediateChannelExpression() {
+        if (!check(TRY) || current + 1 >= tokens.size()) return false;
+        Token.Type next = tokens.get(current + 1).type();
+        return next == READCH || next == WRITECH || next == SELECT;
+    }
+
+    private boolean looksLikeStaticSelectStatement() {
+        int i = current;
+        if (i >= tokens.size()) return false;
+        Token.Type first = tokens.get(i).type();
+        if (first == NB || first == TRY) i++;
+        if (i >= tokens.size() || tokens.get(i).type() != SELECT) return false;
+        i++;
+
+        if (i < tokens.size() && tokens.get(i).type() == FIRST) {
+            i++;
+        } else if (i < tokens.size()
+                && tokens.get(i).type() == IDENT
+                && (tokens.get(i).lexeme().equals("fair")
+                        || tokens.get(i).lexeme().equals("random"))) {
+            i++;
+        }
+        return i < tokens.size() && tokens.get(i).type() == LBRACE;
+    }
+
+    private Ast.SelectStmt parseStaticSelectStatement() {
+        Ast.WaitMode mode = Ast.WaitMode.BLOCKING;
+        if (match(NB)) mode = Ast.WaitMode.NONBLOCKING;
+        else if (match(TRY)) mode = Ast.WaitMode.IMMEDIATE;
+
+        consume(SELECT, "expected 'select'");
+        Ast.SelectPolicy policy = parseSelectPolicy();
+        consume(LBRACE, "static select requires '{ ... }'; use 'select from cases' for dynamic select");
+
+        List<Ast.SelectArm> arms = new ArrayList<>();
+        while (!check(RBRACE) && !check(EOF)) {
+            if (match(CASE)) {
+                Ast.ChannelOperation operation;
+                Ast.Expr channel;
+                Ast.Expr value = null;
+                Ast.BindingKind bindingKind = null;
+                String bindingName = null;
+
+                if (match(READCH)) {
+                    operation = Ast.ChannelOperation.READ;
+                    channel = parseExpression();
+                    consume(COLON, "readch select case requires ':'");
+                    if (isBindingKind(peek().type())) {
+                        bindingKind = parseBindingKind();
+                        bindingName = consume(IDENT, "readch case binding requires a name").lexeme();
+                        match(SEMICOLON);
+                    }
+                } else if (match(WRITECH)) {
+                    operation = Ast.ChannelOperation.WRITE;
+                    channel = parseExpression();
+                    consume(COMMA, "writech select case requires 'channel, value'");
+                    value = parseExpression();
+                    consume(COLON, "writech select case requires ':'");
+                } else {
+                    throw error(peek(), "select case must start with readch or writech");
+                }
+
+                List<Ast.Stmt> body = new ArrayList<>();
+                while (!check(CASE) && !check(DEFAULT) && !check(RBRACE) && !check(EOF)) {
+                    body.add(parseStatement());
+                }
+                arms.add(new Ast.SelectArm(
+                        operation,
+                        channel,
+                        value,
+                        bindingKind,
+                        bindingName,
+                        body));
+                continue;
+            }
+
+            if (match(DEFAULT)) {
+                consume(COLON, "select default arm requires ':'");
+                List<Ast.Stmt> body = new ArrayList<>();
+                while (!check(CASE) && !check(DEFAULT) && !check(RBRACE) && !check(EOF)) {
+                    body.add(parseStatement());
+                }
+                arms.add(new Ast.SelectArm(
+                        Ast.ChannelOperation.DEFAULT,
+                        null,
+                        null,
+                        null,
+                        null,
+                        body));
+                continue;
+            }
+
+            throw error(peek(), "expected case/default inside select");
+        }
+
+        consume(RBRACE, "expected '}' after select");
+        return new Ast.SelectStmt(mode, policy, arms);
+    }
+
+    private Ast.SelectPolicy parseSelectPolicy() {
+        if (match(FIRST)) return Ast.SelectPolicy.PRIORITY;
+        if (check(IDENT) && peek().lexeme().equals("fair")) {
+            advance();
+            return Ast.SelectPolicy.FAIR;
+        }
+        if (check(IDENT) && peek().lexeme().equals("random")) {
+            advance();
+            return Ast.SelectPolicy.RANDOM;
+        }
+        return Ast.SelectPolicy.FAIR;
     }
 
     private Ast.Stmt parseFor() {
@@ -1480,7 +1598,65 @@ public final class Parser {
             return new Ast.UnaryExpr(mutable ? "&mut" : "&", parseUnary());
         }
         if (match(AWAIT)) return new Ast.AwaitExpr(parseUnary());
+
+        if (match(NB)) {
+            if (match(READCH)) return parseChannelOperation(Ast.ChannelOperation.READ, Ast.WaitMode.NONBLOCKING);
+            if (match(WRITECH)) return parseChannelOperation(Ast.ChannelOperation.WRITE, Ast.WaitMode.NONBLOCKING);
+            if (match(SELECT)) return parseDynamicSelect(Ast.WaitMode.NONBLOCKING);
+            throw error(previous(), "'nb' must prefix readch, writech, or select");
+        }
+
+        if (check(TRY) && current + 1 < tokens.size()) {
+            Token.Type next = tokens.get(current + 1).type();
+            if (next == READCH || next == WRITECH || next == SELECT) {
+                advance();
+                if (match(READCH)) return parseChannelOperation(Ast.ChannelOperation.READ, Ast.WaitMode.IMMEDIATE);
+                if (match(WRITECH)) return parseChannelOperation(Ast.ChannelOperation.WRITE, Ast.WaitMode.IMMEDIATE);
+                consume(SELECT, "expected select");
+                return parseDynamicSelect(Ast.WaitMode.IMMEDIATE);
+            }
+        }
+
+        if (match(READCH)) return parseChannelOperation(Ast.ChannelOperation.READ, Ast.WaitMode.BLOCKING);
+        if (match(WRITECH)) return parseChannelOperation(Ast.ChannelOperation.WRITE, Ast.WaitMode.BLOCKING);
+        if (match(SELECT)) return parseDynamicSelect(Ast.WaitMode.BLOCKING);
+
         return parsePostfix();
+    }
+
+    private Ast.Expr parseChannelOperation(
+            Ast.ChannelOperation operation,
+            Ast.WaitMode mode) {
+        if (operation == Ast.ChannelOperation.DEFAULT) {
+            throw new AssertionError("default is not a standalone channel operation");
+        }
+
+        if (match(LPAREN)) {
+            Ast.Expr channel = parseExpression();
+            Ast.Expr value = null;
+            if (operation == Ast.ChannelOperation.WRITE) {
+                consume(COMMA, "writech(channel, value) requires two arguments");
+                value = parseExpression();
+            }
+            consume(RPAREN, "expected ')' after channel operation");
+            return new Ast.ChannelOpExpr(operation, mode, channel, value);
+        }
+
+        Ast.Expr channel = parseUnary();
+        Ast.Expr value = null;
+        if (operation == Ast.ChannelOperation.WRITE) {
+            consume(COMMA, "writech command form requires 'writech channel, value'");
+            value = parseExpression();
+        }
+        return new Ast.ChannelOpExpr(operation, mode, channel, value);
+    }
+
+    private Ast.DynamicSelectExpr parseDynamicSelect(Ast.WaitMode mode) {
+        Ast.SelectPolicy policy = parseSelectPolicy();
+        consume(FROM,
+                "dynamic select requires 'select from cases'; static select uses 'select { case ... }'");
+        Ast.Expr cases = parseUnary();
+        return new Ast.DynamicSelectExpr(mode, policy, cases);
     }
 
     private Ast.Expr parsePostfix() {
@@ -1601,7 +1777,7 @@ public final class Parser {
             case IDENT,
                     DEFINE, CLASS, MODULE, NAMESPACE, IMPORT, FROM, AS, EXTENDS, IMPLEMENTS,
                     TRY, CATCH, FINALLY, END, FI, IF, DO, ELSE, THEN,
-                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, ACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, IS, WHEN, CASE, DEFAULT, FIRST, TYPE, TYPEOF,
+                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, NB, SELECT, READCH, WRITECH, ACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, IS, WHEN, CASE, DEFAULT, FIRST, TYPE, TYPEOF,
                     INTERFACE, IMPL, ABSTRACT, VOID, STATIC, PUB, PRIVATE, STRUCTURAL, RETURN, DEFER,
                     VAL, CONST, LET, MUT, SELF, TRUE, FALSE, NULL, OBJ, ARR -> true;
             default -> false;
