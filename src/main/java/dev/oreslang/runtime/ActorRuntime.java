@@ -112,6 +112,10 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum ActorKind { PRIVATE, SHARED }
 
+    public enum CarrierBackend { NATIVE_PTHREAD, JVM_THREAD_POOL }
+
+    private static final String CARRIER_BACKEND_PROPERTY = "ores.runtime.carriers";
+
     public record DispatcherConfig(
             int privateParallelism,
             int sharedParallelism,
@@ -248,6 +252,19 @@ public final class ActorRuntime implements AutoCloseable {
     public IsolatePolicy policyCeiling() { return policyCeiling; }
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
     public int maxActors() { return dispatcherConfig.maxActors(); }
+
+    /**
+     * Physical carrier implementation currently backing actor turns.
+     *
+     * <p>This is diagnostic/control-plane information only. Actor identity is
+     * never carrier identity and source semantics do not depend on this value.</p>
+     */
+    public CarrierBackend carrierBackend() {
+        return privateDispatcher instanceof NativeCarrierExecutor
+                && sharedDispatcher instanceof NativeCarrierExecutor
+                ? CarrierBackend.NATIVE_PTHREAD
+                : CarrierBackend.JVM_THREAD_POOL;
+    }
 
     /**
      * Installs a host-owned hook invoked exactly once when an actor execution
@@ -2541,6 +2558,39 @@ public final class ActorRuntime implements AutoCloseable {
             int parallelism,
             int readyQueueCapacity,
             String threadPrefix) {
+        String requested = System.getProperty(CARRIER_BACKEND_PROPERTY, "auto")
+                .trim()
+                .toLowerCase(java.util.Locale.ROOT);
+        if (!requested.equals("auto")
+                && !requested.equals("native")
+                && !requested.equals("java")) {
+            throw new IllegalArgumentException(
+                    CARRIER_BACKEND_PROPERTY + " must be one of auto, native, java");
+        }
+
+        boolean unix = isNativeCarrierPlatform();
+        if (!requested.equals("java") && (requested.equals("native") || unix)) {
+            if (!unix) {
+                throw new IllegalStateException(
+                        "native Oreslang carriers currently require Linux or macOS");
+            }
+            try {
+                return new NativeCarrierExecutor(
+                        parallelism,
+                        parallelism,
+                        readyQueueCapacity,
+                        threadPrefix);
+            } catch (UnsatisfiedLinkError | SecurityException unavailable) {
+                if (requested.equals("native")) {
+                    throw new IllegalStateException(
+                            "native Oreslang carrier backend was required but liboresthread could not be loaded",
+                            unavailable);
+                }
+                // Development portability fallback only. CI and production can
+                // set -Dores.runtime.carriers=native to make this fail closed.
+            }
+        }
+
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
                 parallelism,
                 parallelism,
@@ -2549,8 +2599,15 @@ public final class ActorRuntime implements AutoCloseable {
                 new ArrayBlockingQueue<>(readyQueueCapacity),
                 namedFactory(threadPrefix),
                 new ThreadPoolExecutor.AbortPolicy());
-        // Core workers are created lazily on first scheduled actor turn.
+        // JVM workers are a portability fallback, not the preferred Oreslang
+        // runtime backend. They are created lazily on first scheduled turn.
         return executor;
+    }
+
+    private static boolean isNativeCarrierPlatform() {
+        String os = System.getProperty("os.name", "")
+                .toLowerCase(java.util.Locale.ROOT);
+        return os.contains("linux") || os.contains("mac") || os.contains("darwin");
     }
 
     private static ThreadFactory namedFactory(String prefix) {
