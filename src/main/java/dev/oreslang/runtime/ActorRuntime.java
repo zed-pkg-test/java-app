@@ -1183,7 +1183,7 @@ public final class ActorRuntime implements AutoCloseable {
             return members.contains(ref.id());
         }
 
-        private void requireObserver(String operation) {
+        void requireObserver(String operation) {
             requireCallerRuntimeAffinity(operation);
             ActorId caller = currentActorId().orElse(null);
             if (caller != null && !isMember(caller)) {
