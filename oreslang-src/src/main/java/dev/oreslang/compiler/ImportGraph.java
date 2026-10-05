@@ -129,9 +129,9 @@ final class ImportGraph {
     }
 
     /**
-     * Dependency-first SCC order. Members inside one SCC are lexicographically
-     * ordered so init order is deterministic even though the cycle itself does
-     * not define an order.
+     * Dependency-first SCC/link order. Members inside one SCC are
+     * lexicographically ordered only to keep link planning deterministic.
+     * Oreslang does not execute implicit init hooks.
      */
     static List<List<String>> initializationGroups(Map<String, Set<String>> dependencies) {
         if (dependencies.isEmpty()) return List.of();

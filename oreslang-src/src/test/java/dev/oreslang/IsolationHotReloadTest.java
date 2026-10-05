@@ -118,6 +118,31 @@ final class IsolationHotReloadTest {
     }
 
     @Test
+    void rootInitNameIsOrdinaryAndNeverRunsImplicitly() throws Exception {
+        String program = """
+                fnc init(value: int) -> void {
+                  val values = arr[1];
+                  val boom = values[99];
+                  return;
+                }
+
+                pub routine main() -> void {
+                  return;
+                }
+                """;
+
+        Source source = Source.newBuilder(OresLanguage.ID, program, "no-implicit-init.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+        try (Context context = IsolatePolicy.developer()
+                .restrictedContextBuilder(ExecutionProfile.serverJit())
+                .build()) {
+            assertDoesNotThrow(() -> context.eval(source),
+                    "a function merely named init must not execute during link/start");
+        }
+    }
+
+    @Test
     void hotReloadRequiresExplicitCapability() {
         assertThrows(SecurityException.class,
                 () -> new HotReloadManager(IsolatePolicy.strictFaas(), ExecutionProfile.serverJit()));
