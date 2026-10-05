@@ -377,4 +377,279 @@ final class ReturnedDestructuringTest {
         assertTrue(text.contains("5"));
         assertTrue(text.contains("x"));
     }
+
+    @Test
+    void restDestructuringInfersHomogeneousAndFiniteRemainders() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc values(): Array<int> {
+                  return [1, 2, 3];
+                }
+
+                fnc fixed(): [int, bool, string] {
+                  return [7, true, "tail"];
+                }
+
+                fnc acceptsInts(Array<int> values): void {
+                  stdio.println(values[0]);
+                  return;
+                }
+
+                pub fnc main(): void {
+                  const [v, ...rest] = values();
+                  acceptsInts(rest);
+
+                  [const first, const ...tail] = fixed();
+                  const [flag, label] = tail;
+                  stdio.println(v);
+                  stdio.println(first);
+                  stdio.println(flag);
+                  stdio.println(label);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void recordRestComputesStaticOmitShapeForBothBindingSpellings() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                type Row = {v: int, label: string, ok: bool};
+
+                fnc row(): Row {
+                  return obj{v: 5, label: "x", ok: true};
+                }
+
+                fnc acceptsRest({label: string, ok: bool} value): void {
+                  stdio.println(value.label);
+                  stdio.println(value.ok);
+                  return;
+                }
+
+                fnc prefixed(): void {
+                  const {v, ...rest} = row();
+                  acceptsRest(rest);
+                  stdio.println(v);
+                  return;
+                }
+
+                fnc inlineKinds(): void {
+                  {const v, const ...rest} = row();
+                  acceptsRest(rest);
+                  stdio.println(v);
+                  return;
+                }
+
+                pub fnc main(): void {
+                  prefixed();
+                  inlineKinds();
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void finiteTupleRestRejectsImpossiblePrefixAtCompileTime() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                fnc fixed(): [int] {
+                  return [7];
+                }
+
+                pub fnc main(): void {
+                  const [a, b, ...rest] = fixed();
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void objectRestRejectsDynamicShapeAndRemovedMembers() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                fnc dynamic(string key): DynamicStruct<int> {
+                  return obj{`key`: 1, v: 2};
+                }
+
+                pub fnc main(): void {
+                  const {v, ...rest} = dynamic("other");
+                  return;
+                }
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                type Row = {v: int, label: string};
+
+                fnc row(): Row {
+                  return obj{v: 5, label: "x"};
+                }
+
+                pub fnc main(): void {
+                  const {v, ...rest} = row();
+                  stdio.println(rest.v);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void parserRequiresRestBindingToBeFinal() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc values(): Array<int> { return [1, 2, 3]; }
+                pub fnc main(): void {
+                  const [v, ...rest, last] = values();
+                  return;
+                }
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc value(): {v: int, label: string} {
+                  return obj{v: 1, label: "x"};
+                }
+                pub fnc main(): void {
+                  const {v, ...rest, label} = value();
+                  return;
+                }
+                """));
+    }
+
+    @Test
+    void restFirstOrMiddleIsAlwaysRejectedForBothSyntaxFamilies() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc values(): Array<int> { return [1, 2, 3]; }
+                pub fnc main(): void {
+                  const [first, ...rest, last] = values();
+                  return;
+                }
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc values(): Array<int> { return [1, 2, 3]; }
+                pub fnc main(): void {
+                  [const ...rest, const last] = values();
+                  return;
+                }
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc value(): {active: bool, label: string} {
+                  return obj{active: true, label: "x"};
+                }
+                pub fnc main(): void {
+                  const {...rest, active} = value();
+                  return;
+                }
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc value(): {active: bool, label: string} {
+                  return obj{active: true, label: "x"};
+                }
+                pub fnc main(): void {
+                  {const ...rest, const active} = value();
+                  return;
+                }
+                """));
+    }
+
+    @Test
+    void staticallyTypedIterableRestUsesDeclaredIteratorShape() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Vector<T> as
+                  let Array<T> items = new Array<T>();
+
+                  pub add(T value): void {
+                    self.items.add(value);
+                    return;
+                  }
+
+                  pub [Symbol.iterator](): Array<T> {
+                    return self.items;
+                  }
+                end
+
+                fnc vector(): Vector<int> {
+                  let Vector<int> values = new Vector<int>();
+                  values.add(4);
+                  values.add(5);
+                  values.add(6);
+                  return values;
+                }
+
+                fnc acceptsInts(Array<int> values): void {
+                  stdio.println(values[0]);
+                  return;
+                }
+
+                pub fnc main(): void {
+                  const [first, ...rest] = vector();
+                  acceptsInts(rest);
+                  stdio.println(first);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void unionRestKeepsEveryFiniteTailAlternativeStatic() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc variant(bool flag): [int, string] | [int, bool, string] {
+                  if flag; then
+                    return [3, "short"];
+                  else
+                    return [4, true, "long"];
+                  fi
+                }
+
+                pub fnc main(): void {
+                  const [head, ...rest] = variant(false);
+                  stdio.println(head);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void restDestructuringExecutesWithoutRuntimeTypeDiscovery() throws Exception {
+        String program = """
+                type Row = {v: int, label: string, ok: bool};
+
+                fnc values(): Array<int> {
+                  return [10, 20, 30];
+                }
+
+                fnc row(): Row {
+                  return obj{v: 5, label: "rest", ok: true};
+                }
+
+                pub fnc main(): void {
+                  const [head, ...tail] = values();
+                  const {v, ...other} = row();
+                  stdio.println(head);
+                  stdio.println(tail[0]);
+                  stdio.println(tail[1]);
+                  stdio.println(v);
+                  stdio.println(other.label);
+                  stdio.println(other.ok);
+                  return;
+                }
+                """;
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "rest-destructure.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        String text = output.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("10"));
+        assertTrue(text.contains("20"));
+        assertTrue(text.contains("30"));
+        assertTrue(text.contains("5"));
+        assertTrue(text.contains("rest"));
+        assertTrue(text.contains("true"));
+    }
+
 }
