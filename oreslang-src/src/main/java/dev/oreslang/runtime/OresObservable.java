@@ -33,12 +33,24 @@ import java.util.function.Predicate;
  */
 public abstract class OresObservable<T> {
 
-    public abstract OresSubscription<T> subscribe();
+    /**
+     * Create one independent subscription.
+     *
+     * <p>The public entrypoint is final so runtime sources cannot bypass the
+     * non-null subscription invariant.</p>
+     */
+    public final OresSubscription<T> subscribe() {
+        return Objects.requireNonNull(
+                subscribeFromRuntime(),
+                "subscribeFromRuntime returned null Subscription");
+    }
+
+    protected abstract OresSubscription<T> subscribeFromRuntime();
 
     public static <T> OresObservable<T> empty() {
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 return new OresSubscription<>() {
                     @Override
                     protected OresFuture<OresNotification<T>> nextFromRuntime() {
@@ -64,7 +76,7 @@ public abstract class OresObservable<T> {
 
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 return new OresSubscription<>() {
                     private int index;
 
@@ -94,7 +106,7 @@ public abstract class OresObservable<T> {
 
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 return new OresSubscription<>() {
                     private boolean emitted;
 
@@ -131,7 +143,7 @@ public abstract class OresObservable<T> {
         OresObservable<T> upstream = this;
         return new OresObservable<>() {
             @Override
-            public OresSubscription<R> subscribe() {
+            protected OresSubscription<R> subscribeFromRuntime() {
                 OresSubscription<T> inner = upstream.subscribe();
 
                 return new OresSubscription<>() {
@@ -208,7 +220,7 @@ public abstract class OresObservable<T> {
         OresObservable<T> upstream = this;
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 OresSubscription<T> inner = upstream.subscribe();
 
                 return new OresSubscription<>() {
@@ -282,7 +294,7 @@ public abstract class OresObservable<T> {
         OresObservable<T> upstream = this;
         return new OresObservable<>() {
             @Override
-            public OresSubscription<T> subscribe() {
+            protected OresSubscription<T> subscribeFromRuntime() {
                 OresSubscription<T> inner = upstream.subscribe();
 
                 return new OresSubscription<>() {
@@ -332,7 +344,12 @@ public abstract class OresObservable<T> {
                 return;
             }
             if (failure != null) {
-                result.failFromRuntime(OresFuture.unwrap(failure));
+                Throwable terminalFailure = OresFuture.unwrap(failure);
+                if (pull.isCancelled()) {
+                    result.cancel(true);
+                } else {
+                    result.failFromRuntime(terminalFailure);
+                }
                 subscription.cancel();
                 return;
             }
@@ -389,6 +406,8 @@ public abstract class OresObservable<T> {
                         if (exposed.isDone()) return;
                         if (failure == null) {
                             exposed.completeFromRuntime(value);
+                        } else if (task.isCancelled()) {
+                            exposed.cancel(true);
                         } else {
                             exposed.failFromRuntime(OresFuture.unwrap(failure));
                         }
@@ -439,7 +458,12 @@ public abstract class OresObservable<T> {
                             return;
                         }
                         if (failure != null) {
-                            result.failFromRuntime(OresFuture.unwrap(failure));
+                            Throwable terminalFailure = OresFuture.unwrap(failure);
+                            if (source.isCancelled()) {
+                                result.cancel(true);
+                            } else {
+                                result.failFromRuntime(terminalFailure);
+                            }
                             return;
                         }
                         try {
