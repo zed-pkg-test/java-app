@@ -114,6 +114,7 @@ fn language_emitters_preserve_optional_nullable_and_closed_object_semantics() {
     assert!(dart.contains("final OresOptional<String?> display_nameValue"));
     assert!(dart.contains("unknownKeys"));
     assert!(dart.contains("missing required field: email"));
+    assert!(!dart.contains("emailRaw as String"));
     assert!(!dart.contains("password_hash"));
 
     let gleam = gleam::emit(&shape).expect("Gleam should emit");

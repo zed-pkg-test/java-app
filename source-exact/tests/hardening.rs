@@ -156,6 +156,8 @@ fn emitted_numeric_validators_do_not_widen_database_domains() {
     assert!(dart.contains("<= 2147483647"));
     assert!(dart.contains(".isFinite"));
     assert!(!dart.contains("as num).isFinite"));
+    assert!(dart.contains("ratioRaw.toDouble()"));
+    assert!(!dart.contains("(ratioRaw as num).toDouble()"));
 
     let gleam = gleam::emit(&shape).expect("Gleam");
     assert!(gleam.contains("value >= -32_768 && value <= 32_767"));

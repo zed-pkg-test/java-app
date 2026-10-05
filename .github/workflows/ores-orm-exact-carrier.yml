@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify exact source tree
-        run: test "$(git rev-parse HEAD:source-exact)" = "a95f38680165480e9608d8fbfeb4581da53116cb"
+        run: test "$(git rev-parse HEAD:source-exact)" = "19b7ba8cf0ad55bec45620db645b554a4b5ee217"
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.88.0
@@ -43,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify exact source tree
-        run: test "$(git rev-parse HEAD:source-exact)" = "a95f38680165480e9608d8fbfeb4581da53116cb"
+        run: test "$(git rev-parse HEAD:source-exact)" = "19b7ba8cf0ad55bec45620db645b554a4b5ee217"
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.88.0
