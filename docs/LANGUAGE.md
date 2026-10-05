@@ -1035,22 +1035,3 @@ The same compiled program can target a secondary multi-threaded runtime because:
 - actor messages continue to cross actor boundaries only through the existing frozen/sendable contract.
 
 When explicit thread/task spawning is added, cross-thread transfer will require move semantics and a `Send`-equivalent capability; shared cross-thread references will additionally require a `Sync`-equivalent guarantee. Those marker traits are intentionally a future surface feature—the current source language has no ambient raw-thread API, so there is no unchecked escape hatch to bypass ownership.
-
-
-## GPU actors and Regent-style mapping
-
-Oreslang adopts Regent/Legion's separation between **logical independence** and **physical placement**. Regent tasks expose enough data-access information for the compiler/runtime to prove independence, while a mapper chooses physical processors and memory placement. Oreslang applies the same principle to actor isolation rather than copying Regent's region syntax directly.
-
-A one-shot actor callable may target the GPU:
-
-```ores
-pub gpu isoactor fnc score(GpuArray<f32> features) => f32 {
-  return reduce_score(features);
-}
-```
-
-The actor boundary remains authoritative: message transport/isolation, mailbox admission, actor identity, policy checks, and one-turn-at-a-time semantics happen before GPU execution is submitted. The GPU backend receives the actor UUID plus logical placement metadata, so independent actors may execute concurrently without making a GPU lane part of actor identity.
-
-GPU actor placement is expressed in terms of **device**, **logical partition**, and **affinity**, not a physical "GPU core" number. GPU schedulers may remap work-items across warps/wavefronts and SMs/CUs; promising that actor A owns physical core N would be non-portable and often false. A backend may map different actor UUIDs to different devices, streams, work-groups, MIG/partition instances, or backend-specific resources while preserving the source-level actor contract.
-
-The current implementation enables GPU actor callables. Persistent GPU actor classes remain rejected until Oreslang has an explicit device-resident actor-state layout, migration/checkpoint semantics, and host/device ownership rules. Shared mutable actor state is never implicitly copied to the GPU.
