@@ -183,6 +183,43 @@ The exact source facade should be added only on top of the current callable,
 `rt` builtin, local-struct/interface, and AOT-safe declaration branches so this
 library does not freeze stale syntax from an older stack.
 
+
+## Collection / iterable interop
+
+rx-ores must depend on the iterable protocol, **not** on a concrete List,
+ArrayList, or Vector implementation.
+
+The runtime substrate therefore provides two finite-source bridges with
+different stability contracts:
+
+- `fromValues(List)` takes an immutable construction-time snapshot. Later
+  mutation of the supplied host list is invisible to every subscription.
+- `fromIterable(Iterable)` is lazy and cold. Each subscription obtains a fresh
+  iterator, and each `next()` demand consumes at most one iterator element.
+
+The intended Oreslang source bridge is `rx.from_iterable(value)`, where the
+value satisfies the ordinary `Symbol.iterator` contract. Native Oreslang
+`List<T>`, `ArrayList<T>`, and `Vector<T>` deliberately implement
+`Symbol.iterator` by returning a copied Array snapshot. The combined contract
+is therefore:
+
+```text
+Ores collection
+  -> Symbol.iterator() snapshot
+  -> rx.from_iterable(...)
+  -> one fresh iterator per subscription
+  -> one source element per next() demand
+```
+
+This keeps collection ownership independent from reactive scheduling while
+giving an in-flight subscription a stable view even if code with explicit
+mutable authority later changes the source collection.
+
+Standalone null is not an Oreslang value. Both finite-value bridges therefore
+reject null elements rather than emitting `NEXT(null)`. Iterator construction,
+iteration, and null-element failures become failed pull Futures and terminate
+that subscription; they do not execute guest callbacks on producer threads.
+
 ## Future / Observable bridge
 
 The first native bridge includes:
