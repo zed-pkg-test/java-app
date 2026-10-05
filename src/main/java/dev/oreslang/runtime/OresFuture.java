@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -93,16 +94,31 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         }
     }
 
+    private final BooleanSupplier cancelAdmission;
     private final AtomicReference<Runnable> cancelHook;
     private final AtomicBoolean cancelHookRun = new AtomicBoolean();
     private final AtomicReference<Object> state = new AtomicReference<>(PENDING);
     private final ConcurrentLinkedQueue<RuntimeWaiterRegistration<T>> waiters = new ConcurrentLinkedQueue<>();
 
     public OresFuture() {
-        this(() -> { });
+        this(() -> true, () -> { });
     }
 
     OresFuture(Runnable cancelHook) {
+        this(() -> true, cancelHook);
+    }
+
+    /**
+     * Runtime-only constructor for operations whose cancellation must win an
+     * external arbitration before the Future transitions to cancelled.
+     *
+     * <p>This is used by channels/select so a cancellation racing with a ready
+     * case cannot consume a channel value after cancellation has already won.
+     * Guest code never receives the admission capability.</p>
+     */
+    OresFuture(BooleanSupplier cancelAdmission, Runnable cancelHook) {
+        this.cancelAdmission = Objects.requireNonNull(
+                cancelAdmission, "cancelAdmission");
         this.cancelHook = new AtomicReference<>(
                 Objects.requireNonNull(cancelHook, "cancelHook"));
     }
@@ -407,6 +423,9 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
 
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
+        if (state.get() != PENDING) return false;
+        if (!cancelAdmission.getAsBoolean()) return false;
+
         CancellationException cancelled =
                 new CancellationException("OresFuture was cancelled");
         if (!settle(new Cancelled(cancelled))) return false;
