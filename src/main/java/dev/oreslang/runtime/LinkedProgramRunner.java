@@ -50,8 +50,8 @@ public final class LinkedProgramRunner {
         // context is built/entered; RootNode must never hop threads after entry.
         ActorRuntime.executeProcessRoot(policy, () -> {
             Context.Builder builder = policy.restrictedContextBuilder(executionProfile);
-            if (out != null) builder.out(out);
-            if (err != null) builder.err(err);
+            if (out != null) builder.out(forwardingStream(out));
+            if (err != null) builder.err(forwardingStream(err));
 
             try (Context context = builder.build()) {
                 LinkedHashMap<String, Value> parsedUnits = new LinkedHashMap<>();
@@ -92,6 +92,25 @@ public final class LinkedProgramRunner {
         });
 
         return build;
+    }
+
+    private static OutputStream forwardingStream(OutputStream delegate) {
+        return new OutputStream() {
+            @Override
+            public void write(int value) throws IOException {
+                delegate.write(value);
+            }
+
+            @Override
+            public void write(byte[] bytes, int offset, int length) throws IOException {
+                delegate.write(bytes, offset, length);
+            }
+
+            @Override
+            public void flush() throws IOException {
+                delegate.flush();
+            }
+        };
     }
 
     private static void collectRelativeImportClosure(
