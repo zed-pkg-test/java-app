@@ -82,10 +82,7 @@ actor_method_decl
    source-level protocol and lower to one compiler/runtime-owned mailbox
    dispatcher. Private methods are direct self helpers inside an actor turn.
    Public protocol methods are monomorphic at method level and cannot accept
-   mut parameters. ActorRef control/runtime names id, is_alive, send, and
-   mailbox are reserved as public protocol names; receive is an ordinary
-   protocol method name with no special privilege. Actor classes do not
-   declare static functions. *)
+   mut parameters. Actor classes do not declare static functions. *)
 
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
