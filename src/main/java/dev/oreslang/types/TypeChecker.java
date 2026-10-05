@@ -719,6 +719,7 @@ public final class TypeChecker {
             if (local != null) return local.type();
             if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("actor")) return new Named(name.name(), List.of());
             if (name.name().equals("Mutex") || name.name().equals("SharedMutex")) return new Named("$" + name.name() + "Factory", List.of());
+            if (name.name().equals("Future")) return new Named("$FutureFactory", List.of());
             if (name.name().equals("print")) return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             if (name.name().equals("None")) return new Named("Option", List.of(Unknown.INSTANCE));
             Ast.ModuleDecl moduleNamespace = modules.get(name.name());
@@ -915,6 +916,39 @@ public final class TypeChecker {
                             label);
                     return asyncResult(target.async(), result);
                 }
+            }
+            if (call.callee() instanceof Ast.MemberExpr futureCall
+                    && futureCall.receiver() instanceof Ast.NameExpr futureFactory
+                    && futureFactory.name().equals("Future")
+                    && (futureCall.member().equals("all") || futureCall.member().equals("race"))) {
+                if (call.typeArgumentsPresent()) {
+                    throw new IllegalArgumentException(
+                            "Future." + futureCall.member() + " does not accept call-site type arguments");
+                }
+                if (call.arguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "Future." + futureCall.member() + " expects exactly one list of Future values");
+                }
+                Type input = deref(typeOf(call.arguments().getFirst(), env, generics, self));
+                if (!(input instanceof ListType list)) {
+                    throw new IllegalArgumentException(
+                            "Future." + futureCall.member() + " expects List<Future<T>>; got " + input);
+                }
+                Type child = list.element();
+                Type value;
+                if (child == Unknown.INSTANCE) {
+                    value = Unknown.INSTANCE;
+                } else if (child instanceof Named named
+                        && named.name().equals("Future")
+                        && named.arguments().size() == 1) {
+                    value = named.arguments().getFirst();
+                } else {
+                    throw new IllegalArgumentException(
+                            "Future." + futureCall.member() + " expects List<Future<T>>; got List<" + child + ">");
+                }
+                return futureCall.member().equals("all")
+                        ? new Named("Future", List.of(new ListType(value)))
+                        : new Named("Future", List.of(value));
             }
             if (call.callee() instanceof Ast.MemberExpr factoryCall
                     && factoryCall.receiver() instanceof Ast.NameExpr factory

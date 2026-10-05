@@ -16,7 +16,7 @@ final class AsyncRuntimeTest {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
 
-            CompletableFuture<Integer> future = runtime.submit(() -> {
+            OresFuture<Integer> future = runtime.submit(() -> {
                 assertTrue(AsyncRuntime.isAsyncCarrierThread());
                 assertFalse(ActorRuntime.isActorCarrierThread());
                 started.countDown();
@@ -37,7 +37,7 @@ final class AsyncRuntimeTest {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch interrupted = new CountDownLatch(1);
 
-            CompletableFuture<Integer> future = runtime.submit(() -> {
+            OresFuture<Integer> future = runtime.submit(() -> {
                 started.countDown();
                 try {
                     Thread.sleep(TimeUnit.SECONDS.toMillis(30));
@@ -73,4 +73,23 @@ final class AsyncRuntimeTest {
         assertThrows(java.util.concurrent.RejectedExecutionException.class,
                 () -> runtime.submit(() -> 1));
     }
+    @Test
+    void submitReturnsOresFutureRatherThanCompletableFuture() {
+        try (AsyncRuntime runtime = new AsyncRuntime()) {
+            OresFuture<Integer> future = runtime.submit(() -> 7);
+            assertEquals(OresFuture.class, future.getClass());
+            assertEquals(7, AsyncRuntime.await(future));
+        }
+    }
+
+    @Test
+    void hostCompletionStageIsOneWayAdaptedIntoOresFuture() {
+        CompletableFuture<Integer> host = new CompletableFuture<>();
+        OresFuture<Integer> ores = OresFuture.from(host);
+
+        host.complete(9);
+
+        assertEquals(9, AsyncRuntime.await(ores));
+    }
+
 }
