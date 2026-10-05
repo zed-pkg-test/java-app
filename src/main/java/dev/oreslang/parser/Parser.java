@@ -92,20 +92,22 @@ public final class Parser {
                 throw error(peek(), "function imports use 'import fnc', not 'import fn'");
             }
             if (match(MODULE)) kind = Ast.ImportKind.MODULE;
+            else if (match(ACTOR)) kind = Ast.ImportKind.ACTOR;
             else if (match(CLASS)) kind = Ast.ImportKind.CLASS;
             else if (match(FNC)) kind = Ast.ImportKind.FUNCTION;
-            else throw error(peek(), "expected module, class, fnc, or * after import");
+            else if (match(INTERFACE)) kind = Ast.ImportKind.INTERFACE;
+            else if (match(TRAIT)) kind = Ast.ImportKind.TRAIT;
+            else if (match(STRUCT)) kind = Ast.ImportKind.STRUCT;
+            else if (match(TYPE)) kind = Ast.ImportKind.TYPE;
+            else if (match(TYPES)) kind = Ast.ImportKind.TYPES;
+            else throw error(peek(), "expected module, actor, class, fnc, interface, trait, struct, type, types, or * after import");
 
             if (match(STAR)) {
                 wildcard = true;
                 consume(AS, "wildcard import requires 'as <namespace>'");
                 namespace = consume(IDENT, "expected import namespace").lexeme();
-            } else if (match(LBRACE)) {
-                if (check(RBRACE)) throw error(peek(), "import selection cannot be empty");
-                do names.add(consumeImportName(kind)); while (match(COMMA));
-                consume(RBRACE, "expected '}' after imported names");
             } else {
-                names.add(consumeImportName(kind));
+                parseImportSelection(kind, names);
             }
 
             if (!wildcard && match(AS)) {
@@ -121,6 +123,24 @@ public final class Parser {
         if (path.isBlank()) throw error(previous(), "import path cannot be empty");
         consume(SEMICOLON, "expected ';' after import");
         return new Ast.ImportDecl(kind, names, wildcard, namespace, path);
+    }
+
+    private void parseImportSelection(Ast.ImportKind kind, List<String> names) {
+        Token.Type closing = null;
+        if (match(LBRACE)) closing = RBRACE;
+        else if (match(LPAREN)) closing = RPAREN;
+
+        if (closing != null) {
+            if (check(closing)) throw error(peek(), "import selection cannot be empty");
+            do names.add(consumeImportName(kind)); while (match(COMMA));
+            consume(closing, closing == RBRACE
+                    ? "expected '}' after imported names"
+                    : "expected ')' after imported names");
+            return;
+        }
+
+        names.add(consumeImportName(kind));
+        while (match(COMMA)) names.add(consumeImportName(kind));
     }
 
     private String consumeImportName(Ast.ImportKind kind) {
@@ -539,15 +559,17 @@ public final class Parser {
         }
 
         if (check(FAT_ARROW)) {
-            throw error(peek(), "fat arrow '=>' is reserved for function types; named callables use ': ReturnType'");
-        }
-        if (check(ARROW)) {
-            throw error(peek(), "named callable return types use ': ReturnType'; '->' is executable/lambda syntax");
+            throw error(peek(),
+                    "fat arrow '=>' is reserved for function types/interface callable signatures; "
+                            + "named executable callables use ': ReturnType' or '-> ReturnType'");
         }
 
-        Ast.TypeRef declared = match(COLON) ? parseTypeRef() : null;
+        Ast.TypeRef declared = null;
+        if (match(COLON) || match(ARROW)) {
+            declared = parseTypeRef();
+        }
         if (annotated != null && declared != null && !sameType(annotated, declared)) {
-            throw error(previous(), "@Ret type and ': ReturnType' disagree");
+            throw error(previous(), "@Ret type and declared return type disagree");
         }
         return declared != null ? declared : annotated != null ? annotated : Ast.TypeRef.simple("void");
     }
@@ -809,6 +831,8 @@ public final class Parser {
             return new Ast.ContinueStmt();
         }
         if (match(IF)) return parseIf();
+        if (match(MATCH)) return parseMatch();
+        if (match(SWITCH)) return parseSwitch();
         if (match(TRY)) return parseTry();
         if (check(LOOP) && (checkNext(LBRACE) || checkNext(DO))) {
             advance();
@@ -1142,7 +1166,8 @@ public final class Parser {
         List<Ast.IfBranch> branches = new ArrayList<>();
         Ast.Expr condition = parseCondition();
 
-        // Brace form: if condition { ... } elseif condition { ... } else { ... }
+        // Brace form still obeys the universal Oreslang invariant: every if closes with fi.
+        // Braces delimit branch bodies; they never replace the structural terminator.
         if (check(LBRACE)) {
             branches.add(new Ast.IfBranch(condition, parseBlock()));
             while (match(ELSEIF)) {
@@ -1152,6 +1177,7 @@ public final class Parser {
 
             List<Ast.Stmt> elseBody = List.of();
             if (match(ELSE)) elseBody = parseBlock();
+            consume(FI, "expected 'fi' to close if");
             return new Ast.IfStmt(branches, elseBody);
         }
 
@@ -1197,6 +1223,97 @@ public final class Parser {
                     normalizeLegacyConditionPipe(binary.right()));
         }
         return expr;
+    }
+
+    private Ast.MatchStmt parseMatch() {
+        boolean ordered = match(FIRST);
+        Ast.Expr subject = parseExpression();
+        match(SEMICOLON);
+
+        List<Ast.MatchArm> arms = new ArrayList<>();
+        while (!check(END) && !check(EOF)) {
+            Ast.Pattern pattern = match(ELSE) ? new Ast.WildcardPattern() : parsePattern();
+            Ast.Expr guard = match(WHEN) ? parseExpression() : null;
+            if (check(FAT_ARROW)) {
+                throw error(peek(), "match implementations use the slim arrow '->'; '=>' is reserved for type definitions");
+            }
+            consume(ARROW, "match arms use the slim arrow '->'");
+            List<Ast.Stmt> body = parseBlock();
+            arms.add(new Ast.MatchArm(pattern, guard, body));
+        }
+        consume(END, "expected 'end' to close match");
+        if (arms.isEmpty()) throw error(previous(), "match requires at least one arm");
+        return new Ast.MatchStmt(subject, ordered, arms);
+    }
+
+    private Ast.Pattern parsePattern() {
+        if (match(IS)) {
+            Ast.TypeRef target = parseTypeRef();
+            String binding = check(IDENT) && !peek().lexeme().equals("_") ? advance().lexeme() : null;
+            return new Ast.TypePattern(target, binding);
+        }
+        if (match(INT)) return new Ast.LiteralPattern(Long.parseLong(previous().lexeme().replace("_", "")));
+        if (match(FLOAT)) return new Ast.LiteralPattern(Double.parseDouble(previous().lexeme().replace("_", "")));
+        if (match(STRING)) return new Ast.LiteralPattern(previous().lexeme());
+        if (match(TRUE)) return new Ast.LiteralPattern(Boolean.TRUE);
+        if (match(FALSE)) return new Ast.LiteralPattern(Boolean.FALSE);
+        if (check(IDENT) && peek().lexeme().equals("_")) {
+            advance();
+            return new Ast.WildcardPattern();
+        }
+        if (check(IDENT)) {
+            String name = advance().lexeme();
+            if (match(LPAREN)) {
+                List<Ast.Pattern> args = new ArrayList<>();
+                if (!check(RPAREN)) {
+                    do args.add(parsePattern()); while (match(COMMA));
+                }
+                consume(RPAREN, "expected ')' after constructor pattern");
+                return new Ast.ConstructorPattern(name, args);
+            }
+            // Upper-case bare names are zero-arity constructors; lower-case names bind.
+            if (!name.isEmpty() && Character.isUpperCase(name.charAt(0))) {
+                return new Ast.ConstructorPattern(name, List.of());
+            }
+            return new Ast.BindingPattern(name);
+        }
+        throw error(peek(), "expected match pattern");
+    }
+
+    private Ast.SwitchStmt parseSwitch() {
+        Ast.Expr subject = parseExpression();
+        match(SEMICOLON);
+        List<Ast.SwitchCase> cases = new ArrayList<>();
+        List<Ast.Stmt> defaultBody = List.of();
+        boolean sawDefault = false;
+
+        while (!check(END) && !check(EOF)) {
+            if (match(CASE)) {
+                if (sawDefault) throw error(previous(), "switch case cannot appear after default");
+                List<Ast.Expr> constants = new ArrayList<>();
+                do constants.add(parseExpression()); while (match(COMMA));
+                if (check(FAT_ARROW)) {
+                    throw error(peek(), "switch implementations use the slim arrow '->'; '=>' is reserved for type definitions");
+                }
+                consume(ARROW, "switch cases use the slim arrow '->'");
+                cases.add(new Ast.SwitchCase(constants, parseBlock()));
+                continue;
+            }
+            if (match(DEFAULT)) {
+                if (sawDefault) throw error(previous(), "switch can contain only one default arm");
+                sawDefault = true;
+                if (check(FAT_ARROW)) {
+                    throw error(peek(), "switch implementations use the slim arrow '->'; '=>' is reserved for type definitions");
+                }
+                consume(ARROW, "switch default uses the slim arrow '->'");
+                defaultBody = parseBlock();
+                continue;
+            }
+            throw error(peek(), "expected 'case', 'default', or 'end' in switch");
+        }
+
+        consume(END, "expected 'end' to close switch");
+        return new Ast.SwitchStmt(subject, cases, defaultBody);
     }
 
     private Ast.TryStmt parseTry() {
@@ -1288,9 +1405,29 @@ public final class Parser {
 
     private Ast.Expr parseComparison() {
         Ast.Expr expr = parseShift();
-        while (match(LT, LTE, GT, GTE)) {
-            String op = previous().lexeme();
-            expr = new Ast.BinaryExpr(op, expr, parseShift());
+        while (true) {
+            if (match(LT, LTE, GT, GTE)) {
+                String op = previous().lexeme();
+                expr = new Ast.BinaryExpr(op, expr, parseShift());
+                continue;
+            }
+            if (match(IS)) {
+                Ast.TypeRef target = parseTypeRef();
+                String binding = check(IDENT) && !peek().lexeme().equals("_") ? advance().lexeme() : null;
+                expr = new Ast.TypeTestExpr(expr, target, binding);
+                continue;
+            }
+            if (match(MATCHES)) {
+                expr = new Ast.PatternTestExpr(expr, parsePattern());
+                continue;
+            }
+            if (match(AS)) {
+                boolean optional = match(QUESTION);
+                expr = new Ast.CastExpr(expr, parseTypeRef(),
+                        optional ? Ast.CastMode.OPTIONAL : Ast.CastMode.CHECKED);
+                continue;
+            }
+            break;
         }
         return expr;
     }
@@ -1454,7 +1591,7 @@ public final class Parser {
             case IDENT,
                     DEFINE, CLASS, MODULE, NAMESPACE, IMPORT, FROM, AS, EXTENDS, IMPLEMENTS,
                     TRY, CATCH, FINALLY, END, FI, IF, DO, ELSE, THEN,
-                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, ACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, TYPE, TYPEOF,
+                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, ACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, IS, WHEN, CASE, DEFAULT, FIRST, TYPE, TYPEOF,
                     INTERFACE, IMPL, ABSTRACT, VOID, STATIC, PUB, PRIVATE, STRUCTURAL, RETURN, DEFER,
                     VAL, CONST, LET, MUT, SELF, TRUE, FALSE, NULL, OBJ, ARR -> true;
             default -> false;

@@ -626,10 +626,36 @@ public final class TypeChecker {
         if (stmt instanceof Ast.DeferStmt defer) { typeOf(defer.expression(), env, generics, self); return; }
         if (stmt instanceof Ast.IfStmt conditional) {
             for (Ast.IfBranch branch : conditional.branches()) {
-                requireAssignable(typeOf(branch.condition(), env, generics, self), Primitive.BOOL, "if condition");
-                checkBlock(branch.body(), env, generics, expectedReturn, self);
+                requireAssignable(typeOfCondition(branch.condition(), env, generics, self), Primitive.BOOL, "if condition");
+                Env branchEnv = new Env(env);
+                defineConditionBindings(branch.condition(), branchEnv, env, generics, self);
+                checkBlock(branch.body(), branchEnv, generics, expectedReturn, self);
             }
             checkBlock(conditional.elseBody(), env, generics, expectedReturn, self);
+            return;
+        }
+        if (stmt instanceof Ast.MatchStmt matched) {
+            Type subject = deref(typeOf(matched.subject(), env, generics, self));
+            checkMatch(matched, subject, env, generics, expectedReturn, self);
+            return;
+        }
+        if (stmt instanceof Ast.SwitchStmt switched) {
+            Type subject = deref(typeOf(switched.subject(), env, generics, self));
+            Set<String> seen = new HashSet<>();
+            for (Ast.SwitchCase arm : switched.cases()) {
+                if (arm.constants().isEmpty()) throw new IllegalArgumentException("switch case requires at least one constant");
+                for (Ast.Expr constant : arm.constants()) {
+                    if (!constant(constant)) throw new IllegalArgumentException("switch case must be a compile-time constant");
+                    Type actual = typeOf(constant, env, generics, self);
+                    if (!assignable(actual, subject) && !assignable(subject, actual)) {
+                        throw new IllegalArgumentException("switch case type " + actual + " is incompatible with " + subject);
+                    }
+                    String key = constant.toString();
+                    if (!seen.add(key)) throw new IllegalArgumentException("duplicate switch case: " + key);
+                }
+                checkBlock(arm.body(), env, generics, expectedReturn, self);
+            }
+            checkBlock(switched.defaultBody(), env, generics, expectedReturn, self);
             return;
         }
         if (stmt instanceof Ast.TryStmt attempted) {
@@ -753,6 +779,31 @@ public final class TypeChecker {
             Type left = typeOf(conditional.whenTrue(), env, generics, self);
             Type right = typeOf(conditional.whenFalse(), env, generics, self);
             return commonType(left, right);
+        }
+        if (expr instanceof Ast.TypeTestExpr test) {
+            requireRuntimeReifiableType(test.targetType(), "is");
+            Type source = deref(typeOf(test.value(), env, generics, self));
+            Type target = deref(resolve(test.targetType(), generics, self));
+            if (!typesMayOverlap(source, target)) {
+                throw new IllegalArgumentException("impossible type test: " + source + " cannot be " + target);
+            }
+            return Primitive.BOOL;
+        }
+        if (expr instanceof Ast.PatternTestExpr test) {
+            Type subject = deref(typeOf(test.value(), env, generics, self));
+            checkPattern(test.pattern(), subject, new Env(env), generics, self);
+            return Primitive.BOOL;
+        }
+        if (expr instanceof Ast.CastExpr cast) {
+            requireRuntimeReifiableType(cast.targetType(), cast.mode() == Ast.CastMode.OPTIONAL ? "as?" : "as");
+            Type source = deref(typeOf(cast.value(), env, generics, self));
+            Type target = deref(resolve(cast.targetType(), generics, self));
+            if (!typesMayOverlap(source, target)) {
+                throw new IllegalArgumentException("impossible cast: " + source + " cannot be cast to " + target);
+            }
+            return cast.mode() == Ast.CastMode.OPTIONAL
+                    ? new Named("Option", List.of(target))
+                    : target;
         }
         if (expr instanceof Ast.UnaryExpr unary) {
             Type operand = typeOf(unary.operand(), env, generics, self);
@@ -1783,6 +1834,299 @@ public final class TypeChecker {
         }
     }
 
+    private Type typeOfCondition(Ast.Expr expr, Env env, Set<String> generics, Type self) {
+        if (expr instanceof Ast.BinaryExpr binary && binary.operator().equals("&&")) {
+            requireAssignable(typeOfCondition(binary.left(), env, generics, self), Primitive.BOOL, "logical operand");
+            Env rightEnv = new Env(env);
+            defineConditionBindings(binary.left(), rightEnv, env, generics, self);
+            requireAssignable(typeOfCondition(binary.right(), rightEnv, generics, self), Primitive.BOOL, "logical operand");
+            return Primitive.BOOL;
+        }
+        return typeOf(expr, env, generics, self);
+    }
+
+    private void defineConditionBindings(
+            Ast.Expr condition, Env destination, Env sourceEnv, Set<String> generics, Type self) {
+        if (condition instanceof Ast.TypeTestExpr test && test.binding() != null) {
+            Type source = deref(typeOf(test.value(), sourceEnv, generics, self));
+            Type target = deref(resolve(test.targetType(), generics, self));
+            if (!typesMayOverlap(source, target)) {
+                throw new IllegalArgumentException("impossible type refinement: " + source + " cannot be " + target);
+            }
+            destination.define(test.binding(), target, Ast.BindingKind.VAL);
+            return;
+        }
+        if (condition instanceof Ast.PatternTestExpr test) {
+            Type subject = deref(typeOf(test.value(), sourceEnv, generics, self));
+            checkPattern(test.pattern(), subject, destination, generics, self);
+            return;
+        }
+        if (condition instanceof Ast.BinaryExpr binary && binary.operator().equals("&&")) {
+            defineConditionBindings(binary.left(), destination, sourceEnv, generics, self);
+            defineConditionBindings(binary.right(), destination, destination, generics, self);
+        }
+    }
+
+    private void checkMatch(
+            Ast.MatchStmt matched,
+            Type subject,
+            Env env,
+            Set<String> generics,
+            Type expectedReturn,
+            Type self) {
+        List<Ast.MatchArm> arms = matched.arms();
+        for (int i = 0; i < arms.size(); i++) {
+            Ast.MatchArm arm = arms.get(i);
+            boolean fallback = isFallbackArm(arm);
+            if (!matched.ordered() && fallback && i != arms.size() - 1) {
+                throw new IllegalArgumentException("exclusive match fallback '_'/'else'/catch-all binding must be the final arm");
+            }
+
+            Env armEnv = new Env(env);
+            checkPattern(arm.pattern(), subject, armEnv, generics, self);
+            if (arm.guard() != null) {
+                requireAssignable(typeOfCondition(arm.guard(), armEnv, generics, self), Primitive.BOOL, "match guard");
+            }
+            checkBlock(arm.body(), armEnv, generics, expectedReturn, self);
+
+            if (!matched.ordered() && !fallback) {
+                for (int j = 0; j < i; j++) {
+                    Ast.MatchArm previous = arms.get(j);
+                    if (isFallbackArm(previous)) {
+                        throw new IllegalArgumentException("exclusive match fallback must be the final arm");
+                    }
+                    if (!patternsProvablyDisjoint(previous.pattern(), arm.pattern(), subject, generics, self)
+                            && !guardsProvablyDisjoint(previous.guard(), arm.guard())) {
+                        throw new IllegalArgumentException(
+                                "overlapping match arms " + (j + 1) + " and " + (i + 1)
+                                        + "; exclusive match requires a proof of disjointness"
+                                        + " (use 'match first' only when priority semantics are intentional)");
+                    }
+                }
+            }
+        }
+
+        if (!matchProvablyExhaustive(arms, subject, generics, self)) {
+            throw new IllegalArgumentException(
+                    "non-exhaustive match for " + subject
+                            + "; add an unguarded '_'/'else' arm or cover every known constructor/value");
+        }
+    }
+
+    private void checkPattern(
+            Ast.Pattern pattern, Type subject, Env bindings, Set<String> generics, Type self) {
+        if (pattern instanceof Ast.WildcardPattern) return;
+        if (pattern instanceof Ast.BindingPattern binding) {
+            bindings.define(binding.name(), subject, Ast.BindingKind.VAL);
+            return;
+        }
+        if (pattern instanceof Ast.LiteralPattern literal) {
+            Type literalType = typeOf(new Ast.LiteralExpr(literal.value()), bindings, generics, self);
+            if (!assignable(literalType, subject) && !assignable(subject, literalType)) {
+                throw new IllegalArgumentException("literal pattern type " + literalType + " is incompatible with " + subject);
+            }
+            return;
+        }
+        if (pattern instanceof Ast.TypePattern typed) {
+            requireRuntimeReifiableType(typed.type(), "is pattern");
+            Type target = deref(resolve(typed.type(), generics, self));
+            if (!typesMayOverlap(subject, target)) {
+                throw new IllegalArgumentException("unreachable type pattern: " + subject + " cannot be " + target);
+            }
+            if (typed.binding() != null) bindings.define(typed.binding(), target, Ast.BindingKind.VAL);
+            return;
+        }
+        if (pattern instanceof Ast.ConstructorPattern constructor) {
+            if (!(subject instanceof Named named)) {
+                throw new IllegalArgumentException("constructor pattern " + constructor.constructor() + " requires a sum/constructor type, got " + subject);
+            }
+            List<Type> args = switch (constructor.constructor()) {
+                case "Some" -> named.name().equals("Option") && named.arguments().size() == 1
+                        ? List.of(named.arguments().getFirst()) : null;
+                case "None" -> named.name().equals("Option") && named.arguments().size() == 1
+                        ? List.of() : null;
+                case "Ok" -> named.name().equals("Result") && named.arguments().size() == 2
+                        ? List.of(named.arguments().get(0)) : null;
+                case "Err" -> named.name().equals("Result") && named.arguments().size() == 2
+                        ? List.of(named.arguments().get(1)) : null;
+                default -> null;
+            };
+            if (args == null) {
+                throw new IllegalArgumentException("constructor " + constructor.constructor() + " is not valid for " + subject);
+            }
+            if (args.size() != constructor.arguments().size()) {
+                throw new IllegalArgumentException("constructor pattern " + constructor.constructor()
+                        + " expects " + args.size() + " argument(s), got " + constructor.arguments().size());
+            }
+            for (int i = 0; i < args.size(); i++) {
+                checkPattern(constructor.arguments().get(i), args.get(i), bindings, generics, self);
+            }
+            return;
+        }
+        throw new IllegalArgumentException("unsupported pattern " + pattern);
+    }
+
+    private boolean patternsProvablyDisjoint(
+            Ast.Pattern left, Ast.Pattern right, Type subject, Set<String> generics, Type self) {
+        if (left instanceof Ast.WildcardPattern || right instanceof Ast.WildcardPattern
+                || left instanceof Ast.BindingPattern || right instanceof Ast.BindingPattern) return false;
+        if (left instanceof Ast.LiteralPattern a && right instanceof Ast.LiteralPattern b) {
+            return !java.util.Objects.equals(a.value(), b.value());
+        }
+        if (left instanceof Ast.ConstructorPattern a && right instanceof Ast.ConstructorPattern b) {
+            if (!a.constructor().equals(b.constructor())) {
+                if ((a.constructor().equals("Some") && b.constructor().equals("None"))
+                        || (a.constructor().equals("None") && b.constructor().equals("Some"))
+                        || (a.constructor().equals("Ok") && b.constructor().equals("Err"))
+                        || (a.constructor().equals("Err") && b.constructor().equals("Ok"))) return true;
+            }
+            return false;
+        }
+        if (left instanceof Ast.TypePattern a && right instanceof Ast.TypePattern b) {
+            Type at = deref(resolve(a.type(), generics, self));
+            Type bt = deref(resolve(b.type(), generics, self));
+            return !typesMayOverlap(at, bt);
+        }
+        return false;
+    }
+
+    private boolean guardsProvablyDisjoint(Ast.Expr left, Ast.Expr right) {
+        GuardRange a = guardRange(left);
+        GuardRange b = guardRange(right);
+        if (a == null || b == null || !a.variable().equals(b.variable())) return false;
+        return a.max() < b.min() || b.max() < a.min()
+                || (a.max() == b.min() && (!a.maxInclusive() || !b.minInclusive()))
+                || (b.max() == a.min() && (!b.maxInclusive() || !a.minInclusive()));
+    }
+
+    private GuardRange guardRange(Ast.Expr guard) {
+        if (!(guard instanceof Ast.BinaryExpr binary)
+                || !(binary.left() instanceof Ast.NameExpr name)
+                || !(binary.right() instanceof Ast.LiteralExpr literal)
+                || !(literal.value() instanceof Number number)) return null;
+        double v = number.doubleValue();
+        return switch (binary.operator()) {
+            case "<" -> new GuardRange(name.name(), Double.NEGATIVE_INFINITY, false, v, false);
+            case "<=" -> new GuardRange(name.name(), Double.NEGATIVE_INFINITY, false, v, true);
+            case ">" -> new GuardRange(name.name(), v, false, Double.POSITIVE_INFINITY, false);
+            case ">=" -> new GuardRange(name.name(), v, true, Double.POSITIVE_INFINITY, false);
+            case "==" -> new GuardRange(name.name(), v, true, v, true);
+            default -> null;
+        };
+    }
+
+    private record GuardRange(
+            String variable, double min, boolean minInclusive, double max, boolean maxInclusive) { }
+
+    private boolean isFallbackArm(Ast.MatchArm arm) {
+        return arm.guard() == null
+                && (arm.pattern() instanceof Ast.WildcardPattern
+                    || arm.pattern() instanceof Ast.BindingPattern);
+    }
+
+    private boolean matchProvablyExhaustive(
+            List<Ast.MatchArm> arms, Type subject, Set<String> generics, Type self) {
+        for (Ast.MatchArm arm : arms) {
+            if (arm.guard() != null) continue;
+            if (arm.pattern() instanceof Ast.WildcardPattern || arm.pattern() instanceof Ast.BindingPattern) return true;
+            if (arm.pattern() instanceof Ast.TypePattern typed) {
+                Type target = deref(resolve(typed.type(), generics, self));
+                if (assignable(subject, target)) return true;
+            }
+        }
+        if (subject == Primitive.BOOL) {
+            boolean yes = false, no = false;
+            for (Ast.MatchArm arm : arms) if (arm.guard() == null && arm.pattern() instanceof Ast.LiteralPattern literal) {
+                if (Boolean.TRUE.equals(literal.value())) yes = true;
+                if (Boolean.FALSE.equals(literal.value())) no = true;
+            }
+            return yes && no;
+        }
+        if (subject instanceof Named named && named.name().equals("Option")) {
+            boolean some = false, none = false;
+            for (Ast.MatchArm arm : arms) if (arm.guard() == null && arm.pattern() instanceof Ast.ConstructorPattern c) {
+                some |= c.constructor().equals("Some");
+                none |= c.constructor().equals("None");
+            }
+            return some && none;
+        }
+        if (subject instanceof Named named && named.name().equals("Result")) {
+            boolean ok = false, err = false;
+            for (Ast.MatchArm arm : arms) if (arm.guard() == null && arm.pattern() instanceof Ast.ConstructorPattern c) {
+                ok |= c.constructor().equals("Ok");
+                err |= c.constructor().equals("Err");
+            }
+            return ok && err;
+        }
+        return false;
+    }
+
+    /**
+     * Runtime-domain intersection, deliberately stricter than assignment
+     * compatibility. Numeric widening (int -> float) is not a runtime type
+     * identity relation, while open nominal types may share a future/common
+     * subtype and therefore cannot be declared disjoint without a proof.
+     */
+    private boolean typesMayOverlap(Type a, Type b) {
+        if (a == Unknown.INSTANCE || b == Unknown.INSTANCE
+                || a instanceof Generic || b instanceof Generic) return true;
+        if (a instanceof Union union) return union.options().stream().anyMatch(option -> typesMayOverlap(option, b));
+        if (b instanceof Union union) return union.options().stream().anyMatch(option -> typesMayOverlap(a, option));
+
+        if (a instanceof StringLiteral && (b instanceof StringLiteral || b == Primitive.STRING)) return true;
+        if (b instanceof StringLiteral && (a instanceof StringLiteral || a == Primitive.STRING)) return true;
+
+        if (a instanceof Primitive ap && b instanceof Primitive bp) {
+            if (ap == bp) return true;
+            // FLOAT and DECIMAL currently share the same runtime scalar domain.
+            return (ap == Primitive.FLOAT && bp == Primitive.DECIMAL)
+                    || (ap == Primitive.DECIMAL && bp == Primitive.FLOAT);
+        }
+
+        if (a instanceof Named an && b instanceof Named bn) {
+            boolean aNominal = findClass(an.name()) != null || findInterface(an.name()) != null;
+            boolean bNominal = findClass(bn.name()) != null || findInterface(bn.name()) != null;
+            if (aNominal && bNominal) {
+                // Oreslang permits interface composition and multiple class
+                // parents. Without sealed/final proof metadata, unrelated open
+                // nominal types are not safely disjoint.
+                return true;
+            }
+            if (aNominal != bNominal) return false;
+            return an.name().equals(bn.name());
+        }
+
+        if (a instanceof ListType && b instanceof ListType) return true;
+        if (a instanceof Tuple at && b instanceof Tuple bt) {
+            if (at.elements().size() != bt.elements().size()) return false;
+            for (int i = 0; i < at.elements().size(); i++) {
+                if (!typesMayOverlap(at.elements().get(i), bt.elements().get(i))) return false;
+            }
+            return true;
+        }
+        if (a instanceof Record && b instanceof Record) return true;
+        return a.equals(b);
+    }
+
+    private void requireRuntimeReifiableType(Ast.TypeRef ref, String operator) {
+        if (ref == null) throw new IllegalArgumentException(operator + " requires a runtime-reifiable type");
+        if (ref.isUnion()) {
+            for (Ast.TypeRef option : ref.arguments()) requireRuntimeReifiableType(option, operator);
+            return;
+        }
+        if (ref.isBorrow() || ref.isTupleType() || ref.isRecordType() || ref.isStringLiteral()
+                || ref.name().equals("$infer$") || ref.name().equals("self")
+                || ref.name().equals("Fnc")) {
+            throw new IllegalArgumentException(
+                    operator + " requires a nominal/runtime-reifiable type; use 'matches' for structural patterns");
+        }
+        if (ref.inferArguments() || !ref.arguments().isEmpty()) {
+            throw new IllegalArgumentException(
+                    operator + " cannot test parameterized type '" + ref
+                            + "' until generic runtime type arguments are reified; match constructors/structure instead");
+        }
+    }
+
     private Type resolveSharedGeneric(Type type, Map<String, Type> bindings) {
         if (type instanceof Generic generic) {
             Type bound = bindings.get(generic.name());
@@ -1894,6 +2238,11 @@ public final class TypeChecker {
                 ResolvedMethod iteratorTarget = findMethodTarget(klass, named, "Symbol.iterator", 0, new LinkedHashSet<>());
                 if (iteratorTarget != null) {
                     Ast.MethodDecl iterator = iteratorTarget.method();
+                    requireClassMemberVisible(
+                            iterator.visibility(),
+                            iteratorTarget.owner(),
+                            "method",
+                            iterator.name());
                     Set<String> iteratorGenerics = new HashSet<>(iteratorTarget.owner().genericParameters());
                     iteratorGenerics.addAll(iterator.genericParameters());
                     Type result = resolve(iterator.returnType(), iteratorGenerics, iteratorTarget.ownerType());
@@ -2514,6 +2863,22 @@ public final class TypeChecker {
                     rejectStaticClassGenericReferences(branch.body(), classGenerics, klass, method);
                 }
                 rejectStaticClassGenericReferences(conditional.elseBody(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.MatchStmt matched) {
+                rejectStaticClassGenericReferences(matched.subject(), classGenerics, klass, method);
+                for (Ast.MatchArm arm : matched.arms()) {
+                    rejectStaticClassGenericReferences(arm.pattern(), classGenerics, klass, method);
+                    rejectStaticClassGenericReferences(arm.guard(), classGenerics, klass, method);
+                    rejectStaticClassGenericReferences(arm.body(), classGenerics, klass, method);
+                }
+            } else if (statement instanceof Ast.SwitchStmt switched) {
+                rejectStaticClassGenericReferences(switched.subject(), classGenerics, klass, method);
+                for (Ast.SwitchCase arm : switched.cases()) {
+                    for (Ast.Expr constant : arm.constants()) {
+                        rejectStaticClassGenericReferences(constant, classGenerics, klass, method);
+                    }
+                    rejectStaticClassGenericReferences(arm.body(), classGenerics, klass, method);
+                }
+                rejectStaticClassGenericReferences(switched.defaultBody(), classGenerics, klass, method);
             } else if (statement instanceof Ast.TryStmt attempted) {
                 rejectStaticClassGenericReferences(attempted.body(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(attempted.catchBody(), classGenerics, klass, method);
@@ -2544,6 +2909,15 @@ public final class TypeChecker {
         if (expression instanceof Ast.AssignExpr assignment) {
             rejectStaticClassGenericReferences(assignment.target(), classGenerics, klass, method);
             rejectStaticClassGenericReferences(assignment.value(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.TypeTestExpr test) {
+            rejectStaticClassGenericReferences(test.value(), classGenerics, klass, method);
+            rejectStaticClassGenericReference(test.targetType(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.PatternTestExpr test) {
+            rejectStaticClassGenericReferences(test.value(), classGenerics, klass, method);
+            rejectStaticClassGenericReferences(test.pattern(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.CastExpr cast) {
+            rejectStaticClassGenericReferences(cast.value(), classGenerics, klass, method);
+            rejectStaticClassGenericReference(cast.targetType(), classGenerics, klass, method);
         } else if (expression instanceof Ast.BinaryExpr binary) {
             rejectStaticClassGenericReferences(binary.left(), classGenerics, klass, method);
             rejectStaticClassGenericReferences(binary.right(), classGenerics, klass, method);
@@ -2595,6 +2969,20 @@ public final class TypeChecker {
             rejectStaticClassGenericReferences(lambda.expressionBody(), classGenerics, klass, method);
             if (lambda.blockBody() != null) {
                 rejectStaticClassGenericReferences(lambda.blockBody(), classGenerics, klass, method);
+            }
+        }
+    }
+
+    private void rejectStaticClassGenericReferences(
+            Ast.Pattern pattern,
+            Set<String> classGenerics,
+            Ast.ClassDecl klass,
+            Ast.MethodDecl method) {
+        if (pattern instanceof Ast.TypePattern typed) {
+            rejectStaticClassGenericReference(typed.type(), classGenerics, klass, method);
+        } else if (pattern instanceof Ast.ConstructorPattern constructor) {
+            for (Ast.Pattern nested : constructor.arguments()) {
+                rejectStaticClassGenericReferences(nested, classGenerics, klass, method);
             }
         }
     }
@@ -3116,6 +3504,13 @@ public final class TypeChecker {
                         && definitelyReturns(conditional.elseBody());
                 if (allBranches) return true;
             }
+            if (stmt instanceof Ast.MatchStmt matched
+                    && !matched.arms().isEmpty()
+                    && matched.arms().stream().allMatch(arm -> definitelyReturns(arm.body()))) return true;
+            if (stmt instanceof Ast.SwitchStmt switched
+                    && !switched.defaultBody().isEmpty()
+                    && switched.cases().stream().allMatch(arm -> definitelyReturns(arm.body()))
+                    && definitelyReturns(switched.defaultBody())) return true;
             if (stmt instanceof Ast.TryStmt attempted) {
                 if (definitelyReturns(attempted.finallyBody())) return true;
                 if (definitelyReturns(attempted.body()) && definitelyReturns(attempted.catchBody())) return true;
@@ -3133,6 +3528,15 @@ public final class TypeChecker {
                     if (containsBreakForCurrentLoop(branch.body())) return true;
                 }
                 if (containsBreakForCurrentLoop(conditional.elseBody())) return true;
+            } else if (stmt instanceof Ast.MatchStmt matched) {
+                for (Ast.MatchArm arm : matched.arms()) {
+                    if (containsBreakForCurrentLoop(arm.body())) return true;
+                }
+            } else if (stmt instanceof Ast.SwitchStmt switched) {
+                for (Ast.SwitchCase arm : switched.cases()) {
+                    if (containsBreakForCurrentLoop(arm.body())) return true;
+                }
+                if (containsBreakForCurrentLoop(switched.defaultBody())) return true;
             } else if (stmt instanceof Ast.TryStmt attempted) {
                 if (containsBreakForCurrentLoop(attempted.body())
                         || containsBreakForCurrentLoop(attempted.catchBody())

@@ -8,6 +8,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -50,7 +51,10 @@ public final class HungryActor<M> implements AutoCloseable {
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private final CountDownLatch termination = new CountDownLatch(1);
     private final Object lifecycleLock = new Object();
-    private final Thread worker;
+    private final NativeCarrierExecutor carrier;
+    private final AtomicReference<Thread> worker = new AtomicReference<>();
+    private final AtomicLong nativeCarrierThreadId = new AtomicLong();
+    private final String carrierThreadPrefix;
     private final Context<M> context = new Context<>() {
         @Override
         public HungryActor<M> self() {
@@ -90,11 +94,13 @@ public final class HungryActor<M> implements AutoCloseable {
         this.behavior = Objects.requireNonNull(behavior, "behavior");
 
         String safeName = sanitizeName(name);
-        this.worker = Thread.ofPlatform()
-                .daemon(true)
-                .name("ores-hungry-actor-" + safeName + "-" + id)
-                .unstarted(this::runLoop);
-        this.worker.start();
+        this.carrierThreadPrefix = "ores-hungry-" + safeName + "-";
+        this.carrier = new NativeCarrierExecutor(
+                1,
+                1,
+                1,
+                carrierThreadPrefix);
+        this.carrier.execute(this::runLoop);
     }
 
     public UUID id() {
@@ -102,15 +108,25 @@ public final class HungryActor<M> implements AutoCloseable {
     }
 
     public String threadName() {
-        return worker.getName();
+        Thread current = worker.get();
+        return current == null ? carrierThreadPrefix + "1" : current.getName();
     }
 
     public boolean isVirtualCarrier() {
-        return worker.isVirtual();
+        Thread current = worker.get();
+        return current != null && current.isVirtual();
+    }
+
+    public boolean usesNativeCarrier() {
+        return true;
+    }
+
+    public long nativeCarrierThreadId() {
+        return nativeCarrierThreadId.get();
     }
 
     public boolean isAlive() {
-        return worker.isAlive() && !terminated.get();
+        return !terminated.get() && !carrier.isTerminated();
     }
 
     public boolean stopRequested() {
@@ -150,13 +166,16 @@ public final class HungryActor<M> implements AutoCloseable {
     }
 
     private void requestStop() {
-        boolean interruptWorker;
+        Thread target;
         synchronized (lifecycleLock) {
             if (!stopRequested.compareAndSet(false, true)) return;
-            interruptWorker = Thread.currentThread() != worker;
+            target = worker.get();
         }
-        if (interruptWorker) {
-            worker.interrupt();
+        if (target != null && Thread.currentThread() != target) {
+            // This Java Thread object is the VM bridge for a JNI-attached
+            // pthread. Interrupting it wakes Java blocking primitives without
+            // changing the fact that the physical carrier is native-owned.
+            target.interrupt();
         }
     }
 
@@ -164,9 +183,10 @@ public final class HungryActor<M> implements AutoCloseable {
      * Cooperative cancellation point for long CPU-bound loops.
      */
     public void schedulerSafepoint() {
-        if (Thread.currentThread() != worker) {
+        if (Thread.currentThread() != worker.get()
+                || !NativeCarrierExecutor.isNativeCarrierThread()) {
             throw new IllegalStateException(
-                    "HungryActor schedulerSafepoint must run on its dedicated thread");
+                    "HungryActor schedulerSafepoint must run on its dedicated native carrier");
         }
         if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
             throw new CancellationException("HungryActor " + id + " is stopping");
@@ -182,6 +202,39 @@ public final class HungryActor<M> implements AutoCloseable {
 
     @SuppressWarnings("unchecked")
     private void runLoop() {
+        Thread current = Thread.currentThread();
+        if (!NativeCarrierExecutor.isNativeCarrierThread()) {
+            failure.compareAndSet(
+                    null,
+                    new IllegalStateException("HungryActor must execute on a native pthread carrier"));
+            stopRequested.set(true);
+            terminated.set(true);
+            termination.countDown();
+            carrier.shutdown();
+            return;
+        }
+        nativeCarrierThreadId.set(NativeCarrierExecutor.currentNativeThreadId());
+        if (nativeCarrierThreadId.get() == 0L) {
+            failure.compareAndSet(
+                    null,
+                    new IllegalStateException("HungryActor native pthread identity is unavailable"));
+            stopRequested.set(true);
+            terminated.set(true);
+            termination.countDown();
+            carrier.shutdown();
+            return;
+        }
+        if (!worker.compareAndSet(null, current)) {
+            failure.compareAndSet(
+                    null,
+                    new IllegalStateException("HungryActor native carrier was published more than once"));
+            stopRequested.set(true);
+            terminated.set(true);
+            termination.countDown();
+            carrier.shutdown();
+            return;
+        }
+
         try {
             while (!stopRequested.get()) {
                 final Object raw;
@@ -215,17 +268,33 @@ public final class HungryActor<M> implements AutoCloseable {
                 terminated.set(true);
             }
             termination.countDown();
+            // Graceful native shutdown can be requested by the currently
+            // executing carrier. The JNI reaper joins/reclaims it after this
+            // logical turn returns to NativeCarrierExecutor.
+            carrier.shutdown();
         }
     }
 
     @Override
     public void close() {
         release();
+
+        if (Thread.currentThread() == worker.get()) {
+            // The run-loop finally block retires the native carrier after this
+            // callback unwinds; waiting here would self-deadlock.
+            return;
+        }
+
         boolean interrupted = false;
         try {
             if (!termination.await(CLOSE_WAIT_MILLIS, TimeUnit.MILLISECONDS)) {
                 throw new IllegalStateException(
-                        "HungryActor " + id + " did not release its dedicated thread");
+                        "HungryActor " + id + " did not release its dedicated native carrier");
+            }
+            carrier.shutdown();
+            if (!carrier.awaitTermination(CLOSE_WAIT_MILLIS, TimeUnit.MILLISECONDS)) {
+                throw new IllegalStateException(
+                        "HungryActor " + id + " native carrier did not terminate");
             }
         } catch (InterruptedException waitInterrupted) {
             interrupted = true;

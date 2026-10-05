@@ -204,27 +204,33 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
 
     @Override
     public List<Runnable> shutdownNow() {
-        if (CURRENT_EXECUTOR.get() == this) {
-            throw new IllegalStateException(
-                    "native carrier executor cannot be synchronously shut down from one of its own carriers");
-        }
+        return beginShutdown(true);
+    }
+
+    @Override
+    public void shutdown() {
+        beginShutdown(false);
+    }
+
+    private List<Runnable> beginShutdown(boolean interruptActive) {
         if (!shutdown.compareAndSet(false, true)) return List.of();
+
         ArrayList<Runnable> abandoned = new ArrayList<>();
         queue.drainTo(abandoned);
 
-        // Match ThreadPoolExecutor.shutdownNow(): signal any active carrier
-        // before the native side joins pthreads. This is cooperative (Java
-        // interruption), not unsafe pthread cancellation; uncooperative actor
-        // containment remains the runtime watchdog's responsibility.
-        for (int slot = 0; slot < carrierThreads.length(); slot++) {
-            Thread carrier = carrierThreads.get(slot);
-            if (carrier != null) carrier.interrupt();
+        if (interruptActive) {
+            Thread current = Thread.currentThread();
+            for (int slot = 0; slot < carrierThreads.length(); slot++) {
+                Thread carrier = carrierThreads.get(slot);
+                if (carrier != null && carrier != current) carrier.interrupt();
+            }
         }
 
         synchronized (nativeLifecycleLock) {
-            // Native shutdown is non-blocking: it marks the pool closed and
-            // hands joins/reclamation to a native reaper so an uncooperative
-            // guest stack can never hold this caller hostage.
+            // Native retirement is asynchronous: it marks the pool closed and
+            // lets a native reaper join/reclaim pthreads. Graceful shutdown is
+            // therefore safe even when requested by the currently executing
+            // carrier after its final logical turn.
             nativeShutdown(nativeHandle);
         }
         return List.copyOf(abandoned);
@@ -272,11 +278,6 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     public int getMaximumPoolSize() { return maximumPoolSize; }
     public long getNativeStackBytes() { return nativeStackBytes; }
     public int getCorePoolSize() { return corePoolSize.get(); }
-    @Override
-    public void shutdown() {
-        shutdownNow();
-    }
-
     @Override
     public boolean isShutdown() { return shutdown.get(); }
 

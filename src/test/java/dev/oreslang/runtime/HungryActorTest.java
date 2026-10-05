@@ -29,6 +29,7 @@ final class HungryActorTest {
                     }
                 })) {
             assertFalse(actor.isVirtualCarrier(), "HungryActor must reserve a platform/OS carrier");
+            assertTrue(actor.usesNativeCarrier(), "HungryActor must use the JNI/pthread backend");
             assertTrue(actor.isAlive(), "dedicated thread starts with actor lifetime");
 
             actor.send("one");
@@ -38,6 +39,7 @@ final class HungryActorTest {
             assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
             assertEquals(firstThread.get(), secondThread.get());
             assertEquals(actor.threadName(), firstThread.get());
+            assertNotEquals(0L, actor.nativeCarrierThreadId());
             assertTrue(actor.failure().isEmpty());
         }
     }
@@ -76,6 +78,28 @@ final class HungryActorTest {
                     "dedicated CPU work must not consume the ordinary actor dispatcher");
             releaseCpu.set(true);
             assertTrue(hungry.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
+
+
+    @Test
+    void closeFromInsideBehaviorDoesNotSelfDeadlock() throws Exception {
+        CountDownLatch returnedFromClose = new CountDownLatch(1);
+
+        HungryActor<String> actor = new HungryActor<>(
+                "self-close",
+                2,
+                (message, context) -> {
+                    context.self().close();
+                    returnedFromClose.countDown();
+                });
+        try {
+            actor.send("stop");
+            assertTrue(returnedFromClose.await(2, TimeUnit.SECONDS));
+            assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(actor.failure().isEmpty());
+        } finally {
+            actor.close();
         }
     }
 

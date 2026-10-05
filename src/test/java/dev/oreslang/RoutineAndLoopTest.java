@@ -194,12 +194,12 @@ final class RoutineAndLoopTest {
 
                 pub routine main(): void {
                   for item of arr[1, 2] do
-                    done()
-                    stdio.stdout.write(item)
+                    done();
+                    stdio.stdout.write(item);
                   done
 
                   for (let i = 0; i < 2; i = i + 1) do
-                    stdio.stdout.write(i)
+                    stdio.stdout.write(i);
                   done
 
                   let n = 0;
@@ -210,7 +210,7 @@ final class RoutineAndLoopTest {
                     }
                   done
 
-                  stdio.stdout.write(n)
+                  stdio.stdout.write(n);
                   return;
                 }
                 """);
@@ -223,13 +223,13 @@ final class RoutineAndLoopTest {
         String output = run("""
                 pub routine main(): void {
                   for [key, value] of arr[(1, "a"), (2, "b")] do
-                    stdio.stdout.write(key)
-                    stdio.stdout.write(value)
+                    stdio.stdout.write(key);
+                    stdio.stdout.write(value);
                   done
 
                   for [_, let value] of arr[(9, 3), (8, 4)] {
                     value = value + 1;
-                    stdio.stdout.write(value)
+                    stdio.stdout.write(value);
                   }
                   return;
                 }
@@ -245,7 +245,7 @@ final class RoutineAndLoopTest {
                 () -> TypeChecker.check(Parser.parse("""
                         pub routine main(): void {
                           for [a, b, c] of arr[(1, 2)] do
-                            stdio.stdout.write(a)
+                            stdio.stdout.write(a);
                           done
                           return;
                         }
@@ -259,7 +259,7 @@ final class RoutineAndLoopTest {
         String output = run("""
                 pub routine main(): void {
                   for int i = 0; i < 3; i++ do
-                    stdio.stdout.write(i)
+                    stdio.stdout.write(i);
                   done
 
                   for int j = 3; j > 0; j-- {
@@ -294,7 +294,7 @@ final class RoutineAndLoopTest {
                 pub routine main(): void {
                   val bag = new collections.Bag();
                   for (val item of bag) {
-                    stdio.stdout.write(item)
+                    stdio.stdout.write(item);
                   }
                 }
                 """);

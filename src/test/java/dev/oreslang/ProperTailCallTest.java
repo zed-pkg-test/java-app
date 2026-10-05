@@ -167,6 +167,19 @@ final class ProperTailCallTest {
     }
 
     @Test
+    void blockBodiedLambdaTailRecursionUsesTheTrampoline() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  let Fnc<int, int> down = |int n| -> { return n == 0 ? 0 : down(n - 1); };
+                  stdio.stdout.write(down(50000));
+                  return;
+                }
+                """);
+
+        assertEquals("0", output);
+    }
+
+    @Test
     void conditionalTailPositionAlsoUsesTheTrampoline() throws Exception {
         String output = run("""
                 fnc down(int n): int {
