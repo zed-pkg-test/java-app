@@ -210,7 +210,15 @@ public final class TypeChecker {
                 if (!memberKeys.add(key)) throw new IllegalArgumentException("duplicate interface method '" + iface.name() + "." + fn.name() + "' with arity " + fn.parameters().size());
                 Set<String> all = new HashSet<>(generics);
                 for (String generic : fn.genericParameters()) {
-                    if (!all.add(generic)) throw new IllegalArgumentException("duplicate/shadowed generic '" + generic + "' in interface " + iface.name() + "." + fn.name());
+                    rejectReservedGenericName(
+                            generic,
+                            "interface " + iface.name() + "." + fn.name());
+                    if (!all.add(generic)) {
+                        throw new IllegalArgumentException(
+                                "duplicate/shadowed generic '" + generic
+                                        + "' in interface " + iface.name()
+                                        + "." + fn.name());
+                    }
                 }
                 functionType(fn.parameters(), fn.returnType(), all, null);
             } else {
@@ -340,8 +348,13 @@ public final class TypeChecker {
             Set<String> generics = new HashSet<>();
             if (!method.isStatic()) generics.addAll(classGenerics);
             for (String generic : method.genericParameters()) {
+                rejectReservedGenericName(
+                        generic,
+                        "method " + klass.name() + "." + method.name());
                 if (classGenerics.contains(generic) || !generics.add(generic)) {
-                    throw new IllegalArgumentException("duplicate/shadowed generic '" + generic + "' in " + klass.name() + "." + method.name());
+                    throw new IllegalArgumentException(
+                            "duplicate/shadowed generic '" + generic
+                                    + "' in " + klass.name() + "." + method.name());
                 }
             }
 
@@ -2853,8 +2866,24 @@ public final class TypeChecker {
 
     private Set<String> uniqueGenerics(List<String> names, String owner) {
         Set<String> result = new HashSet<>();
-        for (String name : names) if (!result.add(name)) throw new IllegalArgumentException("duplicate generic '" + name + "' in " + owner);
+        for (String name : names) {
+            rejectReservedGenericName(name, owner);
+            if (!result.add(name)) {
+                throw new IllegalArgumentException(
+                        "duplicate generic '" + name + "' in " + owner);
+            }
+        }
         return result;
+    }
+
+    private static void rejectReservedGenericName(
+            String name,
+            String owner) {
+        if (RESERVED_RUNTIME_TYPE_NAMES.contains(name)) {
+            throw new IllegalArgumentException(
+                    "generic '" + name + "' in " + owner
+                            + " conflicts with a compiler/runtime built-in type");
+        }
     }
 
     private boolean constant(Ast.Expr expr) {

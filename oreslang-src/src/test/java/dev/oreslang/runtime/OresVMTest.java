@@ -917,4 +917,43 @@ final class OresVMTest {
     }
 
 
+    @Test
+    void successfulCloseRetryStillShutsDownOwnedVm() throws Exception {
+        ActorRuntime.DispatcherConfig config = new ActorRuntime.DispatcherConfig(
+                1, 1, 1, 8,
+                TimeUnit.MILLISECONDS.toNanos(2),
+                TimeUnit.SECONDS.toNanos(1),
+                0,
+                16);
+
+        OresVM vm = OresVM.dedicated(config);
+        ActorRuntime runtime = vm.newActorRuntime(IsolatePolicy.developer());
+        CountDownLatch entered = new CountDownLatch(1);
+
+        runtime.submitAsyncRootTask(() -> {
+            entered.countDown();
+            long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500);
+            while (System.nanoTime() < until) {
+                Thread.onSpinWait(); // deliberately ignore interrupt/cancellation
+            }
+            return 1;
+        });
+
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+
+        assertThrows(
+                IllegalStateException.class,
+                runtime::close,
+                "first close should fail while the uncooperative task is still running");
+
+        Thread.sleep(350);
+        runtime.close();
+
+        assertThrows(
+                IllegalStateException.class,
+                () -> vm.submitJavaBlocking(() -> 1),
+                "successful close retry must still shut down the dedicated VM");
+    }
+
+
 }

@@ -35,8 +35,10 @@ public final class OwnershipChecker {
     private record CallSignature(List<Ast.Param> parameters, Ast.TypeRef result) { }
     private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
     private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
+    private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
     private final Set<String> ambiguousFunctions = new HashSet<>();
     private final Set<String> ambiguousClasses = new HashSet<>();
+    private final Set<String> ambiguousInterfaces = new HashSet<>();
     private int mutexCriticalSectionDepth;
 
     private OwnershipChecker(Ast.Program program) {
@@ -54,6 +56,7 @@ public final class OwnershipChecker {
             for (Ast.Decl decl : module.declarations()) {
                 if (decl instanceof Ast.FunctionDecl fn) index(functions, ambiguousFunctions, module.name(), fn.name(), fn);
                 else if (decl instanceof Ast.ClassDecl klass) index(classes, ambiguousClasses, module.name(), klass.name(), klass);
+                else if (decl instanceof Ast.InterfaceDecl iface) index(interfaces, ambiguousInterfaces, module.name(), iface.name(), iface);
             }
         }
     }
@@ -453,12 +456,14 @@ public final class OwnershipChecker {
                 throw error("cannot await while holding a MutexGuard; release the guard before suspension");
             }
             ValueInfo awaitedValue = checkExpr(awaited.expression(), scope, consuming);
-            if (awaitedValue.type.name().equals("Future") && awaitedValue.type.arguments().size() == 1) {
-                Ast.TypeRef result = awaitedValue.type.arguments().getFirst();
-                return new ValueInfo(result, kindOfType(result), null);
-            }
             if (awaitedValue.type.name().equals("ActorSpawn")) {
                 return new ValueInfo(Ast.TypeRef.simple("ActorRef"), ValueKind.MOVE_ONLY, null);
+            }
+            Ast.TypeRef payload = awaitablePayloadType(
+                    awaitedValue.type,
+                    new LinkedHashSet<>());
+            if (payload != null) {
+                return new ValueInfo(payload, kindOfType(payload), null);
             }
             return awaitedValue;
         }
@@ -1346,6 +1351,59 @@ public final class OwnershipChecker {
     private Ast.FunctionDecl findFunction(String name) {
         if (ambiguousFunctions.contains(name)) return null;
         return functions.get(name);
+    }
+
+    private Ast.InterfaceDecl findInterface(String name) {
+        if (ambiguousInterfaces.contains(name)) return null;
+        return interfaces.get(name);
+    }
+
+    private Ast.TypeRef awaitablePayloadType(
+            Ast.TypeRef type,
+            Set<String> seen) {
+        if (type == null) return null;
+        if (type.isBorrow()) type = type.borrowedTarget();
+
+        if (type.name().equals("Future") && type.arguments().size() == 1) {
+            return type.arguments().getFirst();
+        }
+        if (type.name().equals("Awaitable") && type.arguments().size() == 1) {
+            return type.arguments().getFirst();
+        }
+
+        String key = type.name() + type.arguments();
+        if (!seen.add(key)) return null;
+
+        Ast.ClassDecl klass = findClass(type.name());
+        if (klass != null) {
+            Map<String, Ast.TypeRef> bindings =
+                    genericBindings(klass.genericParameters(), type.arguments());
+            for (Ast.TypeRef interfaceRef : klass.interfaces()) {
+                Ast.TypeRef concrete = substituteType(interfaceRef, bindings);
+                Ast.TypeRef payload = awaitablePayloadType(concrete, seen);
+                if (payload != null) return payload;
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent == null) continue;
+                Ast.TypeRef concrete = substituteType(parentRef, bindings);
+                Ast.TypeRef payload = awaitablePayloadType(concrete, seen);
+                if (payload != null) return payload;
+            }
+            return null;
+        }
+
+        Ast.InterfaceDecl iface = findInterface(type.name());
+        if (iface != null) {
+            Map<String, Ast.TypeRef> bindings =
+                    genericBindings(iface.genericParameters(), type.arguments());
+            for (Ast.TypeRef parentRef : iface.parents()) {
+                Ast.TypeRef concrete = substituteType(parentRef, bindings);
+                Ast.TypeRef payload = awaitablePayloadType(concrete, seen);
+                if (payload != null) return payload;
+            }
+        }
+        return null;
     }
 
     private Ast.ClassDecl findClass(String name) {

@@ -412,4 +412,64 @@ final class FutureLanguageTest {
     }
 
 
+    @Test
+    void ownershipCheckerUsesAwaitablePayloadTypeAfterAwait() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class IntBox implements Awaitable<int> as
+                  pub async getAwait() => int {
+                    return 7;
+                  }
+                end
+
+                fnc use_twice(IntBox box) => int {
+                  val value = await box;
+                  val first = value;
+                  val second = value;
+                  return first + second;
+                }
+                """)));
+    }
+
+
+    @Test
+    void compilerKnownAsyncProtocolTypesCannotBeShadowedByGenerics() {
+        for (String source : java.util.List.of(
+                """
+                fnc bad<Future>(Future value) => Future {
+                  return value;
+                }
+                """,
+                """
+                define class Box<Awaitable> as
+                end
+                """,
+                """
+                define interface Box<ActorSpawn> {
+                }
+                """,
+                """
+                type Box<ActorRef> = ActorRef;
+                """,
+                """
+                define class Box as
+                  pub static fnc bad<Future>(Future value) => Future {
+                    return value;
+                  }
+                end
+                """,
+                """
+                define interface Box {
+                  fnc bad<Awaitable>(Awaitable value) => Awaitable;
+                }
+                """)) {
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> TypeChecker.check(Parser.parse(source)));
+            assertTrue(
+                    failure.getMessage().contains("compiler/runtime built-in type"),
+                    failure::getMessage);
+        }
+    }
+
+
 }

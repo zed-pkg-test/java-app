@@ -1521,6 +1521,7 @@ public final class ActorRuntime implements AutoCloseable {
     private final AtomicInteger activeRootTasks = new AtomicInteger();
     private final Set<RootTask<?>> rootTasks = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean ownedVmShutdown = new AtomicBoolean();
     private final AtomicLong privateMemoryBytes = new AtomicLong();
     private final AtomicLong sharedMemoryBytes = new AtomicLong();
     private final Object memoryBudgetLock = new Object();
@@ -3856,10 +3857,18 @@ public final class ActorRuntime implements AutoCloseable {
                         groupState.abortActorReservation();
                     }
                 }
-                if (generationLease != null) {
-                    generationLease.close();
+                // Release runtime quota before generation cleanup. A broken
+                // lease implementation must not strand actor admission capacity
+                // or mask the primary spawn failure.
+                if (runtimeReserved) {
+                    releaseReservedActorSlot(kind);
+                    runtimeReserved = false;
                 }
-                if (runtimeReserved) releaseReservedActorSlot(kind);
+                if (generationLease != null) {
+                    closeGenerationLeaseAfterAdmissionFailure(
+                            generationLease,
+                            failure);
+                }
                 throw failure;
             }
         }
@@ -5617,11 +5626,10 @@ public final class ActorRuntime implements AutoCloseable {
      * not be misclassified as a guest-initiated runtime close.
      */
     void closeFromSupervisor() {
-        final boolean firstClose;
         final List<ActorCell<?>> snapshot;
         final List<ActorGroupRuntime<?>> groupSnapshot;
         synchronized (runtimeLifecycleLock) {
-            firstClose = closed.compareAndSet(false, true);
+            closed.compareAndSet(false, true);
             snapshot = List.copyOf(actors.values());
             groupSnapshot = List.copyOf(actorGroups.values());
         }
@@ -5684,11 +5692,12 @@ public final class ActorRuntime implements AutoCloseable {
                             + activeRootTasks.get() + " root task(s) still running");
         }
 
-        if (firstClose && ownsVm) {
+        if (ownsVm && ownedVmShutdown.compareAndSet(false, true)) {
             // Dedicated/test runtimes own their complete VM scheduler set, but
             // carriers must remain alive while actors/root tasks unwind their
-            // final runtime cleanup. Shutting the VM down earlier races the
-            // root-task finally path and can strand lifecycle accounting.
+            // final runtime cleanup. A failed close attempt may be retried; VM
+            // shutdown is therefore tied to the first successful quiescent
+            // close, not merely to the first call to close().
             vm.shutdownNow();
         }
 
@@ -6256,7 +6265,7 @@ public final class ActorRuntime implements AutoCloseable {
             }
             try {
                 actorExitHook.accept(executionDomain);
-            } catch (VirtualMachineError | ThreadDeath fatal) {
+            } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
                 throw fatal;
             } catch (Throwable ignored) {
                 // Actor termination must still complete. Runtime cleanup hooks
@@ -6269,7 +6278,7 @@ public final class ActorRuntime implements AutoCloseable {
             unregisterActor(this);
             try {
                 generationLease.close();
-            } catch (VirtualMachineError | ThreadDeath fatal) {
+            } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
                 throw fatal;
             } catch (Throwable leaseFailure) {
                 ref.terminationCause.compareAndSet(null, leaseFailure);
