@@ -118,6 +118,7 @@ public final class OresEvalRootNode extends RootNode {
         private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> typeAliases = new HashMap<>();
         private final Map<String, Ast.ModuleDecl> modules = new HashMap<>();
+        private final IdentityHashMap<Ast.MethodDecl, Ast.ClassDecl> methodOwners = new IdentityHashMap<>();
         private final Map<String, ImportedBinding> namedImports = new HashMap<>();
         private final Map<String, Ast.ImportDecl> namespaceImports = new HashMap<>();
         private final Map<String, HostClassFacade> hostClasses = new HashMap<>();
@@ -248,8 +249,10 @@ public final class OresEvalRootNode extends RootNode {
                 modules.put(module.name(), module);
                 for (Ast.Decl decl : module.declarations()) {
                     if (decl instanceof Ast.FunctionDecl fn) index(functions, ambiguousFunctions, module.name(), fn.name(), fn);
-                    else if (decl instanceof Ast.ClassDecl klass) index(classes, ambiguousClasses, module.name(), klass.name(), klass);
-                    else if (decl instanceof Ast.TypeAliasDecl alias) index(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias);
+                    else if (decl instanceof Ast.ClassDecl klass) {
+                        index(classes, ambiguousClasses, module.name(), klass.name(), klass);
+                        for (Ast.MethodDecl method : klass.methods()) methodOwners.put(method, klass);
+                    } else if (decl instanceof Ast.TypeAliasDecl alias) index(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias);
                 }
             }
         }
@@ -595,7 +598,7 @@ public final class OresEvalRootNode extends RootNode {
                         "async instance methods are not admitted until receiver ownership can be moved into the task");
             }
             if (args.size() != method.parameters().size()) throw new IllegalArgumentException("method " + method.name() + " arity mismatch");
-            Env env = new Env(null);
+            Env env = new Env(null, false, declaringClass(method));
             if (!method.isStatic()) env.define("self", receiver, Ast.BindingKind.VAL);
             for (int i = 0; i < method.parameters().size(); i++) {
                 Ast.Param param = method.parameters().get(i);
@@ -672,7 +675,10 @@ public final class OresEvalRootNode extends RootNode {
                 } else {
                     for (Ast.DestructureBinding binding : destructure.bindings()) {
                         if (!binding.isDiscard()) {
-                            env.define(binding.name(), destructureMember(value, binding.name()), binding.kind());
+                            env.define(
+                                    binding.name(),
+                                    destructureMember(value, binding.name(), env),
+                                    binding.kind());
                         }
                     }
                 }
@@ -727,7 +733,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (stmt instanceof Ast.ForOfDestructureStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
-                for (Object item : iterableValues(iterable)) {
+                for (Object item : iterableValues(iterable, env)) {
                     context.schedulerSafepoint();
                     List<?> items = asSequence(item);
                     if (items.size() != loop.bindings().size()) {
@@ -757,7 +763,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (stmt instanceof Ast.ForOfStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
-                for (Object item : iterableValues(iterable)) {
+                for (Object item : iterableValues(iterable, env)) {
                     context.schedulerSafepoint();
                     Env iteration = new Env(env);
                     iteration.define(loop.bindingName(), item, loop.bindingKind());
@@ -864,9 +870,25 @@ public final class OresEvalRootNode extends RootNode {
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, methodCall.member(), args.size(), new LinkedHashSet<>());
                     if (method != null) {
+                        object.owner.requireClassMemberVisible(
+                                method.visibility(),
+                                object.owner.declaringClass(method),
+                                env.accessClass(),
+                                "method",
+                                method.name());
                         return object.owner.methodInvocation(object, method, args);
                     }
 
+                    OwnedField ownedField = object.owner.findField(
+                            object.klass, methodCall.member(), new LinkedHashSet<>());
+                    if (ownedField != null) {
+                        object.owner.requireClassMemberVisible(
+                                ownedField.field().visibility(),
+                                ownedField.owner(),
+                                env.accessClass(),
+                                "field",
+                                ownedField.field().name());
+                    }
                     Object fieldValue = object.fields.get(methodCall.member());
                     if (fieldValue instanceof Invokable invokable) {
                         return object.owner.invokableInvocation(invokable, args);
@@ -889,6 +911,12 @@ public final class OresEvalRootNode extends RootNode {
                                 "no static function " + klass.klass().name() + "." + methodCall.member()
                                         + " with arity " + args.size());
                     }
+                    klass.owner().requireClassMemberVisible(
+                            fn.visibility(),
+                            klass.owner().declaringClass(fn),
+                            env.accessClass(),
+                            "static function",
+                            fn.name());
                     return klass.owner().staticFunctionInvocation(fn, args);
                 }
 
@@ -904,6 +932,12 @@ public final class OresEvalRootNode extends RootNode {
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, methodCall.member(), args.size(), new LinkedHashSet<>());
                     if (method != null) {
+                        object.owner.requireClassMemberVisible(
+                                method.visibility(),
+                                object.owner.declaringClass(method),
+                                env.accessClass(),
+                                "method",
+                                method.name());
                         return object.owner.methodInvocation(object, method, args);
                     }
                 }
@@ -913,7 +947,7 @@ public final class OresEvalRootNode extends RootNode {
                             namespace.kind(), methodCall.member(), args);
                 }
 
-                Object callee = member(receiver, methodCall.member());
+                Object callee = member(receiver, methodCall.member(), env);
                 if (!(callee instanceof Invokable invokable)) {
                     throw new IllegalArgumentException("value is not callable: " + callee);
                 }
@@ -1012,10 +1046,18 @@ public final class OresEvalRootNode extends RootNode {
                         if (!object.fields.containsKey(target.member())) {
                             throw new IllegalArgumentException("unknown field " + target.member());
                         }
-                        Ast.FieldDecl field = effectiveFields(object.klass, new LinkedHashSet<>()).stream()
-                                .filter(candidate -> candidate.name().equals(target.member()))
-                                .findFirst()
-                                .orElseThrow(() -> new IllegalArgumentException("unknown field " + target.member()));
+                        OwnedField ownedField = object.owner.findField(
+                                object.klass, target.member(), new LinkedHashSet<>());
+                        if (ownedField == null) {
+                            throw new IllegalArgumentException("unknown field " + target.member());
+                        }
+                        Ast.FieldDecl field = ownedField.field();
+                        object.owner.requireClassMemberVisible(
+                                field.visibility(),
+                                ownedField.owner(),
+                                env.accessClass(),
+                                "field",
+                                field.name());
                         if (field.bindingKind() != Ast.BindingKind.LET) {
                             throw new IllegalArgumentException("field '" + object.klass.name() + "."
                                     + target.member() + "' is immutable");
@@ -1088,7 +1130,7 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.CallExpr call) {
                 return invoke(prepareInvocation(call, env));
             }
-            if (expr instanceof Ast.MemberExpr member) return member(eval(member.receiver(), env), member.member());
+            if (expr instanceof Ast.MemberExpr member) return member(eval(member.receiver(), env), member.member(), env);
             if (expr instanceof Ast.IndexExpr indexed) {
                 Object receiver = eval(indexed.receiver(), env);
                 Object index = eval(indexed.index(), env);
@@ -1214,7 +1256,7 @@ public final class OresEvalRootNode extends RootNode {
             throw new IllegalArgumentException("unsupported expression " + expr);
         }
 
-        private Object member(Object receiver, String name) {
+        private Object member(Object receiver, String name, Env env) {
             if (receiver instanceof HostClassFacade host) {
                 context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
                         "Java host class " + host.className());
@@ -1266,7 +1308,7 @@ public final class OresEvalRootNode extends RootNode {
                 return switch (name) {
                     case "release" -> (Invokable) args -> { requireZero(args, "MutexGuard.release"); guard.release(); return null; };
                     case "is_released" -> (Invokable) args -> { requireZero(args, "MutexGuard.is_released"); return guard.released(); };
-                    default -> member(guard.value(), name);
+                    default -> member(guard.value(), name, env);
                 };
             }
             if (receiver instanceof ImportedNamespace namespace) return namespace.owner().exportValue(namespace.kind(), name);
@@ -1275,6 +1317,12 @@ public final class OresEvalRootNode extends RootNode {
                 List<Ast.MethodDecl> functions = klass.owner().findStaticFunctionsByName(klass.klass(), name, new LinkedHashSet<>());
                 if (functions.size() == 1) {
                     Ast.MethodDecl fn = functions.getFirst();
+                    klass.owner().requireClassMemberVisible(
+                            fn.visibility(),
+                            klass.owner().declaringClass(fn),
+                            env == null ? null : env.accessClass(),
+                            "static function",
+                            fn.name());
                     if (!fn.genericParameters().isEmpty()) {
                         throw new IllegalArgumentException(
                                 "generic static fnc '" + klass.klass().name() + "." + name
@@ -1288,7 +1336,19 @@ public final class OresEvalRootNode extends RootNode {
                 throw new IllegalArgumentException("unknown static member " + klass.klass().name() + "." + name);
             }
             if (receiver instanceof OresObject object) {
-                if (object.fields.containsKey(name)) return object.fields.get(name);
+                if (object.fields.containsKey(name)) {
+                    OwnedField ownedField = object.owner.findField(
+                            object.klass, name, new LinkedHashSet<>());
+                    if (ownedField != null) {
+                        object.owner.requireClassMemberVisible(
+                                ownedField.field().visibility(),
+                                ownedField.owner(),
+                                env == null ? null : env.accessClass(),
+                                "field",
+                                ownedField.field().name());
+                    }
+                    return object.fields.get(name);
+                }
                 if (object.owner.hasInstanceMethodNamed(object.klass, name, new LinkedHashSet<>())) {
                     throw new IllegalArgumentException("instance method " + object.klass.name() + "." + name
                             + " is direct-call-only and cannot be used as a first-class callable value; "
@@ -1517,7 +1577,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callStaticFunctionBodyRaw(Ast.MethodDecl fn, List<?> args) {
-            Env env = new Env(null);
+            Env env = new Env(null, false, declaringClass(fn));
             for (int i = 0; i < fn.parameters().size(); i++) {
                 Ast.Param param = fn.parameters().get(i);
                 env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
@@ -1683,7 +1743,7 @@ public final class OresEvalRootNode extends RootNode {
             List<Ast.FieldDecl> classFields = effectiveFields(klass, new LinkedHashSet<>());
             if (args.size() > classFields.size()) throw new IllegalArgumentException("too many constructor arguments for " + klass.name());
             LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
-            Env env = new Env(null);
+            Env env = new Env(null, false, klass);
             for (int i = 0; i < classFields.size(); i++) {
                 Ast.FieldDecl field = classFields.get(i);
                 Object value;
@@ -1776,6 +1836,57 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
+        private record OwnedField(Ast.ClassDecl owner, Ast.FieldDecl field) { }
+
+        private Ast.ClassDecl declaringClass(Ast.MethodDecl method) {
+            Ast.ClassDecl owner = methodOwners.get(method);
+            if (owner == null) {
+                throw new IllegalStateException(
+                        "cannot find declaring class for method '" + method.name() + "'");
+            }
+            return owner;
+        }
+
+        private void requireClassMemberVisible(
+                Ast.Visibility visibility,
+                Ast.ClassDecl owner,
+                Ast.ClassDecl accessClass,
+                String kind,
+                String name) {
+            if (visibility == Ast.Visibility.PRIVATE && accessClass != owner) {
+                throw new IllegalArgumentException(
+                        "private " + kind + " '" + owner.name() + "." + name
+                                + "' is accessible only from code declared in class " + owner.name());
+            }
+        }
+
+        private OwnedField findField(
+                Ast.ClassDecl klass,
+                String name,
+                Set<Ast.ClassDecl> seen) {
+            if (!seen.add(klass)) {
+                throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
+            }
+            for (Ast.FieldDecl field : klass.fields()) {
+                if (field.name().equals(name)) {
+                    seen.remove(klass);
+                    return new OwnedField(klass, field);
+                }
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent == null) continue;
+                OwnedField candidate = findField(parent, name, seen);
+                if (candidate != null) {
+                    seen.remove(klass);
+                    return candidate;
+                }
+            }
+            seen.remove(klass);
+            return null;
+        }
+
         private Ast.MethodDecl findMethod(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
             if (!seen.add(klass)) throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
             for (Ast.MethodDecl method : klass.methods()) {
@@ -1836,14 +1947,20 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
-        private List<?> iterableValues(Object value) {
+        private List<?> iterableValues(Object value, Env env) {
             if (value instanceof List<?> list) return list;
             if (value instanceof Object[] array) return List.of(array);
             if (value instanceof OresObject object) {
                 Ast.MethodDecl iterator = findMethod(object.klass, "Symbol.iterator", 0, new LinkedHashSet<>());
                 if (iterator == null) throw new IllegalArgumentException("value has no [Symbol.iterator]()");
+                object.owner.requireClassMemberVisible(
+                        iterator.visibility(),
+                        object.owner.declaringClass(iterator),
+                        env == null ? null : env.accessClass(),
+                        "method",
+                        iterator.name());
                 Object produced = callMethod(object, iterator, List.of());
-                return iterableValues(produced);
+                return iterableValues(produced, env);
             }
             throw new IllegalArgumentException("value is not iterable");
         }
@@ -2044,6 +2161,23 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private List<?> asSequence(Object value) { if (value instanceof List<?> l) return l; if (value instanceof Object[] a) return List.of(a); throw new IllegalArgumentException("value is not sequence-destructurable"); }
+
+        private Object destructureMember(Object value, String name, Env env) {
+            if (value instanceof OresObject object) {
+                OwnedField ownedField = object.owner.findField(
+                        object.klass, name, new LinkedHashSet<>());
+                if (ownedField != null) {
+                    object.owner.requireClassMemberVisible(
+                            ownedField.field().visibility(),
+                            ownedField.owner(),
+                            env == null ? null : env.accessClass(),
+                            "field",
+                            ownedField.field().name());
+                }
+            }
+            return destructureMember(value, name);
+        }
+
         private Object destructureMember(Object value, String name) {
             if (value instanceof DynamicStructValue dynamic) {
                 if (!dynamic.fields.containsKey(name)) {
@@ -2077,13 +2211,27 @@ public final class OresEvalRootNode extends RootNode {
         private static final Object MISSING = new Object();
         private final Env parent;
         private final boolean descendantsNonLexical;
+        private final Ast.ClassDecl accessClass;
         private final Map<String, Slot> slots = new HashMap<>();
-        private Env(Env parent) { this(parent, parent != null && parent.descendantsNonLexical); }
+        private Env(Env parent) {
+            this(
+                    parent,
+                    parent != null && parent.descendantsNonLexical,
+                    parent == null ? null : parent.accessClass);
+        }
         private Env(Env parent, boolean descendantsNonLexical) {
+            this(
+                    parent,
+                    descendantsNonLexical,
+                    parent == null || descendantsNonLexical ? null : parent.accessClass);
+        }
+        private Env(Env parent, boolean descendantsNonLexical, Ast.ClassDecl accessClass) {
             this.parent = parent;
             this.descendantsNonLexical = descendantsNonLexical;
+            this.accessClass = accessClass;
         }
         private boolean descendantsNonLexical() { return descendantsNonLexical; }
+        private Ast.ClassDecl accessClass() { return accessClass; }
         private void define(String name, Object value, Ast.BindingKind kind) {
             if (slots.putIfAbsent(name, new Slot(value, kind)) != null) throw new IllegalArgumentException("duplicate binding " + name);
         }
@@ -2107,7 +2255,10 @@ public final class OresEvalRootNode extends RootNode {
             throw new IllegalArgumentException("unknown binding " + name);
         }
         private Env snapshot() {
-            Env cp = new Env(parent == null ? null : parent.snapshot(), descendantsNonLexical);
+            Env cp = new Env(
+                    parent == null ? null : parent.snapshot(),
+                    descendantsNonLexical,
+                    accessClass);
             cp.slots.putAll(slots);
             return cp;
         }
