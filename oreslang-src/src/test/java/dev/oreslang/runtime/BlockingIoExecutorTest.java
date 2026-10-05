@@ -4,6 +4,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -129,4 +132,49 @@ final class BlockingIoExecutorTest {
                     executor.submitJava(() -> 3).get(2, TimeUnit.SECONDS));
         }
     }
+    @Test
+    void plainJavaFutureFromVirtualThreadExecutorNormalizesToOresFuture() throws Exception {
+        try (BlockingIoExecutor executor =
+                     new BlockingIoExecutor("test-", 8, 1, 4);
+             ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<Integer> host = virtualThreads.submit(() -> {
+                assertTrue(Thread.currentThread().isVirtual());
+                return 42;
+            });
+
+            OresFuture<Integer> ores = executor.adaptJavaFuture(host);
+
+            assertEquals(42, ores.get(2, TimeUnit.SECONDS));
+            assertFalse(
+                    java.util.concurrent.CompletionStage.class.isAssignableFrom(
+                            ores.getClass()),
+                    "host Future interop must normalize into Ores-owned Future semantics");
+        }
+    }
+
+    @Test
+    void cancellingAdaptedFuturePropagatesToHostFuture() throws Exception {
+        try (BlockingIoExecutor executor =
+                     new BlockingIoExecutor("test-", 8, 1, 4);
+             ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor()) {
+            CountDownLatch started = new CountDownLatch(1);
+            Future<Integer> host = virtualThreads.submit(() -> {
+                started.countDown();
+                Thread.sleep(30_000L);
+                return 1;
+            });
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+
+            OresFuture<Integer> ores = executor.adaptJavaFuture(host);
+            assertTrue(ores.cancel(true));
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!host.isCancelled() && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertTrue(host.isCancelled(),
+                    "OresFuture cancellation must reach the host Future");
+        }
+    }
+
 }
