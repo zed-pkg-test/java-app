@@ -91,14 +91,18 @@ final class OresObservableTest {
         OresFuture<OresNotification<Integer>> first = one.next();
         OresFuture<OresNotification<Integer>> second = two.next();
 
+        assertEquals(2, source.pendingRuntimeWaiterCount());
+
         assertTrue(one.cancel());
         assertFalse(source.isCancelled(),
                 "one rx subscriber must not cancel a shared source Future");
+        assertEquals(1, source.pendingRuntimeWaiterCount());
 
         source.completeFromRuntime(99);
 
         assertThrows(CancellationException.class, first::join);
         assertEquals(99, second.join().value());
+        assertEquals(0, source.pendingRuntimeWaiterCount());
     }
 
     @Test
@@ -158,6 +162,35 @@ final class OresObservableTest {
             assertEquals(77, consumed.get(5, TimeUnit.SECONDS));
             assertEquals(2, pc.get());
         }
+    }
+
+    @Test
+    void runtimeCancellationCleanupRunsOnceAfterTerminalFailure() {
+        AtomicInteger cleanupCalls = new AtomicInteger();
+        OresFuture<OresNotification<Integer>> source = new OresFuture<>();
+
+        OresSubscription<Integer> subscription = new OresSubscription<>() {
+            @Override
+            protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                return source;
+            }
+
+            @Override
+            protected void cancelFromRuntime() {
+                cleanupCalls.incrementAndGet();
+            }
+        };
+
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+        source.failFromRuntime(new IllegalStateException("source-failed"));
+
+        CompletionException failure =
+                assertThrows(CompletionException.class, pull::join);
+        assertInstanceOf(IllegalStateException.class, failure.getCause());
+        assertEquals(1, cleanupCalls.get());
+
+        assertTrue(subscription.cancel());
+        assertEquals(1, cleanupCalls.get());
     }
 
 }
