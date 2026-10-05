@@ -96,7 +96,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         }
     }
 
-    private final Runnable cancelHook;
+    private final AtomicReference<Runnable> cancelHook;
     private final AtomicBoolean cancelHookRun = new AtomicBoolean();
     private final AtomicReference<Object> state = new AtomicReference<>(PENDING);
     private final ConcurrentLinkedQueue<Waiter<T>> waiters = new ConcurrentLinkedQueue<>();
@@ -106,7 +106,8 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     OresFuture(Runnable cancelHook) {
-        this.cancelHook = Objects.requireNonNull(cancelHook, "cancelHook");
+        this.cancelHook = new AtomicReference<>(
+                Objects.requireNonNull(cancelHook, "cancelHook"));
     }
 
     public static <T> OresFuture<T> completed(T value) {
@@ -290,11 +291,16 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     boolean completeFromRuntime(T value) {
-        return settle(new Success<>(value));
+        boolean completed = settle(new Success<>(value));
+        if (completed) cancelHook.set(null);
+        return completed;
     }
 
     boolean failFromRuntime(Throwable failure) {
-        return settle(new Failure(Objects.requireNonNull(failure, "failure")));
+        boolean completed = settle(
+                new Failure(Objects.requireNonNull(failure, "failure")));
+        if (completed) cancelHook.set(null);
+        return completed;
     }
 
     /**
@@ -341,9 +347,10 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
                 new CancellationException("OresFuture was cancelled");
         if (!settle(new Cancelled(cancelled))) return false;
 
-        if (cancelHookRun.compareAndSet(false, true)) {
+        Runnable hook = cancelHook.getAndSet(null);
+        if (hook != null && cancelHookRun.compareAndSet(false, true)) {
             try {
-                cancelHook.run();
+                hook.run();
             } catch (RuntimeException | Error ignored) {
                 // Cancellation state is already authoritative. A host
                 // cancellation hook cannot roll it back or poison waiter

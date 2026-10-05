@@ -209,26 +209,37 @@ public abstract class OresObservable<T> {
         AtomicReference<OresFuture.RuntimeWaiterRegistration> waiter =
                 new AtomicReference<>();
 
-        OresFuture<O> result = new OresFuture<>(() -> {
+        Runnable detachOnly = () -> {
             OresFuture.RuntimeWaiterRegistration registration =
                     waiter.getAndSet(null);
             if (registration != null) registration.detach();
-            if (propagateCancellation) source.cancel(true);
-        });
+        };
+        Runnable cancelHook = propagateCancellation
+                ? () -> {
+                    detachOnly.run();
+                    source.cancel(true);
+                }
+                : detachOnly;
+
+        OresFuture<O> result = new OresFuture<>(cancelHook);
 
         OresFuture.RuntimeWaiterRegistration registration =
                 source.whenCompleteRuntimeCancellable((value, failure) -> {
-                    if (result.isDone()) {
-                        return;
-                    }
-                    if (failure != null) {
-                        result.failFromRuntime(OresFuture.unwrap(failure));
-                        return;
-                    }
                     try {
-                        result.completeFromRuntime(mapper.apply(value));
-                    } catch (Throwable mappingFailure) {
-                        result.failFromRuntime(mappingFailure);
+                        if (result.isDone()) {
+                            return;
+                        }
+                        if (failure != null) {
+                            result.failFromRuntime(OresFuture.unwrap(failure));
+                            return;
+                        }
+                        try {
+                            result.completeFromRuntime(mapper.apply(value));
+                        } catch (Throwable mappingFailure) {
+                            result.failFromRuntime(mappingFailure);
+                        }
+                    } finally {
+                        detachOnly.run();
                     }
                 });
 
