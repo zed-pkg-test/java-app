@@ -89,6 +89,42 @@ scheduler task itself is the reusable completion sink, so repeated awaits do
 not need a new captured callback object. Cancellation or scheduler shutdown
 detaches the waiter without cancelling a shared producer Future.
 
+### Tail-await forwarding
+
+A callable whose complete body is a direct terminal await:
+
+```ores
+async fnc load() => User {
+  return await fetch_user();
+}
+```
+
+does not need the general async block result path after suspension. The compiler
+may lower the final await directly into callable completion/result shaping:
+
+```text
+state 0:
+  future = fetch_user()
+  pc = TAIL_WAIT
+  return await future
+
+TAIL_WAIT:
+  if failure: complete failure
+  else:       complete shaped(resume.value)
+```
+
+This optimization removes the intermediate `AsyncReturn` value and the
+post-await flat-map/fold chain. It does **not** remove Oreslang's scheduler
+boundary: even a terminal Future must unwind the current guest stack and resume
+through a fresh dispatch before the callable completes.
+
+The current conservative implementation only forwards when the whole callable
+body is exactly one `return await ...` statement and the awaited operand has no
+nested await. Bodies containing `defer`, try/finally-style cleanup, additional
+statements, or nested suspension remain on the general lowering path. A future
+CFG/liveness pass may extend forwarding to proven tail positions while keeping
+all required cleanup edges.
+
 Performance goals for generated async code:
 
 - zero continuation-closure allocation per `await`;

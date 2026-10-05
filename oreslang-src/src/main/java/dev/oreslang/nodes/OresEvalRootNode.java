@@ -290,6 +290,13 @@ public final class OresEvalRootNode extends RootNode {
                         param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
 
+            AsyncPlan tail = directTailAwaitPlan(
+                    fn.body(),
+                    base,
+                    fn.returnType(),
+                    "function " + fn.name());
+            if (tail != null) return tail;
+
             AsyncPlan body = asyncBlock(fn.body(), base);
             return asyncFlatMap(body, flow -> {
                 Object raw =
@@ -317,6 +324,15 @@ public final class OresEvalRootNode extends RootNode {
                         param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
 
+            AsyncPlan tail = directTailAwaitPlan(
+                    method.body(),
+                    base,
+                    method.returnType(),
+                    "method " + method.name());
+            if (tail != null) {
+                return asyncScheduler().start(new AsyncPlanTask(tail));
+            }
+
             AsyncPlan body = asyncBlock(method.body(), base);
             AsyncPlan completed = asyncFlatMap(body, flow -> {
                 Object raw = flow instanceof AsyncReturn returned ? returned.value() : null;
@@ -339,6 +355,15 @@ public final class OresEvalRootNode extends RootNode {
                         param.name(),
                         args.get(i),
                         param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+
+            AsyncPlan tail = directTailAwaitPlan(
+                    fn.body(),
+                    base,
+                    fn.returnType(),
+                    "static function " + klass.name() + "." + fn.name());
+            if (tail != null) {
+                return asyncScheduler().start(new AsyncPlanTask(tail));
             }
 
             AsyncPlan body = asyncBlock(fn.body(), base);
@@ -376,10 +401,104 @@ public final class OresEvalRootNode extends RootNode {
                         args.get(i),
                         param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
+            AsyncPlan tail = directTailAwaitPlan(
+                    lambda.blockBody(),
+                    base,
+                    null,
+                    null);
+            if (tail != null) {
+                return scheduler.start(new AsyncPlanTask(tail));
+            }
+
             AsyncPlan body = asyncBlock(lambda.blockBody(), base);
             AsyncPlan completed = asyncFlatMap(body, flow ->
                     asyncPure(flow instanceof AsyncReturn returned ? returned.value() : null));
             return scheduler.start(new AsyncPlanTask(completed));
+        }
+
+        /**
+         * Recognize the conservative first tail-forwarding shape.
+         *
+         * <p>Only an entire callable body consisting of one
+         * `return await ...` is forwarded. Nested awaits in the awaited
+         * expression are left on the general lowering path. This deliberately
+         * excludes defer/finally and other block cleanup/control flow until the
+         * compiler has CFG-aware tail-position analysis.</p>
+         */
+        private AsyncPlan directTailAwaitPlan(
+                List<Ast.Stmt> body,
+                Env env,
+                Ast.TypeRef returnType,
+                String returnContext) {
+            if (body.size() != 1
+                    || !(body.getFirst() instanceof Ast.ReturnStmt returned)
+                    || !(returned.value() instanceof Ast.AwaitExpr awaited)
+                    || containsAwait(awaited.expression())) {
+                return null;
+            }
+
+            return new AsyncThunk(() -> safePlan(() ->
+                    prepareTailAwait(awaited, env, returnType, returnContext)));
+        }
+
+        private AsyncPlan prepareTailAwait(
+                Ast.AwaitExpr awaited,
+                Env env,
+                Ast.TypeRef returnType,
+                String returnContext) {
+            if (awaited.expression() instanceof Ast.SpawnExpr spawned) {
+                Ast.FunctionDecl target = resolveSpawnTarget(spawned.call());
+                List<Object> args = new ArrayList<>(spawned.call().arguments().size());
+                for (Ast.Expr argument : spawned.call().arguments()) {
+                    args.add(eval(argument, env));
+                }
+                Object raw = spawnFunctionWithArguments(target, args);
+                if (!(raw instanceof ActorRuntime.ActorSpawn<?, ?> spawn)) {
+                    throw new IllegalStateException(
+                            "tail await spawn lowering did not produce an internal ActorSpawn ticket");
+                }
+                return new AsyncTailAwait(
+                        spawn.ready(),
+                        env,
+                        returnType,
+                        returnContext,
+                        spawn);
+            }
+
+            Object value = eval(awaited.expression(), env);
+            return new AsyncTailAwait(
+                    awaitableFuture(value),
+                    env,
+                    returnType,
+                    returnContext,
+                    ASYNC_TAIL_RESUME_VALUE);
+        }
+
+        private AsyncPlan resumeTailAwait(
+                AsyncTailAwait awaited,
+                Object resumeValue,
+                Throwable resumeFailure) {
+            if (resumeFailure != null) {
+                awaited.cleanupEnv().releaseMutexGuards(true);
+                return asyncFailure(unwrapFutureFailure(resumeFailure));
+            }
+
+            try {
+                Object raw = awaited.successValue() == ASYNC_TAIL_RESUME_VALUE
+                        ? resumeValue
+                        : awaited.successValue();
+                Object result = awaited.returnType() == null
+                        ? raw
+                        : shapeReturnedValue(
+                                awaited.returnType(),
+                                raw,
+                                awaited.returnContext());
+                awaited.cleanupEnv().releaseMutexGuards(false);
+                return asyncPure(result);
+            } catch (RuntimeException | Error failure) {
+                awaited.cleanupEnv().releaseMutexGuards(true);
+                throw failure;
+            }
         }
 
         private final class AsyncLambdaValue implements Invokable {
@@ -445,7 +564,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private sealed interface AsyncPlan
-                permits AsyncPure, AsyncFailure, AsyncAwait, AsyncThunk { }
+                permits AsyncPure, AsyncFailure, AsyncAwait, AsyncTailAwait, AsyncThunk { }
 
         private record AsyncPure(Object value) implements AsyncPlan { }
 
@@ -469,6 +588,30 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
+        /**
+         * Terminal await for a callable whose entire body is exactly
+         * `return await expression`. The result is forwarded directly into
+         * callable completion after the mandatory scheduler boundary, without
+         * constructing AsyncReturn or chaining the general block/fold mappers.
+         *
+         * <p>returnType/returnContext are null for lambdas, whose inferred
+         * result does not need declared-return shaping.</p>
+         */
+        private record AsyncTailAwait(
+                OresFuture<?> future,
+                Env cleanupEnv,
+                Ast.TypeRef returnType,
+                String returnContext,
+                Object successValue) implements AsyncPlan {
+            private AsyncTailAwait {
+                Objects.requireNonNull(future, "future");
+                Objects.requireNonNull(cleanupEnv, "cleanupEnv");
+                if (returnType != null) {
+                    Objects.requireNonNull(returnContext, "returnContext");
+                }
+            }
+        }
+
         @FunctionalInterface
         private interface AsyncThunkBody {
             AsyncPlan run();
@@ -481,6 +624,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private static final Object ASYNC_NORMAL = new Object();
+        private static final Object ASYNC_TAIL_RESUME_VALUE = new Object();
         private record AsyncReturn(Object value) { }
 
         @FunctionalInterface
@@ -520,6 +664,9 @@ public final class OresEvalRootNode extends RootNode {
                 return new AsyncThunk(() -> safePlan(() -> next.apply(pure.value())));
             }
             if (plan instanceof AsyncFailure) return plan;
+            if (plan instanceof AsyncTailAwait) {
+                throw new IllegalStateException("terminal tail await cannot be flat-mapped");
+            }
             if (plan instanceof AsyncThunk thunk) {
                 return new AsyncThunk(() ->
                         asyncFlatMap(safePlan(thunk.body()), next));
@@ -539,6 +686,9 @@ public final class OresEvalRootNode extends RootNode {
             if (plan instanceof AsyncFailure failed) {
                 return new AsyncThunk(() ->
                         safePlan(() -> recover.apply(failed.failure())));
+            }
+            if (plan instanceof AsyncTailAwait) {
+                throw new IllegalStateException("terminal tail await cannot be recovered/composed");
             }
             if (plan instanceof AsyncThunk thunk) {
                 return new AsyncThunk(() ->
@@ -564,6 +714,9 @@ public final class OresEvalRootNode extends RootNode {
                 return new AsyncThunk(() ->
                         safePlan(() -> failure.apply(failed.failure())));
             }
+            if (plan instanceof AsyncTailAwait) {
+                throw new IllegalStateException("terminal tail await cannot be folded/composed");
+            }
             if (plan instanceof AsyncThunk thunk) {
                 return new AsyncThunk(() ->
                         asyncFold(safePlan(thunk.body()), success, failure));
@@ -580,6 +733,7 @@ public final class OresEvalRootNode extends RootNode {
         private final class AsyncPlanTask implements OresScheduler.Task<Object> {
             private AsyncPlan current;
             private AsyncAwait waiting;
+            private AsyncTailAwait tailWaiting;
 
             private AsyncPlanTask(AsyncPlan initial) {
                 this.current = Objects.requireNonNull(initial, "initial");
@@ -587,7 +741,14 @@ public final class OresEvalRootNode extends RootNode {
 
             @Override
             public OresScheduler.Step<Object> resume(OresScheduler.Resume resume) {
-                if (waiting != null) {
+                if (tailWaiting != null) {
+                    AsyncTailAwait awaited = tailWaiting;
+                    tailWaiting = null;
+                    current = safePlan(() -> resumeTailAwait(
+                            awaited,
+                            resume.value(),
+                            resume.failure()));
+                } else if (waiting != null) {
                     AsyncAwait awaited = waiting;
                     waiting = null;
                     current = safePlan(() -> awaited.continuation().resume(
@@ -609,6 +770,10 @@ public final class OresEvalRootNode extends RootNode {
                     if (current instanceof AsyncPure pure) {
                         return OresScheduler.done(pure.value());
                     }
+                    if (current instanceof AsyncTailAwait awaited) {
+                        tailWaiting = awaited;
+                        return OresScheduler.await(awaited.future());
+                    }
 
                     AsyncAwait awaited = (AsyncAwait) current;
                     waiting = awaited;
@@ -620,6 +785,7 @@ public final class OresEvalRootNode extends RootNode {
         private final class ActorPlanRunner {
             private AsyncPlan current;
             private AsyncAwait waiting;
+            private AsyncTailAwait tailWaiting;
             private final ActorRuntime.InvocationCompletion<Object> completion;
 
             private ActorPlanRunner(
@@ -645,7 +811,14 @@ public final class OresEvalRootNode extends RootNode {
                     boolean initial,
                     Object resumeValue,
                     Throwable resumeFailure) {
-                if (waiting != null) {
+                if (tailWaiting != null) {
+                    AsyncTailAwait awaited = tailWaiting;
+                    tailWaiting = null;
+                    current = safePlan(() -> resumeTailAwait(
+                            awaited,
+                            resumeValue,
+                            resumeFailure));
+                } else if (waiting != null) {
                     AsyncAwait awaited = waiting;
                     waiting = null;
                     current = safePlan(() -> awaited.continuation().resume(
@@ -675,10 +848,17 @@ public final class OresEvalRootNode extends RootNode {
                         return;
                     }
 
-                    AsyncAwait awaited = (AsyncAwait) current;
-                    waiting = awaited;
+                    OresFuture<?> future;
+                    if (current instanceof AsyncTailAwait awaited) {
+                        tailWaiting = awaited;
+                        future = awaited.future();
+                    } else {
+                        AsyncAwait awaited = (AsyncAwait) current;
+                        waiting = awaited;
+                        future = awaited.future();
+                    }
                     actorContext.suspendOn(
-                            awaited.future(),
+                            future,
                             (value, failure, resumedContext) ->
                                     resume(value, failure, resumedContext));
                     throw new AssertionError(

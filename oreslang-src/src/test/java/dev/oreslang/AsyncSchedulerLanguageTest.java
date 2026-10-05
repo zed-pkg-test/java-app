@@ -420,6 +420,53 @@ final class AsyncSchedulerLanguageTest {
     }
 
     @Test
+    void directTailAwaitForwardsFunctionAndLambdaResults() throws Exception {
+        String program = """
+                async fnc forward() => int {
+                  return await Future.from_callback<int>(|cb| -> {
+                    cb.resolve(40);
+                    return;
+                  });
+                }
+
+                pub async routine main() => void {
+                  val scheduler = new OresScheduler(1);
+                  val lambda_work = scheduler.start(async || -> {
+                    return await Future.from_callback<int>(|cb| -> {
+                      cb.resolve(2);
+                      return;
+                    });
+                  });
+
+                  val first = await forward();
+                  val second = await lambda_work;
+                  stdio.println(first + second);
+                  scheduler.close();
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse(program)));
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(
+                        OresLanguage.ID,
+                        program,
+                        "tail-await-forwarding.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("42"));
+    }
+
+    @Test
     void schedulerStartPreservesInferredLambdaResultType() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 fnc sync_work() => Future<int> {
