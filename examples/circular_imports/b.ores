@@ -1,0 +1,12 @@
+import fnc {a_value} from "./a.ores";
+
+pub fnc b_value(): String {
+  return "B";
+}
+
+pub fnc startup_b(): void {
+  stdio.stdout.write("startup-b:");
+  stdio.stdout.write(a_value());
+  stdio.stdout.write("|");
+  return;
+}
