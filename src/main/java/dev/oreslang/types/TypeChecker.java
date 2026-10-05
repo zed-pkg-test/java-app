@@ -53,6 +53,7 @@ public final class TypeChecker {
     private final Set<String> importedValues = new HashSet<>();
     private final Set<Ast.TypeAliasDecl> resolvingAliases = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
+    private int loopDepth;
 
     public static Ast.Program check(Ast.Program program) {
         program = AnnotationExpander.expand(program);
@@ -488,6 +489,25 @@ public final class TypeChecker {
         for (Ast.Stmt stmt : body) checkStatement(stmt, env, generics, expectedReturn, self);
     }
 
+    private void checkLoopBlock(List<Ast.Stmt> body, Env parent, Set<String> generics, Type expectedReturn, Type self) {
+        loopDepth++;
+        try {
+            checkBlock(body, parent, generics, expectedReturn, self);
+        } finally {
+            loopDepth--;
+        }
+    }
+
+    private void checkCallableBlock(List<Ast.Stmt> body, Env parent, Set<String> generics, Type expectedReturn, Type self) {
+        int previousLoopDepth = loopDepth;
+        loopDepth = 0;
+        try {
+            checkBlock(body, parent, generics, expectedReturn, self);
+        } finally {
+            loopDepth = previousLoopDepth;
+        }
+    }
+
     private void checkStatement(Ast.Stmt stmt, Env env, Set<String> generics, Type expectedReturn, Type self) {
         if (stmt instanceof Ast.BindingStmt binding) {
             Type declaredAhead = binding.declaredType() == null ? null : resolve(binding.declaredType(), generics, self);
@@ -523,6 +543,18 @@ public final class TypeChecker {
             }
             return;
         }
+        if (stmt instanceof Ast.BlockStmt block) {
+            checkBlock(block.body(), env, generics, expectedReturn, self);
+            return;
+        }
+        if (stmt instanceof Ast.BreakStmt) {
+            if (loopDepth == 0) throw new IllegalArgumentException("'break' may only appear inside loop or for");
+            return;
+        }
+        if (stmt instanceof Ast.ContinueStmt) {
+            if (loopDepth == 0) throw new IllegalArgumentException("'continue' may only appear inside loop or for");
+            return;
+        }
         if (stmt instanceof Ast.ReturnStmt ret) {
             if (ret.value() instanceof Ast.LambdaExpr lambda && expectedReturn instanceof Function expectedFunction) {
                 validateLambdaAgainstExpected(lambda, expectedFunction, env, generics, self);
@@ -551,12 +583,23 @@ public final class TypeChecker {
             checkBlock(attempted.finallyBody(), env, generics, expectedReturn, self);
             return;
         }
+        if (stmt instanceof Ast.ForOfDestructureStmt loop) {
+            Type iterable = typeOf(loop.iterable(), env, generics, self);
+            Type element = iterableElementType(iterable);
+            List<Type> elementTypes = sequenceDestructureTypes(element, loop.bindings().size());
+            Env loopEnv = new Env(env);
+            for (int i = 0; i < loop.bindings().size(); i++) {
+                defineDestructureBinding(loopEnv, loop.bindings().get(i), elementTypes.get(i));
+            }
+            checkLoopBlock(loop.body(), loopEnv, generics, expectedReturn, self);
+            return;
+        }
         if (stmt instanceof Ast.ForOfStmt loop) {
             Type iterable = typeOf(loop.iterable(), env, generics, self);
             Type element = iterableElementType(iterable);
             Env loopEnv = new Env(env);
             loopEnv.define(loop.bindingName(), element, loop.bindingKind());
-            checkBlock(loop.body(), loopEnv, generics, expectedReturn, self);
+            checkLoopBlock(loop.body(), loopEnv, generics, expectedReturn, self);
             return;
         }
         if (stmt instanceof Ast.ForStmt loop) {
@@ -564,7 +607,11 @@ public final class TypeChecker {
             if (loop.initializer() != null) checkStatement(loop.initializer(), loopEnv, generics, expectedReturn, self);
             if (loop.condition() != null) requireAssignable(typeOf(loop.condition(), loopEnv, generics, self), Primitive.BOOL, "for condition");
             if (loop.update() != null) typeOf(loop.update(), loopEnv, generics, self);
-            checkBlock(loop.body(), loopEnv, generics, expectedReturn, self);
+            checkLoopBlock(loop.body(), loopEnv, generics, expectedReturn, self);
+            return;
+        }
+        if (stmt instanceof Ast.LoopStmt loop) {
+            checkLoopBlock(loop.body(), env, generics, expectedReturn, self);
         }
     }
 
@@ -1286,7 +1333,7 @@ public final class TypeChecker {
             if (lambda.expressionBody() != null) {
                 throw new IllegalArgumentException("expression-body lambdas are not supported; lambdas require braces and explicit return");
             }
-            checkBlock(lambda.blockBody(), lambdaEnv, generics, Unknown.INSTANCE, self);
+            checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Unknown.INSTANCE, self);
             return new Function(parameters, Unknown.INSTANCE);
         }
         return Unknown.INSTANCE;
@@ -1379,7 +1426,7 @@ public final class TypeChecker {
         requireAssignable(declared, expectedParameter, "mutex callback parameter " + param.name());
         Env lambdaEnv = new Env(parent);
         lambdaEnv.define(param.name(), declared, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
-        checkBlock(lambda.blockBody(), lambdaEnv, generics, Primitive.VOID, self);
+        checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Primitive.VOID, self);
     }
 
 
@@ -1406,7 +1453,7 @@ public final class TypeChecker {
             requireAssignable(declared, expectedParam, "lambda parameter " + param.name());
             lambdaEnv.define(param.name(), declared, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
         }
-        checkBlock(lambda.blockBody(), lambdaEnv, generics, expected.result(), self);
+        checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, expected.result(), self);
         if (expected.result() != Primitive.VOID && !definitelyReturns(lambda.blockBody())) {
             throw new IllegalArgumentException("non-void lambda must explicitly return on every path");
         }
@@ -2246,6 +2293,10 @@ public final class TypeChecker {
                 rejectStaticClassGenericReferences(expression.expression(), classGenerics, klass, method);
             } else if (statement instanceof Ast.DeferStmt defer) {
                 rejectStaticClassGenericReferences(defer.expression(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.BlockStmt block) {
+                rejectStaticClassGenericReferences(block.body(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.LoopStmt loop) {
+                rejectStaticClassGenericReferences(loop.body(), classGenerics, klass, method);
             } else if (statement instanceof Ast.IfStmt conditional) {
                 for (Ast.IfBranch branch : conditional.branches()) {
                     rejectStaticClassGenericReferences(branch.condition(), classGenerics, klass, method);
@@ -2256,6 +2307,9 @@ public final class TypeChecker {
                 rejectStaticClassGenericReferences(attempted.body(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(attempted.catchBody(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(attempted.finallyBody(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.ForOfDestructureStmt loop) {
+                rejectStaticClassGenericReferences(loop.iterable(), classGenerics, klass, method);
+                rejectStaticClassGenericReferences(loop.body(), classGenerics, klass, method);
             } else if (statement instanceof Ast.ForOfStmt loop) {
                 rejectStaticClassGenericReferences(loop.iterable(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(loop.body(), classGenerics, klass, method);
@@ -2842,6 +2896,8 @@ public final class TypeChecker {
     private boolean definitelyReturns(List<Ast.Stmt> body) {
         for (Ast.Stmt stmt : body) {
             if (stmt instanceof Ast.ReturnStmt) return true;
+            if (stmt instanceof Ast.BlockStmt block && definitelyReturns(block.body())) return true;
+            if (stmt instanceof Ast.LoopStmt loop && !containsBreakForCurrentLoop(loop.body())) return true;
             if (stmt instanceof Ast.IfStmt conditional) {
                 boolean allBranches = !conditional.branches().isEmpty()
                         && conditional.branches().stream().allMatch(branch -> definitelyReturns(branch.body()))
@@ -2852,6 +2908,24 @@ public final class TypeChecker {
             if (stmt instanceof Ast.TryStmt attempted) {
                 if (definitelyReturns(attempted.finallyBody())) return true;
                 if (definitelyReturns(attempted.body()) && definitelyReturns(attempted.catchBody())) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean containsBreakForCurrentLoop(List<Ast.Stmt> body) {
+        for (Ast.Stmt stmt : body) {
+            if (stmt instanceof Ast.BreakStmt) return true;
+            if (stmt instanceof Ast.BlockStmt block && containsBreakForCurrentLoop(block.body())) return true;
+            if (stmt instanceof Ast.IfStmt conditional) {
+                for (Ast.IfBranch branch : conditional.branches()) {
+                    if (containsBreakForCurrentLoop(branch.body())) return true;
+                }
+                if (containsBreakForCurrentLoop(conditional.elseBody())) return true;
+            } else if (stmt instanceof Ast.TryStmt attempted) {
+                if (containsBreakForCurrentLoop(attempted.body())
+                        || containsBreakForCurrentLoop(attempted.catchBody())
+                        || containsBreakForCurrentLoop(attempted.finallyBody())) return true;
             }
         }
         return false;

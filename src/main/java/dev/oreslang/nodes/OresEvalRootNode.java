@@ -460,6 +460,8 @@ public final class OresEvalRootNode extends RootNode {
                         fn.returnType(),
                         signal.value,
                         "function " + fn.name());
+            } catch (BreakSignal | ContinueSignal signal) {
+                throw new IllegalStateException("loop control cannot cross a function boundary", signal);
             }
         }
 
@@ -482,6 +484,8 @@ public final class OresEvalRootNode extends RootNode {
                 return new TailCall(signal.invocation);
             } catch (ReturnSignal signal) {
                 return shapeReturnedValue(method.returnType(), signal.value, "method " + method.name());
+            } catch (BreakSignal | ContinueSignal signal) {
+                throw new IllegalStateException("loop control cannot cross a method boundary", signal);
             }
         }
 
@@ -497,7 +501,7 @@ public final class OresEvalRootNode extends RootNode {
                 for (Ast.Stmt stmt : statements) executeStatement(stmt, env, deferred, inheritedTailBarrier);
             } catch (TailCallSignal signal) {
                 throw signal;
-            } catch (ReturnSignal signal) {
+            } catch (ReturnSignal | BreakSignal | ContinueSignal signal) {
                 throw signal;
             } catch (RuntimeException | Error failure) {
                 abnormalExit = true;
@@ -558,6 +562,15 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (stmt instanceof Ast.ExprStmt expression) { eval(expression.expression(), env); return; }
             if (stmt instanceof Ast.DeferStmt defer) { deferred.push(defer.expression()); return; }
+            if (stmt instanceof Ast.BlockStmt block) {
+                executeBlock(
+                        block.body(),
+                        env,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                return;
+            }
+            if (stmt instanceof Ast.BreakStmt) throw new BreakSignal();
+            if (stmt instanceof Ast.ContinueStmt) throw new ContinueSignal();
             if (stmt instanceof Ast.IfStmt ifStmt) {
                 for (Ast.IfBranch branch : ifStmt.branches()) {
                     if (truth(eval(branch.condition(), env))) {
@@ -579,7 +592,7 @@ public final class OresEvalRootNode extends RootNode {
                 // caller still owns exception/cleanup semantics after the call.
                 try { executeBlock(tried.body(), env, true); }
                 catch (TailCallSignal signal) { throw signal; }
-                catch (ReturnSignal signal) { throw signal; }
+                catch (ReturnSignal | BreakSignal | ContinueSignal signal) { throw signal; }
                 catch (OresPanic panic) { throw panic; }
                 catch (RuntimeException failure) {
                     Env catchEnv = new Env(env);
@@ -588,16 +601,52 @@ public final class OresEvalRootNode extends RootNode {
                 } finally { executeBlock(tried.finallyBody(), env, true); }
                 return;
             }
+            if (stmt instanceof Ast.ForOfDestructureStmt loop) {
+                Object iterable = eval(loop.iterable(), env);
+                for (Object item : iterableValues(iterable)) {
+                    context.schedulerSafepoint();
+                    List<?> items = asSequence(item);
+                    if (items.size() != loop.bindings().size()) {
+                        throw new IllegalArgumentException(
+                                "for-of destructure arity mismatch: value has " + items.size()
+                                        + " element(s), pattern has " + loop.bindings().size());
+                    }
+                    Env iteration = new Env(env);
+                    for (int i = 0; i < items.size(); i++) {
+                        Ast.DestructureBinding binding = loop.bindings().get(i);
+                        if (!binding.isDiscard()) {
+                            iteration.define(binding.name(), items.get(i), binding.kind());
+                        }
+                    }
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                iteration,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        continue;
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
+                }
+                return;
+            }
             if (stmt instanceof Ast.ForOfStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
                 for (Object item : iterableValues(iterable)) {
                     context.schedulerSafepoint();
                     Env iteration = new Env(env);
                     iteration.define(loop.bindingName(), item, loop.bindingKind());
-                    executeBlock(
-                            loop.body(),
-                            iteration,
-                            inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                iteration,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        continue;
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
                 }
                 return;
             }
@@ -612,11 +661,33 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 while (loop.condition() == null || truth(eval(loop.condition(), loopEnv))) {
                     context.schedulerSafepoint();
-                    executeBlock(
-                            loop.body(),
-                            loopEnv,
-                            inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                loopEnv,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        // Conventional for-loops still execute their update on continue.
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
                     if (loop.update() != null) eval(loop.update(), loopEnv);
+                }
+                return;
+            }
+            if (stmt instanceof Ast.LoopStmt loop) {
+                while (true) {
+                    context.schedulerSafepoint();
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                env,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        continue;
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
                 }
             }
         }
@@ -1009,6 +1080,8 @@ public final class OresEvalRootNode extends RootNode {
                         return new TailCall(signal.invocation);
                     } catch (ReturnSignal signal) {
                         return signal.value;
+                    } catch (BreakSignal | ContinueSignal signal) {
+                        throw new IllegalStateException("loop control cannot cross a lambda boundary", signal);
                     }
                 });
             }
@@ -1320,6 +1393,8 @@ public final class OresEvalRootNode extends RootNode {
                 return new TailCall(signal.invocation);
             } catch (ReturnSignal signal) {
                 return shapeReturnedValue(fn.returnType(), signal.value, "static function " + fn.name());
+            } catch (BreakSignal | ContinueSignal signal) {
+                throw new IllegalStateException("loop control cannot cross a static function boundary", signal);
             }
         }
 
@@ -2036,6 +2111,14 @@ public final class OresEvalRootNode extends RootNode {
     private static final class ReturnSignal extends RuntimeException {
         private final Object value;
         private ReturnSignal(Object value) { super(null,null,false,false); this.value=value; }
+    }
+
+    private static final class BreakSignal extends RuntimeException {
+        private BreakSignal() { super(null, null, false, false); }
+    }
+
+    private static final class ContinueSignal extends RuntimeException {
+        private ContinueSignal() { super(null, null, false, false); }
     }
 
     private enum StartupPhase {

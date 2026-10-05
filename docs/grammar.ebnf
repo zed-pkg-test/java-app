@@ -36,13 +36,13 @@ visibility      = [ "pub" | "private" ] ;
 callable_modifier = "abstract" | "async" | "nlex" ;
 method_modifier   = "abstract" | "async" ;
 
-callable_decl   = { annotation } visibility { callable_modifier } callable_kind IDENT [ generic_params ]
+callable_decl   = { annotation } visibility { callable_modifier } callable_kind callable_name [ generic_params ]
                   ( "(" [ param_list ] ")" return_spec block
                   | "=" "|" [ param_list ] "|" "->" [ type_ref ] block ) ;
 callable_kind   = "fnc" | "routine" ;
 
 actor_callable_decl
-                = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" ] "actor" "fnc" IDENT [ generic_params ]
+                = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" ] "actor" "fnc" callable_name [ generic_params ]
                   ( "(" [ param_list ] ")" return_spec block
                   | "=" "|" [ param_list ] "|" "->" [ type_ref ] block ) ;
 
@@ -75,12 +75,13 @@ field_decl      = { annotation } visibility
 
 method_decl     = { annotation } visibility { method_modifier } method_name [ generic_params ]
                   method_head return_spec ( block | stmt_terminator ) ;
-method_name     = IDENT | "[" "Symbol" "." IDENT "]" ;
+method_name     = callable_name | "[" "Symbol" "." IDENT "]" ;
+callable_name   = IDENT | "loop" | "block" ;
 method_head     = "(" [ explicit_receiver | param_list ] ")" [ "(" [ param_list ] ")" ] ;
 explicit_receiver = "self" type_ref ;
 
 static_function_decl
-                = { annotation } visibility "static" [ "async" ] "fnc" IDENT [ generic_params ]
+                = { annotation } visibility "static" [ "async" ] "fnc" callable_name [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
 
 interface_decl  = visibility "interface" IDENT [ generic_params ]
@@ -124,27 +125,46 @@ block           = "{" { statement } "}" ;
 statement       = binding_decl
                 | destructure_stmt
                 | return_stmt
+                | block_stmt
+                | break_stmt
+                | continue_stmt
                 | if_stmt
                 | try_stmt
                 | defer_stmt
                 | for_stmt
+                | loop_stmt
                 | expression stmt_terminator ;
 
 return_stmt     = "return" [ expression ] stmt_terminator ;
 defer_stmt      = "defer" expression stmt_terminator ;
+block_stmt      = "block" block ;
+break_stmt      = "break" stmt_terminator ;
+continue_stmt   = "continue" stmt_terminator ;
+loop_stmt       = "loop" block ;
 
-if_stmt         = "if" condition [ ";" ] "do" { statement }
-                  { "elseif" condition [ ";" ] "do" { statement } }
-                  [ "else" { statement } ] "fi" ;
+if_stmt         = "if" condition
+                  ( block
+                    { "elseif" condition block }
+                    [ "else" block ]
+                  | [ ";" ] ( "then" | "do" ) { statement }
+                    { "elseif" condition [ ";" ] ( "then" | "do" ) { statement } }
+                    [ "else" { statement } ] "fi"
+                  ) ;
 condition       = condition_and { "|" condition_and } ;
 condition_and   = equality { "," equality } ;
 
 try_stmt        = "try" block "catch" "(" IDENT ")" block [ "finally" block ] ;
 
-for_stmt        = "for" "(" for_of_head ")" block
-                | "for" "(" [ for_init ] ";" [ expression ] ";" [ expression ] ")" block ;
+for_stmt        = "for" "(" for_of_head ")" loop_body
+                | "for" "(" [ for_init ] ";" [ expression ] ";" [ expression ] ")" loop_body
+                | "for" for_of_head loop_body ;
 
-for_of_head     = [ binding_kind ] IDENT "of" expression ;
+for_of_head     = [ binding_kind ] for_of_pattern "of" expression ;
+for_of_pattern  = IDENT
+                | "[" for_of_destructure_item { "," for_of_destructure_item } "]" ;
+for_of_destructure_item
+                = "_" | [ binding_kind ] IDENT ;
+loop_body       = block | "do" { statement } "done" ;
 for_init        = binding_kind [ type_ref ] IDENT "=" expression
                 | expression ;
 
@@ -165,7 +185,7 @@ index_suffix    = "[" expression "]" ;
 argument_list   = expression { "," expression } ;
 
 primary         = literal
-                | IDENT
+                | callable_name
                 | "self"
                 | "new" type_ref "(" [ argument_list ] ")"
                 | lambda
@@ -233,7 +253,29 @@ qualified_name  = IDENT { "." IDENT } ;
 stmt_terminator   = ";" | SAFE_STRUCTURAL_BOUNDARY ;
 member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
 
-(* Semantic restrictions:
+(* Lexical comments use // for line comments and Java/C-style /* ... */ for
+   multiline comments. Parenthesized expressions are recursively valid anywhere
+   an expression is accepted.
+
+   Semantic restrictions:
+   - "block" followed by "{" is a standalone lexical scope. It has no implicit
+     scheduling behavior and declarations inside it do not escape the scope.
+   - for-of sequence patterns default bindings to val. An outer binding kind
+     (for example "for let [k, v] of entries") seeds the pattern; an explicit
+     binding kind inside the pattern propagates to subsequent names exactly as
+     in ordinary sequence destructuring. "_" discards one sequence position.
+   - "loop" accepts either "{ ... }" or "do ... done". Iterator and
+     conventional for-loops accept the same body forms. The canonical iterator
+     shorthand is "for x of iterable do ... done"; parenthesized headers remain
+     valid for compatibility. A bare done closes a do-body, while done(...)
+     remains a callable invocation.
+     break exits and continue advances the nearest enclosing loop/for; return
+     still exits the enclosing callable. Loop control never crosses a callable
+     boundary.
+   - Brace-delimited if/elseif/else and keyword-delimited then/elseif/else/fi
+     lower to the same conditional semantics. Legacy do ... fi remains accepted.
+   - "loop" and "block" are contextual statement keywords: outside the
+     statement-plus-"{" form they remain legal callable names/references.
    - Single- and double-quoted object keys are equivalent static string keys.
      Reserved stop/do/done are legal static object/map/member keys.
    - A backtick-delimited object key evaluates its enclosed expression at

@@ -1149,7 +1149,29 @@ public final class ActorRuntime implements AutoCloseable {
             }
             if (timeoutNanos <= 0) timeoutNanos = 1;
 
-            return completion.get(timeoutNanos, TimeUnit.NANOSECONDS);
+            long startedAt = System.nanoTime();
+            R result = null;
+            ExecutionException executionFailure = null;
+            try {
+                result = completion.get(timeoutNanos, TimeUnit.NANOSECONDS);
+            } catch (ExecutionException failed) {
+                // The guest result/failure is not externally complete until
+                // the one-shot actor has unwound and its carrier has crossed
+                // back out of TurnExecutor (TruffleContext.leave in OresVM).
+                executionFailure = failed;
+            }
+
+            long elapsed = Math.max(0L, System.nanoTime() - startedAt);
+            long remaining = timeoutNanos == Long.MAX_VALUE
+                    ? Long.MAX_VALUE
+                    : Math.max(0L, timeoutNanos - elapsed);
+            if (!ref.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                throw new TimeoutException(
+                        "actor callable completed its guest result but did not leave its carrier before the wall-time deadline");
+            }
+
+            if (executionFailure != null) throw executionFailure;
+            return result;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new CancellationException("actor callable invocation interrupted");
