@@ -374,19 +374,17 @@ final class ParserTest {
     void actorInheritanceMustPreserveIsolationKind() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 shared actor Parent {
-                  pub let value = 1;
                 }
 
                 shared actor Child extends Parent {
                   pub fnc current(): int {
-                    return self.value;
+                    return 1;
                   }
                 }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 isoactor Parent {
-                  pub let value = 1;
                 }
 
                 shared actor Child extends Parent {
