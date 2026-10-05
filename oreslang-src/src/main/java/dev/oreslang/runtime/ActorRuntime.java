@@ -2171,6 +2171,7 @@ public final class ActorRuntime implements AutoCloseable {
         private volatile ScheduledFuture<?> deadlineFuture;
         private final AtomicBoolean compensationClaimed = new AtomicBoolean();
         private final AtomicBoolean deadlineExpired = new AtomicBoolean();
+        private final AtomicBoolean wallTimeBreachRecorded = new AtomicBoolean();
         private final ActorGenerationLease generationLease;
         private final AtomicBoolean generationLeaseReleased = new AtomicBoolean();
         private final long deadlineNanos;
@@ -2385,6 +2386,12 @@ public final class ActorRuntime implements AutoCloseable {
             }
         }
 
+        private void recordWallTimeBreach() {
+            if (wallTimeBreachRecorded.compareAndSet(false, true)) {
+                vm.rootTaskScheduler().recordOverrun();
+            }
+        }
+
         private void expireRootTask() {
             if (!deadlineExpired.compareAndSet(false, true)) return;
 
@@ -2396,9 +2403,13 @@ public final class ActorRuntime implements AutoCloseable {
                 int observed = phase.get();
                 if (observed == FINISHED || awaitableCompletion.isDone()) return;
 
+                // The logical task is still live after its absolute wall
+                // deadline. Record that fact independently from which racing
+                // path (watchdog or cooperative safepoint) wins cancellation.
+                recordWallTimeBreach();
+
                 if (observed == RUNNING) {
                     if (!completeFailure(timeout)) return;
-                    vm.rootTaskScheduler().recordOverrun();
                     if (compensationClaimed.compareAndSet(false, true)
                             && !vm.rootTaskScheduler().claimCompensatingThread()) {
                         compensationClaimed.set(false);
@@ -2412,8 +2423,7 @@ public final class ActorRuntime implements AutoCloseable {
                 if (!phase.compareAndSet(observed, FINISHED)) continue;
 
                 if (observed == QUEUED) vm.rootTaskScheduler().remove(this);
-                boolean timedOut = completeFailure(timeout);
-                if (timedOut) vm.rootTaskScheduler().recordOverrun();
+                completeFailure(timeout);
                 detachAwaitRegistration();
                 releaseRootTask(this);
                 return;
@@ -4523,7 +4533,10 @@ public final class ActorRuntime implements AutoCloseable {
                     && rootDeadline != Long.MAX_VALUE
                     && System.nanoTime() - rootDeadline >= 0) {
                 RootTask<?> rootTask = currentRootTask.get();
-                if (rootTask != null) rootTask.expireRootTask();
+                if (rootTask != null) {
+                    rootTask.recordWallTimeBreach();
+                    rootTask.expireRootTask();
+                }
                 throw new CancellationException(
                         "root/main process exceeded max wall time "
                                 + policyCeiling.maxWallTime());

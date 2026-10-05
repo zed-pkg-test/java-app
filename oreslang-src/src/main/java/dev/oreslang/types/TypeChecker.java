@@ -730,6 +730,34 @@ public final class TypeChecker {
                 };
             }
             if (call.callee() instanceof Ast.MemberExpr member) {
+                if (member.receiver() instanceof Ast.NameExpr receiverName) {
+                    Env.Binding localReceiver = env.lookup(receiverName.name());
+                    if (localReceiver != null) {
+                        Type localType = deref(localReceiver.type());
+                        if (localType instanceof Named localNamed) {
+                            Ast.ClassDecl localClass = findClass(localNamed.name());
+                            if (localClass != null) {
+                                ResolvedMethod instanceTarget = findMethodTarget(
+                                        localClass,
+                                        localNamed,
+                                        member.member(),
+                                        call.arguments().size(),
+                                        new LinkedHashSet<>());
+                                Ast.MethodDecl staticTarget = findStaticFunction(
+                                        localClass,
+                                        member.member(),
+                                        call.arguments().size(),
+                                        new LinkedHashSet<>());
+                                if (instanceTarget == null && staticTarget != null) {
+                                    throw new IllegalArgumentException(
+                                            "static function '" + localClass.name() + "." + member.member()
+                                                    + "' must be invoked through the class namespace, not an instance");
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Type receiver = deref(typeOf(member.receiver(), env, generics, self));
                 if (receiver instanceof ClassNamespace classNamespace) {
                     Ast.ClassDecl klass = findClass(classNamespace.className());
