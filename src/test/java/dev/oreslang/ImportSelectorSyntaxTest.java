@@ -2,13 +2,19 @@ package dev.oreslang;
 
 import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
+import dev.oreslang.runtime.ExecutionProfile;
+import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.LinkedProgramRunner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -135,4 +141,83 @@ final class ImportSelectorSyntaxTest {
         assertThrows(IllegalArgumentException.class, () -> LinkedProgramRunner.validate(actorAsClass));
         assertThrows(IllegalArgumentException.class, () -> LinkedProgramRunner.validate(classAsActor));
     }
+
+    @Test
+    void importedClassRemainsAUsableRuntimeNamespace() throws Exception {
+        Path child = temp.resolve("class-runtime.ores");
+        Path main = temp.resolve("class-runtime-main.ores");
+
+        Files.writeString(child, """
+                define class Box as
+                  pub static fnc answer(): int { return 42; }
+                end
+                """);
+
+        Files.writeString(main, """
+                import class Box from './class-runtime';
+
+                pub routine main(): void {
+                  stdio.stdout.write(Box.answer());
+                  return;
+                }
+                """);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        LinkedProgramRunner.run(
+                main,
+                IsolatePolicy.developer(),
+                ExecutionProfile.serverJit(),
+                Set.of(),
+                Map.of(),
+                out,
+                new ByteArrayOutputStream());
+
+        assertEquals("42", out.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void actorSelectorStaysTypeOnlyUntilActorSpawnNamespaceLands() throws Exception {
+        Path child = temp.resolve("actor-type-only.ores");
+        Path main = temp.resolve("actor-type-only-main.ores");
+
+        Files.writeString(child, """
+                shared actor Worker {
+                  pub fnc value(): int { return 2; }
+                }
+                """);
+
+        Files.writeString(main, """
+                import actor Worker from './actor-type-only';
+
+                pub routine main(): void {
+                  val runtimeValue = Worker;
+                  return;
+                }
+                """);
+
+        assertThrows(IllegalArgumentException.class, () -> LinkedProgramRunner.validate(main));
+    }
+
+    @Test
+    void typesSelectorDoesNotMatchRuntimeClassesOrActors() throws Exception {
+        Path child = temp.resolve("runtime-decls.ores");
+        Files.writeString(child, """
+                define class Box as
+                end
+
+                shared actor Worker {
+                  pub fnc value(): int { return 2; }
+                }
+                """);
+
+        for (String name : List.of("Box", "Worker")) {
+            Path main = temp.resolve("types-" + name + ".ores");
+            Files.writeString(main, """
+                    import types %s from './runtime-decls';
+                    pub routine main(): void { return; }
+                    """.formatted(name));
+            assertThrows(IllegalArgumentException.class, () -> LinkedProgramRunner.validate(main));
+        }
+    }
+
 }
