@@ -1,0 +1,704 @@
+import fnc sqrt from '../math/scalar';
+
+// Row-major embedding storage.
+//
+// Current core main uses List<float> as the semantic storage primitive.
+// This shape deliberately matches the future contiguous Array<f32> lowering:
+// values[(row * dimensions) + dimension].
+//
+// model_id/model_revision prevent accidental mixing of equal-dimensional
+// vectors produced by unrelated embedding spaces.
+define class EmbeddingBatch as
+  pub val int rows;
+  pub val int dimensions;
+  pub val List<float> values;
+  pub val bool normalized;
+  pub val String model_id;
+  pub val String model_revision;
+end
+
+
+// Padded transformer hidden states in flat [rows, tokens_per_row, dimensions]
+// order. attention_mask has one bool per [row, token] and excludes padding
+// from pooling.
+define class TokenEmbeddingBatch as
+  pub val int rows;
+  pub val int tokens_per_row;
+  pub val int dimensions;
+  pub val List<float> values;
+  pub val List<bool> attention_mask;
+  pub val String model_id;
+  pub val String model_revision;
+end
+
+fnc count_float_values(List<float> values): int {
+  let int count = 0;
+  for const value of values do
+    count = count + 1;
+  done
+  return count;
+}
+
+fnc count_int_values(List<int> values): int {
+  let int count = 0;
+  for const value of values do
+    count = count + 1;
+  done
+  return count;
+}
+
+pub fnc validate_embedding_batch(
+  EmbeddingBatch batch
+): Result<bool, String> {
+  if batch.rows < 0; do
+    return Err("embedding row count must be non-negative");
+  fi
+
+  if batch.dimensions <= 0; do
+    return Err("embedding dimensions must be positive");
+  fi
+
+  if count_float_values(batch.values) != batch.rows * batch.dimensions; do
+    return Err("embedding storage length must equal rows * dimensions");
+  fi
+
+  return Ok(true);
+}
+
+pub fnc validate_token_embedding_batch(
+  TokenEmbeddingBatch batch
+): Result<bool, String> {
+  if batch.rows < 0; do
+    return Err("token embedding row count must be non-negative");
+  fi
+  if batch.tokens_per_row < 0; do
+    return Err("token count must be non-negative");
+  fi
+  if batch.dimensions <= 0; do
+    return Err("token embedding dimensions must be positive");
+  fi
+
+  if count_float_values(batch.values) !=
+      batch.rows * batch.tokens_per_row * batch.dimensions; do
+    return Err("token embedding storage length must equal rows * tokens * dimensions");
+  fi
+
+  let int mask_count = 0;
+  for const valid of batch.attention_mask do
+    mask_count = mask_count + 1;
+  done
+
+  if mask_count != batch.rows * batch.tokens_per_row; do
+    return Err("attention mask length must equal rows * tokens");
+  fi
+
+  return Ok(true);
+}
+
+// Pool padded transformer hidden states into one embedding per row.
+//
+// When normalize_output=true, dividing the accumulated token sum by token
+// count is intentionally skipped: L2(sum / n) == L2(sum), avoiding a full
+// extra scaling pass. The source implementation remains the semantic
+// reference for the runtime intrinsic.
+@Intrinsic(EmbeddingMeanPool)
+pub fnc mean_pool_token_embeddings_into(
+  TokenEmbeddingBatch batch,
+  List<float> mut output,
+  bool normalize_output
+): Result<List<float>, String> {
+  val Result<bool, String> valid = validate_token_embedding_batch(batch);
+  if valid.is_err(); do
+    return Err("invalid token embedding batch");
+  fi
+
+  if count_float_values(output) != batch.rows * batch.dimensions; do
+    return Err("pooling output length must equal rows * dimensions");
+  fi
+
+  let int row = 0;
+  loop {
+    if row >= batch.rows; do
+      break;
+    fi
+
+    val int output_base = row * batch.dimensions;
+
+    let int clear_col = 0;
+    loop {
+      if clear_col >= batch.dimensions; do
+        break;
+      fi
+      output[output_base + clear_col] = 0.0;
+      clear_col = clear_col + 1;
+    }
+
+    let float active_tokens = 0.0;
+    let int token = 0;
+    loop {
+      if token >= batch.tokens_per_row; do
+        break;
+      fi
+
+      val int token_mask_index = (row * batch.tokens_per_row) + token;
+      if batch.attention_mask[token_mask_index]; do
+        active_tokens = active_tokens + 1.0;
+        val int token_base =
+          ((row * batch.tokens_per_row) + token) * batch.dimensions;
+
+        let int col = 0;
+        loop {
+          if col >= batch.dimensions; do
+            break;
+          fi
+          output[output_base + col] =
+            output[output_base + col] + batch.values[token_base + col];
+          col = col + 1;
+        }
+      fi
+
+      token = token + 1;
+    }
+
+    if active_tokens == 0.0; do
+      return Err("mean pooling requires at least one unmasked token per row");
+    fi
+
+    if normalize_output; do
+      let float squared_norm = 0.0;
+      let int norm_col = 0;
+      loop {
+        if norm_col >= batch.dimensions; do
+          break;
+        fi
+        val float value = output[output_base + norm_col];
+        squared_norm = squared_norm + (value * value);
+        norm_col = norm_col + 1;
+      }
+
+      val Result<float, String> norm_result = sqrt(squared_norm);
+      if norm_result.is_err(); do
+        return Err("failed to compute pooled embedding norm");
+      fi
+      val float norm = norm_result.unwrap();
+      if norm == 0.0; do
+        return Err("cannot normalize a zero pooled embedding");
+      fi
+
+      let int write_col = 0;
+      loop {
+        if write_col >= batch.dimensions; do
+          break;
+        fi
+        output[output_base + write_col] =
+          output[output_base + write_col] / norm;
+        write_col = write_col + 1;
+      }
+    else
+      val float divisor = active_tokens;
+      let int write_col = 0;
+      loop {
+        if write_col >= batch.dimensions; do
+          break;
+        fi
+        output[output_base + write_col] =
+          output[output_base + write_col] / divisor;
+        write_col = write_col + 1;
+      }
+    fi
+
+    row = row + 1;
+  }
+
+  return Ok(output);
+}
+
+@Intrinsic(EmbeddingNormalizeRows)
+pub fnc normalize_embedding_rows_into(
+  EmbeddingBatch batch,
+  List<float> mut output
+): Result<List<float>, String> {
+  val Result<bool, String> valid = validate_embedding_batch(batch);
+  if valid.is_err(); do
+    return Err("invalid embedding batch");
+  fi
+
+  if count_float_values(output) != batch.rows * batch.dimensions; do
+    return Err("normalization output length must equal rows * dimensions");
+  fi
+
+  let int row = 0;
+  loop {
+    if row >= batch.rows; do
+      break;
+    fi
+
+    let float squared_norm = 0.0;
+    let int col = 0;
+    loop {
+      if col >= batch.dimensions; do
+        break;
+      fi
+
+      val int index = (row * batch.dimensions) + col;
+      val float value = batch.values[index];
+      squared_norm = squared_norm + (value * value);
+      col = col + 1;
+    }
+
+    val Result<float, String> norm_result = sqrt(squared_norm);
+    if norm_result.is_err(); do
+      return Err("failed to compute embedding row norm");
+    fi
+
+    val float norm = norm_result.unwrap();
+    if norm == 0.0; do
+      return Err("cannot normalize an embedding row with zero norm");
+    fi
+
+    let int write_col = 0;
+    loop {
+      if write_col >= batch.dimensions; do
+        break;
+      fi
+
+      val int index = (row * batch.dimensions) + write_col;
+      output[index] = batch.values[index] / norm;
+      write_col = write_col + 1;
+    }
+
+    row = row + 1;
+  }
+
+  return Ok(output);
+}
+
+@Intrinsic(EmbeddingDotSimilarity)
+pub fnc dot_similarity_into(
+  EmbeddingBatch queries,
+  EmbeddingBatch corpus,
+  List<float> mut output
+): Result<List<float>, String> {
+  val Result<bool, String> queries_valid = validate_embedding_batch(queries);
+  if queries_valid.is_err(); do
+    return Err("invalid query embedding batch");
+  fi
+
+  val Result<bool, String> corpus_valid = validate_embedding_batch(corpus);
+  if corpus_valid.is_err(); do
+    return Err("invalid corpus embedding batch");
+  fi
+
+  if queries.dimensions != corpus.dimensions; do
+    return Err("embedding batches must have equal dimensions");
+  fi
+
+  if count_float_values(output) != queries.rows * corpus.rows; do
+    return Err("dot output length must equal query rows * corpus rows");
+  fi
+
+  let int query_row = 0;
+  loop {
+    if query_row >= queries.rows; do
+      break;
+    fi
+
+    let int corpus_row = 0;
+    loop {
+      if corpus_row >= corpus.rows; do
+        break;
+      fi
+
+      let float total = 0.0;
+      let int col = 0;
+      loop {
+        if col >= queries.dimensions; do
+          break;
+        fi
+
+        val int query_index = (query_row * queries.dimensions) + col;
+        val int corpus_index = (corpus_row * corpus.dimensions) + col;
+        total = total + (queries.values[query_index] * corpus.values[corpus_index]);
+        col = col + 1;
+      }
+
+      output[(query_row * corpus.rows) + corpus_row] = total;
+      corpus_row = corpus_row + 1;
+    }
+
+    query_row = query_row + 1;
+  }
+
+  return Ok(output);
+}
+
+@Intrinsic(EmbeddingCosineSimilarity)
+pub fnc cosine_similarity_into(
+  EmbeddingBatch queries,
+  EmbeddingBatch corpus,
+  List<float> mut output
+): Result<List<float>, String> {
+  val Result<bool, String> queries_valid = validate_embedding_batch(queries);
+  if queries_valid.is_err(); do
+    return Err("invalid query embedding batch");
+  fi
+
+  val Result<bool, String> corpus_valid = validate_embedding_batch(corpus);
+  if corpus_valid.is_err(); do
+    return Err("invalid corpus embedding batch");
+  fi
+
+  if queries.dimensions != corpus.dimensions; do
+    return Err("embedding batches must have equal dimensions");
+  fi
+
+  if count_float_values(output) != queries.rows * corpus.rows; do
+    return Err("cosine output length must equal query rows * corpus rows");
+  fi
+
+  let int query_row = 0;
+  loop {
+    if query_row >= queries.rows; do
+      break;
+    fi
+
+    let int corpus_row = 0;
+    loop {
+      if corpus_row >= corpus.rows; do
+        break;
+      fi
+
+      let float dot_value = 0.0;
+      let float query_squared = 0.0;
+      let float corpus_squared = 0.0;
+
+      let int col = 0;
+      loop {
+        if col >= queries.dimensions; do
+          break;
+        fi
+
+        val int query_index = (query_row * queries.dimensions) + col;
+        val int corpus_index = (corpus_row * corpus.dimensions) + col;
+        val float query_value = queries.values[query_index];
+        val float corpus_value = corpus.values[corpus_index];
+
+        dot_value = dot_value + (query_value * corpus_value);
+        query_squared = query_squared + (query_value * query_value);
+        corpus_squared = corpus_squared + (corpus_value * corpus_value);
+        col = col + 1;
+      }
+
+      val Result<float, String> query_norm_result = sqrt(query_squared);
+      if query_norm_result.is_err(); do
+        return Err("failed to compute query norm");
+      fi
+
+      val Result<float, String> corpus_norm_result = sqrt(corpus_squared);
+      if corpus_norm_result.is_err(); do
+        return Err("failed to compute corpus norm");
+      fi
+
+      val float query_norm = query_norm_result.unwrap();
+      val float corpus_norm = corpus_norm_result.unwrap();
+
+      if query_norm == 0.0; do
+        return Err("cosine similarity is undefined for a zero query vector");
+      fi
+      if corpus_norm == 0.0; do
+        return Err("cosine similarity is undefined for a zero corpus vector");
+      fi
+
+      output[(query_row * corpus.rows) + corpus_row] =
+        dot_value / (query_norm * corpus_norm);
+
+      corpus_row = corpus_row + 1;
+    }
+
+    query_row = query_row + 1;
+  }
+
+  return Ok(output);
+}
+
+@Intrinsic(EmbeddingSquaredL2)
+pub fnc squared_l2_distance_into(
+  EmbeddingBatch queries,
+  EmbeddingBatch corpus,
+  List<float> mut output
+): Result<List<float>, String> {
+  val Result<bool, String> queries_valid = validate_embedding_batch(queries);
+  if queries_valid.is_err(); do
+    return Err("invalid query embedding batch");
+  fi
+
+  val Result<bool, String> corpus_valid = validate_embedding_batch(corpus);
+  if corpus_valid.is_err(); do
+    return Err("invalid corpus embedding batch");
+  fi
+
+  if queries.dimensions != corpus.dimensions; do
+    return Err("embedding batches must have equal dimensions");
+  fi
+
+  if count_float_values(output) != queries.rows * corpus.rows; do
+    return Err("distance output length must equal query rows * corpus rows");
+  fi
+
+  let int query_row = 0;
+  loop {
+    if query_row >= queries.rows; do
+      break;
+    fi
+
+    let int corpus_row = 0;
+    loop {
+      if corpus_row >= corpus.rows; do
+        break;
+      fi
+
+      let float total = 0.0;
+      let int col = 0;
+      loop {
+        if col >= queries.dimensions; do
+          break;
+        fi
+
+        val int query_index = (query_row * queries.dimensions) + col;
+        val int corpus_index = (corpus_row * corpus.dimensions) + col;
+        val float delta = queries.values[query_index] - corpus.values[corpus_index];
+        total = total + (delta * delta);
+        col = col + 1;
+      }
+
+      output[(query_row * corpus.rows) + corpus_row] = total;
+      corpus_row = corpus_row + 1;
+    }
+
+    query_row = query_row + 1;
+  }
+
+  return Ok(output);
+}
+
+fnc selected_in_prefix(
+  List<int> output_indices,
+  int row_base,
+  int selected_count,
+  int candidate
+): bool {
+  let int i = 0;
+  loop {
+    if i >= selected_count; do
+      break;
+    fi
+
+    if output_indices[row_base + i] == candidate; do
+      return true;
+    fi
+
+    i = i + 1;
+  }
+
+  return false;
+}
+
+@Intrinsic(EmbeddingTopK)
+pub fnc top_k_indices_into(
+  List<float> scores,
+  int rows,
+  int cols,
+  int k,
+  List<int> mut output_indices
+): Result<List<int>, String> {
+  if rows < 0; do
+    return Err("top-k row count must be non-negative");
+  fi
+  if cols < 0; do
+    return Err("top-k column count must be non-negative");
+  fi
+  if k < 0; do
+    return Err("top-k k must be non-negative");
+  fi
+  if k > cols; do
+    return Err("top-k k cannot exceed the column count");
+  fi
+
+  if count_float_values(scores) != rows * cols; do
+    return Err("top-k score length must equal rows * cols");
+  fi
+  if count_int_values(output_indices) != rows * k; do
+    return Err("top-k output length must equal rows * k");
+  fi
+
+  let int row = 0;
+  loop {
+    if row >= rows; do
+      break;
+    fi
+
+    val int row_base = row * k;
+    let int rank = 0;
+    loop {
+      if rank >= k; do
+        break;
+      fi
+
+      let bool seen = false;
+      let int best_index = 0;
+      let float best_score = 0.0;
+
+      let int candidate = 0;
+      loop {
+        if candidate >= cols; do
+          break;
+        fi
+
+        val bool already_selected = selected_in_prefix(
+          output_indices,
+          row_base,
+          rank,
+          candidate
+        );
+
+        if !already_selected; do
+          val float score = scores[(row * cols) + candidate];
+
+          if !seen; do
+            seen = true;
+            best_index = candidate;
+            best_score = score;
+          else
+            if score > best_score; do
+              best_index = candidate;
+              best_score = score;
+            fi
+          fi
+        fi
+
+        candidate = candidate + 1;
+      }
+
+      if !seen; do
+        return Err("top-k could not select enough values");
+      fi
+
+      output_indices[row_base + rank] = best_index;
+      rank = rank + 1;
+    }
+
+    row = row + 1;
+  }
+
+  return Ok(output_indices);
+}
+
+@Intrinsic(EmbeddingTopKDot)
+pub fnc top_k_dot_into(
+  EmbeddingBatch queries,
+  EmbeddingBatch corpus,
+  int k,
+  List<int> mut top_indices,
+  List<float> mut top_scores
+): Result<bool, String> {
+  val Result<bool, String> queries_valid = validate_embedding_batch(queries);
+  if queries_valid.is_err(); do
+    return Err("invalid query embedding batch");
+  fi
+
+  val Result<bool, String> corpus_valid = validate_embedding_batch(corpus);
+  if corpus_valid.is_err(); do
+    return Err("invalid corpus embedding batch");
+  fi
+
+  if queries.dimensions != corpus.dimensions; do
+    return Err("embedding batches must have equal dimensions");
+  fi
+  if k < 0; do
+    return Err("top-k k must be non-negative");
+  fi
+  if k > corpus.rows; do
+    return Err("top-k k cannot exceed corpus row count");
+  fi
+  if count_int_values(top_indices) != queries.rows * k; do
+    return Err("top-k index output length must equal query rows * k");
+  fi
+  if count_float_values(top_scores) != queries.rows * k; do
+    return Err("top-k score output length must equal query rows * k");
+  fi
+
+  let int query_row = 0;
+  loop {
+    if query_row >= queries.rows; do
+      break;
+    fi
+
+    val int output_base = query_row * k;
+    let int filled = 0;
+    let int corpus_row = 0;
+
+    loop {
+      if corpus_row >= corpus.rows; do
+        break;
+      fi
+
+      let float score = 0.0;
+      let int col = 0;
+      loop {
+        if col >= queries.dimensions; do
+          break;
+        fi
+
+        val int query_index = (query_row * queries.dimensions) + col;
+        val int corpus_index = (corpus_row * corpus.dimensions) + col;
+        score = score + (queries.values[query_index] * corpus.values[corpus_index]);
+        col = col + 1;
+      }
+
+      let int insertion = filled;
+      let int scan = 0;
+      loop {
+        if scan >= filled; do
+          break;
+        fi
+
+        if score > top_scores[output_base + scan]; do
+          insertion = scan;
+          break;
+        fi
+
+        scan = scan + 1;
+      }
+
+      if insertion < k; do
+        let int shift = filled;
+        if shift >= k; do
+          shift = k - 1;
+        fi
+
+        loop {
+          if shift <= insertion; do
+            break;
+          fi
+
+          top_scores[output_base + shift] = top_scores[output_base + shift - 1];
+          top_indices[output_base + shift] = top_indices[output_base + shift - 1];
+          shift = shift - 1;
+        }
+
+        top_scores[output_base + insertion] = score;
+        top_indices[output_base + insertion] = corpus_row;
+
+        if filled < k; do
+          filled = filled + 1;
+        fi
+      fi
+
+      corpus_row = corpus_row + 1;
+    }
+
+    query_row = query_row + 1;
+  }
+
+  return Ok(true);
+}
