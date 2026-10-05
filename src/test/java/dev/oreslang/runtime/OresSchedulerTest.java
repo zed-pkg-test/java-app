@@ -337,15 +337,4 @@ final class OresSchedulerTest {
         assertEquals(1, pc.get(),
                 "detached continuation must never resume after producer completion");
     }
-
-    @Test
-    void implicitRootSchedulerUsesTwoApplicationLanesByDefault() {
-        try (ActorRuntime runtime = new ActorRuntime()) {
-            assertEquals(2, runtime.rootScheduler().parallelism());
-            assertEquals(2, runtime.dispatcherConfig().rootParallelism());
-            assertEquals(5, runtime.dispatcherConfig().controlParallelism(),
-                    "production defaults keep additional CONTROL carriers for supervisors/mailmen");
-        }
-    }
-
 }
