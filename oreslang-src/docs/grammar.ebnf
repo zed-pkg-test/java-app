@@ -78,11 +78,13 @@ actor_member    = field_decl
 actor_method_decl
                 = { annotation } visibility [ "fnc" ] method_name [ generic_params ]
                   method_head method_return_spec block ;
-(* Semantic rule: one or more public actor instance methods form the typed
-   source-level protocol and lower to one compiler/runtime-owned mailbox
-   dispatcher. Private methods are direct self helpers within an actor turn.
-   Public protocol methods are monomorphic at method level and cannot accept
-   mut parameters. Actor classes do not declare static functions. *)
+(* Semantic rule: every persistent actor has exactly one public
+   receive(message): void entrypoint. OresVM owns the receiver loop and invokes
+   receive once per admitted serialized actor turn. All other actor instance
+   methods are private self helpers. receive is monomorphic at method level,
+   cannot accept mut parameters, and is never directly callable through
+   ActorRef; external code enqueues with ActorRef.send(message). Actor classes
+   do not declare static functions. *)
 
 class_decl      = "define" [ "abstract" ] "class" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
@@ -290,14 +292,17 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - "define actor X as ... end" and "define class X extends Actor as ... end"
      normalize to the same ClassDecl actor semantics. Actor/IsoActor/
      UntrustedActor are compiler-intrinsic bases, not ordinary library classes.
-   - Actor fields are private mailbox-owned state. One or more public instance
-     methods form the typed actor protocol; private methods are direct self
-     helpers. OresVM owns one hidden mailbox dispatcher and external
-     ActorRef<Protocol>.method(...) calls enqueue typed request/reply messages,
-     producing Future<T> for a logical method result T.
-   - Compiler-intrinsic Actor/IsoActor/UntrustedActor bases define execution
-     domains only and do not accept protocol type arguments. Actor protocol
-     shape comes from public methods and/or implemented interfaces.
+   - Actor fields are private mailbox-owned state. Every persistent actor has
+     exactly one public receive(message): void mailbox entrypoint; all other
+     actor instance methods are private helpers. OresVM owns the persistent
+     receiver loop and calls receive once per admitted serialized actor turn.
+     External ActorRef<ConcreteActor>.send(message) enqueues the message;
+     receive/mailbox internals are not directly callable by guest code.
+   - Compiler-intrinsic Actor/IsoActor/UntrustedActor bases accept either no
+     protocol arguments or exactly <Message, Reply, Error>. When present,
+     receive's single parameter type must exactly equal Message. Reply/Error
+     describe explicit response/error contracts and do not synthesize actor RPC
+     methods.
    - Actor constructors are runtime-only, non-public, non-static, non-generic,
      non-suspending, and return void.
    - Actor isolation is an ownership/effect rule rather than @Pure or nlex:
