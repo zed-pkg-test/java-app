@@ -3119,6 +3119,21 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
+     * Compiler/interpreter lowering target for persistent source-level SHARED
+     * actor classes. Guest code never receives this factory; actor-owned state
+     * is created only after the runtime has installed the actor context.
+     */
+    public <M> ActorRef<M> spawnSourceSharedActor(BehaviorFactory<M> behaviorFactory) {
+        Objects.requireNonNull(behaviorFactory, "behaviorFactory");
+        requireCallerRuntimeAffinity("spawn source shared actor classes");
+        return spawnInternal(
+                ActorKind.SHARED,
+                defaultSpawnPolicy(),
+                behaviorFactory,
+                true);
+    }
+
+    /**
      * Compiler/interpreter lowering target for persistent SHARED source actor
      * classes. The returned ActorRef still represents exactly one mailbox;
      * public source methods are multiplexed through runtime-private protocol

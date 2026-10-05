@@ -60,7 +60,7 @@ final class ActorRuntimeTest {
                         suspended.countDown();
                         turnContext.suspendOn(gate, (value, failure, resumeContext) -> {
                             assertNull(failure);
-                            resumeContext.completeProtocolTurn(value);
+                            resumeContext.completeProtocolReply(value);
                         });
                         throw new AssertionError("suspendOn must unwind the current actor turn");
                     });
@@ -118,7 +118,7 @@ final class ActorRuntimeTest {
                         suspended.countDown();
                         turnContext.suspendOn(gate, (value, failure, resumeContext) -> {
                             resumed.countDown();
-                            resumeContext.completeProtocolTurn(value);
+                            resumeContext.completeProtocolReply(value);
                         });
                         throw new AssertionError("suspendOn must unwind the current actor turn");
                     });
