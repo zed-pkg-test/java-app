@@ -90,9 +90,10 @@ public final class TypeChecker {
                 if (localNames.contains(name)) {
                     throw new IllegalArgumentException("imported name '" + name + "' conflicts with a local or builtin name");
                 }
-                if (imported.kind() != Ast.ImportKind.CLASS || ImportRules.isJavaPath(imported.path())) {
-                    importedValues.add(name);
-                }
+                // Cross-file imports are opaque to this per-unit typechecker.
+                // Track class aliases too so ClassAlias.member can survive static
+                // checking and be resolved/validated by the linked runtime.
+                importedValues.add(name);
             }
         }
     }
