@@ -2,7 +2,6 @@ package dev.oreslang.runtime;
 
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -74,25 +73,30 @@ public final class AsyncRuntime implements AutoCloseable {
      * future. Cancellation is propagated to the backing task and therefore
      * interrupts the current virtual carrier when possible.
      */
-    public <T> CompletableFuture<T> submit(Task<T> task) {
+    public <T> OresFuture<T> submit(Task<T> task) {
         Objects.requireNonNull(task, "task");
         if (closed.get()) throw new RejectedExecutionException("async runtime is closed");
 
-        TaskFuture<T> completion = new TaskFuture<>();
+        AtomicReference<Future<?>> scheduledRef = new AtomicReference<>();
+        OresFuture<T> completion = new OresFuture<>(() -> {
+            Future<?> scheduled = scheduledRef.get();
+            if (scheduled != null) scheduled.cancel(true);
+        });
+
         final Future<?> scheduled;
         try {
             scheduled = executor.submit(() -> runTask(task, completion));
         } catch (RejectedExecutionException rejected) {
             throw new RejectedExecutionException("async runtime is closed", rejected);
         }
-        completion.attach(scheduled);
+        scheduledRef.set(scheduled);
 
-        // Close may race submission after the initial check.
+        if (completion.isCancelled()) scheduled.cancel(true);
         if (closed.get()) completion.cancel(true);
         return completion;
     }
 
-    private <T> void runTask(Task<T> task, TaskFuture<T> completion) {
+    private <T> void runTask(Task<T> task, OresFuture<T> completion) {
         if (completion.isCancelled()) return;
 
         AtomicReference<T> value = new AtomicReference<>();
@@ -115,8 +119,8 @@ public final class AsyncRuntime implements AutoCloseable {
 
         if (completion.isCancelled()) return;
         Throwable thrown = failure.get();
-        if (thrown == null) completion.complete(value.get());
-        else completion.completeExceptionally(thrown);
+        if (thrown == null) completion.completeFromRuntime(value.get());
+        else completion.failFromRuntime(thrown);
     }
 
     /**
@@ -127,9 +131,8 @@ public final class AsyncRuntime implements AutoCloseable {
      * <p>An actor carrier is never allowed to park here. Actor await must be
      * lowered to mailbox-turn suspension/resumption.</p>
      */
-    public static <T> T await(CompletionStage<T> stage) {
-        Objects.requireNonNull(stage, "stage");
-        CompletableFuture<T> future = stage.toCompletableFuture();
+    public static <T> T await(OresFuture<T> future) {
+        Objects.requireNonNull(future, "future");
         if (ActorRuntime.inActorExecution() && !future.isDone()) {
             throw new IllegalStateException(
                     "await would block an actor dispatcher carrier; actor continuation lowering must suspend/resume the mailbox turn");
@@ -148,6 +151,14 @@ public final class AsyncRuntime implements AutoCloseable {
             if (cause instanceof Error error) throw error;
             throw new RuntimeException(cause);
         }
+    }
+
+    /**
+     * Host interop bridge. Oreslang never exposes CompletionStage as its
+     * language Future implementation; it is normalized into Ores-owned state.
+     */
+    public static <T> T await(CompletionStage<T> stage) {
+        return await(OresFuture.from(stage));
     }
 
     @Override
@@ -171,25 +182,4 @@ public final class AsyncRuntime implements AutoCloseable {
         }
     }
 
-    private static final class TaskFuture<T> extends CompletableFuture<T> {
-        private final AtomicReference<Future<?>> task = new AtomicReference<>();
-
-        private void attach(Future<?> scheduled) {
-            if (!task.compareAndSet(null, scheduled)) {
-                scheduled.cancel(true);
-                throw new IllegalStateException("async task carrier already attached");
-            }
-            if (isCancelled()) scheduled.cancel(true);
-        }
-
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            boolean cancelled = super.cancel(mayInterruptIfRunning);
-            Future<?> scheduled = task.get();
-            if (cancelled && scheduled != null) {
-                scheduled.cancel(mayInterruptIfRunning);
-            }
-            return cancelled;
-        }
-    }
 }

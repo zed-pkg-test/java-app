@@ -2,7 +2,6 @@ package dev.oreslang.runtime;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -16,7 +15,7 @@ final class AsyncRuntimeTest {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
 
-            CompletableFuture<Integer> future = runtime.submit(() -> {
+            OresFuture<Integer> future = runtime.submit(() -> {
                 assertTrue(AsyncRuntime.isAsyncCarrierThread());
                 assertFalse(ActorRuntime.isActorCarrierThread());
                 started.countDown();
@@ -37,7 +36,7 @@ final class AsyncRuntimeTest {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch interrupted = new CountDownLatch(1);
 
-            CompletableFuture<Integer> future = runtime.submit(() -> {
+            OresFuture<Integer> future = runtime.submit(() -> {
                 started.countDown();
                 try {
                     Thread.sleep(TimeUnit.SECONDS.toMillis(30));
@@ -57,7 +56,7 @@ final class AsyncRuntimeTest {
 
     @Test
     void awaitPropagatesOriginalRuntimeFailure() {
-        CompletableFuture<Integer> future = new CompletableFuture<>();
+        OresFuture<Integer> future = new CompletableFuture<>();
         IllegalStateException original = new IllegalStateException("boom");
         future.completeExceptionally(original);
 

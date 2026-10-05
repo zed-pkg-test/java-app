@@ -14,6 +14,8 @@ import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.AsyncRuntime;
+import dev.oreslang.runtime.OresFuture;
+import dev.oreslang.runtime.OresFutures;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -336,6 +338,9 @@ public final class OresEvalRootNode extends RootNode {
             if (main == null) main = findFunction("main");
             if (main == null) return null;
             Object result = callFunction(main, List.of(arguments));
+            if (result instanceof OresFuture<?> future) {
+                return AsyncRuntime.await(future);
+            }
             if (result instanceof CompletionStage<?> stage) {
                 return AsyncRuntime.await(stage);
             }
@@ -1079,6 +1084,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("actor")) return new ActorFacade(context);
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
+                if (name.name().equals("Future")) return FutureFactory.INSTANCE;
                 if (name.name().equals("print")) return (Invokable) args -> {
                     context.requireCapability(IsolatePolicy.Capability.STDOUT, "print");
                     requireOne(args, "print"); context.output().print(display(args.getFirst())); context.output().flush(); return null;
@@ -1309,6 +1315,9 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.AwaitExpr awaited) {
                 Object value = eval(awaited.expression(), env);
+                if (value instanceof OresFuture<?> future) {
+                    return AsyncRuntime.await(future);
+                }
                 if (value instanceof CompletionStage<?> stage) {
                     return AsyncRuntime.await(stage);
                 }
@@ -1417,6 +1426,25 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof MutexFactory factory) {
                 if (!name.equals("new")) throw new IllegalArgumentException("unknown mutex factory member " + name);
                 return (Invokable) factory::create;
+            }
+            if (receiver instanceof FutureFactory) {
+                return switch (name) {
+                    case "all" -> (Invokable) args -> {
+                        requireOne(args, "Future.all");
+                        if (!(args.getFirst() instanceof List<?> list)) {
+                            throw new IllegalArgumentException("Future.all expects List<Future<T>>");
+                        }
+                        return OresFutures.all(list);
+                    };
+                    case "race" -> (Invokable) args -> {
+                        requireOne(args, "Future.race");
+                        if (!(args.getFirst() instanceof List<?> list)) {
+                            throw new IllegalArgumentException("Future.race expects List<Future<T>>");
+                        }
+                        return OresFutures.race(list);
+                    };
+                    default -> throw new IllegalArgumentException("unknown Future factory member " + name);
+                };
             }
             if (receiver instanceof OptionValue option) return optionMember(option, name);
             if (receiver instanceof ResultValue result) return resultMember(result, name);
@@ -1540,8 +1568,14 @@ public final class OresEvalRootNode extends RootNode {
 
         private Object normalizeHostResult(Object value) {
             if (value == null) return new OptionValue(false, null);
-            if (value instanceof Number || value instanceof Boolean || value instanceof String
-                    || value instanceof Character || value instanceof CompletionStage<?>) {
+            if (value instanceof CompletionStage<?> stage) {
+                return OresFuture.from(stage);
+            }
+            if (value instanceof OresFuture<?>
+                    || value instanceof Number
+                    || value instanceof Boolean
+                    || value instanceof String
+                    || value instanceof Character) {
                 return value;
             }
             return new HostObjectFacade(value);
@@ -2751,6 +2785,8 @@ public final class OresEvalRootNode extends RootNode {
 
     private record ImportedBinding(Ast.ImportDecl declaration, String sourceName) { }
     private record ImportedNamespace(Evaluator owner, Ast.ImportKind kind) { }
+    private enum FutureFactory { INSTANCE }
+
     private record ModuleFacade(Evaluator owner, Ast.ModuleDecl module) { }
     private record ClassFacade(Evaluator owner, Ast.ClassDecl klass) { }
     private record HostClassFacade(String className, Object symbol, boolean constructible) { }
