@@ -20,11 +20,11 @@ A persistent actor is a class with an `ActorKind`:
 - `isoactor` / `extends IsoActor` -> PRIVATE
 - `untrusted actor` / `extends UntrustedActor` -> UNTRUSTED
 
-The intrinsic bases define execution/isolation domain only. They do not carry a
-second `Actor<Message, Reply, Error>` protocol.
+The intrinsic bases define the execution/isolation domain and may carry an
+explicit closed `<Message, Reply, Error>` hot-load ABI.
 
 ```ores
-define actor Counter as
+define class Counter extends Actor<int, void, String> as
   let int value = 0;
 
   constructor(initial: int) {
@@ -35,87 +35,42 @@ define actor Counter as
     return delta;
   }
 
-  pub add(delta: int): void {
+  pub receive(delta: int): void {
     self.value = self.value + self.normalized(delta);
     return;
   }
-
-  pub current(): int {
-    return self.value;
-  }
 end
 ```
 
-Public instance methods form the typed source protocol. Private methods are
-direct `self` calls inside the active actor turn.
+A persistent actor has exactly one effective public instance ingress:
+`receive(Message): void`. Private methods are direct `self` calls inside the
+active actor turn. OresVM owns the receiver loop and the single runtime mailbox.
 
-There is still exactly one runtime mailbox. The compiler lowers the complete
-public method set into one hidden tagged request/reply dispatcher. A source
-method named `receive` has no special privilege.
+## 2. ActorRef is mailbox authority
 
-Conceptually:
-
-```text
-Counter.add(int): void
-Counter.current(): int
-
-      lowers to
-
-hidden CounterProtocol =
-    Add(int, Reply<void>)
-  | Current(Reply<int>)
-```
-
-## 2. ActorRef is typed protocol authority
-
-External code receives `ActorRef<Counter>` or an interface-narrowed
-`ActorRef<CounterAPI>`.
+External code receives `ActorRef<Counter>` and submits messages through
+`send(Message)`:
 
 ```ores
 val counter = spawn Counter(40);
-
-await counter.add(2);
-val value = await counter.current();
+counter.send(2);
 ```
 
-The source projection is:
-
-```text
-Counter.add(int): void
-ActorRef<Counter>.add(int): Future<void>
-
-Counter.current(): int
-ActorRef<Counter>.current(): Future<int>
-```
-
-There is no ambient raw source-level `send`/`receive` operation for actor
-classes. If the actor declares a public method named `send` or `receive`, it
-is an ordinary typed protocol endpoint. The mutable mailbox itself remains
-runtime-private, while `id`, `is_alive`, and `mailbox` are reserved
-ActorRef control-member names.
-
-Protocol methods are not first-class bound callback objects. Use an explicit
-closure when callback behavior is desired so capture/lifetime/suspension remain
-visible to the compiler.
+The reference never exposes the mutable actor instance or a callable
+`receive`. `counter.receive(...)` and arbitrary actor-method RPC calls are
+rejected. Replies/errors use explicit response capabilities/application
+messages described by the actor ABI rather than a hidden method-name
+dispatcher.
 
 ## 3. Inheritance and protocol interfaces
 
-Actor inheritance preserves execution/isolation domain and protocol visibility.
-A child may inherit its entire public protocol and may add endpoints, but it
-cannot narrow an inherited public endpoint to private.
+Actor inheritance preserves execution/isolation domain. Under the current
+compiler contract, each concrete actor declaration supplies its one public
+`receive`; an override cannot add other public instance endpoints.
 
-For abstraction and hot loading, an actor may implement a multi-method
-interface:
-
-```ores
-define interface CounterAPI
-  fnc add(delta: int): void;
-  fnc current(): int;
-end
-```
-
-`ActorRef<Counter>` may narrow to a compatible `ActorRef<CounterAPI>`. The
-interface is an ABI boundary, not a way to expose the mutable actor object.
+If `ActorRef<Interface>` narrowing is used, the interface must be receive-only:
+exactly one compatible monomorphic `receive(Message): void`. A multi-method
+interface cannot reopen arbitrary behavioral entrypoints.
 
 ## 4. Boundary rules
 
@@ -175,13 +130,12 @@ descriptor/factory that:
 1. reserves the ActorId/domain/group quotas;
 2. validates and transports constructor arguments;
 3. initializes actor-owned state under the target actor context;
-4. installs the hidden typed protocol dispatcher;
+4. installs the runtime-owned single-receive mailbox behavior;
 5. publishes READY only after initialization succeeds.
 
-The SHARED reference evaluator uses the privileged
-`spawnSourceSharedProtocolActor` lowering path. PRIVATE and UNTRUSTED source
-actor classes require their isolation-aware OresVM lowering and must not be
-silently routed through the shared evaluator.
+SHARED, PRIVATE, and UNTRUSTED source actor classes are lowered through their
+isolation-aware OresVM spawn paths. No source actor is routed through a hidden
+arbitrary method-name protocol dispatcher.
 
 ## 7. ActorFactoryCatalog meaning
 
@@ -233,8 +187,9 @@ Actors may emit bounded group output:
 actor turn -> emit Out -> group outbox -> ActorMailman
 ```
 
-The mailman/supervisor may route a reply/event by invoking the target actor's
-typed protocol, which re-enters that actor's one mailbox.
+The mailman/supervisor may route a reply/event through the target actor's
+bounded `ActorRef.send`/recipient capability, which re-enters that actor's one
+mailbox.
 
 ## 9. Group capabilities
 
@@ -357,21 +312,20 @@ pinned to their birth generation until drained/terminated.
 Compiler/type system:
 
 - actor classes are persistent; actor fnc/routine callables remain one-shot;
-- at least one effective public actor protocol endpoint exists;
-- inherited endpoints count and cannot be narrowed to private;
-- actors may implement multi-method protocol interfaces;
-- `ActorRef<Concrete>` may narrow to a compatible `ActorRef<Interface>`;
-- direct ActorRef protocol calls return `Future<T>`;
-- public protocol methods are monomorphic at method level and non-reifiable;
-- undeclared send/receive calls fail as unknown protocol methods; mailbox access remains runtime-private;
-- constructor and every protocol parameter/return pass boundary sendability;
+- each concrete persistent actor exposes exactly one public `receive(Message): void`;
+- no other public actor instance method is admitted;
+- `ActorRef<Concrete>.send(Message)` is the behavioral ingress;
+- direct `ActorRef.receive` and arbitrary actor-method calls are rejected;
+- any `ActorRef<Interface>` narrowing must be receive-only;
+- receive is monomorphic, implicit-`self`, non-`mut`, and returns `void`;
+- constructor and receive parameters pass boundary sendability;
 - actor effect restrictions propagate through helper call graphs;
 - imported effect-unknown calls fail closed in actor context.
 
 Runtime:
 
 - one mailbox and one execution lease exist per actor;
-- typed actor protocol calls use runtime-private request/reply metadata;
+- mailbox admission uses runtime-private message metadata and the single receive loop;
 - only user arguments/replies pass transport validation and memory accounting;
 - suspended protocol calls retain their request envelope until final continuation settlement;
 - stop/failure settles pending protocol Futures and releases reservations exactly once;

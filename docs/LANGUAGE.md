@@ -544,10 +544,10 @@ Callable declarations canonically use `: T` or `-> T` for return types.
 `=>` is reserved canonically for type-level callable signatures; historical
 callable-return `=> T` remains parser-compatible only during migration.
 
-Actor protocol methods are not first-class bound callbacks. `self.helper(...)`
-is a direct call during the active actor turn, while extracting
-`worker.add` as a bound callback is invalid; use an explicit closure if a
-callback is required.
+Actor methods are not first-class bound callbacks. `self.helper(...)` is a
+direct private-helper call during the active actor turn. The public
+`receive(...)` ingress is runtime-owned and cannot be extracted or called
+through an `ActorRef`; callers enqueue with `send(message)`.
 
 ### Actor ownership/effects
 
@@ -586,9 +586,8 @@ forbidden; actor identity/state must be created by the actor runtime.
 
 Code outside an actor never receives the mutable actor object. A concrete actor
 spawn returns an `ActorRef<ActorClass>`. The reference grants identity/lifecycle
-operations plus the class/interface's typed protocol methods; each public method
-call is one bounded mailbox admission and returns a runtime-owned `Future<T>`
-for the logical method result.
+operations plus bounded `send(Message)`; direct `receive` and arbitrary actor
+method calls are not part of reference authority.
 
 Generated/runtime actor factories remain useful as launch adapters for actor
 groups, configured factory catalogs, hot loading, and dependency injection.
@@ -596,14 +595,15 @@ They execute under the target actor context and must be capture-safe. This
 runtime factory concept is distinct from source `actor fnc`/`actor routine`,
 which are one-shot spawned callables.
 
-The persistent actor ABI is therefore the actor identity plus its generated
-typed protocol dispatcher—not a raw class pointer and not a user-visible
-mailbox object.
+The persistent actor ABI is therefore the actor identity/isolation domain,
+constructor boundary, explicit `Actor<Message, Reply, Error>` metadata, and
+single `receive(Message): void` ingress—not a raw class pointer and not a
+user-visible mailbox object.
 
-This model preserves ActorGroup/ActorMailman architecture: typed actor protocol
-calls enqueue bounded runtime-private messages; actors may additionally emit
-bounded group output; one logical serialized mailman consumes the group's
-outbox; supervisors remain responsible for lifecycle/restart policy.
+This model preserves ActorGroup/ActorMailman architecture: `ActorRef.send`
+enqueues bounded runtime-private messages; actors may additionally emit bounded
+group output; one logical serialized mailman consumes the group's outbox;
+supervisors remain responsible for lifecycle/restart policy.
 
 Private and untrusted actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
 
