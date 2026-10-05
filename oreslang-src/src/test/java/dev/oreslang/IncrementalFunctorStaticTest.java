@@ -234,7 +234,7 @@ final class IncrementalFunctorStaticTest {
     }
 
     @Test
-    void slimArrowBelongsToFunctionTypesAndLambdasFatArrowToNamedReturnTypes() {
+    void slimArrowBelongsToFunctionTypesLambdasAndCallableCompatibility() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 type Mapper = typeof fnc(bool value) -> int;
                 fnc make() => ((bool value) -> int) {
@@ -248,8 +248,9 @@ final class IncrementalFunctorStaticTest {
                 }
                 """)));
 
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                fnc wrong() -> int { return 1; }
+        assertDoesNotThrow(() -> Parser.parse("""
+                fnc current() -> int { return 1; }
+                fnc preferred_for_void(): void { return; }
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
