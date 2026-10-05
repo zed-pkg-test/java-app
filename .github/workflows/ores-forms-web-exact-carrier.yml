@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD:source-exact)" = "caf169f205fa28989dddeacfacf3cffa328818c5"
+          test "$(git rev-parse HEAD:source-exact)" = "44da18d75be4e6b20e169f416d893f576ca2367f"
           test "$(git rev-parse HEAD:vendor/forms-core)" = "912f858c21aff2d6029f6feba49d46ff5e254ab1"
           test "$(git rev-parse HEAD:vendor/next-loggers)" = "386d7d499a6c1c31076ca54a0c1df9eef1978722"
           diff -ru --exclude=Cargo.toml source-exact source
