@@ -838,20 +838,32 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private boolean ownFuture(ActorCell<?> cell, OresFuture<?> future) {
-        if (cell.stopped.get() || cell.finalized || closed.get()) {
+        boolean reject = false;
+        synchronized (cell.lifecycleLock) {
+            if (cell.stopped.get() || cell.finalized || closed.get()) {
+                reject = true;
+            } else if (!cell.pendingOperations.contains(future)
+                    && cell.pendingOperations.size()
+                    >= cell.policy.maxMailboxMessages()) {
+                reject = true;
+            } else {
+                cell.pendingOperations.add(future);
+            }
+        }
+
+        if (reject) {
+            // Cancellation invokes the Future's admission hook, which removes
+            // channel/select waiter registrations instead of merely failing
+            // the visible Future while leaving hidden runtime work behind.
             future.cancel(false);
             return false;
         }
 
-        cell.pendingOperations.add(future);
-        if (cell.stopped.get() || cell.finalized || closed.get()) {
-            cell.pendingOperations.remove(future);
-            future.cancel(false);
-            return false;
-        }
-
-        future.whenCompleteRuntime((ignored, failure) ->
-                cell.pendingOperations.remove(future));
+        future.whenCompleteRuntime((ignored, failure) -> {
+            synchronized (cell.lifecycleLock) {
+                cell.pendingOperations.remove(future);
+            }
+        });
         return true;
     }
 
