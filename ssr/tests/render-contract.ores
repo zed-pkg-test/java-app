@@ -1,0 +1,117 @@
+import module markup from '../src/markup';
+import module html from '../src/html';
+import module css from '../src/css';
+import module htmx from '../src/htmx';
+import module response from '../src/response';
+
+pub routine main(): void {
+  val nested = html.div(
+    html.attrs_join([
+      html.id_trusted("app"),
+      html.class_trusted("card")
+    ]),
+    html.span(
+      html.attrs_empty(),
+      markup.trusted_raw("hello")
+    )
+  );
+  stdio.println(markup.render(nested));
+
+  val sheet = css.rule_trusted(
+    "body",
+    css.declarations([
+      css.declaration_trusted("margin", "0"),
+      css.declaration_trusted("color", "#222")
+    ])
+  );
+  stdio.println(css.render(sheet));
+
+  val button = html.button(
+    html.attrs_join([
+      htmx.post_trusted("/counter"),
+      htmx.target_trusted("#counter"),
+      htmx.outer_html()
+    ]),
+    markup.trusted_raw("Increment")
+  );
+  stdio.println(markup.render(button));
+
+  stdio.println(markup.render(
+    html.input(html.bool_attr_trusted("disabled", true))
+  ));
+  stdio.println(markup.render(
+    html.input(html.bool_attr_trusted("disabled", false))
+  ));
+
+  val missing = response.not_found(
+    html.p(html.attrs_empty(), markup.trusted_raw("missing"))
+  );
+  stdio.println(missing.status);
+  stdio.println(missing.content_type);
+  stdio.println(missing.body);
+
+  stdio.println("[" + markup.render(
+    markup.when(false, markup.trusted_raw("hidden"))
+  ) + "]");
+  stdio.println("[" + markup.render(
+    markup.when(true, markup.trusted_raw("shown"))
+  ) + "]");
+
+  stdio.println(markup.render(
+    markup.concat(
+      markup.trusted_raw("<b>"),
+      markup.trusted_raw("bold</b>")
+    )
+  ));
+
+  stdio.println(css.render(
+    css.media_trusted(
+      "(min-width: 10px)",
+      css.rule_trusted(
+        "p",
+        css.declaration_trusted("margin", "0")
+      )
+    )
+  ));
+
+  stdio.println(markup.render(
+    html.button(
+      htmx.boost(true),
+      markup.trusted_raw("Boost")
+    )
+  ));
+
+  stdio.println(markup.render(
+    html.document(
+      html.title(html.attrs_empty(), markup.trusted_raw("T")),
+      html.p(html.attrs_empty(), markup.trusted_raw("B"))
+    )
+  ));
+
+  match response.with_status(
+    99,
+    markup.trusted_raw("invalid")
+  )
+    Err(message) -> {
+      stdio.println(message);
+    }
+    Ok(_) -> {
+      stdio.println("unexpected-valid-status");
+    }
+  end
+
+  match response.with_status(
+    418,
+    markup.trusted_raw("teapot")
+  )
+    Ok(custom) -> {
+      stdio.println(custom.status);
+      stdio.println(custom.body);
+    }
+    Err(_) -> {
+      stdio.println("unexpected-invalid-status");
+    }
+  end
+
+  return;
+}
