@@ -156,6 +156,46 @@ final class EcsLanguageTest {
     }
 
     @Test
+    void ecsAnnotationsAreRejectedOnStatefulClassMembers() {
+        Ast.Program program = Parser.parse("""
+                define component Position as
+                  x: f32
+                end
+
+                define class BadSystem as
+                  @system
+                  @reads(Position)
+                  tick(Query<Position> rows): void {
+                    return;
+                  }
+                end
+                """);
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> EcsEffectAnalyzer.analyze(program));
+        assertTrue(error.getMessage().contains("stateless"));
+        assertTrue(error.getMessage().contains("BadSystem.tick"));
+    }
+
+    @Test
+    void podValidationRejectsRecursiveAliasLayoutsWithoutRecursingForever() {
+        Ast.Program program = Parser.parse("""
+                type A = B;
+                type B = A;
+
+                define component Bad as
+                  value: A
+                end
+                """);
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> EcsEffectAnalyzer.analyze(program));
+        assertTrue(error.getMessage().contains("recursive type-alias"));
+    }
+
+    @Test
     void gpuEligibleSystemsCannotPerformStructuralMutation() {
         assertThrows(IllegalArgumentException.class, () -> OresCompiler.parseAndTypeCheck("""
                 define component Health as
