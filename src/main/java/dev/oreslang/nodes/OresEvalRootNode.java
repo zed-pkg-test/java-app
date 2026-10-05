@@ -14,6 +14,10 @@ import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.AsyncRuntime;
+import dev.oreslang.runtime.Awaitable;
+import dev.oreslang.runtime.OresFuture;
+import dev.oreslang.runtime.OresFutures;
+import dev.oreslang.runtime.OresScheduler;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -336,6 +340,9 @@ public final class OresEvalRootNode extends RootNode {
             if (main == null) main = findFunction("main");
             if (main == null) return null;
             Object result = callFunction(main, List.of(arguments));
+            if (result instanceof OresFuture<?> future) {
+                return future.join();
+            }
             if (result instanceof CompletionStage<?> stage) {
                 return AsyncRuntime.await(stage);
             }
@@ -435,10 +442,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (!fn.async()) return callFunctionBodyRaw(fn, normalized);
 
                 List<?> detached = detachAsyncArguments(normalized);
-                return context.asyncRuntime().submit(() ->
-                        detachAsyncValue(
-                                invoke(functionBodyInvocation(fn, detached)),
-                                new IdentityHashMap<>()));
+                return startAsyncFunction(fn, detached);
             }
 
             if (fn.async()) {
@@ -574,6 +578,1384 @@ public final class OresEvalRootNode extends RootNode {
             } finally {
                 visiting.remove(value);
             }
+        }
+
+
+        private OresScheduler asyncScheduler() {
+            OresScheduler current = OresScheduler.current();
+            return current != null ? current : context.asyncScheduler();
+        }
+
+        private OresFuture<Object> startAsyncFunction(Ast.FunctionDecl fn, List<?> args) {
+            Env base = new Env(null, fn.nonLexical());
+            for (int i = 0; i < fn.parameters().size(); i++) {
+                Ast.Param param = fn.parameters().get(i);
+                base.define(
+                        param.name(),
+                        args.get(i),
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            AsyncPlan body = asyncBlock(fn.body(), base);
+            AsyncPlan completed = asyncFlatMap(body, flow -> {
+                if (flow instanceof AsyncBreak || flow instanceof AsyncContinue) {
+                    return asyncFailure(new IllegalStateException(
+                            "loop control cannot cross async function boundary"));
+                }
+                Object raw = flow instanceof AsyncReturn returned ? returned.value() : null;
+                Object shaped = shapeReturnedValue(
+                        fn.returnType(),
+                        raw,
+                        "function " + fn.name());
+                return asyncPure(detachAsyncValue(shaped, new IdentityHashMap<>()));
+            });
+            return asyncScheduler().start(new AsyncPlanTask(completed));
+        }
+
+        private OresFuture<Object> startAsyncStaticFunction(
+                Ast.MethodDecl fn,
+                List<?> args) {
+            Env base = new Env(null, false, declaringClass(fn));
+            for (int i = 0; i < fn.parameters().size(); i++) {
+                Ast.Param param = fn.parameters().get(i);
+                base.define(
+                        param.name(),
+                        args.get(i),
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            AsyncPlan body = asyncBlock(fn.body(), base);
+            AsyncPlan completed = asyncFlatMap(body, flow -> {
+                if (flow instanceof AsyncBreak || flow instanceof AsyncContinue) {
+                    return asyncFailure(new IllegalStateException(
+                            "loop control cannot cross async static function boundary"));
+                }
+                Object raw = flow instanceof AsyncReturn returned ? returned.value() : null;
+                Object shaped = shapeReturnedValue(
+                        fn.returnType(),
+                        raw,
+                        "static function " + fn.name());
+                return asyncPure(detachAsyncValue(shaped, new IdentityHashMap<>()));
+            });
+            return asyncScheduler().start(new AsyncPlanTask(completed));
+        }
+
+        private OresFuture<Object> startAsyncLambda(
+                Ast.LambdaExpr lambda,
+                Env captured,
+                List<Object> args) {
+            if (args.size() != lambda.parameters().size()) {
+                throw new IllegalArgumentException("lambda arity mismatch");
+            }
+            Env base = new Env(captured, lambda.nonLexical());
+            for (int i = 0; i < lambda.parameters().size(); i++) {
+                Ast.Param param = lambda.parameters().get(i);
+                base.define(
+                        param.name(),
+                        args.get(i),
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            AsyncPlan body;
+            if (lambda.expressionBody() != null) {
+                body = asyncFlatMap(
+                        asyncEval(lambda.expressionBody(), base),
+                        value -> asyncPure(new AsyncReturn(value)));
+            } else {
+                body = asyncBlock(lambda.blockBody(), base);
+            }
+            AsyncPlan completed = asyncFlatMap(body, flow -> {
+                if (flow instanceof AsyncBreak || flow instanceof AsyncContinue) {
+                    return asyncFailure(new IllegalStateException(
+                            "loop control cannot cross async lambda boundary"));
+                }
+                Object raw = flow instanceof AsyncReturn returned ? returned.value() : null;
+                return asyncPure(detachAsyncValue(raw, new IdentityHashMap<>()));
+            });
+            return asyncScheduler().start(new AsyncPlanTask(completed));
+        }
+
+        private final class AsyncLambdaValue implements Invokable {
+            private final Ast.LambdaExpr lambda;
+            private final Env captured;
+
+            private AsyncLambdaValue(Ast.LambdaExpr lambda, Env captured) {
+                this.lambda = Objects.requireNonNull(lambda, "lambda");
+                this.captured = captured;
+            }
+
+            @Override
+            public Object call(List<Object> args) {
+                return startAsyncLambda(lambda, captured, args);
+            }
+        }
+
+        private sealed interface AsyncPlan
+                permits AsyncPure, AsyncFailure, AsyncAwait, AsyncThunk { }
+
+        private record AsyncPure(Object value) implements AsyncPlan { }
+
+        private record AsyncFailure(Throwable failure) implements AsyncPlan {
+            private AsyncFailure {
+                Objects.requireNonNull(failure, "failure");
+            }
+        }
+
+        @FunctionalInterface
+        private interface AsyncResume {
+            AsyncPlan resume(Object value, Throwable failure);
+        }
+
+        private record AsyncAwait(
+                OresFuture<?> future,
+                AsyncResume continuation) implements AsyncPlan {
+            private AsyncAwait {
+                Objects.requireNonNull(future, "future");
+                Objects.requireNonNull(continuation, "continuation");
+            }
+        }
+
+        @FunctionalInterface
+        private interface AsyncThunkBody {
+            AsyncPlan run();
+        }
+
+        private record AsyncThunk(AsyncThunkBody body) implements AsyncPlan {
+            private AsyncThunk {
+                Objects.requireNonNull(body, "body");
+            }
+        }
+
+        private static final Object ASYNC_NORMAL = new Object();
+        private record AsyncReturn(Object value) { }
+        private record AsyncBreak() { }
+        private record AsyncContinue() { }
+        private record AsyncMatchChoice(
+                Ast.MatchArm arm,
+                Map<String, Object> bindings) { }
+
+        @FunctionalInterface
+        private interface AsyncMapper {
+            AsyncPlan apply(Object value);
+        }
+
+        @FunctionalInterface
+        private interface AsyncFailureMapper {
+            AsyncPlan apply(Throwable failure);
+        }
+
+        private static AsyncPlan asyncPure(Object value) {
+            return new AsyncPure(value);
+        }
+
+        private static AsyncPlan asyncFailure(Throwable failure) {
+            return new AsyncFailure(Objects.requireNonNull(failure, "failure"));
+        }
+
+        private static AsyncPlan safePlan(AsyncThunkBody body) {
+            try {
+                return Objects.requireNonNull(body.run(), "async plan body returned null");
+            } catch (VirtualMachineError fatal) {
+                throw fatal;
+            } catch (ThreadDeath fatal) {
+                throw fatal;
+            } catch (LinkageError fatal) {
+                throw fatal;
+            } catch (Throwable failure) {
+                return asyncFailure(failure);
+            }
+        }
+
+        private static AsyncPlan asyncFlatMap(AsyncPlan plan, AsyncMapper next) {
+            if (plan instanceof AsyncPure pure) {
+                return new AsyncThunk(() -> safePlan(() -> next.apply(pure.value())));
+            }
+            if (plan instanceof AsyncFailure) return plan;
+            if (plan instanceof AsyncThunk thunk) {
+                return new AsyncThunk(() ->
+                        asyncFlatMap(safePlan(thunk.body()), next));
+            }
+            AsyncAwait awaited = (AsyncAwait) plan;
+            return new AsyncAwait(
+                    awaited.future(),
+                    (value, failure) -> asyncFlatMap(
+                            safePlan(() -> awaited.continuation().resume(value, failure)),
+                            next));
+        }
+
+        private static AsyncPlan asyncRecover(
+                AsyncPlan plan,
+                AsyncFailureMapper recover) {
+            if (plan instanceof AsyncPure) return plan;
+            if (plan instanceof AsyncFailure failed) {
+                return new AsyncThunk(() ->
+                        safePlan(() -> recover.apply(failed.failure())));
+            }
+            if (plan instanceof AsyncThunk thunk) {
+                return new AsyncThunk(() ->
+                        asyncRecover(safePlan(thunk.body()), recover));
+            }
+            AsyncAwait awaited = (AsyncAwait) plan;
+            return new AsyncAwait(
+                    awaited.future(),
+                    (value, failure) -> asyncRecover(
+                            safePlan(() -> awaited.continuation().resume(value, failure)),
+                            recover));
+        }
+
+        private static AsyncPlan asyncFold(
+                AsyncPlan plan,
+                AsyncMapper success,
+                AsyncFailureMapper failure) {
+            if (plan instanceof AsyncPure pure) {
+                return new AsyncThunk(() ->
+                        safePlan(() -> success.apply(pure.value())));
+            }
+            if (plan instanceof AsyncFailure failed) {
+                return new AsyncThunk(() ->
+                        safePlan(() -> failure.apply(failed.failure())));
+            }
+            if (plan instanceof AsyncThunk thunk) {
+                return new AsyncThunk(() ->
+                        asyncFold(safePlan(thunk.body()), success, failure));
+            }
+            AsyncAwait awaited = (AsyncAwait) plan;
+            return new AsyncAwait(
+                    awaited.future(),
+                    (value, problem) -> asyncFold(
+                            safePlan(() -> awaited.continuation().resume(value, problem)),
+                            success,
+                            failure));
+        }
+
+        private final class AsyncPlanTask implements OresScheduler.Task<Object> {
+            private AsyncPlan current;
+            private AsyncAwait waiting;
+
+            private AsyncPlanTask(AsyncPlan initial) {
+                this.current = Objects.requireNonNull(initial, "initial");
+            }
+
+            @Override
+            public OresScheduler.Step<Object> resume(OresScheduler.Resume resume) {
+                if (waiting != null) {
+                    AsyncAwait awaited = waiting;
+                    waiting = null;
+                    current = safePlan(() -> awaited.continuation().resume(
+                            resume.value(),
+                            resume.failure()));
+                } else if (!resume.initial()) {
+                    throw new IllegalStateException(
+                            "async source task resumed without a captured await");
+                }
+
+                while (true) {
+                    if (current instanceof AsyncThunk thunk) {
+                        current = safePlan(thunk.body());
+                        continue;
+                    }
+                    if (current instanceof AsyncFailure failed) {
+                        throw propagateAsyncFailure(failed.failure());
+                    }
+                    if (current instanceof AsyncPure pure) {
+                        return OresScheduler.done(pure.value());
+                    }
+
+                    AsyncAwait awaited = (AsyncAwait) current;
+                    waiting = awaited;
+                    return OresScheduler.await(awaited.future());
+                }
+            }
+        }
+
+        private static Throwable unwrapFutureFailure(Throwable failure) {
+            Throwable current = failure;
+            while ((current instanceof java.util.concurrent.CompletionException
+                            || current instanceof java.util.concurrent.ExecutionException)
+                    && current.getCause() != null) {
+                current = current.getCause();
+            }
+            return current;
+        }
+
+        private static RuntimeException propagateAsyncFailure(Throwable failure) {
+            Throwable unwrapped = unwrapFutureFailure(failure);
+            if (unwrapped instanceof RuntimeException runtime) return runtime;
+            if (unwrapped instanceof Error error) throw error;
+            return new RuntimeException(unwrapped);
+        }
+
+        private AsyncPlan asyncBlock(List<Ast.Stmt> statements, Env parent) {
+            Env env = new Env(parent);
+            ArrayDeque<Ast.Expr> deferred = new ArrayDeque<>();
+            AsyncPlan body = asyncStatements(statements, 0, env, deferred);
+            return asyncFold(
+                    body,
+                    flow -> asyncFlatMap(
+                            asyncRunDeferred(deferred, env),
+                            ignored -> {
+                                env.releaseMutexGuards(false);
+                                return asyncPure(flow);
+                            }),
+                    failure -> asyncFold(
+                            asyncRunDeferred(deferred, env),
+                            ignored -> {
+                                env.releaseMutexGuards(true);
+                                return asyncFailure(failure);
+                            },
+                            deferredFailure -> {
+                                env.releaseMutexGuards(true);
+                                return asyncFailure(deferredFailure);
+                            }));
+        }
+
+        private AsyncPlan asyncRunDeferred(
+                ArrayDeque<Ast.Expr> deferred,
+                Env env) {
+            return new AsyncThunk(() -> {
+                if (deferred.isEmpty()) return asyncPure(null);
+                Ast.Expr expression = deferred.pop();
+                return asyncFlatMap(
+                        asyncEval(expression, env),
+                        ignored -> asyncRunDeferred(deferred, env));
+            });
+        }
+
+        private AsyncPlan asyncStatements(
+                List<Ast.Stmt> statements,
+                int index,
+                Env env,
+                ArrayDeque<Ast.Expr> deferred) {
+            return new AsyncThunk(() -> {
+                if (index >= statements.size()) return asyncPure(ASYNC_NORMAL);
+                return asyncFlatMap(
+                        asyncStatement(statements.get(index), env, deferred),
+                        flow -> flow == ASYNC_NORMAL
+                                ? asyncStatements(statements, index + 1, env, deferred)
+                                : asyncPure(flow));
+            });
+        }
+
+        private AsyncPlan asyncStatement(
+                Ast.Stmt stmt,
+                Env env,
+                ArrayDeque<Ast.Expr> deferred) {
+            if (stmt instanceof Ast.BindingStmt binding) {
+                if (binding.initializer() instanceof Ast.LambdaExpr) {
+                    env.reserve(binding.name(), binding.kind());
+                    return asyncFlatMap(
+                            asyncEval(binding.initializer(), env),
+                            value -> {
+                                env.initialize(binding.name(), value);
+                                return asyncPure(ASYNC_NORMAL);
+                            });
+                }
+                return asyncFlatMap(
+                        asyncEval(binding.initializer(), env),
+                        value -> {
+                            env.define(binding.name(), value, binding.kind());
+                            return asyncPure(ASYNC_NORMAL);
+                        });
+            }
+            if (stmt instanceof Ast.DestructureStmt destructure) {
+                return asyncFlatMap(asyncEval(destructure.initializer(), env), value -> {
+                    if (destructure.kind() == Ast.DestructureKind.SEQUENCE) {
+                        List<?> items = asSequence(value);
+                        if (items.size() != destructure.bindings().size()) {
+                            return asyncFailure(new IllegalArgumentException(
+                                    "destructure arity mismatch: value has "
+                                            + items.size()
+                                            + " element(s), pattern has "
+                                            + destructure.bindings().size()));
+                        }
+                        for (int i = 0; i < items.size(); i++) {
+                            Ast.DestructureBinding binding = destructure.bindings().get(i);
+                            if (!binding.isDiscard()) {
+                                env.define(binding.name(), items.get(i), binding.kind());
+                            }
+                        }
+                    } else {
+                        for (Ast.DestructureBinding binding : destructure.bindings()) {
+                            if (!binding.isDiscard()) {
+                                env.define(
+                                        binding.name(),
+                                        destructureMember(value, binding.name(), env),
+                                        binding.kind());
+                            }
+                        }
+                    }
+                    return asyncPure(ASYNC_NORMAL);
+                });
+            }
+            if (stmt instanceof Ast.ReturnStmt returned) {
+                if (returned.value() == null) return asyncPure(new AsyncReturn(null));
+                return asyncFlatMap(
+                        asyncEval(returned.value(), env),
+                        value -> asyncPure(new AsyncReturn(value)));
+            }
+            if (stmt instanceof Ast.ExprStmt expression) {
+                return asyncFlatMap(
+                        asyncEval(expression.expression(), env),
+                        ignored -> asyncPure(ASYNC_NORMAL));
+            }
+            if (stmt instanceof Ast.DeferStmt defer) {
+                deferred.push(defer.expression());
+                return asyncPure(ASYNC_NORMAL);
+            }
+            if (stmt instanceof Ast.BlockStmt block) {
+                return asyncBlock(block.body(), env);
+            }
+            if (stmt instanceof Ast.BreakStmt) return asyncPure(new AsyncBreak());
+            if (stmt instanceof Ast.ContinueStmt) return asyncPure(new AsyncContinue());
+            if (stmt instanceof Ast.IfStmt conditional) {
+                return asyncIf(conditional, 0, env);
+            }
+            if (stmt instanceof Ast.MatchStmt matched) {
+                return asyncMatch(matched, env);
+            }
+            if (stmt instanceof Ast.SwitchStmt switched) {
+                return asyncSwitch(switched, env);
+            }
+            if (stmt instanceof Ast.TryStmt tried) {
+                return asyncTry(tried, env);
+            }
+            if (stmt instanceof Ast.ForOfDestructureStmt loop) {
+                return asyncFlatMap(
+                        asyncEval(loop.iterable(), env),
+                        iterable -> asyncForOfDestructure(
+                                loop,
+                                iterableValues(iterable, env),
+                                0,
+                                env));
+            }
+            if (stmt instanceof Ast.ForOfStmt loop) {
+                return asyncFlatMap(
+                        asyncEval(loop.iterable(), env),
+                        iterable -> asyncForOf(
+                                loop,
+                                iterableValues(iterable, env),
+                                0,
+                                env));
+            }
+            if (stmt instanceof Ast.ForStmt loop) {
+                Env loopEnv = new Env(env);
+                AsyncPlan initialized = loop.initializer() == null
+                        ? asyncPure(ASYNC_NORMAL)
+                        : asyncStatement(
+                                loop.initializer(),
+                                loopEnv,
+                                new ArrayDeque<>());
+                return asyncFlatMap(initialized, flow -> {
+                    if (flow != ASYNC_NORMAL) return asyncPure(flow);
+                    return asyncFor(loop, loopEnv);
+                });
+            }
+            if (stmt instanceof Ast.LoopStmt loop) {
+                return asyncLoop(loop, env);
+            }
+            return asyncFailure(new IllegalArgumentException(
+                    "unsupported async statement " + stmt));
+        }
+
+        private AsyncPlan asyncCondition(Ast.Expr condition, Env env) {
+            if (condition instanceof Ast.BinaryExpr binary
+                    && binary.operator().equals("&&")) {
+                return asyncFlatMap(asyncCondition(binary.left(), env), rawLeft -> {
+                    ConditionResult left = (ConditionResult) rawLeft;
+                    if (!left.matched()) return asyncPure(ConditionResult.noMatch());
+                    Env rightEnv = new Env(env);
+                    left.bindings().forEach((name, value) ->
+                            rightEnv.define(name, value, Ast.BindingKind.VAL));
+                    return asyncFlatMap(asyncCondition(binary.right(), rightEnv), rawRight -> {
+                        ConditionResult right = (ConditionResult) rawRight;
+                        if (!right.matched()) return asyncPure(ConditionResult.noMatch());
+                        LinkedHashMap<String, Object> merged =
+                                new LinkedHashMap<>(left.bindings());
+                        for (Map.Entry<String, Object> entry : right.bindings().entrySet()) {
+                            Object previous = merged.putIfAbsent(entry.getKey(), entry.getValue());
+                            if (previous != null && previous != entry.getValue()) {
+                                return asyncFailure(new IllegalStateException(
+                                        "condition pattern binds '"
+                                                + entry.getKey()
+                                                + "' more than once"));
+                            }
+                        }
+                        return asyncPure(new ConditionResult(true, Map.copyOf(merged)));
+                    });
+                });
+            }
+            if (condition instanceof Ast.TypeTestExpr test) {
+                return asyncFlatMap(asyncEval(test.value(), env), value -> {
+                    if (!oresTypeMatches(value, test.targetType())) {
+                        return asyncPure(ConditionResult.noMatch());
+                    }
+                    if (test.binding() == null) return asyncPure(ConditionResult.match());
+                    return asyncPure(new ConditionResult(
+                            true,
+                            Map.of(test.binding(), value)));
+                });
+            }
+            if (condition instanceof Ast.PatternTestExpr test) {
+                return asyncFlatMap(asyncEval(test.value(), env), value -> {
+                    LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+                    return asyncPure(
+                            patternMatches(test.pattern(), value, bindings)
+                                    ? new ConditionResult(true, Map.copyOf(bindings))
+                                    : ConditionResult.noMatch());
+                });
+            }
+            return asyncFlatMap(
+                    asyncEval(condition, env),
+                    value -> asyncPure(
+                            truth(value)
+                                    ? ConditionResult.match()
+                                    : ConditionResult.noMatch()));
+        }
+
+        private AsyncPlan asyncIf(
+                Ast.IfStmt conditional,
+                int index,
+                Env env) {
+            if (index >= conditional.branches().size()) {
+                return asyncBlock(conditional.elseBody(), env);
+            }
+            Ast.IfBranch branch = conditional.branches().get(index);
+            return asyncFlatMap(asyncCondition(branch.condition(), env), raw -> {
+                ConditionResult condition = (ConditionResult) raw;
+                if (!condition.matched()) {
+                    return asyncIf(conditional, index + 1, env);
+                }
+                Env branchEnv = new Env(env);
+                condition.bindings().forEach((name, value) ->
+                        branchEnv.define(name, value, Ast.BindingKind.VAL));
+                return asyncBlock(branch.body(), branchEnv);
+            });
+        }
+
+        private AsyncPlan asyncMatch(Ast.MatchStmt matched, Env env) {
+            return asyncFlatMap(
+                    asyncEval(matched.subject(), env),
+                    subject -> matched.ordered()
+                            ? asyncOrderedMatch(matched, subject, 0, env)
+                            : asyncExclusiveMatch(
+                                    matched,
+                                    subject,
+                                    0,
+                                    env,
+                                    null,
+                                    null));
+        }
+
+        private AsyncPlan asyncOrderedMatch(
+                Ast.MatchStmt matched,
+                Object subject,
+                int index,
+                Env env) {
+            if (index >= matched.arms().size()) {
+                return asyncFailure(new IllegalStateException(
+                        "exhaustive ordered match invariant violated at runtime"));
+            }
+            Ast.MatchArm arm = matched.arms().get(index);
+            LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+            if (!patternMatches(arm.pattern(), subject, bindings)) {
+                return asyncOrderedMatch(matched, subject, index + 1, env);
+            }
+            Env armEnv = new Env(env);
+            bindings.forEach((name, value) ->
+                    armEnv.define(name, value, Ast.BindingKind.VAL));
+            if (arm.guard() == null) return asyncBlock(arm.body(), armEnv);
+            return asyncFlatMap(asyncEval(arm.guard(), armEnv), guard ->
+                    truth(guard)
+                            ? asyncBlock(arm.body(), armEnv)
+                            : asyncOrderedMatch(matched, subject, index + 1, env));
+        }
+
+        private AsyncPlan asyncExclusiveMatch(
+                Ast.MatchStmt matched,
+                Object subject,
+                int index,
+                Env env,
+                AsyncMatchChoice selected,
+                AsyncMatchChoice fallback) {
+            if (index >= matched.arms().size()) {
+                AsyncMatchChoice choice = selected != null ? selected : fallback;
+                if (choice == null) {
+                    return asyncFailure(new IllegalStateException(
+                            "exhaustive match invariant violated at runtime: no arm matched"));
+                }
+                Env selectedEnv = new Env(env);
+                choice.bindings().forEach((name, value) ->
+                        selectedEnv.define(name, value, Ast.BindingKind.VAL));
+                return asyncBlock(choice.arm().body(), selectedEnv);
+            }
+
+            Ast.MatchArm arm = matched.arms().get(index);
+            boolean catchAll = arm.guard() == null
+                    && (arm.pattern() instanceof Ast.WildcardPattern
+                        || arm.pattern() instanceof Ast.BindingPattern);
+            LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+            if (!patternMatches(arm.pattern(), subject, bindings)) {
+                return asyncExclusiveMatch(
+                        matched, subject, index + 1, env, selected, fallback);
+            }
+            AsyncMatchChoice candidate =
+                    new AsyncMatchChoice(arm, Map.copyOf(bindings));
+            if (catchAll) {
+                return asyncExclusiveMatch(
+                        matched, subject, index + 1, env, selected, candidate);
+            }
+            Env armEnv = new Env(env);
+            bindings.forEach((name, value) ->
+                    armEnv.define(name, value, Ast.BindingKind.VAL));
+            AsyncPlan guardPlan = arm.guard() == null
+                    ? asyncPure(Boolean.TRUE)
+                    : asyncEval(arm.guard(), armEnv);
+            return asyncFlatMap(guardPlan, guard -> {
+                if (!truth(guard)) {
+                    return asyncExclusiveMatch(
+                            matched, subject, index + 1, env, selected, fallback);
+                }
+                if (selected != null) {
+                    return asyncFailure(new IllegalStateException(
+                            "exclusive match invariant violated at runtime: "
+                                    + "more than one explicit arm matched"));
+                }
+                return asyncExclusiveMatch(
+                        matched, subject, index + 1, env, candidate, fallback);
+            });
+        }
+
+        private AsyncPlan asyncSwitch(Ast.SwitchStmt switched, Env env) {
+            return asyncFlatMap(
+                    asyncEval(switched.subject(), env),
+                    subject -> asyncSwitchCase(switched, subject, 0, env));
+        }
+
+        private AsyncPlan asyncSwitchCase(
+                Ast.SwitchStmt switched,
+                Object subject,
+                int index,
+                Env env) {
+            if (index >= switched.cases().size()) {
+                return asyncBlock(switched.defaultBody(), env);
+            }
+            Ast.SwitchCase arm = switched.cases().get(index);
+            return asyncFlatMap(
+                    asyncSwitchConstants(arm.constants(), subject, 0, env),
+                    selected -> truth(selected)
+                            ? asyncBlock(arm.body(), env)
+                            : asyncSwitchCase(switched, subject, index + 1, env));
+        }
+
+        private AsyncPlan asyncSwitchConstants(
+                List<Ast.Expr> constants,
+                Object subject,
+                int index,
+                Env env) {
+            if (index >= constants.size()) return asyncPure(Boolean.FALSE);
+            return asyncFlatMap(asyncEval(constants.get(index), env), value ->
+                    Objects.equals(subject, value)
+                            ? asyncPure(Boolean.TRUE)
+                            : asyncSwitchConstants(constants, subject, index + 1, env));
+        }
+
+        private AsyncPlan asyncTry(Ast.TryStmt tried, Env env) {
+            AsyncPlan attempted = asyncBlock(tried.body(), env);
+            AsyncPlan caught = asyncRecover(attempted, failure -> {
+                if (failure instanceof OresPanic
+                        || failure instanceof VirtualMachineError
+                        || failure instanceof ThreadDeath
+                        || failure instanceof LinkageError) {
+                    return asyncFailure(failure);
+                }
+                Env catchEnv = new Env(env);
+                catchEnv.define(tried.errorName(), failure, Ast.BindingKind.VAL);
+                return asyncBlock(tried.catchBody(), catchEnv);
+            });
+            return asyncFold(
+                    caught,
+                    originalFlow -> asyncFlatMap(
+                            asyncBlock(tried.finallyBody(), env),
+                            finallyFlow -> finallyFlow == ASYNC_NORMAL
+                                    ? asyncPure(originalFlow)
+                                    : asyncPure(finallyFlow)),
+                    originalFailure -> asyncFold(
+                            asyncBlock(tried.finallyBody(), env),
+                            finallyFlow -> finallyFlow == ASYNC_NORMAL
+                                    ? asyncFailure(originalFailure)
+                                    : asyncPure(finallyFlow),
+                            asyncFinallyFailure -> asyncFailure(asyncFinallyFailure)));
+        }
+
+        private AsyncPlan asyncForOf(
+                Ast.ForOfStmt loop,
+                List<?> values,
+                int index,
+                Env env) {
+            return new AsyncThunk(() -> {
+                if (index >= values.size()) return asyncPure(ASYNC_NORMAL);
+                context.schedulerSafepoint();
+                Env iteration = new Env(env);
+                iteration.define(
+                        loop.bindingName(),
+                        values.get(index),
+                        loop.bindingKind());
+                return asyncFlatMap(asyncBlock(loop.body(), iteration), flow -> {
+                    if (flow instanceof AsyncReturn) return asyncPure(flow);
+                    if (flow instanceof AsyncBreak) return asyncPure(ASYNC_NORMAL);
+                    return asyncForOf(loop, values, index + 1, env);
+                });
+            });
+        }
+
+        private AsyncPlan asyncForOfDestructure(
+                Ast.ForOfDestructureStmt loop,
+                List<?> values,
+                int index,
+                Env env) {
+            return new AsyncThunk(() -> {
+                if (index >= values.size()) return asyncPure(ASYNC_NORMAL);
+                context.schedulerSafepoint();
+                List<?> items = asSequence(values.get(index));
+                if (items.size() != loop.bindings().size()) {
+                    return asyncFailure(new IllegalArgumentException(
+                            "for-of destructure arity mismatch: value has "
+                                    + items.size()
+                                    + " element(s), pattern has "
+                                    + loop.bindings().size()));
+                }
+                Env iteration = new Env(env);
+                for (int i = 0; i < items.size(); i++) {
+                    Ast.DestructureBinding binding = loop.bindings().get(i);
+                    if (!binding.isDiscard()) {
+                        iteration.define(binding.name(), items.get(i), binding.kind());
+                    }
+                }
+                return asyncFlatMap(asyncBlock(loop.body(), iteration), flow -> {
+                    if (flow instanceof AsyncReturn) return asyncPure(flow);
+                    if (flow instanceof AsyncBreak) return asyncPure(ASYNC_NORMAL);
+                    return asyncForOfDestructure(loop, values, index + 1, env);
+                });
+            });
+        }
+
+        private AsyncPlan asyncFor(Ast.ForStmt loop, Env loopEnv) {
+            return new AsyncThunk(() -> {
+                AsyncPlan condition = loop.condition() == null
+                        ? asyncPure(Boolean.TRUE)
+                        : asyncEval(loop.condition(), loopEnv);
+                return asyncFlatMap(condition, value -> {
+                    if (!truth(value)) return asyncPure(ASYNC_NORMAL);
+                    context.schedulerSafepoint();
+                    return asyncFlatMap(asyncBlock(loop.body(), loopEnv), flow -> {
+                        if (flow instanceof AsyncReturn) return asyncPure(flow);
+                        if (flow instanceof AsyncBreak) return asyncPure(ASYNC_NORMAL);
+                        AsyncPlan updated = loop.update() == null
+                                ? asyncPure(null)
+                                : asyncEval(loop.update(), loopEnv);
+                        return asyncFlatMap(
+                                updated,
+                                ignored -> asyncFor(loop, loopEnv));
+                    });
+                });
+            });
+        }
+
+        private AsyncPlan asyncLoop(Ast.LoopStmt loop, Env env) {
+            return new AsyncThunk(() -> {
+                context.schedulerSafepoint();
+                return asyncFlatMap(asyncBlock(loop.body(), env), flow -> {
+                    if (flow instanceof AsyncReturn) return asyncPure(flow);
+                    if (flow instanceof AsyncBreak) return asyncPure(ASYNC_NORMAL);
+                    return asyncLoop(loop, env);
+                });
+            });
+        }
+
+        private OresFuture<?> awaitableFuture(Object value) {
+            Objects.requireNonNull(value, "awaitable");
+            if (value instanceof Awaitable<?> awaitable) {
+                return Objects.requireNonNull(
+                        awaitable.getAwaited(),
+                        "Awaitable.getAwaited() returned null");
+            }
+            if (value instanceof CompletionStage<?> stage) {
+                return OresFuture.from(stage);
+            }
+            throw new IllegalArgumentException(
+                    "await requires Future<T>/Awaitable<T>; value of runtime type "
+                            + value.getClass().getName()
+                            + " is not awaitable");
+        }
+
+        private AsyncPlan asyncEval(Ast.Expr expr, Env env) {
+            if (!containsAwait(expr)) {
+                if (expr instanceof Ast.LambdaExpr lambda && lambda.async()) {
+                    boolean nonLexical =
+                            lambda.nonLexical() || env.descendantsNonLexical();
+                    Env captured = nonLexical ? null : env.snapshot();
+                    return asyncPure(new AsyncLambdaValue(lambda, captured));
+                }
+                return new AsyncThunk(() ->
+                        safePlan(() -> asyncPure(eval(expr, env))));
+            }
+
+            if (expr instanceof Ast.AwaitExpr awaited) {
+                return asyncFlatMap(asyncEval(awaited.expression(), env), value -> {
+                    OresFuture<?> future = awaitableFuture(value);
+                    return new AsyncAwait(
+                            future,
+                            (result, failure) -> failure == null
+                                    ? asyncPure(result)
+                                    : asyncFailure(unwrapFutureFailure(failure)));
+                });
+            }
+            if (expr instanceof Ast.ConditionalExpr conditional) {
+                return asyncFlatMap(asyncEval(conditional.condition(), env), value ->
+                        truth(value)
+                                ? asyncEval(conditional.whenTrue(), env)
+                                : asyncEval(conditional.whenFalse(), env));
+            }
+            if (expr instanceof Ast.UnaryExpr unary) {
+                return asyncFlatMap(asyncEval(unary.operand(), env), value ->
+                        safePlan(() -> asyncPure(switch (unary.operator()) {
+                            case "&", "&mut" -> value;
+                            case "!" -> !truth(value);
+                            case "~" -> ~integralLong(value);
+                            case "+" -> value;
+                            case "-" -> negate(value);
+                            default -> throw new IllegalArgumentException(
+                                    "unsupported unary operator " + unary.operator());
+                        })));
+            }
+            if (expr instanceof Ast.BinaryExpr binaryExpr) {
+                return asyncFlatMap(asyncEval(binaryExpr.left(), env), left -> {
+                    if (binaryExpr.operator().equals("&&") && !truth(left)) {
+                        return asyncPure(Boolean.FALSE);
+                    }
+                    if (binaryExpr.operator().equals("||") && truth(left)) {
+                        return asyncPure(Boolean.TRUE);
+                    }
+                    return asyncFlatMap(asyncEval(binaryExpr.right(), env), right -> {
+                        if (binaryExpr.operator().equals("&&")) {
+                            return asyncPure(truth(left) && truth(right));
+                        }
+                        if (binaryExpr.operator().equals("||")) {
+                            return asyncPure(truth(left) || truth(right));
+                        }
+                        if (binaryExpr.operator().equals("^^")) {
+                            return asyncPure(truth(left) ^ truth(right));
+                        }
+                        if (binaryExpr.operator().equals("|")
+                                && left instanceof Boolean lb
+                                && right instanceof Boolean rb) {
+                            return asyncPure(lb || rb);
+                        }
+                        return safePlan(() ->
+                                asyncPure(binary(binaryExpr.operator(), left, right)));
+                    });
+                });
+            }
+            if (expr instanceof Ast.TypeTestExpr test) {
+                return asyncFlatMap(
+                        asyncEval(test.value(), env),
+                        value -> asyncPure(
+                                oresTypeMatches(value, test.targetType())));
+            }
+            if (expr instanceof Ast.PatternTestExpr test) {
+                return asyncFlatMap(
+                        asyncEval(test.value(), env),
+                        value -> asyncPure(
+                                patternMatches(
+                                        test.pattern(),
+                                        value,
+                                        new LinkedHashMap<>())));
+            }
+            if (expr instanceof Ast.CastExpr cast) {
+                return asyncFlatMap(asyncEval(cast.value(), env), value -> {
+                    boolean matches = oresTypeMatches(value, cast.targetType());
+                    if (cast.mode() == Ast.CastMode.OPTIONAL) {
+                        return asyncPure(new OptionValue(
+                                matches,
+                                matches ? value : null));
+                    }
+                    if (!matches) {
+                        return asyncFailure(new OresCastError(
+                                "cannot cast runtime type "
+                                        + oresRuntimeTypeName(value)
+                                        + " to "
+                                        + cast.targetType().name()));
+                    }
+                    return asyncPure(value);
+                });
+            }
+            if (expr instanceof Ast.AssignExpr assignment) {
+                return asyncFlatMap(
+                        asyncEval(assignment.value(), env),
+                        value -> asyncAssign(
+                                assignment.target(),
+                                value,
+                                env));
+            }
+            if (expr instanceof Ast.CallExpr call) {
+                if (call.callee() instanceof Ast.MemberExpr memberCall) {
+                    return asyncFlatMap(
+                            asyncEval(memberCall.receiver(), env),
+                            receiver -> asyncFlatMap(
+                                    asyncEvalArguments(
+                                            call.arguments(),
+                                            0,
+                                            env,
+                                            new ArrayList<>()),
+                                    args -> safePlan(() ->
+                                            asyncPure(invokeEvaluatedMemberCall(
+                                                    receiver,
+                                                    memberCall.member(),
+                                                    castObjectList(args),
+                                                    env)))));
+                }
+                return asyncFlatMap(
+                        asyncEval(call.callee(), env),
+                        callee -> asyncFlatMap(
+                                asyncEvalArguments(
+                                        call.arguments(),
+                                        0,
+                                        env,
+                                        new ArrayList<>()),
+                                args -> {
+                                    if (!(callee instanceof Invokable invokable)) {
+                                        return asyncFailure(
+                                                new IllegalArgumentException(
+                                                        "value is not callable: "
+                                                                + callee));
+                                    }
+                                    return safePlan(() ->
+                                            asyncPure(invokable.call(
+                                                    castObjectList(args))));
+                                }));
+            }
+            if (expr instanceof Ast.MemberExpr memberExpr) {
+                return asyncFlatMap(
+                        asyncEval(memberExpr.receiver(), env),
+                        receiver -> safePlan(() ->
+                                asyncPure(member(
+                                        receiver,
+                                        memberExpr.member(),
+                                        env))));
+            }
+            if (expr instanceof Ast.IndexExpr indexed) {
+                return asyncFlatMap(
+                        asyncEval(indexed.receiver(), env),
+                        receiver -> asyncFlatMap(
+                                asyncEval(indexed.index(), env),
+                                index -> safePlan(() ->
+                                        asyncPure(readAsyncIndex(
+                                                receiver,
+                                                index)))));
+            }
+            if (expr instanceof Ast.NewExpr created) {
+                return asyncFlatMap(
+                        asyncEvalArguments(
+                                created.arguments(),
+                                0,
+                                env,
+                                new ArrayList<>()),
+                        args -> safePlan(() ->
+                                asyncPure(instantiateAsync(
+                                        created,
+                                        castObjectList(args)))));
+            }
+            if (expr instanceof Ast.ListExpr list) {
+                return asyncEvalArguments(
+                        list.elements(),
+                        0,
+                        env,
+                        new ArrayList<>());
+            }
+            if (expr instanceof Ast.TupleExpr tuple) {
+                return asyncEvalArguments(
+                        tuple.elements(),
+                        0,
+                        env,
+                        new ArrayList<>());
+            }
+            if (expr instanceof Ast.ObjectExpr object) {
+                return asyncObjectFields(
+                        object.fields(),
+                        0,
+                        env,
+                        new LinkedHashMap<>(),
+                        object.fields().stream().anyMatch(Ast.ObjectField::isDynamic));
+            }
+            if (expr instanceof Ast.LambdaExpr lambda) {
+                boolean nonLexical =
+                        lambda.nonLexical() || env.descendantsNonLexical();
+                Env captured = nonLexical ? null : env.snapshot();
+                return asyncPure(
+                        lambda.async()
+                                ? new AsyncLambdaValue(lambda, captured)
+                                : eval(lambda, env));
+            }
+
+            return asyncFailure(new IllegalArgumentException(
+                    "unsupported expression containing await: "
+                            + expr.getClass().getSimpleName()));
+        }
+
+        private AsyncPlan asyncAssign(
+                Ast.Expr target,
+                Object value,
+                Env env) {
+            if (target instanceof Ast.NameExpr name) {
+                env.assign(name.name(), value);
+                return asyncPure(value);
+            }
+            if (target instanceof Ast.MemberExpr memberTarget) {
+                return asyncFlatMap(
+                        asyncEval(memberTarget.receiver(), env),
+                        receiver -> safePlan(() -> {
+                            Object actual = receiver;
+                            if (actual instanceof OresMutex.Guard<?> guard) {
+                                actual = guard.value();
+                            }
+                            if (actual instanceof OresObject object) {
+                                if (!object.fields.containsKey(memberTarget.member())) {
+                                    throw new IllegalArgumentException(
+                                            "unknown field " + memberTarget.member());
+                                }
+                                OwnedField ownedField = object.owner.findField(
+                                        object.klass,
+                                        memberTarget.member(),
+                                        new LinkedHashSet<>());
+                                if (ownedField == null) {
+                                    throw new IllegalArgumentException(
+                                            "unknown field " + memberTarget.member());
+                                }
+                                Ast.FieldDecl field = ownedField.field();
+                                object.owner.requireClassMemberVisible(
+                                        field.visibility(),
+                                        ownedField.owner(),
+                                        env.accessClass(),
+                                        "field",
+                                        field.name());
+                                if (field.bindingKind() != Ast.BindingKind.LET) {
+                                    throw new IllegalArgumentException(
+                                            "field '"
+                                                    + object.klass.name()
+                                                    + "."
+                                                    + memberTarget.member()
+                                                    + "' is immutable");
+                                }
+                                object.fields.put(memberTarget.member(), value);
+                                return asyncPure(value);
+                            }
+                            if (actual instanceof DynamicStructValue dynamic) {
+                                dynamic.fields.put(memberTarget.member(), value);
+                                return asyncPure(value);
+                            }
+                            throw new IllegalArgumentException(
+                                    "member assignment requires a class instance, "
+                                            + "DynamicStruct, or mutex guard");
+                        }));
+            }
+            if (target instanceof Ast.IndexExpr indexedTarget) {
+                return asyncFlatMap(
+                        asyncEval(indexedTarget.receiver(), env),
+                        receiver -> asyncFlatMap(
+                                asyncEval(indexedTarget.index(), env),
+                                index -> safePlan(() -> {
+                                    if (receiver instanceof DynamicStructValue dynamic) {
+                                        if (!(index instanceof String key)) {
+                                            throw new IllegalArgumentException(
+                                                    "DynamicStruct key must be a string");
+                                        }
+                                        dynamic.fields.put(key, value);
+                                        return asyncPure(value);
+                                    }
+                                    if (!(index instanceof Number number)) {
+                                        throw new IllegalArgumentException(
+                                                "array/list index must be an integer");
+                                    }
+                                    int i = Math.toIntExact(number.longValue());
+                                    if (receiver instanceof List<?> raw) {
+                                        @SuppressWarnings("unchecked")
+                                        List<Object> list = (List<Object>) raw;
+                                        list.set(i, value);
+                                        return asyncPure(value);
+                                    }
+                                    throw new IllegalArgumentException(
+                                            "indexed assignment requires a mutable "
+                                                    + "array/list or DynamicStruct");
+                                })));
+            }
+            return asyncFailure(new IllegalArgumentException(
+                    "unsupported assignment target"));
+        }
+
+        private AsyncPlan asyncEvalArguments(
+                List<? extends Ast.Expr> expressions,
+                int index,
+                Env env,
+                ArrayList<Object> values) {
+            if (index >= expressions.size()) {
+                return asyncPure(List.copyOf(values));
+            }
+            return asyncFlatMap(
+                    asyncEval(expressions.get(index), env),
+                    value -> {
+                        values.add(value);
+                        return asyncEvalArguments(
+                                expressions,
+                                index + 1,
+                                env,
+                                values);
+                    });
+        }
+
+        private AsyncPlan asyncObjectFields(
+                List<Ast.ObjectField> fields,
+                int index,
+                Env env,
+                LinkedHashMap<String, Object> values,
+                boolean dynamicKeys) {
+            if (index >= fields.size()) {
+                return asyncPure(
+                        dynamicKeys
+                                ? new DynamicStructValue(values)
+                                : Map.copyOf(values));
+            }
+            Ast.ObjectField field = fields.get(index);
+            AsyncPlan keyPlan = field.isDynamic()
+                    ? asyncEval(field.dynamicName(), env)
+                    : asyncPure(field.name());
+            return asyncFlatMap(keyPlan, rawKey -> {
+                if (!(rawKey instanceof String key)) {
+                    return asyncFailure(new IllegalArgumentException(
+                            "dynamic obj key must evaluate to a string"));
+                }
+                return asyncFlatMap(asyncEval(field.value(), env), value -> {
+                    if (values.putIfAbsent(key, value) != null) {
+                        return asyncFailure(new IllegalArgumentException(
+                                "duplicate obj field " + key));
+                    }
+                    return asyncObjectFields(
+                            fields,
+                            index + 1,
+                            env,
+                            values,
+                            dynamicKeys);
+                });
+            });
+        }
+
+        @SuppressWarnings("unchecked")
+        private static List<Object> castObjectList(Object value) {
+            return (List<Object>) value;
+        }
+
+        private Object readAsyncIndex(Object receiver, Object index) {
+            if (receiver instanceof DynamicStructValue dynamic) {
+                if (!(index instanceof String key)) {
+                    throw new IllegalArgumentException(
+                            "DynamicStruct key must be a string");
+                }
+                if (!dynamic.fields.containsKey(key)) {
+                    throw new IllegalArgumentException(
+                            "unknown DynamicStruct key " + key);
+                }
+                return dynamic.fields.get(key);
+            }
+            if (receiver instanceof Map<?, ?> map) {
+                if (!(index instanceof String key)) {
+                    throw new IllegalArgumentException(
+                            "object/map key must be a string");
+                }
+                if (!map.containsKey(key)) {
+                    throw new IllegalArgumentException(
+                            "unknown object/map key " + key);
+                }
+                return map.get(key);
+            }
+            if (!(index instanceof Number number)) {
+                throw new IllegalArgumentException(
+                        "array/list index must be an integer");
+            }
+            int i = Math.toIntExact(number.longValue());
+            if (receiver instanceof List<?> list) return list.get(i);
+            if (receiver instanceof Object[] array) return array[i];
+            throw new IllegalArgumentException(
+                    "value is not indexable: " + receiver);
+        }
+
+        private Object instantiateAsync(
+                Ast.NewExpr created,
+                List<Object> args) {
+            if (created.type().name().equals("DynamicStruct")) {
+                if (!args.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "DynamicStruct<T> constructor takes no positional arguments");
+                }
+                return new DynamicStructValue();
+            }
+            HostClassFacade hostClass = hostClasses.get(created.type().name());
+            if (hostClass != null) {
+                context.requireCapability(
+                        IsolatePolicy.Capability.JAVA_INTEROP,
+                        "Java host constructor " + hostClass.className());
+                if (!hostClass.constructible()) {
+                    throw new IllegalArgumentException(
+                            "Java function namespace '"
+                                    + created.type().name()
+                                    + "' is not constructible");
+                }
+                return instantiateHost(hostClass, args);
+            }
+
+            Ast.ClassDecl klass = findClass(created.type().name());
+            Evaluator owner = this;
+            if (klass == null) {
+                Object imported = importedValue(created.type().name());
+                if (imported instanceof ClassFacade externalClass) {
+                    owner = externalClass.owner();
+                    klass = externalClass.klass();
+                }
+            }
+            if (klass == null) {
+                throw new IllegalArgumentException(
+                        "unknown class " + created.type().name());
+            }
+            return owner.instantiate(klass, args);
+        }
+
+        private Object invokeEvaluatedMemberCall(
+                Object receiver,
+                String memberName,
+                List<Object> args,
+                Env env) {
+            if (receiver instanceof OresObject object) {
+                Ast.MethodDecl method = object.owner.findMethod(
+                        object.klass,
+                        memberName,
+                        args.size(),
+                        new LinkedHashSet<>());
+                if (method != null) {
+                    object.owner.requireClassMemberVisible(
+                            method.visibility(),
+                            object.owner.declaringClass(method),
+                            env.accessClass(),
+                            "method",
+                            method.name());
+                    return object.owner.callMethod(object, method, args);
+                }
+            }
+            if (receiver instanceof ClassFacade klass) {
+                Ast.MethodDecl fn = klass.owner().findStaticFunction(
+                        klass.klass(),
+                        memberName,
+                        args.size(),
+                        new LinkedHashSet<>());
+                if (fn != null) {
+                    klass.owner().requireClassMemberVisible(
+                            fn.visibility(),
+                            klass.owner().declaringClass(fn),
+                            env.accessClass(),
+                            "static function",
+                            fn.name());
+                    return klass.owner().callStaticFunction(
+                            klass.klass(),
+                            fn,
+                            args);
+                }
+            }
+            if (receiver instanceof ModuleFacade module) {
+                return module.owner().invoke(
+                        module.owner().prepareModuleInvocation(
+                                module.module(),
+                                memberName,
+                                args));
+            }
+            if (receiver instanceof ImportedNamespace namespace) {
+                return namespace.owner().invoke(
+                        namespace.owner().prepareImportedInvocation(
+                                namespace.kind(),
+                                memberName,
+                                args));
+            }
+            Object callee = member(receiver, memberName, env);
+            if (!(callee instanceof Invokable invokable)) {
+                throw new IllegalArgumentException(
+                        "value is not callable: " + callee);
+            }
+            return invokable.call(args);
+        }
+
+        private static boolean containsAwait(Ast.Expr expr) {
+            if (expr instanceof Ast.AwaitExpr) return true;
+            if (expr instanceof Ast.LambdaExpr) return false;
+            if (expr instanceof Ast.UnaryExpr unary) {
+                return containsAwait(unary.operand());
+            }
+            if (expr instanceof Ast.BinaryExpr binary) {
+                return containsAwait(binary.left())
+                        || containsAwait(binary.right());
+            }
+            if (expr instanceof Ast.AssignExpr assignment) {
+                return containsAwait(assignment.target())
+                        || containsAwait(assignment.value());
+            }
+            if (expr instanceof Ast.ConditionalExpr conditional) {
+                return containsAwait(conditional.condition())
+                        || containsAwait(conditional.whenTrue())
+                        || containsAwait(conditional.whenFalse());
+            }
+            if (expr instanceof Ast.TypeTestExpr test) {
+                return containsAwait(test.value());
+            }
+            if (expr instanceof Ast.PatternTestExpr test) {
+                return containsAwait(test.value());
+            }
+            if (expr instanceof Ast.CastExpr cast) {
+                return containsAwait(cast.value());
+            }
+            if (expr instanceof Ast.CallExpr call) {
+                if (containsAwait(call.callee())) return true;
+                for (Ast.Expr argument : call.arguments()) {
+                    if (containsAwait(argument)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.MemberExpr member) {
+                return containsAwait(member.receiver());
+            }
+            if (expr instanceof Ast.IndexExpr indexed) {
+                return containsAwait(indexed.receiver())
+                        || containsAwait(indexed.index());
+            }
+            if (expr instanceof Ast.NewExpr created) {
+                for (Ast.Expr argument : created.arguments()) {
+                    if (containsAwait(argument)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.ListExpr list) {
+                for (Ast.Expr element : list.elements()) {
+                    if (containsAwait(element)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.TupleExpr tuple) {
+                for (Ast.Expr element : tuple.elements()) {
+                    if (containsAwait(element)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.ObjectExpr object) {
+                for (Ast.ObjectField field : object.fields()) {
+                    if (field.isDynamic()
+                            && containsAwait(field.dynamicName())) {
+                        return true;
+                    }
+                    if (containsAwait(field.value())) return true;
+                }
+            }
+            return false;
         }
 
         private Object callFunctionBodyRaw(Ast.FunctionDecl fn, List<?> args) {
@@ -1687,10 +3069,7 @@ public final class OresEvalRootNode extends RootNode {
             if (!fn.async()) return callStaticFunctionBodyRaw(fn, args);
 
             List<?> detached = detachAsyncArguments(args);
-            return context.asyncRuntime().submit(() ->
-                    detachAsyncValue(
-                            invoke(staticFunctionBodyInvocation(fn, detached)),
-                            new IdentityHashMap<>()));
+            return startAsyncStaticFunction(fn, detached);
         }
 
         private Object callStaticFunctionBodyRaw(Ast.MethodDecl fn, List<?> args) {

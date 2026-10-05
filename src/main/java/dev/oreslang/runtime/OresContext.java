@@ -24,6 +24,7 @@ public final class OresContext implements AutoCloseable {
     private final PrintWriter output;
     private final ActorRuntime actors;
     private final AsyncRuntime asyncRuntime;
+    private final OresScheduler asyncScheduler;
     private final RuntimeGarbageCollector garbageCollector;
     private final UUID contextId = UUID.randomUUID();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
@@ -45,6 +46,9 @@ public final class OresContext implements AutoCloseable {
                 ActorRuntime.DispatcherConfig.defaults(),
                 this::executeActorTurn);
         this.asyncRuntime = new AsyncRuntime(this::executeAsyncTurn);
+        this.asyncScheduler = OresScheduler.managed(
+                defaultAsyncParallelism(),
+                this::executeAsyncTurn);
         this.garbageCollector = new RuntimeGarbageCollector();
         this.actors.setActorExitHook(garbageCollector::retireActorDomain);
     }
@@ -59,6 +63,7 @@ public final class OresContext implements AutoCloseable {
     public PrintWriter output() { return output; }
     public ActorRuntime actors() { return actors; }
     public AsyncRuntime asyncRuntime() { return asyncRuntime; }
+    public OresScheduler asyncScheduler() { return asyncScheduler; }
     public RuntimeGarbageCollector garbageCollector() { return garbageCollector; }
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
@@ -179,6 +184,17 @@ public final class OresContext implements AutoCloseable {
         executeGuestTurn(turn, isolatePolicy.adversarial());
     }
 
+    private static int defaultAsyncParallelism() {
+        int configured = Integer.getInteger("ores.async.parallelism", 0);
+        if (configured < 0 || configured > 64) {
+            throw new IllegalArgumentException(
+                    "ores.async.parallelism must be between 0 and 64");
+        }
+        if (configured > 0) return configured;
+        int cpus = Runtime.getRuntime().availableProcessors();
+        return Math.max(2, Math.min(8, cpus));
+    }
+
     private void executeAsyncTurn(Runnable turn) {
         // The current interpreter executes an async callable as one virtual-
         // thread task. Holding the adversarial actor serialization lock across
@@ -226,6 +242,12 @@ public final class OresContext implements AutoCloseable {
             asyncRuntime.close();
         } catch (RuntimeException asyncFailure) {
             failure = asyncFailure;
+        }
+        try {
+            asyncScheduler.close();
+        } catch (RuntimeException schedulerFailure) {
+            if (failure == null) failure = schedulerFailure;
+            else failure.addSuppressed(schedulerFailure);
         }
         try {
             actors.close();
