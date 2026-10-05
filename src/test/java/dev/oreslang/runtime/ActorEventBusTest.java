@@ -202,6 +202,65 @@ final class ActorEventBusTest {
     }
 
     @Test
+    void aggregateActorPendingOperationsAreBoundedAcrossTopics()
+            throws Exception {
+        IsolatePolicy developer = IsolatePolicy.developer();
+        IsolatePolicy tinyMailbox = new IsolatePolicy(
+                developer.capabilities(),
+                developer.maxHeapBytes(),
+                2,
+                Duration.ofMinutes(1),
+                false);
+
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            ActorRuntime.ActorGroup group = runtime.createActorGroup();
+            ActorRuntime.ActorGroupJoinCapability capability =
+                    group.joinCapability();
+            group.events().defineTopic(
+                    "one",
+                    ActorEventBus.DeliveryPolicy.RELIABLE,
+                    1);
+            group.events().defineTopic(
+                    "two",
+                    ActorEventBus.DeliveryPolicy.RELIABLE,
+                    1);
+
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<Boolean> aggregateRejected =
+                    new AtomicReference<>(false);
+
+            ActorRuntime.ActorRef<String> actor = runtime.spawnShared(
+                    tinyMailbox,
+                    () -> (message, context) -> {
+                        capability.join();
+                        ActorEventBus.Subscription<Integer> one =
+                                group.events().subscribe("one");
+                        ActorEventBus.Subscription<Integer> two =
+                                group.events().subscribe("two");
+
+                        OresFuture<ActorEventBus.Event<Integer>> first =
+                                one.readAsync();
+                        OresFuture<ActorEventBus.Event<Integer>> second =
+                                one.readAsync();
+                        OresFuture<ActorEventBus.Event<Integer>> acrossTopic =
+                                two.readAsync();
+
+                        aggregateRejected.set(acrossTopic.isCancelled());
+                        first.cancel(false);
+                        second.cancel(false);
+                        done.countDown();
+                    });
+
+            actor.send("run");
+
+            assertTrue(done.await(2, TimeUnit.SECONDS));
+            assertTrue(
+                    aggregateRejected.get(),
+                    "pending-operation quota must span all topics/channels");
+        }
+    }
+
+    @Test
     void actorCreatedGroupCapsTopicCapacityAtCreatorPolicy() throws Exception {
         IsolatePolicy developer = IsolatePolicy.developer();
         IsolatePolicy tinyMailbox = new IsolatePolicy(
