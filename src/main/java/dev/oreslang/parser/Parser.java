@@ -1192,14 +1192,14 @@ public final class Parser {
         List<Ast.IfBranch> branches = new ArrayList<>();
         Ast.Expr condition = parseCondition();
         match(SEMICOLON);
-        consume(DO, "expected 'do'");
+        if (!match(DO, THEN)) throw error(peek(), "expected 'do' or 'then'");
         List<Ast.Stmt> body = parseUntil(ELSEIF, ELSE, FI);
         branches.add(new Ast.IfBranch(condition, body));
 
         while (match(ELSEIF)) {
             condition = parseCondition();
             match(SEMICOLON);
-            consume(DO, "expected 'do'");
+            if (!match(DO, THEN)) throw error(peek(), "expected 'do' or 'then'");
             body = parseUntil(ELSEIF, ELSE, FI);
             branches.add(new Ast.IfBranch(condition, body));
         }
