@@ -31,16 +31,25 @@ Observable<T>
 A `next()` call admits at most one item. This gives us real backpressure before
 we add a larger demand protocol.
 
-There may be only one outstanding `next()` per subscription.
+There may be only one outstanding `next()` per subscription. The demand slot
+is not released until the **exposed pull Future itself** reaches a terminal
+state; source completion alone is not enough to admit another pull.
 
-A pull settles with either:
+A pull settles with exactly one of:
 
 - `NEXT(value)`;
-- `COMPLETE`; or
-- a failed Future for the stream error path.
+- `COMPLETE`;
+- a failed Future for the stream error path; or
+- a cancelled Future for structured cancellation.
 
-Errors are not encoded as ordinary values. `NEXT(null)` is invalid: Oreslang
-absence is represented with `Option<T>`, not a null reactive payload.
+Errors are not encoded as ordinary values, and cancellation is not demoted into
+an ordinary failure. Cancellation identity comes from Future state, not merely
+from seeing a `CancellationException`: a domain failure whose error happens to
+be a `CancellationException` is still a failure unless that Future was
+actually cancelled.
+
+`NEXT(null)` is invalid. Oreslang absence is represented with `Option<T>`,
+not a null reactive payload.
 
 ## Scheduler invariant
 
@@ -138,7 +147,7 @@ Using the current callable direction, the target shape is approximately:
 ```ores
 pub interface Subscription<T> {
   fnc next(): Future<Notification<T>>;
-  fnc cancel(): void;
+  fnc cancel(): bool;
 }
 
 pub interface Observable<T> {
@@ -219,6 +228,17 @@ downstream subscription cancel
   -> release buffers/resources
   -> stop future production
 ```
+
+The subscription substrate owns the terminal transition and runs its runtime
+cleanup hook at most once across explicit cancellation, natural completion,
+source failure, invalid source output, pull cancellation, and completion/cancel
+races. Calling `cancel()` after the subscription is already terminal returns
+`false` because no new cancellation transition occurred.
+
+Cancelling a derived/shared pull detaches its runtime waiter so it does not keep
+continuation state alive. It must not cancel a shared producer unless that
+operator/source explicitly owns the producer and requests cancellation
+propagation.
 
 As with ordinary Ores Futures, cancellation is a request to underlying host work,
 not proof that an uncooperative host call has stopped.
