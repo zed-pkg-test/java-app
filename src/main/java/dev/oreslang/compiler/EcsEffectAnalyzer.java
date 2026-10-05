@@ -66,6 +66,7 @@ public final class EcsEffectAnalyzer {
      */
     public static Map<String, SystemEffects> analyze(Ast.Program program) {
         Index index = new Index(program);
+        index.validateAnnotationPlacement(program);
         index.validateComponents();
 
         LinkedHashMap<String, SystemEffects> result = new LinkedHashMap<>();
@@ -115,6 +116,7 @@ public final class EcsEffectAnalyzer {
         private final Map<Ast.ComponentDecl, String> componentOwners = new java.util.IdentityHashMap<>();
         private final Set<String> ambiguousComponents = new LinkedHashSet<>();
         private final Map<String, Ast.TypeAliasDecl> aliases = new LinkedHashMap<>();
+        private final Set<String> ambiguousAliases = new LinkedHashSet<>();
 
         private Index(Ast.Program program) {
             for (Ast.ModuleDecl module : program.modules()) {
@@ -127,7 +129,11 @@ public final class EcsEffectAnalyzer {
                     } else if (declaration instanceof Ast.TypeAliasDecl alias) {
                         claimTypeName(localTypes, module.name(), alias.name(), "type alias");
                         aliases.put(module.name() + "." + alias.name(), alias);
-                        aliases.putIfAbsent(alias.name(), alias);
+                        Ast.TypeAliasDecl previous = aliases.putIfAbsent(alias.name(), alias);
+                        if (previous != null && previous != alias) {
+                            ambiguousAliases.add(alias.name());
+                            aliases.remove(alias.name());
+                        }
                     } else if (declaration instanceof Ast.ComponentDecl component) {
                         claimTypeName(localTypes, module.name(), component.name(), "component");
                         putComponent(module.name(), component);
@@ -161,6 +167,46 @@ public final class EcsEffectAnalyzer {
             }
         }
 
+        private void validateAnnotationPlacement(Ast.Program program) {
+            for (Ast.ModuleDecl module : program.modules()) {
+                for (Ast.Decl declaration : module.declarations()) {
+                    if (declaration instanceof Ast.FieldDecl field) {
+                        rejectEcsAnnotations(
+                                field.annotations(),
+                                "module field '" + qualify(module.name(), field.name()) + "'");
+                    } else if (declaration instanceof Ast.ClassDecl klass) {
+                        String className = qualify(module.name(), klass.name());
+                        for (Ast.FieldDecl field : klass.fields()) {
+                            rejectEcsAnnotations(
+                                    field.annotations(),
+                                    "class field '" + className + "." + field.name() + "'");
+                        }
+                        for (Ast.MethodDecl method : klass.methods()) {
+                            rejectEcsAnnotations(
+                                    method.annotations(),
+                                    "method '" + className + "." + method.name() + "'");
+                        }
+                    } else if (declaration instanceof Ast.ComponentDecl component) {
+                        for (Ast.FieldDecl field : component.fields()) {
+                            rejectEcsAnnotations(
+                                    field.annotations(),
+                                    "component field '" + qualifiedComponent(component) + "." + field.name() + "'");
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void rejectEcsAnnotations(List<Ast.Annotation> annotations, String location) {
+            for (Ast.Annotation annotation : annotations) {
+                if (EFFECT_ANNOTATIONS.contains(annotation.name())) {
+                    throw new IllegalArgumentException(
+                            "ECS annotation @" + annotation.name()
+                                    + " is only valid on a stateless module/root fnc, not " + location);
+                }
+            }
+        }
+
         private void validateComponents() {
             for (Ast.ComponentDecl component : componentOwners.keySet()) {
                 LinkedHashSet<String> fields = new LinkedHashSet<>();
@@ -179,7 +225,11 @@ public final class EcsEffectAnalyzer {
                                 "component field '" + component.name() + "." + field.name()
                                         + "' cannot have an initializer");
                     }
-                    requirePod(field.type(), component, new LinkedHashSet<>());
+                    requirePod(
+                            field.type(),
+                            component,
+                            new LinkedHashSet<>(),
+                            new LinkedHashSet<>());
                 }
             }
         }
@@ -187,7 +237,8 @@ public final class EcsEffectAnalyzer {
         private void requirePod(
                 Ast.TypeRef type,
                 Ast.ComponentDecl owner,
-                Set<Ast.ComponentDecl> stack) {
+                Set<Ast.ComponentDecl> componentStack,
+                Set<Ast.TypeAliasDecl> aliasStack) {
             if (type.isBorrow()) {
                 throw nonPod(owner, type, "borrowed references are not component POD");
             }
@@ -195,11 +246,15 @@ public final class EcsEffectAnalyzer {
                 throw nonPod(owner, type, "union layout is not yet a fixed ECS ABI");
             }
             if (type.isTupleType()) {
-                for (Ast.TypeRef element : type.arguments()) requirePod(element, owner, stack);
+                for (Ast.TypeRef element : type.arguments()) {
+                    requirePod(element, owner, componentStack, aliasStack);
+                }
                 return;
             }
             if (type.isRecordType()) {
-                for (Ast.TypeRef member : type.recordMembers().values()) requirePod(member, owner, stack);
+                for (Ast.TypeRef member : type.recordMembers().values()) {
+                    requirePod(member, owner, componentStack, aliasStack);
+                }
                 return;
             }
             if (type.inferArguments() || !type.arguments().isEmpty()) {
@@ -218,13 +273,19 @@ public final class EcsEffectAnalyzer {
                 return;
             }
 
-            Ast.ComponentDecl nested = findComponent(type.name());
+            Ast.ComponentDecl nested =
+                    findComponentInModule(type.name(), componentOwners.get(owner));
             if (nested != null) {
-                if (!stack.add(nested)) {
+                if (!componentStack.add(nested)) {
                     throw nonPod(owner, type, "recursive component layout is not permitted");
                 }
-                for (Ast.FieldDecl field : nested.fields()) requirePod(field.type(), owner, stack);
-                stack.remove(nested);
+                try {
+                    for (Ast.FieldDecl field : nested.fields()) {
+                        requirePod(field.type(), owner, componentStack, aliasStack);
+                    }
+                } finally {
+                    componentStack.remove(nested);
+                }
                 return;
             }
 
@@ -233,7 +294,14 @@ public final class EcsEffectAnalyzer {
                 if (!alias.genericParameters().isEmpty()) {
                     throw nonPod(owner, type, "generic aliases are not component POD in this ABI");
                 }
-                requirePod(alias.target(), owner, stack);
+                if (!aliasStack.add(alias)) {
+                    throw nonPod(owner, type, "recursive type-alias layout is not permitted");
+                }
+                try {
+                    requirePod(alias.target(), owner, componentStack, aliasStack);
+                } finally {
+                    aliasStack.remove(alias);
+                }
                 return;
             }
 
@@ -413,9 +481,12 @@ public final class EcsEffectAnalyzer {
         }
 
         private Ast.TypeAliasDecl findAlias(String name, Ast.ComponentDecl owner) {
+            if (name.contains(".")) return aliases.get(name);
             String module = componentOwners.get(owner);
             Ast.TypeAliasDecl local = aliases.get(qualify(module, name));
-            return local != null ? local : aliases.get(name);
+            if (local != null) return local;
+            if (ambiguousAliases.contains(name)) return null;
+            return aliases.get(name);
         }
 
         private String qualifiedComponent(Ast.ComponentDecl component) {
