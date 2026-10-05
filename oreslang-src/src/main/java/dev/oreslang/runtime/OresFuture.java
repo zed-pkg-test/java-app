@@ -136,17 +136,24 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         AtomicBoolean callbackClaimed = new AtomicBoolean();
 
         Callback<T> completion = new Callback<>() {
-            private void claim(String operation) {
+            private boolean claim(String operation) {
                 if (!callbackClaimed.compareAndSet(false, true)) {
                     throw new AlreadySettledException(
                             "callback Future already settled; duplicate " + operation);
                 }
+
+                // Consumer cancellation may legitimately win before a foreign
+                // callback arrives. The first late producer callback is then a
+                // no-op rather than an exception escaping onto the producer's
+                // thread. Marking the callback claimed still diagnoses any
+                // subsequent duplicate callback invocation.
+                return !future.isCancelled();
             }
 
             @Override
             public void resolve(T value) {
-                claim("resolve");
-                if (!future.completeFromRuntime(value)) {
+                if (!claim("resolve")) return;
+                if (!future.completeFromRuntime(value) && !future.isCancelled()) {
                     throw new AlreadySettledException(
                             "callback Future was already settled before resolve");
                 }
@@ -155,8 +162,8 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
             @Override
             public void reject(Throwable failure) {
                 Objects.requireNonNull(failure, "failure");
-                claim("reject");
-                if (!future.failFromRuntime(failure)) {
+                if (!claim("reject")) return;
+                if (!future.failFromRuntime(failure) && !future.isCancelled()) {
                     throw new AlreadySettledException(
                             "callback Future was already settled before reject");
                 }
@@ -164,8 +171,8 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
 
             @Override
             public void cancel() {
-                claim("cancel");
-                if (!future.cancel(false)) {
+                if (!claim("cancel")) return;
+                if (!future.cancel(false) && !future.isCancelled()) {
                     throw new AlreadySettledException(
                             "callback Future was already settled before cancel");
                 }
