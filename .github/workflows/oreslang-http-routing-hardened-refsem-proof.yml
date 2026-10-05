@@ -50,7 +50,22 @@ jobs:
           export PATH="$JAVA_HOME/bin:$PATH"
           bash proof245/routing/scripts/audit.sh
           actual="$RUNNER_TEMP/router.actual"
+          errors="$RUNNER_TEMP/router.err"
+          set +e
           mvn -B -ntp -q -f proof245/compiler/pom.xml -DskipTests exec:java \
             -Dexec.args="$GITHUB_WORKSPACE/proof245/routing/tests/router_semantics.ores" \
-            > "$actual"
+            > "$actual" 2> "$errors"
+          status=$?
+          set -e
+          if [[ -s "$actual" ]]; then
+            echo "=== router stdout ==="
+            cat "$actual"
+          fi
+          if [[ -s "$errors" ]]; then
+            echo "=== router stderr ==="
+            cat "$errors"
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            exit "$status"
+          fi
           diff -u proof245/routing/tests/expected.txt "$actual"
