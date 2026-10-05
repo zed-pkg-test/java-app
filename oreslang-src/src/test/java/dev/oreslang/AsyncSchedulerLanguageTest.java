@@ -207,20 +207,27 @@ final class AsyncSchedulerLanguageTest {
     }
 
     @Test
-    void schedulerStartRequiresInlineAsyncZeroArgumentLambda() {
-        IllegalArgumentException synchronous = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        fnc bad() => void {
-                          val scheduler = new OresScheduler(2);
-                          val work = scheduler.start(|| -> {
-                            return;
-                          });
-                          scheduler.close();
-                          return;
-                        }
-                        """)));
-        assertTrue(synchronous.getMessage().contains("inline async zero-argument lambda"));
+    void schedulerStartAcceptsSyncOrAsyncButRequiresZeroArguments() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc good_sync() => void {
+                  val scheduler = new OresScheduler(2);
+                  val work = scheduler.start(|| -> {
+                    return;
+                  });
+                  scheduler.close();
+                  return;
+                }
+
+                async fnc good_async() => void {
+                  val scheduler = new OresScheduler(2);
+                  val work = scheduler.start(async || -> {
+                    return;
+                  });
+                  await work;
+                  scheduler.close();
+                  return;
+                }
+                """)));
 
         IllegalArgumentException parameterized = assertThrows(
                 IllegalArgumentException.class,
@@ -305,6 +312,84 @@ final class AsyncSchedulerLanguageTest {
                 failure.getMessage().contains("guard")
                         || failure.getMessage().contains("capture"),
                 () -> "unexpected guard-capture error: " + failure.getMessage());
+    }
+
+    @Test
+    void synchronousSchedulerTaskCannotRaceMutableParentCapture() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          let counter = 0;
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(|| -> {
+                            counter = counter + 1;
+                            return;
+                          });
+                          counter = counter + 1;
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                failure.getMessage().contains("moved")
+                        || failure.getMessage().contains("capture"),
+                () -> "unexpected sync scheduler ownership error: " + failure.getMessage());
+    }
+
+    @Test
+    void synchronousSchedulerTaskCannotCaptureLinearGuard() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          val mutex = Mutex.new(1);
+                          val guard = mutex.lock();
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(|| -> {
+                            guard.release();
+                            return;
+                          });
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                failure.getMessage().contains("guard")
+                        || failure.getMessage().contains("capture"),
+                () -> "unexpected sync scheduler guard error: " + failure.getMessage());
+    }
+
+    @Test
+    void synchronousSchedulerTaskRunsOnCustomPoolAndReturnsFuture() throws Exception {
+        String program = """
+                pub async routine main() => void {
+                  val scheduler = new OresScheduler(2);
+                  val work = scheduler.start(|| -> {
+                    return 7;
+                  });
+                  val value = await work;
+                  stdio.println(value);
+                  scheduler.close();
+                  return;
+                }
+                """;
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "scheduler-sync.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("7"));
     }
 
 }

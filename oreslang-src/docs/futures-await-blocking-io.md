@@ -214,9 +214,11 @@ val response = await work;
 io.close();
 ```
 
-`scheduler.start(async || -> { ... })` currently accepts an inline async
-zero-argument lambda and creates a task whose continuations remain
-scheduler-affine until completion. The context also closes any remaining user
+`scheduler.start(...)` accepts an inline zero-argument lambda. A synchronous
+`|| -> { ... }` body is ordinary CPU/non-suspending work and is submitted as a
+scheduler task; an `async || -> { ... }` body may use `await` and its captured
+continuation remains scheduler-affine until completion. Both forms return an
+`OresFuture<T>` for the lambda's logical result `T`. The context also closes any remaining user
 schedulers during teardown, so forgotten scheduler handles cannot leak carrier
 threads. A scheduler cannot close itself from one of its own task turns; close
 is initiated from an outside/root task so teardown cannot self-cancel the turn
