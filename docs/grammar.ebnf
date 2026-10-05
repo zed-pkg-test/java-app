@@ -101,7 +101,7 @@ interface_member= "fnc" IDENT [ generic_params ] "(" [ param_list ] ")" type_ret
 type_decl       = "type" IDENT [ generic_params ] "=" type_ref stmt_terminator ;
 
 annotation      = "@" IDENT [ "<" [ type_args ] ">" | "(" [ type_args ] ")" ] ;
-return_spec     = [ ":" type_ref ] ;
+return_spec     = [ ( ":" | "->" ) type_ref ] ;
 type_return_spec= [ "=>" type_ref ] ;
 generic_params  = "<" IDENT { "," IDENT } ">" ;
 param_list      = param { "," param } ;
@@ -328,8 +328,9 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      when a callback must call a method.
    - class-level functions use "static fnc"; they have no self receiver, are
      dispatched through the class namespace, and are reifiable when unambiguous.
-   - "->" is executable syntax for lambdas and lambda-style callable
-     declarations. Ordinary named executable declarations use ": ReturnType".
+   - "->" is executable syntax for lambdas, lambda-style callable
+     declarations, and may also spell a named executable callable return type
+     as an alternative to ":". Ordinary named executable declarations use ": ReturnType".
    - "=>" is type-level syntax for function types and interface callable
      signatures; it is not an executable return separator.
    - Unqualified "actor" declarations are private actors; "shared actor" opts

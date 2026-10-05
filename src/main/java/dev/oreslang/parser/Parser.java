@@ -539,15 +539,17 @@ public final class Parser {
         }
 
         if (check(FAT_ARROW)) {
-            throw error(peek(), "fat arrow '=>' is reserved for function types; named callables use ': ReturnType'");
-        }
-        if (check(ARROW)) {
-            throw error(peek(), "named callable return types use ': ReturnType'; '->' is executable/lambda syntax");
+            throw error(peek(),
+                    "fat arrow '=>' is reserved for function types/interface callable signatures; "
+                            + "named executable callables use ': ReturnType' or '-> ReturnType'");
         }
 
-        Ast.TypeRef declared = match(COLON) ? parseTypeRef() : null;
+        Ast.TypeRef declared = null;
+        if (match(COLON) || match(ARROW)) {
+            declared = parseTypeRef();
+        }
         if (annotated != null && declared != null && !sameType(annotated, declared)) {
-            throw error(previous(), "@Ret type and ': ReturnType' disagree");
+            throw error(previous(), "@Ret type and declared return type disagree");
         }
         return declared != null ? declared : annotated != null ? annotated : Ast.TypeRef.simple("void");
     }

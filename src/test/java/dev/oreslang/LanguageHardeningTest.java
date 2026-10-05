@@ -315,6 +315,53 @@ final class LanguageHardeningTest {
     }
 
     @Test
+    void storageFieldNamesMustBeUniqueAcrossInheritanceButDiamondsMayShareOneAncestorSlot() {
+        IllegalArgumentException shadow = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Parent as
+                          private val int id = 1;
+                        end
+
+                        define class Child extends Parent as
+                          private val int id = 2;
+                        end
+                        """)));
+        assertTrue(shadow.getMessage().contains("must be unique across inheritance"));
+
+        IllegalArgumentException siblingCollision = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Left as
+                          private val int id = 1;
+                        end
+
+                        define class Right as
+                          private val int id = 2;
+                        end
+
+                        define class Combined extends Left, Right as
+                        end
+                        """)));
+        assertTrue(siblingCollision.getMessage().contains("must be unique across inheritance"));
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Root as
+                  private val int id = 1;
+                end
+
+                define class Left extends Root as
+                end
+
+                define class Right extends Root as
+                end
+
+                define class Diamond extends Left, Right as
+                end
+                """)));
+    }
+
+    @Test
     void moduleAliasesPreserveFncReifiabilityButKeepRoutinesDirectOnly() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module service

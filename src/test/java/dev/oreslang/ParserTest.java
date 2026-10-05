@@ -124,6 +124,50 @@ final class ParserTest {
                 """));
     }
     @Test
+    void namedExecutableCallablesAcceptColonOrSlimArrowReturns() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc by_colon(int value): int {
+                  return value;
+                }
+
+                routine by_arrow(int value) -> int {
+                  return value;
+                }
+
+                define class Box as
+                  pub value() -> int {
+                    return 1;
+                  }
+
+                  pub static fnc twice(int value) -> int {
+                    return value * 2;
+                  }
+                end
+
+                actor Worker {
+                  pub handle(int value) -> int {
+                    return value;
+                  }
+                }
+
+                pub routine main() -> void {
+                  val box = new Box();
+                  stdio.stdout.write(by_colon(1));
+                  stdio.stdout.write(by_arrow(2));
+                  stdio.stdout.write(box.value());
+                  stdio.stdout.write(Box.twice(2));
+                  return;
+                }
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc still_type_only() => int {
+                  return 1;
+                }
+                """));
+    }
+
+    @Test
     void parsesSharedActorAndAllowsMailboxOwnedStateMutation() {
         String source = """
                 shared actor Account {

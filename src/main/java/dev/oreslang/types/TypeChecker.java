@@ -53,6 +53,7 @@ public final class TypeChecker {
     private final Set<String> importedValues = new HashSet<>();
     private final Set<Ast.TypeAliasDecl> resolvingAliases = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
+    private Ast.ClassDecl currentClassOwner;
     private int loopDepth;
 
     public static Ast.Program check(Ast.Program program) {
@@ -374,6 +375,8 @@ public final class TypeChecker {
             }
         }
 
+        validateFieldLayout(klass);
+
         Set<String> effectiveFieldNames = new LinkedHashSet<>();
         for (ResolvedField field : effectiveFieldTargets(
                 klass, nominalClassType(klass), new LinkedHashSet<>())) {
@@ -408,8 +411,14 @@ public final class TypeChecker {
             }
             Type fieldType = classFieldType(klass, field);
             if (field.initializer() != null && field.type() != null) {
-                Type actual = typeOf(field.initializer(), new Env(null), classGenerics, self);
-                requireAssignable(actual, fieldType, "field initializer " + klass.name() + "." + field.name());
+                Ast.ClassDecl previousClassOwner = currentClassOwner;
+                currentClassOwner = klass;
+                try {
+                    Type actual = typeOf(field.initializer(), new Env(null), classGenerics, self);
+                    requireAssignable(actual, fieldType, "field initializer " + klass.name() + "." + field.name());
+                } finally {
+                    currentClassOwner = previousClassOwner;
+                }
             }
             if (field.bindingKind() == Ast.BindingKind.CONST && field.initializer() != null && !constant(field.initializer())) {
                 throw new IllegalArgumentException("const field '" + field.name() + "' needs a compile-time constant initializer");
@@ -477,11 +486,14 @@ public final class TypeChecker {
                         "return type of async static function '" + klass.name() + "." + method.name() + "'");
             }
             Ast.ActorKind previousActorKind = currentActorKind;
+            Ast.ClassDecl previousClassOwner = currentClassOwner;
             currentActorKind = method.isStatic() ? Ast.ActorKind.NONE : klass.actorKind();
+            currentClassOwner = klass;
             try {
                 checkBlock(method.body(), env, generics, returns, callableSelf);
             } finally {
                 currentActorKind = previousActorKind;
+                currentClassOwner = previousClassOwner;
             }
             if (!method.isAbstract() && returns != Primitive.VOID && !definitelyReturns(method.body())) {
                 String label = method.isStatic() ? "static function" : "method";
@@ -999,7 +1011,9 @@ public final class TypeChecker {
                     if (klass == null) throw new IllegalArgumentException("unknown class namespace '" + classNamespace.className() + "'");
                     Ast.MethodDecl fn = findStaticFunction(klass, member.member(), call.arguments().size(), new LinkedHashSet<>());
                     if (fn == null) throw new IllegalArgumentException("no static function '" + member.member() + "' with arity " + call.arguments().size() + " on " + klass.name());
-                    validateCallTypeArgumentMarker(call, fn.genericParameters(), "static function " + klass.name() + "." + fn.name());
+                    Ast.ClassDecl fnOwner = findDeclaringClass(klass, fn, new LinkedHashSet<>());
+                    requireClassMemberVisible(fn.visibility(), fnOwner, "static function", fn.name());
+                    validateCallTypeArgumentMarker(call, fn.genericParameters(), "static function " + fnOwner.name() + "." + fn.name());
                     List<String> callableGenerics = new ArrayList<>(fn.genericParameters());
                     String label = "static function " + klass.name() + "." + fn.name();
                     Type result = checkGenericCallable(
@@ -1045,6 +1059,8 @@ public final class TypeChecker {
                             ResolvedField field = findFieldTarget(
                                     klass, named, member.member(), new LinkedHashSet<>());
                             if (field != null) {
+                                requireClassMemberVisible(
+                                        field.field().visibility(), field.owner(), "field", field.field().name());
                                 if (call.typeArgumentsPresent()) {
                                     throw new IllegalArgumentException(
                                             "function-valued field '" + member.member()
@@ -1080,6 +1096,7 @@ public final class TypeChecker {
                         Ast.MethodDecl method = target.method();
                         Ast.ClassDecl owner = target.owner();
                         Named ownerType = target.ownerType();
+                        requireClassMemberVisible(method.visibility(), owner, "method", method.name());
                         validateCallTypeArgumentMarker(call, method.genericParameters(), "method " + owner.name() + "." + method.name());
                         List<String> callableGenerics = new ArrayList<>(owner.genericParameters());
                         callableGenerics.addAll(method.genericParameters());
@@ -1193,6 +1210,8 @@ public final class TypeChecker {
                 List<Ast.MethodDecl> functions = findStaticFunctionsByName(klass, member.member(), new LinkedHashSet<>());
                 if (functions.size() == 1) {
                     Ast.MethodDecl fn = functions.getFirst();
+                    Ast.ClassDecl fnOwner = findDeclaringClass(klass, fn, new LinkedHashSet<>());
+                    requireClassMemberVisible(fn.visibility(), fnOwner, "static function", fn.name());
                     if (!fn.genericParameters().isEmpty()) {
                         throw new IllegalArgumentException(
                                 "generic static function '" + klass.name() + "." + fn.name()
@@ -1230,6 +1249,8 @@ public final class TypeChecker {
                 if (klass != null) {
                     ResolvedField field = findFieldTarget(klass, named, member.member(), new LinkedHashSet<>());
                     if (field != null) {
+                        requireClassMemberVisible(
+                                field.field().visibility(), field.owner(), "field", field.field().name());
                         Type pattern = classFieldType(field.owner(), field.field());
                         return substituteGenerics(pattern, classGenericBindings(field.owner(), field.ownerType()));
                     }
@@ -1386,7 +1407,13 @@ public final class TypeChecker {
             if (lambda.expressionBody() != null) {
                 throw new IllegalArgumentException("expression-body lambdas are not supported; lambdas require braces and explicit return");
             }
-            checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Unknown.INSTANCE, self);
+            Ast.ClassDecl previousClassOwner = currentClassOwner;
+            if (nonLexical) currentClassOwner = null;
+            try {
+                checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Unknown.INSTANCE, self);
+            } finally {
+                currentClassOwner = previousClassOwner;
+            }
             return new Function(parameters, Unknown.INSTANCE);
         }
         return Unknown.INSTANCE;
@@ -1450,12 +1477,18 @@ public final class TypeChecker {
         if (source instanceof Named named) {
             Ast.ClassDecl klass = findClass(named.name());
             if (klass == null) throw new IllegalArgumentException("object destructuring requires a record/map-like value");
-            Record shape = (Record) substituteGenerics(
-                    publicClassShape(klass, new LinkedHashSet<>()),
-                    classGenericBindings(klass, named));
-            Type member = shape.members().get(memberName);
-            if (member == null) throw new IllegalArgumentException("object destructure requires member '" + memberName + "'");
-            return member;
+            ResolvedField field = findFieldTarget(
+                    klass, named, memberName, new LinkedHashSet<>());
+            if (field == null) {
+                throw new IllegalArgumentException(
+                        "object destructure requires field '" + memberName + "'");
+            }
+            requireClassMemberVisible(
+                    field.field().visibility(), field.owner(), "field", field.field().name());
+            Type pattern = classFieldType(field.owner(), field.field());
+            return substituteGenerics(
+                    pattern,
+                    classGenericBindings(field.owner(), field.ownerType()));
         }
         if (source instanceof Union union) {
             List<Type> alternatives = new ArrayList<>(union.options().size());
@@ -1477,9 +1510,16 @@ public final class TypeChecker {
         Type declared = param.type().name().equals("$infer$") ? expectedParameter : resolveParam(param, generics, self);
         requireAssignable(expectedParameter, declared, "mutex callback parameter " + param.name());
         requireAssignable(declared, expectedParameter, "mutex callback parameter " + param.name());
-        Env lambdaEnv = new Env(parent);
+        boolean nonLexical = lambda.nonLexical() || parent.descendantsNonLexical();
+        Env lambdaEnv = new Env(nonLexical ? null : parent, nonLexical);
         lambdaEnv.define(param.name(), declared, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
-        checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Primitive.VOID, self);
+        Ast.ClassDecl previousClassOwner = currentClassOwner;
+        if (nonLexical) currentClassOwner = null;
+        try {
+            checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Primitive.VOID, self);
+        } finally {
+            currentClassOwner = previousClassOwner;
+        }
     }
 
 
@@ -1506,7 +1546,13 @@ public final class TypeChecker {
             requireAssignable(declared, expectedParam, "lambda parameter " + param.name());
             lambdaEnv.define(param.name(), declared, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
         }
-        checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, expected.result(), self);
+        Ast.ClassDecl previousClassOwner = currentClassOwner;
+        if (nonLexical) currentClassOwner = null;
+        try {
+            checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, expected.result(), self);
+        } finally {
+            currentClassOwner = previousClassOwner;
+        }
         if (expected.result() != Primitive.VOID && !definitelyReturns(lambda.blockBody())) {
             throw new IllegalArgumentException("non-void lambda must explicitly return on every path");
         }
@@ -1534,6 +1580,8 @@ public final class TypeChecker {
             if (klass != null) {
                 ResolvedField field = findFieldTarget(klass, named, member.member(), new LinkedHashSet<>());
                 if (field != null) {
+                    requireClassMemberVisible(
+                            field.field().visibility(), field.owner(), "field", field.field().name());
                     Type pattern = resolve(field.field().type(), Set.copyOf(field.owner().genericParameters()), field.ownerType());
                     return substituteGenerics(pattern, classGenericBindings(field.owner(), field.ownerType()));
                 }
@@ -2065,6 +2113,55 @@ public final class TypeChecker {
         return typeOf(field.initializer(), new Env(null), generics, self);
     }
 
+    private void validateFieldLayout(Ast.ClassDecl klass) {
+        collectFieldLayout(
+                klass,
+                nominalClassType(klass),
+                new LinkedHashMap<>(),
+                new LinkedHashSet<>());
+    }
+
+    private void collectFieldLayout(
+            Ast.ClassDecl klass,
+            Named concreteType,
+            Map<String, ResolvedField> fields,
+            Set<Ast.ClassDecl> stack) {
+        if (!stack.add(klass)) {
+            throw new IllegalArgumentException(
+                    "inheritance cycle involving class '" + klass.name() + "'");
+        }
+
+        for (Ast.TypeRef parentRef : klass.parents()) {
+            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+            if (parent == null) continue;
+            Named parentType = concreteParentType(parentRef, klass, concreteType);
+            collectFieldLayout(parent, parentType, fields, stack);
+        }
+
+        Set<String> localNames = new LinkedHashSet<>();
+        for (Ast.FieldDecl field : klass.fields()) {
+            if (!localNames.add(field.name())) {
+                throw new IllegalArgumentException(
+                        "duplicate field '" + klass.name() + "." + field.name() + "'");
+            }
+
+            ResolvedField candidate = new ResolvedField(klass, concreteType, field);
+            ResolvedField previous = fields.putIfAbsent(field.name(), candidate);
+            if (previous != null
+                    && (previous.owner() != candidate.owner()
+                            || !previous.ownerType().equals(candidate.ownerType()))) {
+                throw new IllegalArgumentException(
+                        "field '" + klass.name() + "." + field.name()
+                                + "' collides with inherited field slot "
+                                + previous.owner().name() + previous.ownerType().arguments()
+                                + "; class storage field names must be unique across inheritance "
+                                + "and generic diamond paths must use the same concrete instantiation");
+            }
+        }
+
+        stack.remove(klass);
+    }
+
     private List<ResolvedField> effectiveFieldTargets(Ast.ClassDecl klass, Named concreteType, Set<Ast.ClassDecl> stack) {
         if (!stack.add(klass)) throw new IllegalArgumentException("inheritance cycle involving class '" + klass.name() + "'");
         LinkedHashMap<String, ResolvedField> fields = new LinkedHashMap<>();
@@ -2248,6 +2345,43 @@ public final class TypeChecker {
             if (parent != null) collectInterfaceMethodNames(parent, names, seen);
         }
         seen.remove(iface);
+    }
+
+    private void requireClassMemberVisible(
+            Ast.Visibility visibility,
+            Ast.ClassDecl owner,
+            String kind,
+            String name) {
+        if (visibility == Ast.Visibility.PRIVATE && currentClassOwner != owner) {
+            throw new IllegalArgumentException(
+                    "private " + kind + " '" + owner.name() + "." + name
+                            + "' is accessible only from code declared in class " + owner.name());
+        }
+    }
+
+    private Ast.ClassDecl findDeclaringClass(
+            Ast.ClassDecl klass,
+            Ast.MethodDecl target,
+            Set<Ast.ClassDecl> seen) {
+        if (!seen.add(klass)) return null;
+        for (Ast.MethodDecl method : klass.methods()) {
+            if (method == target) {
+                seen.remove(klass);
+                return klass;
+            }
+        }
+        for (Ast.TypeRef parentRef : klass.parents()) {
+            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+            if (parent == null) continue;
+            Ast.ClassDecl owner = findDeclaringClass(parent, target, seen);
+            if (owner != null) {
+                seen.remove(klass);
+                return owner;
+            }
+        }
+        seen.remove(klass);
+        throw new IllegalStateException(
+                "cannot find declaring class for method '" + target.name() + "'");
     }
 
     private Ast.MethodDecl findStaticFunction(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {

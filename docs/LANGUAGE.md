@@ -104,6 +104,8 @@ Only exported (`pub`) module members satisfy an adherence contract. `@AdheresTo(
 
 Functions use `fnc` and are private by default. `pub` exports them. Return statements are always explicit; a non-`void` function must return on every control-flow path.
 
+Class fields, instance methods, and `static fnc` members are also private by default unless marked `pub`. Private class-member access is scoped to the **declaring class**, not to a particular receiver instance: code declared in class `A` may access an `A` private member on another `A` instance, but subclasses and external callers may not. A lexical lambda created inside an `A` method retains that private-access authority with its lexical environment; an explicit or inherited `nlex` lambda does not. Runtime member dispatch enforces the same rule for dynamically linked/wildcard-imported values whose static type is `Unknown`, so imports cannot bypass private visibility. Public/structural class shapes expose only public members.
+
 Named executable declarations use a colon for the return type:
 
 ```ores
@@ -114,7 +116,7 @@ pub fnc run(): (() => void) {
 }
 ```
 
-The equivalent lambda-style declaration keeps executable `->` syntax:
+Named executable callables may spell their return type with either `: T` or `-> T`; both forms are equivalent. The equivalent lambda-style declaration also uses executable `->` syntax:
 
 ```ores
 pub fnc run = || -> (() => void) {
@@ -232,7 +234,7 @@ define class Combined extends Cacheable, Serializable implements HasId, Named as
 end
 ```
 
-Parent order is significant and is the deterministic v0.2 method-resolution order after child methods: the first declared parent is searched before the next parent. The static checker rejects inheritance cycles and incompatible inherited member shapes. Child members may override inherited members only with compatible types.
+Parent order is significant and is the deterministic v0.2 method-resolution order after child methods: the first declared parent is searched before the next parent. The static checker rejects inheritance cycles and incompatible inherited member shapes. Child **methods** may override inherited methods only with compatible types. Storage fields are not virtual slots: a field name must be unique across the effective inheritance graph, so child fields may not shadow inherited fields and two distinct parent fields may not collide. Reaching the same field declaration twice through a diamond is not a collision.
 
 `Object` and `List` are extensible base classes:
 
@@ -1018,7 +1020,8 @@ Static data fields are intentionally not part of v0.5 yet; `static` on a class b
 The arrows have distinct jobs:
 
 - `:` declares the return type of a **named executable callable/method**.
-- `->` is executable syntax for lambdas and lambda-style callable declarations.
+- `->` is executable syntax for lambdas and lambda-style callable declarations, and is also accepted as an alternative named-callable return separator: `fnc f() -> int { ... }`.
+- `:` remains an equivalent named-callable return separator: `fnc f(): int { ... }`.
 - `=>` is type-level syntax for function types and interface callable signatures.
 
 Function aliases can use `typeof fnc`:
