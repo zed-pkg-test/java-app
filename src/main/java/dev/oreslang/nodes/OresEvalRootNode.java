@@ -794,6 +794,12 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("routine " + fn.name()
                                 + " is direct-call-only and cannot be used as a first-class callable value");
                     }
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic fnc '" + fn.name()
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
+                    }
                     return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
                 }
                 throw new IllegalArgumentException("unknown name " + name.name());
