@@ -62,9 +62,15 @@ pub trait IntegrationRouteAuthority {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+struct PreviousSecret {
+    value: Vec<u8>,
+    valid_until: i64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct RotatingSecret {
     current: Vec<u8>,
-    previous: Option<Vec<u8>>,
+    previous: Option<PreviousSecret>,
 }
 
 impl fmt::Debug for RotatingSecret {
@@ -74,26 +80,44 @@ impl fmt::Debug for RotatingSecret {
             .field("current", &"<redacted>")
             .field(
                 "previous",
-                &self.previous.as_ref().map(|_| "<redacted>"),
+                &self.previous.as_ref().map(|previous| {
+                    ("<redacted>", previous.valid_until)
+                }),
             )
             .finish()
     }
 }
 
 impl RotatingSecret {
-    pub fn new(current: Vec<u8>, previous: Option<Vec<u8>>) -> Result<Self, ServiceError> {
-        if current.is_empty() || previous.as_ref().is_some_and(Vec::is_empty) {
+    pub fn new(
+        current: Vec<u8>,
+        previous: Option<(Vec<u8>, i64)>,
+    ) -> Result<Self, ServiceError> {
+        if current.is_empty()
+            || previous
+                .as_ref()
+                .is_some_and(|(value, _)| value.is_empty())
+        {
             return Err(ServiceError::InvalidSecretMaterial);
         }
-        Ok(Self { current, previous })
+        Ok(Self {
+            current,
+            previous: previous.map(|(value, valid_until)| PreviousSecret {
+                value,
+                valid_until,
+            }),
+        })
     }
 
     fn current(&self) -> &[u8] {
         &self.current
     }
 
-    fn previous(&self) -> Option<&[u8]> {
-        self.previous.as_deref()
+    fn previous(&self, now_unix_seconds: i64) -> Option<&[u8]> {
+        self.previous
+            .as_ref()
+            .filter(|previous| now_unix_seconds <= previous.valid_until)
+            .map(|previous| previous.value.as_slice())
     }
 }
 
@@ -200,7 +224,7 @@ where
     let route = selected.ok_or(ServiceError::RouteNotFound)?;
     let secret = resolve_provider_secret(secrets, &route)?;
 
-    verify_with_rotation(&secret, |candidate| {
+    verify_with_rotation(&secret, now_unix_seconds, |candidate| {
         verify_slack_request(
             candidate,
             ingress.timestamp_header,
@@ -241,7 +265,7 @@ where
     .ok_or(ServiceError::RouteNotFound)?;
     let secret = resolve_provider_secret(secrets, &route)?;
 
-    verify_with_rotation(&secret, |candidate| {
+    verify_with_rotation(&secret, now_unix_seconds, |candidate| {
         verify_zendesk_request(
             candidate,
             ingress.timestamp_header,
@@ -388,6 +412,7 @@ fn validate_gmail_mailbox(value: &str) -> Result<(), ServiceError> {
 
 fn verify_with_rotation<F>(
     secret: &RotatingSecret,
+    now_unix_seconds: i64,
     verify: F,
 ) -> Result<(), ServiceError>
 where
@@ -396,7 +421,7 @@ where
     match verify(secret.current()) {
         Ok(()) => Ok(()),
         Err(VerificationError::InvalidSignature) => {
-            let Some(previous) = secret.previous() else {
+            let Some(previous) = secret.previous(now_unix_seconds) else {
                 return Err(ServiceError::Verification(
                     VerificationError::InvalidSignature,
                 ));
@@ -528,7 +553,10 @@ mod tests {
                 "secret://provider/current".to_owned(),
                 RotatingSecret::new(
                     b"new-secret-not-active-at-provider".to_vec(),
-                    Some(b"8f742231b10e8888abcd99yyyzzz85a5".to_vec()),
+                    Some((
+                        b"8f742231b10e8888abcd99yyyzzz85a5".to_vec(),
+                        1_531_420_700,
+                    )),
                 )
                 .expect("valid rotation"),
             )],
@@ -570,6 +598,57 @@ mod tests {
         assert!(crate::private_assertion_headers_are_canonical(
             headers.iter().map(|(name, _)| name.as_str())
         ));
+    }
+
+    #[test]
+    fn expired_previous_provider_secret_is_not_accepted() {
+        let authority = StaticAuthority {
+            routes: vec![route(
+                "slack",
+                "slack_team",
+                "T1DC2JH3J",
+                "tenant-a",
+                "integration-a",
+            )],
+            fail: None,
+        };
+        let secrets = StaticSecrets {
+            values: vec![(
+                "secret://provider/current".to_owned(),
+                RotatingSecret::new(
+                    b"new-secret-not-active-at-provider".to_vec(),
+                    Some((
+                        b"8f742231b10e8888abcd99yyyzzz85a5".to_vec(),
+                        1_531_420_617,
+                    )),
+                )
+                .expect("valid bounded rotation"),
+            )],
+            fail: None,
+        };
+        let body = b"token=xyzz0WbapA4vBCDEFasx0q6G&team_id=T1DC2JH3J&team_domain=testteamnow&channel_id=G8PSS9T3V&channel_name=foobar&user_id=U2CERLKJA&user_name=roadrunner&command=%2Fwebhook-collect&text=&response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2FT1DC2JH3J%2F397700885554%2F96rGlfmibIGlgcZRskXaIFfN&trigger_id=398738663015.47445629121.803a0bc887a14d10d2c447fce8b6703c";
+
+        let error = verify_slack_and_mint(
+            &authority,
+            &secrets,
+            SlackIngress {
+                team_id: Some("T1DC2JH3J"),
+                enterprise_id: None,
+                timestamp_header: "1531420618",
+                signature_header:
+                    "v0=a2114d57b48eac39b9ad189dd8316235a7b4a8d21a10bd27519666489c69b503",
+                raw_body: body,
+            },
+            1_531_420_618,
+            300,
+            b"0123456789abcdef0123456789abcdef",
+        )
+        .expect_err("expired previous secret must not remain an authentication key");
+
+        assert_eq!(
+            error,
+            ServiceError::Verification(VerificationError::InvalidSignature)
+        );
     }
 
     #[test]
