@@ -1,10 +1,10 @@
 import fnc {a_value} from "./a.ores";
 
-pub fnc b_value() => String {
+pub fnc b_value(): String {
   return "B";
 }
 
-fnc init() => void {
+fnc init(): void {
   stdio.stdout.write("init-b:");
   stdio.stdout.write(a_value());
   stdio.stdout.write("|");

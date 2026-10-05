@@ -11,9 +11,7 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -25,6 +23,7 @@ public final class OresContext implements AutoCloseable {
     private final BufferedReader input;
     private final PrintWriter output;
     private final ActorRuntime actors;
+    private final AsyncRuntime asyncRuntime;
     private final RuntimeGarbageCollector garbageCollector;
     private final UUID contextId = UUID.randomUUID();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
@@ -32,9 +31,7 @@ public final class OresContext implements AutoCloseable {
     private final ExecutionProfile executionProfile;
     private final ReentrantLock adversarialActorTurnLock = new ReentrantLock(true);
     private final Map<String, Object> linkedCodeUnits = new HashMap<>();
-    private final Set<AutoCloseable> nativeResources = ConcurrentHashMap.newKeySet();
-    private final Object nativeResourceLifecycleLock = new Object();
-    private boolean nativeResourceRegistrationClosed;
+    private final Map<String, Map<String, String>> linkedImportResolutions = new HashMap<>();
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
@@ -47,6 +44,7 @@ public final class OresContext implements AutoCloseable {
                 isolatePolicy,
                 ActorRuntime.DispatcherConfig.defaults(),
                 this::executeActorTurn);
+        this.asyncRuntime = new AsyncRuntime(this::executeAsyncTurn);
         this.garbageCollector = new RuntimeGarbageCollector();
         this.actors.setActorExitHook(garbageCollector::retireActorDomain);
     }
@@ -60,6 +58,7 @@ public final class OresContext implements AutoCloseable {
     public BufferedReader input() { return input; }
     public PrintWriter output() { return output; }
     public ActorRuntime actors() { return actors; }
+    public AsyncRuntime asyncRuntime() { return asyncRuntime; }
     public RuntimeGarbageCollector garbageCollector() { return garbageCollector; }
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
@@ -114,30 +113,6 @@ public final class OresContext implements AutoCloseable {
 
     public long schedulerSafepoints() { return schedulerSafepoints.get(); }
 
-    public void registerNativeResource(AutoCloseable resource) {
-        java.util.Objects.requireNonNull(resource, "resource");
-        synchronized (nativeResourceLifecycleLock) {
-            if (nativeResourceRegistrationClosed) {
-                try {
-                    resource.close();
-                } catch (Exception closeFailure) {
-                    throw new IllegalStateException(
-                            "Oreslang context is closed and late native resource cleanup failed",
-                            closeFailure);
-                }
-                throw new IllegalStateException(
-                        "Oreslang context is closed; native resources cannot be registered");
-            }
-            nativeResources.add(resource);
-        }
-    }
-
-    public void unregisterNativeResource(AutoCloseable resource) {
-        synchronized (nativeResourceLifecycleLock) {
-            nativeResources.remove(resource);
-        }
-    }
-
     /**
      * Host-managed cross-file link registry. Guest imports may only observe
      * units that the host has explicitly loaded into this context; import
@@ -161,8 +136,63 @@ public final class OresContext implements AutoCloseable {
         return linkedCodeUnits.containsKey(codeUnitId);
     }
 
+    /**
+     * Registers the host compiler's exact filesystem resolution for one import.
+     * Guest code can only consume these aliases; it does not gain filesystem
+     * access by knowing the resolved target.
+     */
+    public synchronized void registerLinkedImportResolution(
+            String importerCodeUnitId,
+            String importPath,
+            String targetCodeUnitId) {
+        if (importerCodeUnitId == null || importerCodeUnitId.isBlank()) {
+            throw new IllegalArgumentException("importer code unit id cannot be blank");
+        }
+        if (importPath == null || importPath.isBlank()) {
+            throw new IllegalArgumentException("linked import path cannot be blank");
+        }
+        if (targetCodeUnitId == null || targetCodeUnitId.isBlank()) {
+            throw new IllegalArgumentException("target code unit id cannot be blank");
+        }
+
+        Map<String, String> imports = linkedImportResolutions.computeIfAbsent(
+                normalizeCodeUnitId(importerCodeUnitId),
+                ignored -> new HashMap<>());
+        String target = normalizeCodeUnitId(targetCodeUnitId);
+        String previous = imports.putIfAbsent(importPath, target);
+        if (previous != null && !previous.equals(target)) {
+            throw new IllegalStateException(
+                    "conflicting import resolution for '" + importPath + "' in '" + importerCodeUnitId + "'");
+        }
+    }
+
+    public synchronized String resolvedLinkedImport(String importerCodeUnitId, String importPath) {
+        Map<String, String> imports = linkedImportResolutions.get(normalizeCodeUnitId(importerCodeUnitId));
+        return imports == null ? null : imports.get(importPath);
+    }
+
+    private static String normalizeCodeUnitId(String id) {
+        return java.nio.file.Path.of(id).normalize().toString().replace('\\', '/');
+    }
+
     private void executeActorTurn(Runnable turn) {
-        boolean serialize = isolatePolicy.adversarial();
+        executeGuestTurn(turn, isolatePolicy.adversarial());
+    }
+
+    private void executeAsyncTurn(Runnable turn) {
+        // The current interpreter executes an async callable as one virtual-
+        // thread task. Holding the adversarial actor serialization lock across
+        // an await could deadlock a nested async task, so strict/adversarial
+        // profiles fail closed until compiler continuation lowering can release
+        // the guest turn at each await suspension point.
+        if (isolatePolicy.adversarial()) {
+            throw new SecurityException(
+                    "async callable execution in adversarial contexts requires continuation lowering");
+        }
+        executeGuestTurn(turn, false);
+    }
+
+    private void executeGuestTurn(Runnable turn, boolean serialize) {
         if (serialize) adversarialActorTurnLock.lock();
         TruffleContext truffleContext = env.getContext();
         Object previous = null;
@@ -185,29 +215,31 @@ public final class OresContext implements AutoCloseable {
                 "language", "oreslang",
                 "execution_mode", executionProfile.mode().name(),
                 "platform", executionProfile.platform().name(),
+                "actor_carrier_backend", actors.carrierBackend().name().toLowerCase(java.util.Locale.ROOT),
                 "scheduler_safepoints", schedulerSafepoints.get());
     }
 
     @Override
     public void close() {
+        RuntimeException failure = null;
+        try {
+            asyncRuntime.close();
+        } catch (RuntimeException asyncFailure) {
+            failure = asyncFailure;
+        }
         try {
             actors.close();
+        } catch (RuntimeException actorFailure) {
+            if (failure == null) failure = actorFailure;
+            else failure.addSuppressed(actorFailure);
         } finally {
             synchronized (this) {
                 linkedCodeUnits.clear();
-            }
-            AutoCloseable[] resources;
-            synchronized (nativeResourceLifecycleLock) {
-                nativeResourceRegistrationClosed = true;
-                resources = nativeResources.toArray(AutoCloseable[]::new);
-                nativeResources.clear();
-            }
-            for (AutoCloseable resource : resources) {
-                try { resource.close(); }
-                catch (Exception ignored) { }
+                linkedImportResolutions.clear();
             }
             garbageCollector.close();
             output.flush();
         }
+        if (failure != null) throw failure;
     }
 }

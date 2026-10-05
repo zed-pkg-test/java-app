@@ -18,75 +18,66 @@ import static org.junit.jupiter.api.Assertions.*;
 final class ActorCallableKeywordTest {
 
     @Test
-    void actorIsPrivateSharedIsExplicitAndIsoactorIsPrivate() {
-        List<Token> tokens = new Lexer("actor isoactor shared").scan();
+    void actorIsSharedAndIsoactorIsPrivateForFunctionsRoutinesAndClasses() {
+        List<Token> tokens = new Lexer("actor isoactor").scan();
         assertEquals(Token.Type.ACTOR, tokens.get(0).type());
         assertEquals(Token.Type.ISOACTOR, tokens.get(1).type());
 
         Ast.Program program = Parser.parse("""
-                actor fnc private_fnc() => void { return; }
-                actor routine private_routine() => void { return; }
-                shared actor fnc shared_fnc() => void { return; }
-                shared actor routine shared_routine() => void { return; }
-                isoactor fnc isolated_fnc() => void { return; }
-                isoactor routine isolated_routine() => void { return; }
+                actor fnc shared_fnc(): void { return; }
+                actor routine shared_routine(): void { return; }
+                isoactor fnc private_fnc(): void { return; }
+                isoactor routine private_routine(): void { return; }
 
-                actor PrivateBox {
+                actor SharedBox {
                   let int value = 1;
                 }
 
-                shared actor SharedBox {
-                  let int value = 1;
-                }
-
-                isoactor IsolatedBox {
+                isoactor PrivateBox {
                   let int value = 1;
                 }
                 """);
 
         List<Ast.Decl> declarations = program.modules().getFirst().declarations();
 
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(0)).actorKind());
+        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(0)).actorKind());
         assertEquals(Ast.CallableKind.FNC, ((Ast.FunctionDecl) declarations.get(0)).kind());
 
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(1)).actorKind());
+        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(1)).actorKind());
         assertEquals(Ast.CallableKind.ROUTINE, ((Ast.FunctionDecl) declarations.get(1)).kind());
 
-        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(2)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(2)).actorKind());
         assertEquals(Ast.CallableKind.FNC, ((Ast.FunctionDecl) declarations.get(2)).kind());
 
-        assertEquals(Ast.ActorKind.SHARED, ((Ast.FunctionDecl) declarations.get(3)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(3)).actorKind());
         assertEquals(Ast.CallableKind.ROUTINE, ((Ast.FunctionDecl) declarations.get(3)).kind());
 
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(4)).actorKind());
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.FunctionDecl) declarations.get(5)).actorKind());
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.ClassDecl) declarations.get(6)).actorKind());
-        assertEquals(Ast.ActorKind.SHARED, ((Ast.ClassDecl) declarations.get(7)).actorKind());
-        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.ClassDecl) declarations.get(8)).actorKind());
+        assertEquals(Ast.ActorKind.SHARED, ((Ast.ClassDecl) declarations.get(4)).actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, ((Ast.ClassDecl) declarations.get(5)).actorKind());
     }
 
     @Test
     void actorCallablesSpawnFreshActorsAndPreserveDeclaredResults() throws Exception {
         String output = run("""
-                actor fnc add_one(int value) => int {
+                actor fnc add_one(int value): int {
                   return value + 1;
                 }
 
-                actor routine shared_emit(String value) => void {
+                actor routine shared_emit(String value): void {
                   stdio.stdout.write(value);
                   return;
                 }
 
-                isoactor fnc double_it(int value) => int {
+                isoactor fnc double_it(int value): int {
                   return value * 2;
                 }
 
-                isoactor routine private_emit(String value) => void {
+                isoactor routine private_emit(String value): void {
                   stdio.stdout.write(value);
                   return;
                 }
 
-                pub routine main() => void {
+                pub routine main(): void {
                   stdio.stdout.write(add_one(41));
                   stdio.stdout.write(":");
                   shared_emit("shared");
@@ -104,14 +95,14 @@ final class ActorCallableKeywordTest {
     @Test
     void actorKeywordsRemainReservedButActorBuiltinNamespaceStillParses() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                pub routine main() => void {
+                pub routine main(): void {
                   val int isoactor = 1;
                   return;
                 }
                 """));
 
         assertDoesNotThrow(() -> Parser.parse("""
-                pub routine main() => void {
+                pub routine main(): void {
                   actor.gc();
                   return;
                 }
@@ -121,42 +112,42 @@ final class ActorCallableKeywordTest {
     @Test
     void actorMainRemainsForbidden() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                pub actor fnc main() => void { return; }
+                pub actor fnc main(): void { return; }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                pub isoactor routine main() => void { return; }
+                pub isoactor routine main(): void { return; }
                 """)));
     }
 
     @Test
     void actorBoundaryTypesAreCheckedStatically() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                actor fnc invalid(Mutex<int> value) => void { return; }
+                actor fnc invalid(Mutex<int> value): void { return; }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                actor fnc invalid(MutexGuard<int> value) => void { return; }
+                actor fnc invalid(MutexGuard<int> value): void { return; }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                isoactor fnc invalid(SharedMutex<int> value) => void { return; }
+                isoactor fnc invalid(SharedMutex<int> value): void { return; }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                actor fnc invalid(Future<int> value) => void { return; }
+                actor fnc invalid(Future<int> value): void { return; }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                actor fnc invalid(&int value) => void { return; }
+                actor fnc invalid(&int value): void { return; }
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                shared actor fnc valid(SharedMutex<int> value) => void { return; }
+                actor fnc valid(SharedMutex<int> value): void { return; }
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                isoactor fnc valid(int value) => int { return value; }
+                isoactor fnc valid(int value): int { return value; }
                 """)));
     }
 
@@ -165,11 +156,11 @@ final class ActorCallableKeywordTest {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
-                        actor fnc child(int value) => int {
+                        actor fnc child(int value): int {
                           return value + 1;
                         }
 
-                        actor fnc parent(int value) => int {
+                        actor fnc parent(int value): int {
                           return child(value);
                         }
                         """)));

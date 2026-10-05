@@ -15,6 +15,16 @@ public final class OresCompiler {
     }
 
     /**
+     * Parse and type-check the complete source first, then perform closed-world
+     * build optimization. Type errors in code that later becomes unreachable
+     * are still reported; tree shaking is an optimization, not conditional
+     * compilation that hides invalid source.
+     */
+    public static TreeShaker.Result compileForBuild(String source, BuildOptions options) {
+        return TreeShaker.shake(parseAndTypeCheck(source), options);
+    }
+
+    /**
      * Performs syntax, type, and language-capability admission without
      * executing guest code.
      */

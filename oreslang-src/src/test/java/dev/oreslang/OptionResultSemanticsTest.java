@@ -16,27 +16,27 @@ final class OptionResultSemanticsTest {
     void typechecksOptionAndResultExtractionSurface() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc option_value(Option<int> value) => int {
+                  fnc option_value(Option<int> value): int {
                     return value.unwrap();
                   }
 
-                  fnc option_safe(Option<int> value) => Result<int, OptionUnwrapError> {
+                  fnc option_safe(Option<int> value): Result<int, OptionUnwrapError> {
                     return value.unwrap_safe();
                   }
 
-                  fnc option_default(Option<int> value) => int {
+                  fnc option_default(Option<int> value): int {
                     return value.unwrap_or(7);
                   }
 
-                  fnc result_value(Result<int, String> value) => int {
+                  fnc result_value(Result<int, String> value): int {
                     return value.expect("expected an integer");
                   }
 
-                  fnc result_safe(Result<int, String> value) => Result<int, String> {
+                  fnc result_safe(Result<int, String> value): Result<int, String> {
                     return value.unwrap_safe();
                   }
 
-                  fnc constructors() => Result<int, String> {
+                  fnc constructors(): Result<int, String> {
                     val Option<int> some = Some(42);
                     val Option<int> none = None;
                     val Result<int, String> ok = Ok(some.unwrap());
@@ -53,14 +53,14 @@ final class OptionResultSemanticsTest {
     @Test
     void sumTypesRejectCrossVariantAndUnknownMembers() {
         IllegalArgumentException option = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                fnc bad(Option<int> value) => bool {
+                fnc bad(Option<int> value): bool {
                   return value.is_ok();
                 }
                 """)));
         assertTrue(option.getMessage().contains("unknown Option member"));
 
         IllegalArgumentException result = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                fnc bad(Result<int, String> value) => bool {
+                fnc bad(Result<int, String> value): bool {
                   return value.is_some();
                 }
                 """)));
@@ -71,7 +71,7 @@ final class OptionResultSemanticsTest {
     void resultRequiresTwoExplicitTypeArguments() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad(Result<int> value) => int {
+                  fnc bad(Result<int> value): int {
                     return 1;
                   }
                 end
@@ -82,7 +82,7 @@ final class OptionResultSemanticsTest {
     void runtimeSupportsSafeAndPanickingExtraction() throws Exception {
         String program = """
                 define module app
-                  pub fnc main() => void {
+                  pub fnc main(): void {
                     val some = Some(42);
                     stdio.println(some.is_some());
                     stdio.println(some.unwrap());
@@ -124,11 +124,11 @@ final class OptionResultSemanticsTest {
     @Test
     void stringPayloadConstructorsWidenToString() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc option() => Option<String> {
+                fnc option(): Option<String> {
                   return Some("hello");
                 }
 
-                fnc result() => Result<int, String> {
+                fnc result(): Result<int, String> {
                   return Err("bad");
                 }
                 """)));
@@ -138,7 +138,7 @@ final class OptionResultSemanticsTest {
     void unwrapNoneRaisesLanguagePanicThatOrdinaryCatchCannotSwallow() throws Exception {
         String program = """
                 define module app
-                  pub fnc main() => void {
+                  pub fnc main(): void {
                     try {
                       None.unwrap();
                     } catch (err) {
@@ -169,11 +169,11 @@ final class OptionResultSemanticsTest {
                 define class Box as
                 end
 
-                fnc consume(Option<Box> value) => void {
+                fnc consume(Option<Box> value): void {
                   return;
                 }
 
-                fnc bad() => void {
+                fnc bad(): void {
                   val Option<Box> value = None;
                   consume(value);
                   consume(value);
@@ -183,11 +183,11 @@ final class OptionResultSemanticsTest {
         assertTrue(moved.getMessage().contains("moved value"));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc consume(Option<int> value) => void {
+                fnc consume(Option<int> value): void {
                   return;
                 }
 
-                fnc good() => void {
+                fnc good(): void {
                   val Option<int> value = None;
                   consume(value);
                   consume(value);
@@ -202,7 +202,7 @@ final class OptionResultSemanticsTest {
                 define class Box as
                 end
 
-                fnc bad() => void {
+                fnc bad(): void {
                   let Box box = new Box();
                   val first = Some(box);
                   val second = Some(box);
@@ -215,7 +215,7 @@ final class OptionResultSemanticsTest {
                 define class Box as
                 end
 
-                fnc bad() => void {
+                fnc bad(): void {
                   val Option<Box> value = Some(new Box());
                   val first = value.unwrap();
                   val second = value.unwrap();
@@ -231,7 +231,7 @@ final class OptionResultSemanticsTest {
                 define class Box as
                 end
 
-                fnc bad() => void {
+                fnc bad(): void {
                   let Box box = new Box();
                   val maybe = Some(&box);
                   return;
@@ -246,7 +246,7 @@ final class OptionResultSemanticsTest {
                 define class Box as
                 end
 
-                fnc good() => void {
+                fnc good(): void {
                   let Mutex<Box> mutex = Mutex.new(new Box());
                   val maybe = mutex.try_lock();
                   val guard = maybe.unwrap();
@@ -259,7 +259,7 @@ final class OptionResultSemanticsTest {
                 define class Box as
                 end
 
-                fnc bad() => void {
+                fnc bad(): void {
                   let Mutex<Box> mutex = Mutex.new(new Box());
                   val maybe = mutex.try_lock();
                   val guard = maybe.unwrap();

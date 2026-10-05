@@ -12,7 +12,7 @@ shared actor SharedCounter {
   let SharedMutex<CounterState> shared_count =
       SharedMutex.new(new CounterState());
 
-  pub fnc increment() => bool {
+  pub fnc increment(): bool {
     self.local_count = self.local_count + 1;
 
     // Actor mailbox turns must never park a dispatcher carrier. Until actor
@@ -32,11 +32,11 @@ shared actor SharedCounter {
     return true;
   }
 
-  pub fnc local_value() => int {
+  pub fnc local_value(): int {
     return self.local_count;
   }
 
-  pub fnc actor_kind() => String {
+  pub fnc actor_kind(): String {
     return actor_label(true);
   }
 }
@@ -49,16 +49,16 @@ shared actor SharedCounter {
 isoactor PrivateCounter {
   let int value = 10;
 
-  pub fnc increment() => void {
+  pub fnc increment(): void {
     self.value = self.value + 1;
     return;
   }
 
-  pub fnc current() => int {
+  pub fnc current(): int {
     return self.value;
   }
 
-  pub fnc actor_kind() => String {
+  pub fnc actor_kind(): String {
     return actor_label(false);
   }
 }
@@ -79,7 +79,7 @@ isoactor PrivateCounter {
  *   let SharedMutex<CounterState> shared_count =
  *       SharedMutex.new(new CounterState());
  *
- *   pub fnc increment_shared() => void {
+ *   pub fnc increment_shared(): void {
  *     self.shared_count.with_lock(|counter| -> {
  *       counter.value = counter.value + 1;
  *       return;

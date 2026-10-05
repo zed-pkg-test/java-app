@@ -16,11 +16,11 @@ final class GenericsAndOperatorsHardeningTest {
     void infersGenericFunctionArgumentsWithoutTreatingTAsAny() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc identity<T>(T value) => T {
+                  fnc identity<T>(T value): T {
                     return value;
                   }
 
-                  fnc use() => void {
+                  fnc use(): void {
                     val int number = identity(42);
                     val String label = identity("ores");
                     return;
@@ -30,7 +30,7 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc unsound<T>() => T {
+                  fnc unsound<T>(): T {
                     return 42;
                   }
                 end
@@ -44,16 +44,16 @@ final class GenericsAndOperatorsHardeningTest {
                   define class Box<T> as
                     pub val T value;
 
-                    pub get() => T {
+                    pub get(): T {
                       return self.value;
                     }
                   end
 
-                  fnc read(Box<int> box) => int {
+                  fnc read(Box<int> box): int {
                     return box.get();
                   }
 
-                  fnc make() => Box<int> {
+                  fnc make(): Box<int> {
                     return new Box<int>(7);
                   }
                 end
@@ -66,7 +66,7 @@ final class GenericsAndOperatorsHardeningTest {
                     val B right;
                   end
 
-                  fnc bad(Pair<int> pair) => void {
+                  fnc bad(Pair<int> pair): void {
                     return;
                   }
                 end
@@ -78,11 +78,11 @@ final class GenericsAndOperatorsHardeningTest {
     void explicitGenericCallsAndInferenceMarkersAreChecked() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc identity<T>(T value) => T {
+                  fnc identity<T>(T value): T {
                     return value;
                   }
 
-                  fnc use() => void {
+                  fnc use(): void {
                     val explicit = identity<int>(42);
                     val inferred = identity<>(42);
                     stdio.println(explicit);
@@ -96,8 +96,8 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc identity<T>(T value) => T { return value; }
-                  fnc bad() => void {
+                  fnc identity<T>(T value): T { return value; }
+                  fnc bad(): void {
                     val int value = identity<int>("wrong");
                     return;
                   }
@@ -106,8 +106,8 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc plain(int value) => int { return value; }
-                  fnc bad() => int { return plain<>(1); }
+                  fnc plain(int value): int { return value; }
+                  fnc bad(): int { return plain<>(1); }
                 end
                 """)));
     }
@@ -123,7 +123,7 @@ final class GenericsAndOperatorsHardeningTest {
                   define class Parent<T> as
                     pub val T value;
 
-                    pub get() => T {
+                    pub get(): T {
                       return self.value;
                     }
                   end
@@ -134,29 +134,29 @@ final class GenericsAndOperatorsHardeningTest {
                   define class IntChild extends Parent<int> as
                   end
 
-                  fnc read(Child<int> child) => int {
+                  fnc read(Child<int> child): int {
                     return child.get();
                   }
 
-                  fnc reuseInheritedGenericResult(Child<int> child) => void {
+                  fnc reuseInheritedGenericResult(Child<int> child): void {
                     val value = child.get();
                     stdio.println(value);
                     stdio.println(value);
                     return;
                   }
 
-                  fnc readField(IntChild child) => int {
+                  fnc readField(IntChild child): int {
                     return child.value;
                   }
 
-                  fnc reuseInheritedGenericField(IntChild child) => void {
+                  fnc reuseInheritedGenericField(IntChild child): void {
                     val value = child.value;
                     stdio.println(value);
                     stdio.println(value);
                     return;
                   }
 
-                  fnc make() => Child<int> {
+                  fnc make(): Child<int> {
                     return new Child<int>(7);
                   }
                 end
@@ -167,13 +167,13 @@ final class GenericsAndOperatorsHardeningTest {
     void qualifiedGenericCallsInferButUnspecializedGenericValuesAreRejected() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module util
-                  pub fnc identity<T>(T value) => T {
+                  pub fnc identity<T>(T value): T {
                     return value;
                   }
                 end
 
                 define module app
-                  fnc use() => void {
+                  fnc use(): void {
                     val value = util.identity<>(7);
                     stdio.println(value);
                     stdio.println(value);
@@ -184,9 +184,9 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc identity<T>(T value) => T { return value; }
+                  fnc identity<T>(T value): T { return value; }
 
-                  fnc bad() => void {
+                  fnc bad(): void {
                     val f = identity;
                     return;
                   }
@@ -195,11 +195,11 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module util
-                  pub fnc identity<T>(T value) => T { return value; }
+                  pub fnc identity<T>(T value): T { return value; }
                 end
 
                 define module app
-                  fnc bad() => void {
+                  fnc bad(): void {
                     val f = util.identity;
                     return;
                   }
@@ -209,10 +209,10 @@ final class GenericsAndOperatorsHardeningTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
                   define class Box as
-                    pub map<T>(T value) => T { return value; }
+                    pub map<T>(T value): T { return value; }
                   end
 
-                  fnc bad(Box box) => void {
+                  fnc bad(Box box): void {
                     val f = box.map;
                     return;
                   }
@@ -225,11 +225,11 @@ final class GenericsAndOperatorsHardeningTest {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         define module app
-                          fnc identity<T>(T value) => T {
+                          fnc identity<T>(T value): T {
                             return value;
                           }
 
-                          fnc bad() => void {
+                          fnc bad(): void {
                             val value = identity(arr[]);
                             return;
                           }
@@ -246,7 +246,7 @@ final class GenericsAndOperatorsHardeningTest {
                     pub val T value;
                   end
 
-                  fnc use(Box<int> box) => void {
+                  fnc use(Box<int> box): void {
                     const {value} = box;
                     stdio.println(value);
                     stdio.println(value);
@@ -265,7 +265,7 @@ final class GenericsAndOperatorsHardeningTest {
                   end
 
                   define class Good<T> implements Mapper<T> as
-                    pub map<V>(T input, V fallback) => V {
+                    pub map<V>(T input, V fallback): V {
                       return fallback;
                     }
                   end
@@ -279,7 +279,7 @@ final class GenericsAndOperatorsHardeningTest {
                   end
 
                   define class Bad<T> implements Mapper<T> as
-                    pub map<A, B>(T input, A fallback) => A {
+                    pub map<A, B>(T input, A fallback): A {
                       return fallback;
                     }
                   end
@@ -305,10 +305,10 @@ final class GenericsAndOperatorsHardeningTest {
                   define class Child<T> extends Parent<T> implements ExtendedValue<T> as
                   end
 
-                  fnc takeParentInt(Parent<int> value) => void { return; }
-                  fnc takeValueInt(HasValue<int> value) => void { return; }
+                  fnc takeParentInt(Parent<int> value): void { return; }
+                  fnc takeValueInt(HasValue<int> value): void { return; }
 
-                  fnc ok(Child<int> parentValue, Child<int> interfaceValue) => void {
+                  fnc ok(Child<int> parentValue, Child<int> interfaceValue): void {
                     takeParentInt(parentValue);
                     takeValueInt(interfaceValue);
                     return;
@@ -325,9 +325,9 @@ final class GenericsAndOperatorsHardeningTest {
                   define class Child<T> extends Parent<T> as
                   end
 
-                  fnc takeString(Parent<String> value) => void { return; }
+                  fnc takeString(Parent<String> value): void { return; }
 
-                  fnc bad(Child<int> value) => void {
+                  fnc bad(Child<int> value): void {
                     takeString(value);
                     return;
                   }
@@ -347,9 +347,9 @@ final class GenericsAndOperatorsHardeningTest {
                     pub val T value;
                   end
 
-                  fnc takeString(HasValue<String> value) => void { return; }
+                  fnc takeString(HasValue<String> value): void { return; }
 
-                  fnc bad(Box<int> value) => void {
+                  fnc bad(Box<int> value): void {
                     takeString(value);
                     return;
                   }
@@ -362,14 +362,14 @@ final class GenericsAndOperatorsHardeningTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module model
                   define class Box<T> as
-                    pub static fnc identity<U>(U value) => U {
+                    pub static fnc identity<U>(U value): U {
                       return value;
                     }
                   end
                 end
 
                 define module app
-                  fnc use() => void {
+                  fnc use(): void {
                     val value = model.Box.identity<>(7);
                     stdio.println(value);
                     stdio.println(value);
@@ -382,7 +382,7 @@ final class GenericsAndOperatorsHardeningTest {
                 () -> TypeChecker.check(Parser.parse("""
                         define module app
                           define class Bad<T> as
-                            pub static fnc leak(T value) => T {
+                            pub static fnc leak(T value): T {
                               return value;
                             }
                           end
@@ -394,7 +394,7 @@ final class GenericsAndOperatorsHardeningTest {
                 () -> TypeChecker.check(Parser.parse("""
                         define module app
                           define class Bad<T> as
-                            pub static fnc leakInside() => void {
+                            pub static fnc leakInside(): void {
                               val T value = process.dynamic;
                               return;
                             }
@@ -419,7 +419,7 @@ final class GenericsAndOperatorsHardeningTest {
                   define class Child<U> extends Parent<U> as
                   end
 
-                  fnc use() => void {
+                  fnc use(): void {
                     val box = new Box<>(7);
                     val number = box.value;
                     stdio.println(number);
@@ -443,7 +443,7 @@ final class GenericsAndOperatorsHardeningTest {
                           define class Phantom<T> as
                           end
 
-                          fnc bad() => void {
+                          fnc bad(): void {
                             val value = new Phantom<>();
                             return;
                           }
@@ -459,7 +459,7 @@ final class GenericsAndOperatorsHardeningTest {
                             pub val T right;
                           end
 
-                          fnc bad() => void {
+                          fnc bad(): void {
                             val value = new Same<>(1, "mixed");
                             return;
                           }
@@ -472,7 +472,7 @@ final class GenericsAndOperatorsHardeningTest {
     void spacedComparisonsAreNotMistakenForGenericCalls() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc between(int a, int b, int c) => bool {
+                  fnc between(int a, int b, int c): bool {
                     return a < b && b > (c);
                   }
                 end
@@ -483,7 +483,7 @@ final class GenericsAndOperatorsHardeningTest {
     void nestedGenericClosersDoNotBecomeShiftOperators() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc keep(Option<Array<int>> value) => Option<Array<int>> {
+                  fnc keep(Option<Array<int>> value): Option<Array<int>> {
                     return value;
                   }
                 end
@@ -494,11 +494,11 @@ final class GenericsAndOperatorsHardeningTest {
     void logicalAndBitwiseFamiliesHaveDistinctTypesAndPrecedence() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bits(int a, int b) => int {
+                  fnc bits(int a, int b): int {
                     return ((~a & b) | (a ^ b)) << 1 >> 1 >>> 1;
                   }
 
-                  fnc logic(bool a, bool b) => bool {
+                  fnc logic(bool a, bool b): bool {
                     return a && b || a ^^ b;
                   }
                 end
@@ -506,7 +506,7 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad(bool a, bool b) => bool {
+                  fnc bad(bool a, bool b): bool {
                     return a | b;
                   }
                 end
@@ -514,7 +514,7 @@ final class GenericsAndOperatorsHardeningTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad(float a, int b) => int {
+                  fnc bad(float a, int b): int {
                     return a & b;
                   }
                 end
@@ -525,13 +525,13 @@ final class GenericsAndOperatorsHardeningTest {
     void zeroArgumentLambdaStillUsesDoublePipeAndRuntimeExecutesBitwiseOps() throws Exception {
         String program = """
                 define module app
-                  fnc callback() => (() -> int) {
+                  fnc callback(): (() => int) {
                     return || -> {
                       return 7;
                     };
                   }
 
-                  pub fnc main() => void {
+                  pub fnc main(): void {
                     stdio.println((5 & 3) | (8 >> 2));
                     stdio.println(true ^^ false);
                     stdio.println(false && [true][99]);

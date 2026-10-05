@@ -7,13 +7,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Compile-time expansion for language-defined serialization annotations.
+ * Compile-time expansion for language-defined annotations/attributes.
  *
- * <p>Expansion produces ordinary typed AST methods before semantic checking.
- * Guest code never receives reflection or macro-execution authority.
+ * The source parser preserves annotations in the AST. This pass turns
+ * annotations with code-generation semantics into ordinary AST nodes before
+ * type/ownership checking and execution, keeping the runtime reflection-free.
  */
 public final class AnnotationExpander {
     public static final String FROM_JSON = "FromJson";
+
+    /** Internal-only markers. '$' cannot be written as an Oreslang identifier. */
     public static final String GENERATED_FROM_JSON_GETTER = "$generated.fromJson.getter";
     public static final String GENERATED_FROM_JSON_SETTER = "$generated.fromJson.setter";
 
@@ -40,34 +43,22 @@ public final class AnnotationExpander {
         return hasAnnotation(method.annotations(), GENERATED_FROM_JSON_GETTER);
     }
 
-    public static String fromJsonKey(Ast.FieldDecl field) {
-        Ast.Annotation found = null;
-        for (Ast.Annotation annotation : field.annotations()) {
-            if (!annotation.name().equals(FROM_JSON)) continue;
-            if (found != null) {
-                throw new IllegalArgumentException(
-                        "field '" + field.name() + "' has duplicate @FromJson annotations");
-            }
-            found = annotation;
-        }
-        if (found == null) return null;
-        if (found.arguments().size() != 1 || !found.arguments().getFirst().isStringLiteral()) {
-            throw new IllegalArgumentException(
-                    "@FromJson on field '" + field.name() + "' requires exactly one string key");
-        }
-        String key = found.arguments().getFirst().stringLiteralValue();
-        if (key.isBlank()) {
-            throw new IllegalArgumentException(
-                    "@FromJson key for field '" + field.name() + "' cannot be blank");
-        }
-        return key;
-    }
-
+    /**
+     * Stable metadata consumed by JSON codecs. The codec can look up an
+     * incoming JSON key, then invoke the named generated setter. This keeps
+     * deserialization dispatch explicit and reflection-free.
+     */
     public static List<FromJsonBinding> fromJsonBindings(Ast.ClassDecl klass) {
         List<FromJsonBinding> result = new ArrayList<>();
+        Map<String, String> keys = new LinkedHashMap<>();
         for (Ast.FieldDecl field : klass.fields()) {
             String jsonKey = fromJsonKey(field);
             if (jsonKey == null) continue;
+            String previous = keys.putIfAbsent(jsonKey, field.name());
+            if (previous != null && !previous.equals(field.name())) {
+                throw new IllegalArgumentException("duplicate @FromJson key '" + jsonKey + "' on fields '"
+                        + previous + "' and '" + field.name() + "' in class " + klass.name());
+            }
             String suffix = accessorSuffix(field.name());
             result.add(new FromJsonBinding(
                     jsonKey,
@@ -79,25 +70,43 @@ public final class AnnotationExpander {
         return List.copyOf(result);
     }
 
+    /**
+     * Returns the JSON key for a field or null when the field is not annotated.
+     * Annotation shape is validated here so every compiler consumer sees one
+     * canonical interpretation.
+     */
+    public static String fromJsonKey(Ast.FieldDecl field) {
+        Ast.Annotation found = null;
+        for (Ast.Annotation annotation : field.annotations()) {
+            if (!annotation.name().equals(FROM_JSON)) continue;
+            if (found != null) {
+                throw new IllegalArgumentException("field '" + field.name() + "' has duplicate @FromJson annotations");
+            }
+            found = annotation;
+        }
+        if (found == null) return null;
+        if (found.arguments().size() != 1 || !found.arguments().getFirst().isStringLiteral()) {
+            throw new IllegalArgumentException("@FromJson on field '" + field.name() + "' requires exactly one string key");
+        }
+        String key = found.arguments().getFirst().stringLiteralValue();
+        if (key.isBlank()) throw new IllegalArgumentException("@FromJson key for field '" + field.name() + "' cannot be blank");
+        return key;
+    }
+
     private static Ast.ModuleDecl expandModule(Ast.ModuleDecl module) {
         List<Ast.Decl> declarations = new ArrayList<>(module.declarations().size());
         for (Ast.Decl declaration : module.declarations()) {
             if (declaration instanceof Ast.ClassDecl klass) {
                 declarations.add(expandClass(klass));
-                continue;
+            } else {
+                if (declaration instanceof Ast.FieldDecl field && fromJsonKey(field) != null) {
+                    throw new IllegalArgumentException("@FromJson is only valid on class fields, not module binding '" + field.name() + "'");
+                }
+                if (declaration instanceof Ast.FunctionDecl function && hasAnnotation(function.annotations(), FROM_JSON)) {
+                    throw new IllegalArgumentException("@FromJson is only valid on class fields, not callable '" + function.name() + "'");
+                }
+                declarations.add(declaration);
             }
-            if (declaration instanceof Ast.FieldDecl field && fromJsonKey(field) != null) {
-                throw new IllegalArgumentException(
-                        "@FromJson is only valid on ordinary class instance fields, not module binding '"
-                                + field.name() + "'");
-            }
-            if (declaration instanceof Ast.FunctionDecl function
-                    && hasAnnotation(function.annotations(), FROM_JSON)) {
-                throw new IllegalArgumentException(
-                        "@FromJson is only valid on class fields, not callable '"
-                                + function.name() + "'");
-            }
-            declarations.add(declaration);
         }
         return new Ast.ModuleDecl(module.name(), module.annotations(), declarations);
     }
@@ -107,9 +116,7 @@ public final class AnnotationExpander {
         Map<String, Ast.MethodDecl> signatures = new HashMap<>();
         for (Ast.MethodDecl method : methods) {
             if (hasAnnotation(method.annotations(), FROM_JSON)) {
-                throw new IllegalArgumentException(
-                        "@FromJson is only valid on class fields, not method '"
-                                + klass.name() + "." + method.name() + "'");
+                throw new IllegalArgumentException("@FromJson is only valid on class fields, not method '" + klass.name() + "." + method.name() + "'");
             }
             signatures.put(signature(method.name(), method.arity()), method);
         }
@@ -118,53 +125,34 @@ public final class AnnotationExpander {
         for (Ast.FieldDecl field : klass.fields()) {
             String jsonKey = fromJsonKey(field);
             if (jsonKey == null) continue;
-
             if (klass.actorKind() != Ast.ActorKind.NONE) {
-                throw new IllegalArgumentException(
-                        "@FromJson cannot annotate actor state field '"
-                                + klass.name() + "." + field.name() + "'");
-            }
-            if (klass.isStruct()) {
-                throw new IllegalArgumentException(
-                        "@FromJson on typed struct fields is not supported; decode into a class or native record first");
+                throw new IllegalArgumentException("@FromJson is not valid on actor state field '"
+                        + klass.name() + "." + field.name() + "'");
             }
             if (field.type() == null) {
-                throw new IllegalArgumentException(
-                        "@FromJson field '" + klass.name() + "." + field.name()
-                                + "' requires an explicit field type");
-            }
-            if (field.bindingKind() != Ast.BindingKind.LET) {
-                throw new IllegalArgumentException(
-                        "@FromJson field '" + klass.name() + "." + field.name()
-                                + "' must be mutable (let)");
+                throw new IllegalArgumentException("@FromJson field '" + klass.name() + "." + field.name()
+                        + "' requires an explicit field type");
             }
 
             String previous = jsonKeys.putIfAbsent(jsonKey, field.name());
             if (previous != null && !previous.equals(field.name())) {
-                throw new IllegalArgumentException(
-                        "duplicate @FromJson key '" + jsonKey + "' on fields '"
-                                + previous + "' and '" + field.name() + "' in class " + klass.name());
+                throw new IllegalArgumentException("duplicate @FromJson key '" + jsonKey + "' on fields '"
+                        + previous + "' and '" + field.name() + "' in class " + klass.name());
+            }
+            if (field.bindingKind() != Ast.BindingKind.LET) {
+                throw new IllegalArgumentException("@FromJson field '" + klass.name() + "." + field.name()
+                        + "' must be mutable; use 'let " + field.type().name() + " " + field.name()
+                        + "' or the shorthand '" + field.name() + ": " + field.type().name() + "'");
             }
 
             String suffix = accessorSuffix(field.name());
-            addGeneratedAccessor(
-                    klass,
-                    methods,
-                    signatures,
-                    getter(field, jsonKey, "get" + suffix),
-                    true);
-            addGeneratedAccessor(
-                    klass,
-                    methods,
-                    signatures,
-                    setter(field, jsonKey, "set" + suffix),
-                    false);
+            addGeneratedAccessor(klass, methods, signatures, getter(field, jsonKey, "get" + suffix), true);
+            addGeneratedAccessor(klass, methods, signatures, setter(field, jsonKey, "set" + suffix), false);
         }
 
         return new Ast.ClassDecl(
                 klass.name(),
                 klass.isAbstract(),
-                klass.isStruct(),
                 klass.actorKind(),
                 klass.genericParameters(),
                 klass.parents(),
@@ -185,10 +173,9 @@ public final class AnnotationExpander {
             boolean sameGeneratedKind = getter
                     ? isGeneratedFromJsonGetter(existing)
                     : isGeneratedFromJsonSetter(existing);
-            if (sameGeneratedKind) return;
-            throw new IllegalArgumentException(
-                    "@FromJson generated accessor '" + klass.name() + "."
-                            + generated.name() + "' collides with existing method");
+            if (sameGeneratedKind) return; // idempotent expansion
+            throw new IllegalArgumentException("@FromJson generated accessor '" + klass.name() + "."
+                    + generated.name() + "' collides with an existing method of arity " + generated.arity());
         }
         methods.add(generated);
         signatures.put(key, generated);
@@ -209,8 +196,7 @@ public final class AnnotationExpander {
                 List.of(),
                 field.type(),
                 List.of(marker),
-                List.of(new Ast.ReturnStmt(
-                        new Ast.MemberExpr(new Ast.NameExpr("self"), field.name()))));
+                List.of(new Ast.ReturnStmt(new Ast.MemberExpr(new Ast.NameExpr("self"), field.name()))));
     }
 
     private static Ast.MethodDecl setter(Ast.FieldDecl field, String jsonKey, String name) {
@@ -256,9 +242,7 @@ public final class AnnotationExpander {
     }
 
     private static boolean hasAnnotation(List<Ast.Annotation> annotations, String name) {
-        for (Ast.Annotation annotation : annotations) {
-            if (annotation.name().equals(name)) return true;
-        }
+        for (Ast.Annotation annotation : annotations) if (annotation.name().equals(name)) return true;
         return false;
     }
 }

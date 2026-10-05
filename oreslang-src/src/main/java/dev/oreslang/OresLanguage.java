@@ -8,6 +8,7 @@ import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.nodes.OresEvalRootNode;
 import dev.oreslang.nodes.OresInteropRootNode;
 import dev.oreslang.runtime.ActorRuntime;
+import dev.oreslang.runtime.AsyncRuntime;
 import dev.oreslang.runtime.OresContext;
 import org.graalvm.polyglot.SandboxPolicy;
 
@@ -33,8 +34,8 @@ public final class OresLanguage extends TruffleLanguage<OresContext> {
     }
 
     /**
-     * Host-owned actor dispatcher workers may enter the context. Guest source
-     * still has no raw thread-creation authority; that remains controlled by
+     * Host-owned actor dispatcher and async workers may enter the context.
+     * Guest source still has no raw thread-creation authority; that remains controlled by
      * IsolatePolicy and the Polyglot Context builder.
      *
      * Strict/adversarial contexts serialize actor guest turns in OresContext.
@@ -42,7 +43,9 @@ public final class OresLanguage extends TruffleLanguage<OresContext> {
      */
     @Override
     protected boolean isThreadAccessAllowed(Thread thread, boolean singleThreaded) {
-        return singleThreaded || ActorRuntime.isActorCarrierThread();
+        return singleThreaded
+                || ActorRuntime.isActorCarrierThread()
+                || AsyncRuntime.isAsyncCarrierThread();
     }
 
     @Override

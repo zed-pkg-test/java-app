@@ -20,7 +20,7 @@ final class RoutineAndLoopTest {
                   end
                 end
 
-                pub fnc main() => void {
+                pub fnc main(): void {
                   val y = new x.y();
                   stdio.stdout.write(y);
                 }
@@ -37,7 +37,7 @@ final class RoutineAndLoopTest {
                   end
                 end
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val y = new x.y();
                   stdio.stdout.write(y)
                 }
@@ -47,15 +47,20 @@ final class RoutineAndLoopTest {
     }
 
     @Test
-    void routinesCannotParticipateInRecursionButFncsCan() {
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                routine spin() => void {
-                  spin();
+    void routinesAndFncsCanParticipateInRecursion() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                routine spin(bool shouldStop): void {
+                  if shouldStop; do
+                    return;
+                  else
+                    spin(true);
+                    return;
+                  fi
                 }
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc recurse(bool shouldStop) => void {
+                fnc recurse(bool shouldStop): void {
                   if shouldStop; do
                     return;
                   else
@@ -71,8 +76,8 @@ final class RoutineAndLoopTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module m
                   define class C as
-                    pub find() => int { return 0; }
-                    pub find(int value) => int { return value; }
+                    pub find(): int { return 0; }
+                    pub find(int value): int { return value; }
                   end
                 end
                 """)));
@@ -80,22 +85,22 @@ final class RoutineAndLoopTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module m
                   define class C as
-                    pub find(int value) => int { return value; }
-                    pub find(String value) => int { return 1; }
+                    pub find(int value): int { return value; }
+                    pub find(String value): int { return 1; }
                   end
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                fnc find() => int { return 0; }
-                fnc find(int value) => int { return value; }
+                fnc find(): int { return 0; }
+                fnc find(int value): int { return value; }
                 """)));
     }
 
     @Test
     void explicitlyTypedLambdasCanRecurse() throws Exception {
         String output = run("""
-                pub routine main() => void {
+                pub routine main(): void {
                   let Fnc<int, int> fact = |int n| -> {
                     return n == 0 ? 1 : n * fact(n - 1);
                   };
@@ -108,7 +113,7 @@ final class RoutineAndLoopTest {
     @Test
     void ternaryWorksWithOption() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc find(bool found) => Option<int> {
+                fnc find(bool found): Option<int> {
                   return found ? Some(42) : None;
                 }
                 """)));
@@ -124,11 +129,11 @@ final class RoutineAndLoopTest {
                 pub interface Foo extends Bar {
                 }
 
-                fnc structural(@Structural Foo value) => String {
+                fnc structural(@Structural Foo value): String {
                   return value.markerBrand;
                 }
 
-                fnc main() => void {
+                fnc main(): void {
                   val branded = obj{markerBrand: "marking/branding"};
                   stdio.println(structural(branded));
                   return;
@@ -140,11 +145,11 @@ final class RoutineAndLoopTest {
                   markerBrand: 'marking/branding'
                 }
 
-                fnc nominal(Foo value) => String {
+                fnc nominal(Foo value): String {
                   return "ok";
                 }
 
-                fnc main() => void {
+                fnc main(): void {
                   val branded = obj{markerBrand: "marking/branding"};
                   stdio.println(nominal(branded));
                   return;
@@ -155,7 +160,7 @@ final class RoutineAndLoopTest {
     @Test
     void forOfInjectsSchedulerSafepoints() throws Exception {
         String output = run("""
-                pub routine main() => void {
+                pub routine main(): void {
                   for (val item of arr[1, 2, 3]) {
                     stdio.stdout.write(item);
                   }
@@ -169,7 +174,7 @@ final class RoutineAndLoopTest {
     @Test
     void conventionalForLoopAlsoInjectsSafepoints() throws Exception {
         String output = run("""
-                pub routine main() => void {
+                pub routine main(): void {
                   for (let i = 0; i < 3; i = i + 1) {
                     stdio.stdout.write(i);
                   }
@@ -180,20 +185,116 @@ final class RoutineAndLoopTest {
     }
 
     @Test
+    void doDoneBodiesAndIteratorShorthandRemainUnambiguous() throws Exception {
+        String output = run("""
+                fnc done(): void {
+                  stdio.stdout.write("d");
+                  return;
+                }
+
+                pub routine main(): void {
+                  for item of arr[1, 2] do
+                    done();
+                    stdio.stdout.write(item);
+                  done
+
+                  for (let i = 0; i < 2; i = i + 1) do
+                    stdio.stdout.write(i);
+                  done
+
+                  let n = 0;
+                  loop do
+                    n = n + 1;
+                    if n == 2 {
+                      break;
+                    } fi
+                  done
+
+                  stdio.stdout.write(n);
+                  return;
+                }
+                """);
+
+        assertEquals("d1d2012", output);
+    }
+
+    @Test
+    void forOfSequencePatternsDestructureTupleElements() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  for [key, value] of arr[(1, "a"), (2, "b")] do
+                    stdio.stdout.write(key);
+                    stdio.stdout.write(value);
+                  done
+
+                  for [_, let value] of arr[(9, 3), (8, 4)] {
+                    value = value + 1;
+                    stdio.stdout.write(value);
+                  }
+                  return;
+                }
+                """);
+
+        assertEquals("1a2b45", output);
+    }
+
+    @Test
+    void forOfSequencePatternsRejectKnownArityMismatch() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        pub routine main(): void {
+                          for [a, b, c] of arr[(1, 2)] do
+                            stdio.stdout.write(a);
+                          done
+                          return;
+                        }
+                        """)));
+
+        assertTrue(failure.getMessage().contains("destructure arity mismatch"));
+    }
+
+    @Test
+    void typedUnparenthesizedForHeadersSupportPostfixUpdates() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  for int i = 0; i < 3; i++ do
+                    stdio.stdout.write(i);
+                  done
+
+                  for int j = 3; j > 0; j-- {
+                    stdio.stdout.write(j)
+                  }
+
+                  for (let k = 0; k < 2; k++) {
+                    stdio.stdout.write(k)
+                  }
+
+                  for (int q = 0; q < 2; q++) do
+                    stdio.stdout.write(q)
+                  done
+                  return;
+                }
+                """);
+
+        assertEquals("0123210101", output);
+    }
+
+    @Test
     void customJavascriptStyleIteratorDrivesForOf() throws Exception {
         String output = run("""
                 define module collections
                   define class Bag as
-                    [Symbol.iterator]() => Array<int> {
+                    pub [Symbol.iterator](): Array<int> {
                       return arr[4, 5];
                     }
                   end
                 end
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val bag = new collections.Bag();
                   for (val item of bag) {
-                    stdio.stdout.write(item)
+                    stdio.stdout.write(item);
                   }
                 }
                 """);

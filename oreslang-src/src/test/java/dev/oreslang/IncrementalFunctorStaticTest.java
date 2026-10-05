@@ -24,7 +24,7 @@ final class IncrementalFunctorStaticTest {
                 namespace payments;
 
                 define module api
-                  pub fnc ping() => int { return 1; }
+                  pub fnc ping(): int { return 1; }
                 end
                 """));
         assertEquals("payments", program.namespace());
@@ -32,7 +32,7 @@ final class IncrementalFunctorStaticTest {
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 namespace company.payments;
-                fnc x() => void { return; }
+                fnc x(): void { return; }
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
@@ -54,18 +54,18 @@ final class IncrementalFunctorStaticTest {
         Map<String, String> firstSources = new LinkedHashMap<>();
         firstSources.put("math.ores", """
                 namespace mathpkg;
-                pub fnc answer() => int { return 42; }
+                pub fnc answer(): int { return 42; }
                 """);
         firstSources.put("app.ores", """
                 import fnc {answer} from './math.ores';
-                pub fnc main() => void { return; }
+                pub fnc main(): void { return; }
                 """);
         firstSources.put("cli.ores", """
                 import fnc {main} from './app.ores';
-                pub fnc launch() => void { return; }
+                pub fnc launch(): void { return; }
                 """);
         firstSources.put("unrelated.ores", """
-                pub fnc untouched() => int { return 7; }
+                pub fnc untouched(): int { return 7; }
                 """);
 
         var first = compiler.compile(firstSources);
@@ -80,7 +80,7 @@ final class IncrementalFunctorStaticTest {
         Map<String, String> changed = new LinkedHashMap<>(firstSources);
         changed.put("math.ores", """
                 namespace mathpkg;
-                pub fnc answer() => int { return 43; }
+                pub fnc answer(): int { return 43; }
                 """);
 
         var third = compiler.compile(changed);
@@ -92,7 +92,7 @@ final class IncrementalFunctorStaticTest {
         Map<String, String> abiChanged = new LinkedHashMap<>(changed);
         abiChanged.put("math.ores", """
                 namespace mathpkg;
-                pub fnc answer() => String { return "43"; }
+                pub fnc answer(): String { return "43"; }
                 """);
 
         var fourth = compiler.compile(abiChanged);
@@ -103,13 +103,57 @@ final class IncrementalFunctorStaticTest {
     }
 
     @Test
+    void callableKindAndActorKindParticipateInAbiInvalidation() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+        Map<String, String> initial = Map.of(
+                "service.ores", """
+                        pub fnc work(int value): int {
+                          return value + 1;
+                        }
+                        """,
+                "consumer.ores", """
+                        import * as service from "./service.ores";
+                        pub routine main(): void {
+                          stdio.stdout.write(service.work(1));
+                          return;
+                        }
+                        """);
+
+        compiler.compile(initial);
+
+        Map<String, String> routineChanged = Map.of(
+                "service.ores", """
+                        pub routine work(int value): int {
+                          return value + 1;
+                        }
+                        """,
+                "consumer.ores", initial.get("consumer.ores"));
+        var routineResult = compiler.compile(routineChanged);
+        assertTrue(routineResult.rebuilt("service.ores"));
+        assertTrue(routineResult.rebuilt("consumer.ores"),
+                "fnc -> routine changes reifiability and must invalidate dependents");
+
+        Map<String, String> actorChanged = Map.of(
+                "service.ores", """
+                        pub actor fnc work(int value): int {
+                          return value + 1;
+                        }
+                        """,
+                "consumer.ores", initial.get("consumer.ores"));
+        var actorResult = compiler.compile(actorChanged);
+        assertTrue(actorResult.rebuilt("service.ores"));
+        assertTrue(actorResult.rebuilt("consumer.ores"),
+                "actor-kind changes dispatch semantics and must invalidate dependents");
+    }
+
+    @Test
     void inferredPublicBindingsParticipateInAbiInvalidation() {
         IncrementalCompiler compiler = new IncrementalCompiler();
         Map<String, String> first = Map.of(
                 "config.ores", "pub val setting = 1;",
                 "consumer.ores", """
                         import * as config from "./config.ores";
-                        pub routine main() => void { return; }
+                        pub routine main(): void { return; }
                         """);
         compiler.compile(first);
 
@@ -126,8 +170,8 @@ final class IncrementalFunctorStaticTest {
     void compiledUnitsCanStageDirectlyAsIndependentHotReloadGenerations() {
         IncrementalCompiler compiler = new IncrementalCompiler();
         var build = compiler.compile(Map.of(
-                "worker.ores", "pub routine main() => void { return; }",
-                "helper.ores", "pub fnc help() => int { return 1; }"));
+                "worker.ores", "pub routine main(): void { return; }",
+                "helper.ores", "pub fnc help(): int { return 1; }"));
         var worker = build.units().get("worker.ores");
         var helper = build.units().get("helper.ores");
 
@@ -150,7 +194,7 @@ final class IncrementalFunctorStaticTest {
         assertThrows(IllegalArgumentException.class, () -> compiler.compile(Map.of(
                 "app.ores", """
                         import fnc {missing} from "./missing.ores";
-                        pub routine main() => void { return; }
+                        pub routine main(): void { return; }
                         """)));
     }
 
@@ -161,17 +205,17 @@ final class IncrementalFunctorStaticTest {
                   define class Counter as
                     pub val int value = 9;
 
-                    pub static fnc twice(int x) => int {
+                    pub static fnc twice(int x): int {
                       return x * 2;
                     }
 
-                    pub read() => int {
+                    pub read(): int {
                       return self.value;
                     }
                   end
                 end
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val c = new model.Counter();
                   stdio.stdout.write(model.Counter.twice(c.read()));
                 }
@@ -180,21 +224,21 @@ final class IncrementalFunctorStaticTest {
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define class Bad as
-                  static nope() => int { return 1; }
+                  static nope(): int { return 1; }
                 end
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define class Bad as
-                  static fnc nope() => int { return self.value; }
+                  static fnc nope(): int { return self.value; }
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define class Bad as
-                  static fnc make() => int { return 1; }
+                  static fnc make(): int { return 1; }
                 end
-                fnc bad() => int {
+                fnc bad(): int {
                   val b = new Bad();
                   return b.make();
                 }
@@ -204,15 +248,15 @@ final class IncrementalFunctorStaticTest {
     @Test
     void functionAliasesNestedFunctionTypesAndPipeLambdasWork() throws Exception {
         String output = run("""
-                type F = typeof fnc() -> int;
+                type F = typeof fnc() => int;
 
-                fnc find(bool found) => F {
+                fnc find(bool found): F {
                   return || -> {
                     return found ? 5 : 6;
                   };
                 }
 
-                fnc sink() => ((bool foo) -> void) {
+                fnc sink(): ((bool foo) => void) {
                   return |foo| -> {
                     if foo; do
                       stdio.stdout.write("T");
@@ -223,9 +267,9 @@ final class IncrementalFunctorStaticTest {
                   };
                 }
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val F result = find(true);
-                  val ((bool flag) -> void) callback = sink();
+                  val ((bool flag) =>void) callback = sink();
                   stdio.stdout.write(result());
                   callback(true);
                 }
@@ -234,10 +278,10 @@ final class IncrementalFunctorStaticTest {
     }
 
     @Test
-    void slimArrowBelongsToFunctionTypesAndLambdasFatArrowToNamedReturnTypes() {
+    void slimArrowIsExecutableWhileFatArrowRemainsTypeLevel() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                type Mapper = typeof fnc(bool value) -> int;
-                fnc make() => ((bool value) -> int) {
+                type Mapper = typeof fnc(bool value) => int;
+                fnc make(): ((bool value) => int) {
                   return |value| -> {
                     if value; do
                       return 1;
@@ -248,18 +292,18 @@ final class IncrementalFunctorStaticTest {
                 }
                 """)));
 
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                fnc wrong() -> int { return 1; }
-                """));
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc right() -> int { return 1; }
+                """)));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                fnc wrong() => int {
+                fnc wrong(): int {
                   return || => { return 1; };
                 }
                 """));
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                fnc wrong() => int {
+                fnc wrong(): int {
                   val Fnc<int> x = () -> 1;
                   return x();
                 }
@@ -269,8 +313,8 @@ final class IncrementalFunctorStaticTest {
     @Test
     void nonVoidLambdasMustReturnOnEveryPath() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                type F = typeof fnc(bool x) -> int;
-                fnc make() => F {
+                type F = typeof fnc(bool x) => int;
+                fnc make(): F {
                   return |x| -> {
                     if x; do
                       return 1;
@@ -293,4 +337,36 @@ final class IncrementalFunctorStaticTest {
         }
         return output.toString(StandardCharsets.UTF_8);
     }
+    @Test
+    void fromJsonKeyChangesInvalidateIncrementalImporters() {
+        IncrementalCompiler compiler = new IncrementalCompiler();
+        Map<String, String> first = Map.of(
+                "model.ores", """
+                        define class Payload as
+                          @FromJson("foo")
+                          foo: String;
+                        end
+                        """,
+                "consumer.ores", """
+                        import class Payload from "./model.ores";
+                        pub fnc consume(Payload payload) : void { return; }
+                        """);
+
+        compiler.compile(first);
+
+        Map<String, String> changed = Map.of(
+                "model.ores", """
+                        define class Payload as
+                          @FromJson("external_foo")
+                          foo: String;
+                        end
+                        """,
+                "consumer.ores", first.get("consumer.ores"));
+
+        var result = compiler.compile(changed);
+        assertTrue(result.rebuilt("model.ores"));
+        assertTrue(result.rebuilt("consumer.ores"),
+                "changing a JSON wire key is an ABI change for importers");
+    }
+
 }

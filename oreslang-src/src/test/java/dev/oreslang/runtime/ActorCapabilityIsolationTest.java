@@ -18,8 +18,8 @@ final class ActorCapabilityIsolationTest {
     @Test
     void privateActorStaticallyDeniesReadonlySharingEvenUnderDeveloperPolicy() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
-                actor PrivateWorker {
-                  pub fnc attempt_share() => void {
+                isoactor PrivateWorker {
+                  pub fnc attempt_share(): void {
                     val shared = process.share_readonly(arr[1, 2, 3]);
                     stdio.println(shared);
                     return;
@@ -39,7 +39,7 @@ final class ActorCapabilityIsolationTest {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 type SharedInt = SharedMutex<int>;
 
-                actor PrivateWorker {
+                isoactor PrivateWorker {
                   let SharedInt hidden;
                 }
                 """));
@@ -58,7 +58,7 @@ final class ActorCapabilityIsolationTest {
                   let SharedMutex<int> value;
                 end
 
-                actor PrivateWorker {
+                isoactor PrivateWorker {
                   let SharedBox hidden;
                 }
                 """));
@@ -73,14 +73,14 @@ final class ActorCapabilityIsolationTest {
     @Test
     void privateActorCannotLaunderSharedMemoryThroughOrdinaryHelperFunction() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
-                fnc build_shared() => void {
+                fnc build_shared(): void {
                   val shared = SharedMutex.new(1);
                   stdio.println(shared);
                   return;
                 }
 
-                actor PrivateWorker {
-                  pub fnc run() => void {
+                isoactor PrivateWorker {
+                  pub fnc run(): void {
                     build_shared();
                     return;
                   }
@@ -98,15 +98,15 @@ final class ActorCapabilityIsolationTest {
     void privateActorCannotLaunderSharedMemoryThroughStaticClassHelper() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 define class Helpers as
-                  pub static fnc build_shared() => void {
+                  pub static fnc build_shared(): void {
                     val shared = SharedMutex.new(1);
                     stdio.println(shared);
                     return;
                   }
                 end
 
-                actor PrivateWorker {
-                  pub fnc run() => void {
+                isoactor PrivateWorker {
+                  pub fnc run(): void {
                     Helpers.build_shared();
                     return;
                   }
@@ -124,14 +124,14 @@ final class ActorCapabilityIsolationTest {
     void privateActorCannotCarryObjectWhoseInstanceMethodUsesSharedAuthority() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 define class Helper as
-                  pub use_shared() => void {
+                  pub use_shared(): void {
                     val shared = process.share_readonly(arr[1, 2, 3]);
                     stdio.println(shared);
                     return;
                   }
                 end
 
-                actor PrivateWorker {
+                isoactor PrivateWorker {
                   let Helper helper;
                 }
                 """));
@@ -167,12 +167,12 @@ final class ActorCapabilityIsolationTest {
                 define class Node as
                   let Node next;
 
-                  pub identity(Node other) => Node {
+                  pub identity(Node other): Node {
                     return other;
                   }
                 end
 
-                actor PrivateWorker {
+                isoactor PrivateWorker {
                   let Node root;
                 }
                 """));
@@ -228,14 +228,14 @@ final class ActorCapabilityIsolationTest {
     @Test
     void privateActorCannotLaunderSharedMemoryThroughFunctionValue() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
-                fnc build_shared() => void {
+                fnc build_shared(): void {
                   val shared = SharedMutex.new(1);
                   stdio.println(shared);
                   return;
                 }
 
-                actor PrivateWorker {
-                  pub fnc run() => void {
+                isoactor PrivateWorker {
+                  pub fnc run(): void {
                     val callback = build_shared;
                     callback();
                     return;
@@ -254,15 +254,15 @@ final class ActorCapabilityIsolationTest {
     void privateActorCannotLaunderReadonlyShareThroughQualifiedFunctionValue() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 define module helpers
-                  pub fnc expose() => void {
+                  pub fnc expose(): void {
                     val shared = process.share_readonly(arr[1, 2, 3]);
                     stdio.println(shared);
                     return;
                   }
                 end
 
-                actor PrivateWorker {
-                  pub fnc run() => void {
+                isoactor PrivateWorker {
+                  pub fnc run(): void {
                     val callback = helpers.expose;
                     callback();
                     return;
@@ -282,15 +282,15 @@ final class ActorCapabilityIsolationTest {
     void privateActorCannotLaunderSharedMemoryThroughStaticMethodValue() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 define class Helpers as
-                  pub static fnc build_shared() => void {
+                  pub static fnc build_shared(): void {
                     val shared = SharedMutex.new(1);
                     stdio.println(shared);
                     return;
                   }
                 end
 
-                actor PrivateWorker {
-                  pub fnc run() => void {
+                isoactor PrivateWorker {
+                  pub fnc run(): void {
                     val callback = Helpers.build_shared;
                     callback();
                     return;

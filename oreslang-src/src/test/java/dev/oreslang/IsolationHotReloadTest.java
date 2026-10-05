@@ -39,7 +39,7 @@ final class IsolationHotReloadTest {
     @Test
     void capabilityAdmissionRejectsForbiddenApiBeforeGuestExecution() {
         var program = TypeChecker.check(Parser.parse("""
-                pub routine main() => void {
+                pub routine main(): void {
                   stdio.stdout.write(process.context_id);
                 }
                 """));
@@ -56,7 +56,7 @@ final class IsolationHotReloadTest {
     void runtimeCapabilityCheckCannotBeBypassedByFacadeDispatch() throws Exception {
         IsolatePolicy noOutput = new IsolatePolicy(Set.of(), 64L * 1024 * 1024, 32, Duration.ofSeconds(5));
         Source source = Source.newBuilder(OresLanguage.ID, """
-                pub routine main() => void {
+                pub routine main(): void {
                   stdio.stdout.write("forbidden");
                 }
                 """, "denied.ores").mimeType(OresLanguage.MIME_TYPE).buildLiteral();
@@ -74,10 +74,10 @@ final class IsolationHotReloadTest {
         IsolatePolicy policy = IsolatePolicy.developer();
         try (HotReloadManager hot = new HotReloadManager(policy, ExecutionProfile.serverJit())) {
             var first = hot.load("v1.ores", """
-                    pub routine main() => void { return; }
+                    pub routine main(): void { return; }
                     """);
             var second = hot.load("v2.ores", """
-                    pub routine main() => void {
+                    pub routine main(): void {
                       val version = 2;
                       return;
                     }
@@ -99,7 +99,7 @@ final class IsolationHotReloadTest {
         IsolatePolicy policy = IsolatePolicy.developer();
         try (HotReloadManager hot = new HotReloadManager(policy, ExecutionProfile.serverJit())) {
             var generation = hot.load("staged.ores", """
-                    pub routine main() => void {
+                    pub routine main(): void {
                       val values = arr[1];
                       val boom = values[99];
                       return;
@@ -128,20 +128,20 @@ final class IsolationHotReloadTest {
                   markerBrand: 'marking/branding'
                 }
 
-                fnc first(y structural Foo) => void {
+                fnc first(y structural Foo): void {
                   return;
                 }
 
                 @AllowStructural(y)
-                fnc second(y Foo) => void {
+                fnc second(y Foo): void {
                   return;
                 }
 
-                fnc third(@Structural Foo y) => void {
+                fnc third(@Structural Foo y): void {
                   return;
                 }
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val branded = obj{marker: "brand", markerBrand: "marking/branding"};
                   first(branded);
                   second(branded);
@@ -158,9 +158,9 @@ final class IsolationHotReloadTest {
                   marker: 'brand'
                 }
 
-                fnc nominal(Foo y) => void { return; }
+                fnc nominal(Foo y): void { return; }
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val branded = obj{marker: "brand"};
                   nominal(branded);
                   return;
@@ -169,19 +169,38 @@ final class IsolationHotReloadTest {
     }
 
     @Test
-    void extractedMethodValueKeepsReceiverAndSelfCannotBeRebound() throws Exception {
+    void instanceMethodValuesRequireExplicitLambdaAndSelfCannotBeRebound() throws Exception {
+        IllegalArgumentException extracted = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          val int value;
+
+                          pub get(): int {
+                            return self.value;
+                          }
+                        end
+
+                        fnc bad(Box box): void {
+                          val Fnc<int> callback = box.get;
+                        }
+                        """)));
+        assertTrue(extracted.getMessage().contains("direct-call-only"));
+
         String output = run("""
                 define class Box as
                   val int value;
 
-                  pub get() => int {
+                  pub get(): int {
                     return self.value;
                   }
                 end
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val box = new Box(17);
-                  val Fnc<int> callback = box.get;
+                  val Fnc<int> callback = || -> {
+                    return box.get();
+                  };
                   stdio.stdout.write(callback())
                 }
                 """);
@@ -189,7 +208,7 @@ final class IsolationHotReloadTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define class Box as
-                  pub bad() => void {
+                  pub bad(): void {
                     self = new Box();
                     return;
                   }

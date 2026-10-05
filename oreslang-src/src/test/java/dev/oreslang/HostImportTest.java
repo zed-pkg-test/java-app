@@ -21,22 +21,22 @@ final class HostImportTest {
     void validatesJavaImportShapesAliasesAndCollisions() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 import module Math from "java:java.lang.Math";
-                pub fnc main() => void { return; }
+                pub fnc main(): void { return; }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 import class Nope from "java:java.lang.Math";
-                pub fnc main() => void { return; }
+                pub fnc main(): void { return; }
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 import class Math from "java:java/lang/Math";
-                pub fnc main() => void { return; }
+                pub fnc main(): void { return; }
                 """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 import class ArrayList as JArrayList from "java:java.util.ArrayList";
-                pub fnc main() => void {
+                pub fnc main(): void {
                   val values = new JArrayList();
                   return;
                 }
@@ -44,7 +44,7 @@ final class HostImportTest {
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 import class {ArrayList, LinkedList} as JList from "java:java.util.ArrayList";
-                pub fnc main() => void { return; }
+                pub fnc main(): void { return; }
                 """));
     }
 
@@ -86,7 +86,7 @@ final class HostImportTest {
                 ExecutionProfile.serverJit(), Set.of("java.util.ArrayList")).build()) {
             Value value = context.eval(OresLanguage.ID, """
                     import class ArrayList as JArrayList from "java:java.util.ArrayList";
-                    pub fnc main() => int {
+                    pub fnc main(): int {
                       val values = new JArrayList();
                       values.add(19);
                       values.add(23);
@@ -106,7 +106,7 @@ final class HostImportTest {
                 ExecutionProfile.serverJit(), Set.of("java.lang.Math")).build()) {
             Value value = context.eval(OresLanguage.ID, """
                     import fnc abs as jabs from "java:java.lang.Math";
-                    pub fnc main() => int { return jabs(-42); }
+                    pub fnc main(): int { return jabs(-42); }
                     """);
             assertEquals(42L, value.asLong());
         }
@@ -121,7 +121,7 @@ final class HostImportTest {
                 ExecutionProfile.serverJit(), Set.of("java.lang.Math")).build()) {
             assertThrows(PolyglotException.class, () -> context.eval(OresLanguage.ID, """
                     import class System from "java:java.lang.System";
-                    pub fnc main() => int { return 1; }
+                    pub fnc main(): int { return 1; }
                     """));
         }
 
@@ -129,7 +129,7 @@ final class HostImportTest {
                 ExecutionProfile.serverJit(), Set.of("java.lang.Math")).build()) {
             assertThrows(PolyglotException.class, () -> context.eval(OresLanguage.ID, """
                     import class Math as JMath from "java:java.lang.Math";
-                    pub fnc main() => any { return JMath.getClass(); }
+                    pub fnc main(): any { return JMath.getClass(); }
                     """));
         }
     }
@@ -158,7 +158,7 @@ final class HostImportTest {
         var program = TypeChecker.check(Parser.parse("""
                 import class ArrayList as JArrayList from "java:java.util.ArrayList";
 
-                isoactor fnc worker() => void {
+                isoactor fnc worker(): void {
                   val values = new JArrayList();
                   return;
                 }

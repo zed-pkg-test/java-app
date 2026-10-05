@@ -30,7 +30,7 @@ jobs:
           java --version
           native-image --version
       - name: Verify JIT/JVM profile
-        run: mvn -B -ntp verify
+        run: mvn -B -ntp -Dores.runtime.carriers=native verify
       - name: Run showcase
         run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
       - name: Compile and run shared Oreslang program
@@ -56,6 +56,10 @@ jobs:
         run: mvn -B -ntp -Pnative-aot -DskipTests package
       - name: Run AOT image
         run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+      - name: Run AOT proper tail-call stress
+        run: |
+          ./target/ores-aot --mode=aot --platform=linux examples/proper-tail-call.ores | tee /tmp/ores-aot-tail.out
+          grep -F "0|0|0" /tmp/ores-aot-tail.out
 
   native-hybrid:
     runs-on: ubuntu-latest
@@ -77,6 +81,10 @@ jobs:
         run: mvn -B -ntp -Pnative-hybrid -DskipTests package
       - name: Run hybrid image
         run: ./target/ores-hybrid --mode=hybrid --platform=linux examples/together.ores
+      - name: Run hybrid proper tail-call stress
+        run: |
+          ./target/ores-hybrid --mode=hybrid --platform=linux examples/proper-tail-call.ores | tee /tmp/ores-hybrid-tail.out
+          grep -F "0|0|0" /tmp/ores-hybrid-tail.out
 
   polyglot-isolate:
     runs-on: ubuntu-latest

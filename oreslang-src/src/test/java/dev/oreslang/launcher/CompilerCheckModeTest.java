@@ -15,7 +15,7 @@ final class CompilerCheckModeTest {
     void validationCompilesWithoutExecutingMain() throws Exception {
         Path source = Files.createTempFile("ores-check-", ".ores");
         Files.writeString(source, """
-                pub fnc main() => void {
+                pub fnc main(): void {
                   let denominator = 0;
                   let result = 1 / denominator;
                   return;

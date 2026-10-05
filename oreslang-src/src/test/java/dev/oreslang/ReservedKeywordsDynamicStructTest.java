@@ -23,11 +23,11 @@ final class ReservedKeywordsDynamicStructTest {
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc stop() => int { return 1; }
-                  routine do() => int { return 2; }
-                  fnc done() => int { return 3; }
+                  fnc stop(): int { return 1; }
+                  routine do(): int { return 2; }
+                  fnc done(): int { return 3; }
 
-                  pub fnc main() => int {
+                  pub fnc main(): int {
                     val values = obj{stop: 4, 'do': 5, "done": 6};
                     return stop() + do() + done()
                         + values["stop"] + values["do"] + values["done"];
@@ -37,8 +37,8 @@ final class ReservedKeywordsDynamicStructTest {
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define module app
-                  fnc stop() => int { return 1; }
-                  fnc main() => void {
+                  fnc stop(): int { return 1; }
+                  fnc main(): void {
                     val callback = stop;
                     return;
                   }
@@ -47,7 +47,7 @@ final class ReservedKeywordsDynamicStructTest {
 
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define module app
-                  fnc main() => void {
+                  fnc main(): void {
                     val stop = 1;
                     return;
                   }
@@ -59,7 +59,7 @@ final class ReservedKeywordsDynamicStructTest {
     void objectKeysSupportSingleDoubleQuotedReservedAndBacktickForms() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc make(string key) => DynamicStruct<int> {
+                  fnc make(string key): DynamicStruct<int> {
                     return obj{
                       stop: 1,
                       'do': 2,
@@ -72,7 +72,7 @@ final class ReservedKeywordsDynamicStructTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad() => void {
+                  fnc bad(): void {
                     const key = 42;
                     const value = obj{`key`: 1};
                     return;
@@ -82,7 +82,7 @@ final class ReservedKeywordsDynamicStructTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad() => void {
+                  fnc bad(): void {
                     const value = obj{'same': 1, "same": 2};
                     return;
                   }
@@ -94,7 +94,7 @@ final class ReservedKeywordsDynamicStructTest {
     void dynamicStructAllowsArbitraryStringKeysWithTypedValuesAtRuntime() throws Exception {
         String program = """
                 define module app
-                  pub fnc main() => void {
+                  pub fnc main(): void {
                     let DynamicStruct<int> bag = new DynamicStruct<int>();
                     bag["stop"] = 1;
                     bag["done"] = 2;
@@ -127,7 +127,7 @@ final class ReservedKeywordsDynamicStructTest {
     void dynamicStructRejectsWrongValueAndNonStringIndexTypes() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad() => void {
+                  fnc bad(): void {
                     let DynamicStruct<int> bag = new DynamicStruct<int>();
                     bag.answer = "forty-two";
                     return;
@@ -137,7 +137,7 @@ final class ReservedKeywordsDynamicStructTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad() => void {
+                  fnc bad(): void {
                     let DynamicStruct<int> bag = new DynamicStruct<int>();
                     bag[1] = 42;
                     return;
@@ -147,7 +147,7 @@ final class ReservedKeywordsDynamicStructTest {
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
-                  fnc bad() => void {
+                  fnc bad(): void {
                     let DynamicStruct<void> bag = new DynamicStruct<void>();
                     return;
                   }

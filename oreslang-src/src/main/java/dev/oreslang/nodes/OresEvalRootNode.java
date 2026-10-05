@@ -13,16 +13,13 @@ import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.ActorRuntime;
-import dev.oreslang.runtime.BuiltinCallable;
-import dev.oreslang.runtime.BuiltinValue;
-import dev.oreslang.runtime.NativeNetBuiltin;
-import dev.oreslang.runtime.NativeRuntimeBuiltins;
-import dev.oreslang.runtime.NativeValues;
+import dev.oreslang.runtime.AsyncRuntime;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -37,6 +34,7 @@ public final class OresEvalRootNode extends RootNode {
     public static final String INIT_ONLY_COMMAND = "__ores_internal_init_only__";
     public static final String MAIN_ONLY_COMMAND = "__ores_internal_main_only__";
     public static final String INVOKE_PUBLIC_COMMAND = "__ores_internal_invoke_public__";
+    public static final String REGISTER_IMPORT_COMMAND = "__ores_internal_register_import__";
 
     private final Ast.Program program;
     private final String codeUnitId;
@@ -63,6 +61,14 @@ public final class OresEvalRootNode extends RootNode {
     @TruffleBoundary
     private Object executeBoundary(OresContext context, Object[] arguments) {
         CapabilityChecker.check(program, context.isolatePolicy());
+        if (arguments.length == 3
+                && REGISTER_IMPORT_COMMAND.equals(arguments[0])
+                && arguments[1] instanceof String importPath
+                && arguments[2] instanceof String targetCodeUnitId) {
+            context.registerLinkedImportResolution(codeUnitId, importPath, targetCodeUnitId);
+            return null;
+        }
+
         Evaluator current = evaluator(context);
         if (isControl(arguments, LINK_ONLY_COMMAND)) {
             current.link();
@@ -110,8 +116,10 @@ public final class OresEvalRootNode extends RootNode {
         private final String codeUnitId;
         private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
         private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
+        private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> typeAliases = new HashMap<>();
         private final Map<String, Ast.ModuleDecl> modules = new HashMap<>();
+        private final IdentityHashMap<Ast.MethodDecl, Ast.ClassDecl> methodOwners = new IdentityHashMap<>();
         private final Map<String, ImportedBinding> namedImports = new HashMap<>();
         private final Map<String, Ast.ImportDecl> namespaceImports = new HashMap<>();
         private final Map<String, HostClassFacade> hostClasses = new HashMap<>();
@@ -119,8 +127,37 @@ public final class OresEvalRootNode extends RootNode {
         private final Map<String, HostClassFacade> hostSymbols = new HashMap<>();
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
+        private final Set<String> ambiguousInterfaces = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
-        private boolean initialized;
+        private StartupPhase startupPhase = StartupPhase.CREATED;
+        private static final int TAIL_SAFEPOINT_INTERVAL = 64;
+
+        private enum InvocationKind {
+            FUNCTION,
+            FUNCTION_BODY,
+            METHOD,
+            STATIC_FUNCTION,
+            STATIC_FUNCTION_BODY,
+            INVOKABLE
+        }
+
+        private record Invocation(
+                Evaluator owner,
+                InvocationKind kind,
+                Object receiver,
+                Object target,
+                List<Object> arguments) { }
+
+        private record TailCall(Invocation invocation) { }
+
+        private static final class TailCallSignal extends RuntimeException {
+            private final Invocation invocation;
+            private TailCallSignal(Invocation invocation) {
+                super(null, null, false, false);
+                this.invocation = invocation;
+            }
+        }
+
 
         private Evaluator(Ast.Program program, OresContext context, String codeUnitId) {
             this.program = program;
@@ -214,8 +251,12 @@ public final class OresEvalRootNode extends RootNode {
                 modules.put(module.name(), module);
                 for (Ast.Decl decl : module.declarations()) {
                     if (decl instanceof Ast.FunctionDecl fn) index(functions, ambiguousFunctions, module.name(), fn.name(), fn);
-                    else if (decl instanceof Ast.ClassDecl klass) index(classes, ambiguousClasses, module.name(), klass.name(), klass);
-                    else if (decl instanceof Ast.TypeAliasDecl alias) index(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias);
+                    else if (decl instanceof Ast.ClassDecl klass) {
+                        index(classes, ambiguousClasses, module.name(), klass.name(), klass);
+                        for (Ast.MethodDecl method : klass.methods()) methodOwners.put(method, klass);
+                    } else if (decl instanceof Ast.InterfaceDecl iface) {
+                        index(interfaces, ambiguousInterfaces, module.name(), iface.name(), iface);
+                    } else if (decl instanceof Ast.TypeAliasDecl alias) index(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias);
                 }
             }
         }
@@ -239,29 +280,66 @@ public final class OresEvalRootNode extends RootNode {
             return classes.get(name);
         }
 
+        private Ast.InterfaceDecl findInterface(String name) {
+            if (ambiguousInterfaces.contains(name)) throw new IllegalArgumentException("ambiguous interface " + name + "; qualify it with its module");
+            return interfaces.get(name);
+        }
+
         private Ast.TypeAliasDecl findTypeAlias(String name) {
             if (ambiguousTypeAliases.contains(name)) throw new IllegalArgumentException("ambiguous type alias " + name + "; qualify it with its module");
             return typeAliases.get(name);
         }
 
         private synchronized void link() {
+            if (startupPhase == StartupPhase.FAILED) {
+                throw new IllegalStateException("cannot relink failed code unit " + codeUnitId);
+            }
             context.registerLinkedCodeUnit(codeUnitId, this);
+            if (startupPhase == StartupPhase.CREATED) startupPhase = StartupPhase.LINKED;
         }
 
         private synchronized Object initialize() {
-            if (initialized) return null;
-            // Mark before invocation so a recursive path cannot run init twice.
-            initialized = true;
-            Ast.FunctionDecl init = functions.get(Parser.ROOT_MODULE + ".init");
-            if (init == null) return null;
-            return callFunction(init, List.of());
+            if (startupPhase == StartupPhase.READY) return null;
+            if (startupPhase == StartupPhase.INITIALIZING) {
+                throw new IllegalStateException("recursive initialization of code unit " + codeUnitId);
+            }
+            if (startupPhase == StartupPhase.FAILED) {
+                throw new IllegalStateException("initialization previously failed for code unit " + codeUnitId);
+            }
+            if (startupPhase == StartupPhase.CREATED) link();
+
+            startupPhase = StartupPhase.INITIALIZING;
+            Object last = null;
+            try {
+                for (Ast.ModuleDecl module : program.modules()) {
+                    for (Ast.Decl decl : module.declarations()) {
+                        if (decl instanceof Ast.FunctionDecl fn && fn.name().equals("init")) {
+                            last = invoke(functionBodyInvocation(fn, List.of()));
+                        }
+                    }
+                }
+                startupPhase = StartupPhase.READY;
+                return last;
+            } catch (RuntimeException | Error failure) {
+                startupPhase = StartupPhase.FAILED;
+                throw failure;
+            }
         }
 
         private Object executeMain(Object[] arguments) {
+            if (startupPhase != StartupPhase.READY) {
+                throw new IllegalStateException(
+                        "main cannot run before successful initialization of code unit "
+                                + codeUnitId + "; current phase=" + startupPhase);
+            }
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
-            return callFunction(main, List.of(arguments));
+            Object result = callFunction(main, List.of(arguments));
+            if (result instanceof CompletionStage<?> stage) {
+                return AsyncRuntime.await(stage);
+            }
+            return result;
         }
 
         private Object invokePublic(String name, Object[] arguments) {
@@ -274,10 +352,105 @@ public final class OresEvalRootNode extends RootNode {
             return result instanceof HostObjectFacade host ? host.value() : result;
         }
 
+        private Object invoke(Invocation initial) {
+            Invocation current = initial;
+            int tailHops = 0;
+            while (true) {
+                Object result = current.owner().executeRaw(current);
+                if (!(result instanceof TailCall tail)) return result;
+                current = tail.invocation();
+                tailHops++;
+                if (tailHops % TAIL_SAFEPOINT_INTERVAL == 0) {
+                    current.owner().context.schedulerSafepoint();
+                }
+            }
+        }
+
+        private Object executeRaw(Invocation invocation) {
+            return switch (invocation.kind()) {
+                case FUNCTION -> callFunctionRaw(
+                        (Ast.FunctionDecl) invocation.target(),
+                        invocation.arguments());
+                case FUNCTION_BODY -> callFunctionBodyRaw(
+                        (Ast.FunctionDecl) invocation.target(),
+                        invocation.arguments());
+                case METHOD -> callMethodRaw(
+                        (OresObject) invocation.receiver(),
+                        (Ast.MethodDecl) invocation.target(),
+                        invocation.arguments());
+                case STATIC_FUNCTION -> callStaticFunctionRaw(
+                        (Ast.MethodDecl) invocation.target(),
+                        invocation.arguments());
+                case STATIC_FUNCTION_BODY -> callStaticFunctionBodyRaw(
+                        (Ast.MethodDecl) invocation.target(),
+                        invocation.arguments());
+                case INVOKABLE -> ((Invokable) invocation.target()).call(invocation.arguments());
+            };
+        }
+
+        private Invocation functionInvocation(Ast.FunctionDecl fn, List<?> args) {
+            return new Invocation(this, InvocationKind.FUNCTION, null, fn, objectArguments(args));
+        }
+
+        private Invocation functionBodyInvocation(Ast.FunctionDecl fn, List<?> args) {
+            return new Invocation(this, InvocationKind.FUNCTION_BODY, null, fn, objectArguments(args));
+        }
+
+        private Invocation methodInvocation(OresObject receiver, Ast.MethodDecl method, List<?> args) {
+            return new Invocation(this, InvocationKind.METHOD, receiver, method, objectArguments(args));
+        }
+
+        private Invocation staticFunctionInvocation(Ast.MethodDecl fn, List<?> args) {
+            return new Invocation(this, InvocationKind.STATIC_FUNCTION, null, fn, objectArguments(args));
+        }
+
+        private Invocation staticFunctionBodyInvocation(Ast.MethodDecl fn, List<?> args) {
+            return new Invocation(this, InvocationKind.STATIC_FUNCTION_BODY, null, fn, objectArguments(args));
+        }
+
+        private Invocation invokableInvocation(Invokable callable, List<?> args) {
+            return new Invocation(this, InvocationKind.INVOKABLE, null, callable, objectArguments(args));
+        }
+
+        private TailInvokable tailCallable(Invokable callable) {
+            return new TailCallable(this, callable);
+        }
+
+        @SuppressWarnings("unchecked")
+        private static List<Object> objectArguments(List<?> args) {
+            return (List<Object>) args;
+        }
+
         private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
-            List<?> normalized = normalizeFunctionArguments(fn, args);
+            return invoke(functionInvocation(fn, args));
+        }
+
+        private Object callFunctionRaw(Ast.FunctionDecl fn, List<Object> args) {
+            if (fn.name().equals("init")) {
+                throw new IllegalStateException(
+                        "init is a lifecycle hook and cannot be invoked directly; startup runs it exactly once");
+            }
+            List<Object> normalized = normalizeFunctionArguments(fn, args);
             if (fn.actorKind() == Ast.ActorKind.NONE) {
-                return callFunctionBody(fn, normalized);
+                if (!fn.async()) return callFunctionBodyRaw(fn, normalized);
+
+                List<?> detached = detachAsyncArguments(normalized);
+                return context.asyncRuntime().submit(() ->
+                        detachAsyncValue(
+                                invoke(functionBodyInvocation(fn, detached)),
+                                new IdentityHashMap<>()));
+            }
+
+            if (fn.async()) {
+                throw new IllegalStateException(
+                        "async actor callables require mailbox continuation lowering and are not executed synchronously");
+            }
+
+            if (ActorRuntime.inActorExecution()) {
+                throw new IllegalArgumentException(
+                        "actor callable '" + fn.name()
+                                + "' cannot be synchronously invoked from another actor turn; "
+                                + "use mailbox-oriented actor composition");
             }
 
             ActorRuntime.ActorKind runtimeKind = switch (fn.actorKind()) {
@@ -289,10 +462,11 @@ public final class OresEvalRootNode extends RootNode {
             return context.actors().invoke(
                     runtimeKind,
                     normalized,
-                    (delivered, actorContext) -> callFunctionBody(fn, delivered));
+                    (delivered, actorContext) ->
+                            invoke(functionBodyInvocation(fn, delivered)));
         }
 
-        private List<?> normalizeFunctionArguments(Ast.FunctionDecl fn, List<?> args) {
+        private List<Object> normalizeFunctionArguments(Ast.FunctionDecl fn, List<?> args) {
             if (args.size() != fn.parameters().size()) {
                 if (fn.parameters().isEmpty()
                         && args.size() == 1
@@ -304,10 +478,105 @@ public final class OresEvalRootNode extends RootNode {
                         "function " + fn.name() + " expects " + fn.parameters().size()
                                 + " arguments, got " + args.size());
             }
-            return args;
+            return objectArguments(args);
         }
 
-        private Object callFunctionBody(Ast.FunctionDecl fn, List<?> args) {
+        private List<?> detachAsyncArguments(List<?> args) {
+            ArrayList<Object> detached = new ArrayList<>(args.size());
+            for (Object arg : args) {
+                detached.add(detachAsyncValue(arg, new IdentityHashMap<>()));
+            }
+            return List.copyOf(detached);
+        }
+
+        private Object detachAsyncValue(
+                Object value,
+                IdentityHashMap<Object, Boolean> visiting) {
+            if (value == null
+                    || value instanceof String
+                    || value instanceof Boolean
+                    || value instanceof Character
+                    || value instanceof Byte
+                    || value instanceof Short
+                    || value instanceof Integer
+                    || value instanceof Long
+                    || value instanceof Float
+                    || value instanceof Double
+                    || value instanceof java.math.BigInteger
+                    || value instanceof java.math.BigDecimal
+                    || value instanceof Enum<?>
+                    || value instanceof java.util.UUID
+                    || value instanceof Complex
+                    || value instanceof OptionUnwrapError) {
+                return value;
+            }
+
+            if (visiting.put(value, Boolean.TRUE) != null) {
+                throw new IllegalArgumentException(
+                        "cyclic mutable values cannot cross an async task boundary");
+            }
+            try {
+                if (value instanceof OresObject object) {
+                    LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
+                    for (Map.Entry<String, Object> entry : object.fields.entrySet()) {
+                        fields.put(entry.getKey(), detachAsyncValue(entry.getValue(), visiting));
+                    }
+                    return new OresObject(object.owner, object.klass, fields);
+                }
+                if (value instanceof DynamicStructValue dynamic) {
+                    LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
+                    for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
+                        fields.put(entry.getKey(), detachAsyncValue(entry.getValue(), visiting));
+                    }
+                    return new DynamicStructValue(fields);
+                }
+                if (value instanceof OptionValue option) {
+                    return option.present()
+                            ? new OptionValue(true, detachAsyncValue(option.value(), visiting))
+                            : option;
+                }
+                if (value instanceof ResultValue result) {
+                    return new ResultValue(result.ok(), detachAsyncValue(result.value(), visiting));
+                }
+                if (value instanceof List<?> list) {
+                    ArrayList<Object> copy = new ArrayList<>(list.size());
+                    for (Object item : list) copy.add(detachAsyncValue(item, visiting));
+                    return copy;
+                }
+                if (value instanceof Map<?, ?> map) {
+                    LinkedHashMap<Object, Object> copy = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> entry : map.entrySet()) {
+                        copy.put(
+                                detachAsyncValue(entry.getKey(), visiting),
+                                detachAsyncValue(entry.getValue(), visiting));
+                    }
+                    return copy;
+                }
+                if (value instanceof Set<?> set) {
+                    LinkedHashSet<Object> copy = new LinkedHashSet<>();
+                    for (Object item : set) copy.add(detachAsyncValue(item, visiting));
+                    return copy;
+                }
+                if (value.getClass().isArray()) {
+                    int length = java.lang.reflect.Array.getLength(value);
+                    ArrayList<Object> copy = new ArrayList<>(length);
+                    for (int i = 0; i < length; i++) {
+                        copy.add(detachAsyncValue(
+                                java.lang.reflect.Array.get(value, i),
+                                visiting));
+                    }
+                    return copy;
+                }
+
+                throw new IllegalArgumentException(
+                        "value of type " + value.getClass().getName()
+                                + " cannot cross an async task boundary; use owned data");
+            } finally {
+                visiting.remove(value);
+            }
+        }
+
+        private Object callFunctionBodyRaw(Ast.FunctionDecl fn, List<?> args) {
             Env env = new Env(null, fn.nonLexical());
             for (int i = 0; i < fn.parameters().size(); i++) {
                 Ast.Param param = fn.parameters().get(i);
@@ -316,17 +585,29 @@ public final class OresEvalRootNode extends RootNode {
             try {
                 executeBlock(fn.body(), env);
                 return null;
+            } catch (TailCallSignal signal) {
+                return new TailCall(signal.invocation);
             } catch (ReturnSignal signal) {
                 return shapeReturnedValue(
                         fn.returnType(),
                         signal.value,
                         "function " + fn.name());
+            } catch (BreakSignal | ContinueSignal signal) {
+                throw new IllegalStateException("loop control cannot cross a function boundary", signal);
             }
         }
 
         private Object callMethod(OresObject receiver, Ast.MethodDecl method, List<?> args) {
+            return invoke(methodInvocation(receiver, method, args));
+        }
+
+        private Object callMethodRaw(OresObject receiver, Ast.MethodDecl method, List<?> args) {
+            if (method.async()) {
+                throw new IllegalStateException(
+                        "async instance methods are not admitted until receiver ownership can be moved into the task");
+            }
             if (args.size() != method.parameters().size()) throw new IllegalArgumentException("method " + method.name() + " arity mismatch");
-            Env env = new Env(null);
+            Env env = new Env(null, false, declaringClass(method));
             if (!method.isStatic()) env.define("self", receiver, Ast.BindingKind.VAL);
             for (int i = 0; i < method.parameters().size(); i++) {
                 Ast.Param param = method.parameters().get(i);
@@ -335,16 +616,28 @@ public final class OresEvalRootNode extends RootNode {
             try {
                 executeBlock(method.body(), env);
                 return null;
-            } catch (ReturnSignal signal) { return shapeReturnedValue(method.returnType(), signal.value, "method " + method.name()); }
+            } catch (TailCallSignal signal) {
+                return new TailCall(signal.invocation);
+            } catch (ReturnSignal signal) {
+                return shapeReturnedValue(method.returnType(), signal.value, "method " + method.name());
+            } catch (BreakSignal | ContinueSignal signal) {
+                throw new IllegalStateException("loop control cannot cross a method boundary", signal);
+            }
         }
 
         private void executeBlock(List<Ast.Stmt> statements, Env parent) {
+            executeBlock(statements, parent, false);
+        }
+
+        private void executeBlock(List<Ast.Stmt> statements, Env parent, boolean inheritedTailBarrier) {
             Env env = new Env(parent);
             ArrayDeque<Ast.Expr> deferred = new ArrayDeque<>();
             boolean abnormalExit = false;
             try {
-                for (Ast.Stmt stmt : statements) executeStatement(stmt, env, deferred);
-            } catch (ReturnSignal signal) {
+                for (Ast.Stmt stmt : statements) executeStatement(stmt, env, deferred, inheritedTailBarrier);
+            } catch (TailCallSignal signal) {
+                throw signal;
+            } catch (ReturnSignal | BreakSignal | ContinueSignal signal) {
                 throw signal;
             } catch (RuntimeException | Error failure) {
                 abnormalExit = true;
@@ -362,7 +655,11 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
-        private void executeStatement(Ast.Stmt stmt, Env env, ArrayDeque<Ast.Expr> deferred) {
+        private void executeStatement(
+                Ast.Stmt stmt,
+                Env env,
+                ArrayDeque<Ast.Expr> deferred,
+                boolean inheritedTailBarrier) {
             if (stmt instanceof Ast.BindingStmt binding) {
                 if (binding.initializer() instanceof Ast.LambdaExpr) {
                     env.reserve(binding.name(), binding.kind());
@@ -387,52 +684,385 @@ public final class OresEvalRootNode extends RootNode {
                 } else {
                     for (Ast.DestructureBinding binding : destructure.bindings()) {
                         if (!binding.isDiscard()) {
-                            env.define(binding.name(), destructureMember(value, binding.name()), binding.kind());
+                            env.define(
+                                    binding.name(),
+                                    destructureMember(value, binding.name(), env),
+                                    binding.kind());
                         }
                     }
                 }
                 return;
             }
-            if (stmt instanceof Ast.ReturnStmt ret) throw new ReturnSignal(ret.value() == null ? null : eval(ret.value(), env));
+            if (stmt instanceof Ast.ReturnStmt ret) {
+                returnFrom(
+                        ret.value(),
+                        env,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+            }
             if (stmt instanceof Ast.ExprStmt expression) { eval(expression.expression(), env); return; }
             if (stmt instanceof Ast.DeferStmt defer) { deferred.push(defer.expression()); return; }
+            if (stmt instanceof Ast.BlockStmt block) {
+                executeBlock(
+                        block.body(),
+                        env,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                return;
+            }
+            if (stmt instanceof Ast.BreakStmt) throw new BreakSignal();
+            if (stmt instanceof Ast.ContinueStmt) throw new ContinueSignal();
             if (stmt instanceof Ast.IfStmt ifStmt) {
                 for (Ast.IfBranch branch : ifStmt.branches()) {
-                    if (truth(eval(branch.condition(), env))) { executeBlock(branch.body(), env); return; }
+                    ConditionResult condition = evalCondition(branch.condition(), env);
+                    if (condition.matched()) {
+                        Env branchEnv = new Env(env);
+                        condition.bindings().forEach((name, value) ->
+                                branchEnv.define(name, value, Ast.BindingKind.VAL));
+                        executeBlock(
+                                branch.body(),
+                                branchEnv,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                        return;
+                    }
                 }
-                executeBlock(ifStmt.elseBody(), env);
+                executeBlock(
+                        ifStmt.elseBody(),
+                        env,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                return;
+            }
+            if (stmt instanceof Ast.MatchStmt matched) {
+                Object subject = eval(matched.subject(), env);
+                Ast.MatchArm selected = null;
+                Map<String, Object> selectedBindings = Map.of();
+                Ast.MatchArm fallback = null;
+
+                for (Ast.MatchArm arm : matched.arms()) {
+                    boolean catchAll = arm.guard() == null
+                            && (arm.pattern() instanceof Ast.WildcardPattern
+                                || arm.pattern() instanceof Ast.BindingPattern);
+                    if (!matched.ordered() && catchAll) {
+                        fallback = arm;
+                        continue;
+                    }
+
+                    LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+                    if (!patternMatches(arm.pattern(), subject, bindings)) continue;
+                    Env armEnv = new Env(env);
+                    bindings.forEach((name, value) ->
+                            armEnv.define(name, value, Ast.BindingKind.VAL));
+                    if (arm.guard() != null && !truth(eval(arm.guard(), armEnv))) continue;
+
+                    if (matched.ordered()) {
+                        executeBlock(
+                                arm.body(),
+                                armEnv,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                        return;
+                    }
+                    if (selected != null) {
+                        throw new IllegalStateException(
+                                "exclusive match invariant violated at runtime: more than one explicit arm matched; "
+                                        + "the static pattern proof and runtime type metadata disagree");
+                    }
+                    selected = arm;
+                    selectedBindings = Map.copyOf(bindings);
+                }
+
+                if (selected == null && fallback != null) {
+                    LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+                    if (!patternMatches(fallback.pattern(), subject, bindings)) {
+                        throw new IllegalStateException("match fallback did not accept the unmatched subject");
+                    }
+                    selected = fallback;
+                    selectedBindings = Map.copyOf(bindings);
+                }
+
+                if (selected == null) {
+                    throw new IllegalStateException(
+                            "exhaustive match invariant violated at runtime: no arm matched");
+                }
+                Env selectedEnv = new Env(env);
+                selectedBindings.forEach((name, value) ->
+                        selectedEnv.define(name, value, Ast.BindingKind.VAL));
+                executeBlock(
+                        selected.body(),
+                        selectedEnv,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                return;
+            }
+            if (stmt instanceof Ast.SwitchStmt switched) {
+                Object subject = eval(switched.subject(), env);
+                for (Ast.SwitchCase arm : switched.cases()) {
+                    boolean selected = false;
+                    for (Ast.Expr constant : arm.constants()) {
+                        if (Objects.equals(subject, eval(constant, env))) {
+                            selected = true;
+                            break;
+                        }
+                    }
+                    if (selected) {
+                        executeBlock(
+                                arm.body(),
+                                env,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                        return;
+                    }
+                }
+                executeBlock(
+                        switched.defaultBody(),
+                        env,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
                 return;
             }
             if (stmt instanceof Ast.TryStmt tried) {
-                try { executeBlock(tried.body(), env); }
-                catch (ReturnSignal signal) { throw signal; }
+                // A call under catch/finally is not a proper tail call: the
+                // caller still owns exception/cleanup semantics after the call.
+                try { executeBlock(tried.body(), env, true); }
+                catch (TailCallSignal signal) { throw signal; }
+                catch (ReturnSignal | BreakSignal | ContinueSignal signal) { throw signal; }
                 catch (OresPanic panic) { throw panic; }
                 catch (RuntimeException failure) {
                     Env catchEnv = new Env(env);
                     catchEnv.define(tried.errorName(), failure, Ast.BindingKind.VAL);
-                    executeBlock(tried.catchBody(), catchEnv);
-                } finally { executeBlock(tried.finallyBody(), env); }
+                    executeBlock(tried.catchBody(), catchEnv, true);
+                } finally { executeBlock(tried.finallyBody(), env, true); }
+                return;
+            }
+            if (stmt instanceof Ast.ForOfDestructureStmt loop) {
+                Object iterable = eval(loop.iterable(), env);
+                for (Object item : iterableValues(iterable, env)) {
+                    context.schedulerSafepoint();
+                    List<?> items = asSequence(item);
+                    if (items.size() != loop.bindings().size()) {
+                        throw new IllegalArgumentException(
+                                "for-of destructure arity mismatch: value has " + items.size()
+                                        + " element(s), pattern has " + loop.bindings().size());
+                    }
+                    Env iteration = new Env(env);
+                    for (int i = 0; i < items.size(); i++) {
+                        Ast.DestructureBinding binding = loop.bindings().get(i);
+                        if (!binding.isDiscard()) {
+                            iteration.define(binding.name(), items.get(i), binding.kind());
+                        }
+                    }
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                iteration,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        continue;
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
+                }
                 return;
             }
             if (stmt instanceof Ast.ForOfStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
-                for (Object item : iterableValues(iterable)) {
+                for (Object item : iterableValues(iterable, env)) {
                     context.schedulerSafepoint();
                     Env iteration = new Env(env);
                     iteration.define(loop.bindingName(), item, loop.bindingKind());
-                    executeBlock(loop.body(), iteration);
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                iteration,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        continue;
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
                 }
                 return;
             }
             if (stmt instanceof Ast.ForStmt loop) {
                 Env loopEnv = new Env(env);
-                if (loop.initializer() != null) executeStatement(loop.initializer(), loopEnv, new ArrayDeque<>());
+                if (loop.initializer() != null) {
+                    executeStatement(
+                            loop.initializer(),
+                            loopEnv,
+                            new ArrayDeque<>(),
+                            inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                }
                 while (loop.condition() == null || truth(eval(loop.condition(), loopEnv))) {
                     context.schedulerSafepoint();
-                    executeBlock(loop.body(), loopEnv);
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                loopEnv,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        // Conventional for-loops still execute their update on continue.
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
                     if (loop.update() != null) eval(loop.update(), loopEnv);
                 }
+                return;
             }
+            if (stmt instanceof Ast.LoopStmt loop) {
+                while (true) {
+                    context.schedulerSafepoint();
+                    try {
+                        executeBlock(
+                                loop.body(),
+                                env,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                    } catch (ContinueSignal ignored) {
+                        continue;
+                    } catch (BreakSignal ignored) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void returnFrom(Ast.Expr value, Env env, boolean tailBarrier) {
+            if (value == null) throw new ReturnSignal(null);
+
+            if (!tailBarrier) {
+                if (value instanceof Ast.CallExpr call) {
+                    Invocation invocation = prepareInvocation(call, env);
+                    boolean localTailTarget = invocation.kind() == InvocationKind.INVOKABLE
+                            ? invocation.target() instanceof TailCallable callable
+                                    && callable.owner() == this
+                            : invocation.owner() == this;
+                    if (localTailTarget) {
+                        throw new TailCallSignal(invocation);
+                    }
+                    // Crossing an untyped linked-code-unit boundary keeps this
+                    // activation until the imported call returns so the caller's
+                    // declared return-shape check still runs.
+                    throw new ReturnSignal(invoke(invocation));
+                }
+                if (value instanceof Ast.ConditionalExpr conditional) {
+                    Ast.Expr selected = truth(eval(conditional.condition(), env))
+                            ? conditional.whenTrue()
+                            : conditional.whenFalse();
+                    returnFrom(selected, env, false);
+                    return;
+                }
+            }
+
+            throw new ReturnSignal(eval(value, env));
+        }
+
+        private Invocation prepareInvocation(Ast.CallExpr call, Env env) {
+            if (call.callee() instanceof Ast.NameExpr directName
+                    && env.lookup(directName.name()) == Env.MISSING) {
+                Ast.FunctionDecl direct = findFunction(directName.name());
+                if (direct != null) {
+                    List<Object> args = evaluateArguments(call.arguments(), env);
+                    return functionInvocation(direct, args);
+                }
+            }
+
+            if (call.callee() instanceof Ast.MemberExpr methodCall) {
+                Object receiver = eval(methodCall.receiver(), env);
+                List<Object> args = evaluateArguments(call.arguments(), env);
+
+                if (receiver instanceof OresObject object) {
+                    Ast.MethodDecl method = object.owner.findMethod(
+                            object.klass, methodCall.member(), args.size(), new LinkedHashSet<>());
+                    if (method != null) {
+                        object.owner.requireClassMemberVisible(
+                                method.visibility(),
+                                object.owner.declaringClass(method),
+                                env.accessClass(),
+                                "method",
+                                method.name());
+                        return object.owner.methodInvocation(object, method, args);
+                    }
+
+                    OwnedField ownedField = object.owner.findField(
+                            object.klass, methodCall.member(), new LinkedHashSet<>());
+                    if (ownedField != null) {
+                        object.owner.requireClassMemberVisible(
+                                ownedField.field().visibility(),
+                                ownedField.owner(),
+                                env.accessClass(),
+                                "field",
+                                ownedField.field().name());
+                    }
+                    Object fieldValue = object.fields.get(methodCall.member());
+                    if (fieldValue instanceof Invokable invokable) {
+                        return object.owner.invokableInvocation(invokable, args);
+                    }
+                    if (object.fields.containsKey(methodCall.member())) {
+                        throw new IllegalArgumentException(
+                                "field " + object.klass.name() + "." + methodCall.member()
+                                        + " is not callable");
+                    }
+                    throw new IllegalArgumentException(
+                            "no method or callable field " + object.klass.name() + "."
+                                    + methodCall.member() + " with arity " + args.size());
+                }
+
+                if (receiver instanceof ClassFacade klass) {
+                    Ast.MethodDecl fn = klass.owner().findStaticFunction(
+                            klass.klass(), methodCall.member(), args.size(), new LinkedHashSet<>());
+                    if (fn == null) {
+                        throw new IllegalArgumentException(
+                                "no static function " + klass.klass().name() + "." + methodCall.member()
+                                        + " with arity " + args.size());
+                    }
+                    klass.owner().requireClassMemberVisible(
+                            fn.visibility(),
+                            klass.owner().declaringClass(fn),
+                            env.accessClass(),
+                            "static function",
+                            fn.name());
+                    return klass.owner().staticFunctionInvocation(fn, args);
+                }
+
+                if (receiver instanceof ModuleFacade module) {
+                    return module.owner().prepareModuleInvocation(
+                            module.module(), methodCall.member(), args);
+                }
+
+                if (receiver instanceof OresMutex.Guard<?> guard
+                        && !methodCall.member().equals("release")
+                        && !methodCall.member().equals("is_released")
+                        && guard.value() instanceof OresObject object) {
+                    Ast.MethodDecl method = object.owner.findMethod(
+                            object.klass, methodCall.member(), args.size(), new LinkedHashSet<>());
+                    if (method != null) {
+                        object.owner.requireClassMemberVisible(
+                                method.visibility(),
+                                object.owner.declaringClass(method),
+                                env.accessClass(),
+                                "method",
+                                method.name());
+                        return object.owner.methodInvocation(object, method, args);
+                    }
+                }
+
+                if (receiver instanceof ImportedNamespace namespace) {
+                    return namespace.owner().prepareImportedInvocation(
+                            namespace.kind(), methodCall.member(), args);
+                }
+
+                Object callee = member(receiver, methodCall.member(), env);
+                if (!(callee instanceof Invokable invokable)) {
+                    throw new IllegalArgumentException("value is not callable: " + callee);
+                }
+                return invokableInvocation(invokable, args);
+            }
+
+            Object callee = eval(call.callee(), env);
+            List<Object> args = evaluateArguments(call.arguments(), env);
+            if (!(callee instanceof Invokable invokable)) {
+                throw new IllegalArgumentException("value is not callable: " + callee);
+            }
+            return invokableInvocation(invokable, args);
+        }
+
+        private List<Object> evaluateArguments(List<Ast.Expr> arguments, Env env) {
+            ArrayList<Object> values = new ArrayList<>(arguments.size());
+            for (Ast.Expr argument : arguments) values.add(eval(argument, env));
+            return List.copyOf(values);
         }
 
         private Object eval(Ast.Expr expr, Env env) {
@@ -449,11 +1079,6 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("actor")) return new ActorFacade(context);
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
-                if (name.name().equals("List")) return new NativeRuntimeBuiltins.ListFactory(context);
-                if (name.name().equals("Map")) return new NativeRuntimeBuiltins.MapFactory(context);
-                if (name.name().equals("File")) return new NativeRuntimeBuiltins.FileFactory(context);
-                if (name.name().equals("thread")) return new NativeRuntimeBuiltins.ThreadNamespace(context);
-                if (name.name().equals("net") || name.name().equals("native_net")) return new NativeNetBuiltin(context);
                 if (name.name().equals("print")) return (Invokable) args -> {
                     context.requireCapability(IsolatePolicy.Capability.STDOUT, "print");
                     requireOne(args, "print"); context.output().print(display(args.getFirst())); context.output().flush(); return null;
@@ -486,7 +1111,23 @@ public final class OresEvalRootNode extends RootNode {
                 Object imported = importedValue(name.name());
                 if (imported != Env.MISSING) return imported;
                 Ast.FunctionDecl fn = findFunction(name.name());
-                if (fn != null) return (Invokable) args -> callFunction(fn, args);
+                if (fn != null) {
+                    if (fn.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("actor callable " + fn.name()
+                                + " is an actor entry point, not a first-class callable value");
+                    }
+                    if (fn.kind() == Ast.CallableKind.ROUTINE) {
+                        throw new IllegalArgumentException("routine " + fn.name()
+                                + " is direct-call-only and cannot be used as a first-class callable value");
+                    }
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic fnc '" + fn.name()
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
+                    }
+                    return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
+                }
                 throw new IllegalArgumentException("unknown name " + name.name());
             }
             if (expr instanceof Ast.AssignExpr assignment) {
@@ -502,10 +1143,18 @@ public final class OresEvalRootNode extends RootNode {
                         if (!object.fields.containsKey(target.member())) {
                             throw new IllegalArgumentException("unknown field " + target.member());
                         }
-                        Ast.FieldDecl field = effectiveFields(object.klass, new LinkedHashSet<>()).stream()
-                                .filter(candidate -> candidate.name().equals(target.member()))
-                                .findFirst()
-                                .orElseThrow(() -> new IllegalArgumentException("unknown field " + target.member()));
+                        OwnedField ownedField = object.owner.findField(
+                                object.klass, target.member(), new LinkedHashSet<>());
+                        if (ownedField == null) {
+                            throw new IllegalArgumentException("unknown field " + target.member());
+                        }
+                        Ast.FieldDecl field = ownedField.field();
+                        object.owner.requireClassMemberVisible(
+                                field.visibility(),
+                                ownedField.owner(),
+                                env.accessClass(),
+                                "field",
+                                field.name());
                         if (field.bindingKind() != Ast.BindingKind.LET) {
                             throw new IllegalArgumentException("field '" + object.klass.name() + "."
                                     + target.member() + "' is immutable");
@@ -513,49 +1162,30 @@ public final class OresEvalRootNode extends RootNode {
                         object.fields.put(target.member(), value);
                         return value;
                     }
-                    if (receiver instanceof NativeValues.DynamicStructValue dynamic) {
-                        dynamic.putString(target.member(), value);
+                    if (receiver instanceof DynamicStructValue dynamic) {
+                        dynamic.fields.put(target.member(), value);
                         return value;
                     }
-                    if (receiver instanceof NativeValues.StructValue struct) {
-                        Ast.ClassDecl structDecl = findClass(struct.typeName());
-                        if (structDecl == null || !structDecl.isStruct()) {
-                            throw new IllegalArgumentException("unknown struct type " + struct.typeName());
-                        }
-                        Ast.FieldDecl field = effectiveFields(structDecl, new LinkedHashSet<>()).stream()
-                                .filter(candidate -> candidate.name().equals(target.member()))
-                                .findFirst()
-                                .orElseThrow(() -> new IllegalArgumentException("unknown struct field " + target.member()));
-                        if (field.bindingKind() != Ast.BindingKind.LET) {
-                            throw new IllegalArgumentException("struct field '" + struct.typeName() + "."
-                                    + target.member() + "' is immutable");
-                        }
-                        struct.putString(target.member(), value);
-                        return value;
-                    }
-                    throw new IllegalArgumentException("member assignment requires a class instance, typed struct, DynamicStruct, or mutex guard");
+                    throw new IllegalArgumentException("member assignment requires a class instance, DynamicStruct, or mutex guard");
                 }
                 if (assignment.target() instanceof Ast.IndexExpr target) {
                     Object receiver = eval(target.receiver(), env);
                     Object index = eval(target.index(), env);
-                    if (receiver instanceof NativeValues.DynamicStructValue dynamic) {
+                    if (receiver instanceof DynamicStructValue dynamic) {
                         if (!(index instanceof String key)) {
                             throw new IllegalArgumentException("DynamicStruct key must be a string");
                         }
-                        dynamic.putString(key, value);
-                        return value;
-                    }
-                    if (receiver instanceof NativeValues.MapValue map) {
-                        map.put(index, value);
+                        dynamic.fields.put(key, value);
                         return value;
                     }
                     if (!(index instanceof Number number)) throw new IllegalArgumentException("array/list index must be an integer");
                     int i = Math.toIntExact(number.longValue());
-                    if (receiver instanceof NativeValues.ListValue list) {
+                    if (receiver instanceof List<?> raw) {
+                        @SuppressWarnings("unchecked") List<Object> list = (List<Object>) raw;
                         list.set(i, value);
                         return value;
                     }
-                    throw new IllegalArgumentException("indexed assignment requires native List, Map, or DynamicStruct");
+                    throw new IllegalArgumentException("indexed assignment requires a mutable array/list or DynamicStruct");
                 }
                 throw new IllegalArgumentException("unsupported assignment target");
             }
@@ -594,47 +1224,54 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 return binary(binary.operator(), left, right);
             }
-            if (expr instanceof Ast.CallExpr call) {
-                if (call.callee() instanceof Ast.MemberExpr methodCall) {
-                    Object receiver = eval(methodCall.receiver(), env);
-                    List<Object> args = call.arguments().stream().map(arg -> eval(arg, env)).toList();
-                    if (receiver instanceof OresObject object) {
-                        return object.owner.invokeMethod(object, methodCall.member(), args);
-                    }
-                    if (receiver instanceof ClassFacade klass) {
-                        return klass.owner().invokeStaticFunction(klass.klass(), methodCall.member(), args);
-                    }
-                    Object callee = member(receiver, methodCall.member());
-                    if (callee instanceof Invokable invokable) return invokable.call(args);
-                    if (callee instanceof BuiltinCallable builtin) return builtin.call(args);
-                    throw new IllegalArgumentException("value is not callable: " + callee);
-                }
-                Object callee = eval(call.callee(), env);
-                List<Object> args = call.arguments().stream().map(arg -> eval(arg, env)).toList();
-                if (callee instanceof Invokable invokable) return invokable.call(args);
-                if (callee instanceof BuiltinCallable builtin) return builtin.call(args);
-                throw new IllegalArgumentException("value is not callable: " + callee);
+            if (expr instanceof Ast.TypeTestExpr test) {
+                Object value = eval(test.value(), env);
+                return oresTypeMatches(value, test.targetType());
             }
-            if (expr instanceof Ast.MemberExpr member) return member(eval(member.receiver(), env), member.member());
+            if (expr instanceof Ast.PatternTestExpr test) {
+                Object value = eval(test.value(), env);
+                return patternMatches(test.pattern(), value, new LinkedHashMap<>());
+            }
+            if (expr instanceof Ast.CastExpr cast) {
+                Object value = eval(cast.value(), env);
+                boolean matches = oresTypeMatches(value, cast.targetType());
+                if (cast.mode() == Ast.CastMode.OPTIONAL) {
+                    return new OptionValue(matches, matches ? value : null);
+                }
+                if (!matches) {
+                    throw new OresCastError("cannot cast runtime type " + oresRuntimeTypeName(value)
+                            + " to " + cast.targetType().name());
+                }
+                return value;
+            }
+            if (expr instanceof Ast.CallExpr call) {
+                return invoke(prepareInvocation(call, env));
+            }
+            if (expr instanceof Ast.MemberExpr member) return member(eval(member.receiver(), env), member.member(), env);
             if (expr instanceof Ast.IndexExpr indexed) {
                 Object receiver = eval(indexed.receiver(), env);
                 Object index = eval(indexed.index(), env);
-                if (receiver instanceof NativeValues.DynamicStructValue dynamic) {
-                    if (!(index instanceof String key)) throw new IllegalArgumentException("DynamicStruct key must be a string");
-                    return dynamic.getString(key);
+                if (receiver instanceof DynamicStructValue dynamic) {
+                    if (!(index instanceof String key)) {
+                        throw new IllegalArgumentException("DynamicStruct key must be a string");
+                    }
+                    if (!dynamic.fields.containsKey(key)) {
+                        throw new IllegalArgumentException("unknown DynamicStruct key " + key);
+                    }
+                    return dynamic.fields.get(key);
                 }
-                if (receiver instanceof NativeValues.RecordValue record) {
-                    if (!(index instanceof String key)) throw new IllegalArgumentException("record key must be a string");
-                    return record.getString(key);
+                if (receiver instanceof Map<?, ?> map) {
+                    if (!(index instanceof String key)) {
+                        throw new IllegalArgumentException("object/map key must be a string");
+                    }
+                    if (!map.containsKey(key)) {
+                        throw new IllegalArgumentException("unknown object/map key " + key);
+                    }
+                    return map.get(key);
                 }
-                if (receiver instanceof NativeValues.StructValue struct) {
-                    if (!(index instanceof String key)) throw new IllegalArgumentException("struct field key must be a string");
-                    return struct.getString(key);
-                }
-                if (receiver instanceof NativeValues.MapValue map) return map.get(index);
                 if (!(index instanceof Number number)) throw new IllegalArgumentException("array/list index must be an integer");
                 int i = Math.toIntExact(number.longValue());
-                if (receiver instanceof NativeValues.ListValue list) return list.get(i);
+                if (receiver instanceof List<?> list) return list.get(i);
                 if (receiver instanceof Object[] array) return array[i];
                 throw new IllegalArgumentException("value is not indexable: " + receiver);
             }
@@ -643,16 +1280,7 @@ public final class OresEvalRootNode extends RootNode {
                     if (!created.arguments().isEmpty()) {
                         throw new IllegalArgumentException("DynamicStruct<T> constructor takes no positional arguments");
                     }
-                    return new NativeValues.DynamicStructValue(context);
-                }
-                if (created.type().name().equals("List") || created.type().name().equals("Array")) {
-                    NativeValues.ListValue result = new NativeValues.ListValue(context);
-                    for (Ast.Expr argument : created.arguments()) result.add(eval(argument, env));
-                    return result;
-                }
-                if (created.type().name().equals("Map")) {
-                    if (!created.arguments().isEmpty()) throw new IllegalArgumentException("Map<K,V> constructor takes no positional arguments");
-                    return new NativeValues.MapValue(context);
+                    return new DynamicStructValue();
                 }
                 HostClassFacade hostClass = hostClasses.get(created.type().name());
                 if (hostClass != null) {
@@ -670,9 +1298,6 @@ public final class OresEvalRootNode extends RootNode {
                 Evaluator owner = this;
                 if (klass == null) {
                     Object imported = importedValue(created.type().name());
-                    if (imported == Env.MISSING) {
-                        imported = importedQualifiedClass(created.type().name());
-                    }
                     if (imported instanceof ClassFacade externalClass) {
                         owner = externalClass.owner();
                         klass = externalClass.klass();
@@ -685,29 +1310,19 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.AwaitExpr awaited) {
                 Object value = eval(awaited.expression(), env);
                 if (value instanceof CompletionStage<?> stage) {
-                    var future = stage.toCompletableFuture();
-                    if (ActorRuntime.inActorExecution() && !future.isDone()) {
-                        throw new IllegalStateException(
-                                "await would block an actor dispatcher carrier; actor continuation lowering must suspend/resume the mailbox turn");
-                    }
-                    return future.join();
+                    return AsyncRuntime.await(stage);
                 }
                 return value;
             }
             if (expr instanceof Ast.ListExpr list) {
-                NativeValues.ListValue result = new NativeValues.ListValue(context);
+                ArrayList<Object> result = new ArrayList<>(list.elements().size());
                 for (Ast.Expr item : list.elements()) result.add(eval(item, env));
                 return result;
             }
-            if (expr instanceof Ast.TupleExpr tuple) {
-                Object[] result = new Object[tuple.elements().size()];
-                for (int i = 0; i < result.length; i++) result[i] = eval(tuple.elements().get(i), env);
-                return result;
-            }
+            if (expr instanceof Ast.TupleExpr tuple) return tuple.elements().stream().map(item -> eval(item, env)).toList();
             if (expr instanceof Ast.ObjectExpr object) {
                 boolean dynamicKeys = object.fields().stream().anyMatch(Ast.ObjectField::isDynamic);
-                NativeValues.DynamicStructValue dynamic = dynamicKeys ? new NativeValues.DynamicStructValue(context) : null;
-                NativeValues.RecordValue record = dynamicKeys ? null : new NativeValues.RecordValue(context);
+                LinkedHashMap<String, Object> result = new LinkedHashMap<>();
                 for (Ast.ObjectField field : object.fields()) {
                     String key;
                     if (field.isDynamic()) {
@@ -719,34 +1334,46 @@ public final class OresEvalRootNode extends RootNode {
                     } else {
                         key = field.name();
                     }
-                    boolean duplicate = dynamicKeys ? dynamic.containsString(key) : record.containsString(key);
-                    if (duplicate) throw new IllegalArgumentException("duplicate obj field " + key);
-                    Object fieldValue = eval(field.value(), env);
-                    if (dynamicKeys) dynamic.putString(key, fieldValue);
-                    else record.initialize(key, fieldValue);
+                    if (result.putIfAbsent(key, eval(field.value(), env)) != null) {
+                        throw new IllegalArgumentException("duplicate obj field " + key);
+                    }
                 }
-                return dynamicKeys ? dynamic : record;
+                return dynamicKeys ? new DynamicStructValue(result) : Map.copyOf(result);
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
                 boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
-                return (Invokable) args -> {
+                return tailCallable(args -> {
                     if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
                     Env local = new Env(captured, nonLexical);
                     for (int i = 0; i < lambda.parameters().size(); i++) {
                         Ast.Param param = lambda.parameters().get(i);
                         local.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
                     }
-                    if (lambda.expressionBody() != null) return eval(lambda.expressionBody(), local);
-                    try { executeBlock(lambda.blockBody(), local); return null; }
-                    catch (ReturnSignal signal) { return signal.value; }
-                };
+                    try {
+                        if (lambda.expressionBody() != null) {
+                            // An expression-bodied lambda's sole expression is
+                            // inherently in tail position. Route it through the
+                            // same tail-return lowering as an explicit
+                            // `return expr;` in a block-bodied lambda.
+                            returnFrom(lambda.expressionBody(), local, false);
+                            throw new AssertionError("lambda expression return did not transfer control");
+                        }
+                        executeBlock(lambda.blockBody(), local);
+                        return null;
+                    } catch (TailCallSignal signal) {
+                        return new TailCall(signal.invocation);
+                    } catch (ReturnSignal signal) {
+                        return signal.value;
+                    } catch (BreakSignal | ContinueSignal signal) {
+                        throw new IllegalStateException("loop control cannot cross a lambda boundary", signal);
+                    }
+                });
             }
             throw new IllegalArgumentException("unsupported expression " + expr);
         }
 
-        private Object member(Object receiver, String name) {
-            if (receiver instanceof BuiltinValue builtin) return builtin.member(name);
+        private Object member(Object receiver, String name, Env env) {
             if (receiver instanceof HostClassFacade host) {
                 context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
                         "Java host class " + host.className());
@@ -798,7 +1425,7 @@ public final class OresEvalRootNode extends RootNode {
                 return switch (name) {
                     case "release" -> (Invokable) args -> { requireZero(args, "MutexGuard.release"); guard.release(); return null; };
                     case "is_released" -> (Invokable) args -> { requireZero(args, "MutexGuard.is_released"); return guard.released(); };
-                    default -> member(guard.value(), name);
+                    default -> member(guard.value(), name, env);
                 };
             }
             if (receiver instanceof ImportedNamespace namespace) return namespace.owner().exportValue(namespace.kind(), name);
@@ -807,20 +1434,53 @@ public final class OresEvalRootNode extends RootNode {
                 List<Ast.MethodDecl> functions = klass.owner().findStaticFunctionsByName(klass.klass(), name, new LinkedHashSet<>());
                 if (functions.size() == 1) {
                     Ast.MethodDecl fn = functions.getFirst();
-                    return (Invokable) args -> klass.owner().callStaticFunction(klass.klass(), fn, args);
+                    klass.owner().requireClassMemberVisible(
+                            fn.visibility(),
+                            klass.owner().declaringClass(fn),
+                            env == null ? null : env.accessClass(),
+                            "static function",
+                            fn.name());
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic static fnc '" + klass.klass().name() + "." + name
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
+                    }
+                    return klass.owner().tailCallable(
+                            args -> klass.owner().callStaticFunctionRaw(fn, objectArguments(args)));
                 }
                 if (functions.size() > 1) throw new IllegalArgumentException("overloaded static function " + klass.klass().name() + "." + name + " must be called so arity can select it");
                 throw new IllegalArgumentException("unknown static member " + klass.klass().name() + "." + name);
             }
             if (receiver instanceof OresObject object) {
-                if (object.fields.containsKey(name)) return object.fields.get(name);
-                return new BoundMethod(object.owner, object, name);
+                if (object.fields.containsKey(name)) {
+                    OwnedField ownedField = object.owner.findField(
+                            object.klass, name, new LinkedHashSet<>());
+                    if (ownedField != null) {
+                        object.owner.requireClassMemberVisible(
+                                ownedField.field().visibility(),
+                                ownedField.owner(),
+                                env == null ? null : env.accessClass(),
+                                "field",
+                                ownedField.field().name());
+                    }
+                    return object.fields.get(name);
+                }
+                if (object.owner.hasInstanceMethodNamed(object.klass, name, new LinkedHashSet<>())) {
+                    throw new IllegalArgumentException("instance method " + object.klass.name() + "." + name
+                            + " is direct-call-only and cannot be used as a first-class callable value; "
+                            + "wrap receiver." + name + "(...) in an explicit lambda when a callback is required");
+                }
+                throw new IllegalArgumentException("unknown member " + object.klass.name() + "." + name);
             }
-            if (receiver instanceof NativeValues.DynamicStructValue dynamic) return dynamic.getString(name);
-            if (receiver instanceof NativeValues.RecordValue record) return record.getString(name);
-            if (receiver instanceof NativeValues.StructValue struct) return struct.getString(name);
+            if (receiver instanceof DynamicStructValue dynamic) {
+                if (!dynamic.fields.containsKey(name)) {
+                    throw new IllegalArgumentException("unknown DynamicStruct member " + name);
+                }
+                return dynamic.fields.get(name);
+            }
             if (receiver instanceof Map<?, ?> map) {
-                if (!map.containsKey(name)) throw new IllegalArgumentException("unknown map member " + name);
+                if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
                 return map.get(name);
             }
             InteropLibrary foreign = InteropLibrary.getUncached(receiver);
@@ -971,7 +1631,7 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("Mutex.with_lock expects a one-argument lambda/function");
                     }
                     return lock.withLock(value -> {
-                        Object result = callback.call(List.of(value));
+                        Object result = invoke(invokableInvocation(callback, List.of(value)));
                         if (result != null) {
                             throw new IllegalArgumentException(
                                     "Mutex.with_lock callback must return void");
@@ -991,7 +1651,7 @@ public final class OresEvalRootNode extends RootNode {
                             throw new IllegalArgumentException("SharedMutex.recover expects a one-argument lambda/function");
                         }
                         return shared.recover(value -> {
-                            Object result = callback.call(List.of(value));
+                            Object result = invoke(invokableInvocation(callback, List.of(value)));
                             if (result != null) {
                                 throw new IllegalArgumentException(
                                         "SharedMutex.recover callback must return void");
@@ -1018,8 +1678,23 @@ public final class OresEvalRootNode extends RootNode {
 
         private Object callStaticFunction(Ast.ClassDecl klass, Ast.MethodDecl fn, List<?> args) {
             if (!fn.isStatic()) throw new IllegalArgumentException("not a static class function: " + klass.name() + "." + fn.name());
+            return invoke(staticFunctionInvocation(fn, args));
+        }
+
+        private Object callStaticFunctionRaw(Ast.MethodDecl fn, List<?> args) {
+            if (!fn.isStatic()) throw new IllegalArgumentException("not a static class function: " + fn.name());
             if (args.size() != fn.parameters().size()) throw new IllegalArgumentException("static function " + fn.name() + " arity mismatch");
-            Env env = new Env(null);
+            if (!fn.async()) return callStaticFunctionBodyRaw(fn, args);
+
+            List<?> detached = detachAsyncArguments(args);
+            return context.asyncRuntime().submit(() ->
+                    detachAsyncValue(
+                            invoke(staticFunctionBodyInvocation(fn, detached)),
+                            new IdentityHashMap<>()));
+        }
+
+        private Object callStaticFunctionBodyRaw(Ast.MethodDecl fn, List<?> args) {
+            Env env = new Env(null, false, declaringClass(fn));
             for (int i = 0; i < fn.parameters().size(); i++) {
                 Ast.Param param = fn.parameters().get(i);
                 env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
@@ -1027,28 +1702,12 @@ public final class OresEvalRootNode extends RootNode {
             try {
                 executeBlock(fn.body(), env);
                 return null;
-            } catch (ReturnSignal signal) { return shapeReturnedValue(fn.returnType(), signal.value, "static function " + fn.name()); }
-        }
-
-        /**
-         * Go-style method value: one shared method definition per class plus a
-         * tiny (receiver, method-name) pair only when a method is extracted as
-         * a first-class callback. Direct receiver.method(...) calls allocate no
-         * bound-method object.
-         */
-        private static final class BoundMethod implements Invokable {
-            private final Evaluator owner;
-            private final OresObject receiver;
-            private final String methodName;
-
-            private BoundMethod(Evaluator owner, OresObject receiver, String methodName) {
-                this.owner = owner;
-                this.receiver = receiver;
-                this.methodName = methodName;
-            }
-
-            @Override public Object call(List<Object> arguments) {
-                return owner.invokeMethod(receiver, methodName, arguments);
+            } catch (TailCallSignal signal) {
+                return new TailCall(signal.invocation);
+            } catch (ReturnSignal signal) {
+                return shapeReturnedValue(fn.returnType(), signal.value, "static function " + fn.name());
+            } catch (BreakSignal | ContinueSignal signal) {
+                throw new IllegalStateException("loop control cannot cross a static function boundary", signal);
             }
         }
 
@@ -1060,31 +1719,6 @@ public final class OresEvalRootNode extends RootNode {
             }
             Ast.ImportDecl namespace = namespaceImports.get(name);
             if (namespace != null) return new ImportedNamespace(importedTarget(namespace), namespace.kind());
-            return Env.MISSING;
-        }
-
-        /**
-         * Resolves a class reached through an imported module/wildcard namespace,
-         * e.g. `new collections.ArrayList<int>()`. Module names are flat in
-         * Oreslang, so exactly one namespace separator is sufficient here.
-         */
-        private Object importedQualifiedClass(String qualifiedName) {
-            int dot = qualifiedName.indexOf('.');
-            if (dot <= 0 || dot != qualifiedName.lastIndexOf('.')) return Env.MISSING;
-
-            String namespaceName = qualifiedName.substring(0, dot);
-            String className = qualifiedName.substring(dot + 1);
-            Object namespace = importedValue(namespaceName);
-
-            if (namespace instanceof ModuleFacade module) {
-                Object value = module.owner().moduleMember(module.module(), className);
-                return value instanceof ClassFacade ? value : Env.MISSING;
-            }
-            if (namespace instanceof ImportedNamespace importedNamespace) {
-                Object value = importedNamespace.owner()
-                        .exportValue(importedNamespace.kind(), className);
-                return value instanceof ClassFacade ? value : Env.MISSING;
-            }
             return Env.MISSING;
         }
 
@@ -1100,6 +1734,9 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private String resolveImportUnitId(String rawPath) {
+            String hostResolved = context.resolvedLinkedImport(codeUnitId, rawPath);
+            if (hostResolved != null) return hostResolved;
+
             String raw = rawPath.replace('\\', '/');
             Path parent = Path.of(codeUnitId).getParent();
             Path candidatePath = raw.startsWith(".")
@@ -1115,6 +1752,35 @@ public final class OresEvalRootNode extends RootNode {
             return candidate;
         }
 
+        private Invocation prepareImportedInvocation(Ast.ImportKind kind, String name, List<Object> args) {
+            Ast.FunctionDecl fn = findFunction(name);
+            if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
+                throw new IllegalArgumentException("code unit '" + codeUnitId
+                        + "' does not export callable '" + name + "'");
+            }
+            if (kind == Ast.ImportKind.FUNCTION) {
+                if (fn.kind() != Ast.CallableKind.FNC || fn.actorKind() != Ast.ActorKind.NONE) {
+                    throw new IllegalArgumentException("import fnc requires a reifiable non-actor fnc; '" + name
+                            + "' is direct-call-only or actor-scheduled");
+                }
+                if (!fn.genericParameters().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "import fnc requires a reifiable non-generic fnc; '" + name
+                                    + "' requires direct-call specialization");
+                }
+                return functionInvocation(fn, args);
+            }
+            if (kind == Ast.ImportKind.ALL) {
+                return functionInvocation(fn, args);
+            }
+            throw new IllegalArgumentException("import namespace kind " + kind
+                    + " does not expose direct callable '" + name + "'");
+        }
+
+        private Object invokeImportedCallable(Ast.ImportKind kind, String name, List<Object> args) {
+            return invoke(prepareImportedInvocation(kind, name, args));
+        }
+
         private Object exportValue(Ast.ImportKind kind, String name) {
             return switch (kind) {
                 case FUNCTION -> {
@@ -1122,13 +1788,29 @@ public final class OresEvalRootNode extends RootNode {
                     if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
                         throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export function '" + name + "'");
                     }
-                    yield (Invokable) args -> callFunction(fn, args);
+                    if (fn.kind() != Ast.CallableKind.FNC || fn.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("import fnc requires a reifiable non-actor fnc; '" + name
+                                + "' is direct-call-only or actor-scheduled");
+                    }
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic fnc '" + name
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
+                    }
+                    yield tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
                 }
                 case CLASS -> {
                     Ast.ClassDecl klass = findClass(name);
-                    if (klass == null) throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export class '" + name + "'");
+                    if (klass == null || klass.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export ordinary class '" + name + "'");
+                    }
                     yield new ClassFacade(this, klass);
                 }
+                case ACTOR, INTERFACE, TRAIT, STRUCT, TYPE, TYPES ->
+                        throw new IllegalArgumentException(
+                                "import " + kind.name().toLowerCase()
+                                        + " is a type-only selector and cannot be evaluated as a runtime value");
                 case MODULE -> {
                     Ast.ModuleDecl module = modules.get(name);
                     if (module == null) throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export module '" + name + "'");
@@ -1144,7 +1826,25 @@ public final class OresEvalRootNode extends RootNode {
             Ast.ClassDecl klass = findClass(name);
             if (klass != null) return new ClassFacade(this, klass);
             Ast.FunctionDecl fn = findFunction(name);
-            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC) return (Invokable) args -> callFunction(fn, args);
+            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC) {
+                if (fn.kind() == Ast.CallableKind.ROUTINE) {
+                    throw new IllegalArgumentException(
+                            "routine '" + name
+                                    + "' is direct-call-only and cannot be extracted through a wildcard import namespace");
+                }
+                if (fn.actorKind() != Ast.ActorKind.NONE) {
+                    throw new IllegalArgumentException(
+                            "actor callable '" + name
+                                    + "' is scheduler-dispatched and cannot be extracted as a first-class callable value");
+                }
+                if (!fn.genericParameters().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "generic fnc '" + name
+                                    + "' must be specialized by a direct call; "
+                                    + "polymorphic function values are not supported yet");
+                }
+                return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
+            }
             for (Ast.ModuleDecl candidate : program.modules()) {
                 for (Ast.Decl decl : candidate.declarations()) {
                     if (decl instanceof Ast.FieldDecl field
@@ -1158,27 +1858,15 @@ public final class OresEvalRootNode extends RootNode {
             throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export '" + name + "'");
         }
 
-        private Object instantiate(Ast.ClassDecl klass, List<Object> args) {
+        private OresObject instantiate(Ast.ClassDecl klass, List<Object> args) {
             if (klass.actorKind() != Ast.ActorKind.NONE) {
                 throw new IllegalStateException("actor '" + klass.name()
                         + "' cannot be constructed with new; actor state must be initialized inside ActorRuntime");
             }
             List<Ast.FieldDecl> classFields = effectiveFields(klass, new LinkedHashSet<>());
             if (args.size() > classFields.size()) throw new IllegalArgumentException("too many constructor arguments for " + klass.name());
-            Env env = new Env(null);
-            if (klass.isStruct()) {
-                NativeValues.StructValue struct = new NativeValues.StructValue(context, klass.name());
-                for (int i = 0; i < classFields.size(); i++) {
-                    Ast.FieldDecl field = classFields.get(i);
-                    Object value;
-                    if (i < args.size()) value = args.get(i);
-                    else if (field.initializer() != null) value = eval(field.initializer(), env);
-                    else throw new IllegalArgumentException("missing constructor field " + klass.name() + "." + field.name());
-                    struct.initialize(field.name(), value);
-                }
-                return struct;
-            }
             LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
+            Env env = new Env(null, false, klass);
             for (int i = 0; i < classFields.size(); i++) {
                 Ast.FieldDecl field = classFields.get(i);
                 Object value;
@@ -1201,7 +1889,17 @@ public final class OresEvalRootNode extends RootNode {
                     return new ClassFacade(this, klass);
                 }
                 if (decl instanceof Ast.FunctionDecl fn && fn.name().equals(name) && fn.visibility() == Ast.Visibility.PUBLIC) {
-                    return (Invokable) args -> callFunction(fn, args);
+                    if (fn.kind() == Ast.CallableKind.ROUTINE || fn.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("callable '" + module.name() + "." + name
+                                + "' is direct-call-only and cannot be extracted as a value");
+                    }
+                    if (!fn.genericParameters().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "generic fnc '" + module.name() + "." + name
+                                        + "' must be specialized by a direct call; "
+                                        + "polymorphic function values are not supported yet");
+                    }
+                    return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
                 }
                 if (decl instanceof Ast.FieldDecl field && field.name().equals(name) && field.visibility() == Ast.Visibility.PUBLIC) {
                     if (field.initializer() == null) throw new IllegalArgumentException("module field has no initializer: " + module.name() + "." + name);
@@ -1209,6 +1907,42 @@ public final class OresEvalRootNode extends RootNode {
                 }
             }
             throw new IllegalArgumentException("module '" + module.name() + "' does not export '" + name + "'");
+        }
+
+        private Invocation prepareModuleInvocation(Ast.ModuleDecl module, String name, List<Object> args) {
+            for (Ast.Decl decl : module.declarations()) {
+                if (decl instanceof Ast.FunctionDecl fn
+                        && fn.name().equals(name)
+                        && fn.visibility() == Ast.Visibility.PUBLIC) {
+                    return functionInvocation(fn, args);
+                }
+            }
+            throw new IllegalArgumentException("module '" + module.name()
+                    + "' does not export callable '" + name + "'");
+        }
+
+        private Object invokeModuleFunction(Ast.ModuleDecl module, String name, List<Object> args) {
+            return invoke(prepareModuleInvocation(module, name, args));
+        }
+
+        private boolean hasInstanceMethodNamed(Ast.ClassDecl klass, String name, Set<Ast.ClassDecl> seen) {
+            if (!seen.add(klass)) return false;
+            for (Ast.MethodDecl method : klass.methods()) {
+                if (!method.isStatic() && method.name().equals(name)) {
+                    seen.remove(klass);
+                    return true;
+                }
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent != null && hasInstanceMethodNamed(parent, name, seen)) {
+                    seen.remove(klass);
+                    return true;
+                }
+            }
+            seen.remove(klass);
+            return false;
         }
 
         private List<Ast.FieldDecl> effectiveFields(Ast.ClassDecl klass, Set<Ast.ClassDecl> seen) {
@@ -1223,6 +1957,57 @@ public final class OresEvalRootNode extends RootNode {
             for (Ast.FieldDecl field : klass.fields()) result.put(field.name(), field);
             seen.remove(klass);
             return List.copyOf(result.values());
+        }
+
+        private record OwnedField(Ast.ClassDecl owner, Ast.FieldDecl field) { }
+
+        private Ast.ClassDecl declaringClass(Ast.MethodDecl method) {
+            Ast.ClassDecl owner = methodOwners.get(method);
+            if (owner == null) {
+                throw new IllegalStateException(
+                        "cannot find declaring class for method '" + method.name() + "'");
+            }
+            return owner;
+        }
+
+        private void requireClassMemberVisible(
+                Ast.Visibility visibility,
+                Ast.ClassDecl owner,
+                Ast.ClassDecl accessClass,
+                String kind,
+                String name) {
+            if (visibility == Ast.Visibility.PRIVATE && accessClass != owner) {
+                throw new IllegalArgumentException(
+                        "private " + kind + " '" + owner.name() + "." + name
+                                + "' is accessible only from code declared in class " + owner.name());
+            }
+        }
+
+        private OwnedField findField(
+                Ast.ClassDecl klass,
+                String name,
+                Set<Ast.ClassDecl> seen) {
+            if (!seen.add(klass)) {
+                throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
+            }
+            for (Ast.FieldDecl field : klass.fields()) {
+                if (field.name().equals(name)) {
+                    seen.remove(klass);
+                    return new OwnedField(klass, field);
+                }
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent == null) continue;
+                OwnedField candidate = findField(parent, name, seen);
+                if (candidate != null) {
+                    seen.remove(klass);
+                    return candidate;
+                }
+            }
+            seen.remove(klass);
+            return null;
         }
 
         private Ast.MethodDecl findMethod(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
@@ -1285,17 +2070,202 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
-        private List<?> iterableValues(Object value) {
-            if (value instanceof NativeValues.ListValue list) return list.interpreterView();
+        private List<?> iterableValues(Object value, Env env) {
             if (value instanceof List<?> list) return list;
             if (value instanceof Object[] array) return List.of(array);
             if (value instanceof OresObject object) {
                 Ast.MethodDecl iterator = findMethod(object.klass, "Symbol.iterator", 0, new LinkedHashSet<>());
                 if (iterator == null) throw new IllegalArgumentException("value has no [Symbol.iterator]()");
+                object.owner.requireClassMemberVisible(
+                        iterator.visibility(),
+                        object.owner.declaringClass(iterator),
+                        env == null ? null : env.accessClass(),
+                        "method",
+                        iterator.name());
                 Object produced = callMethod(object, iterator, List.of());
-                return iterableValues(produced);
+                return iterableValues(produced, env);
             }
             throw new IllegalArgumentException("value is not iterable");
+        }
+
+        private ConditionResult evalCondition(Ast.Expr condition, Env env) {
+            if (condition instanceof Ast.BinaryExpr binary && binary.operator().equals("&&")) {
+                ConditionResult left = evalCondition(binary.left(), env);
+                if (!left.matched()) return ConditionResult.noMatch();
+                Env rightEnv = new Env(env);
+                left.bindings().forEach((name, value) ->
+                        rightEnv.define(name, value, Ast.BindingKind.VAL));
+                ConditionResult right = evalCondition(binary.right(), rightEnv);
+                if (!right.matched()) return ConditionResult.noMatch();
+                LinkedHashMap<String, Object> merged = new LinkedHashMap<>(left.bindings());
+                for (Map.Entry<String, Object> entry : right.bindings().entrySet()) {
+                    Object previous = merged.putIfAbsent(entry.getKey(), entry.getValue());
+                    if (previous != null && previous != entry.getValue()) {
+                        throw new IllegalStateException("condition pattern binds '" + entry.getKey() + "' more than once");
+                    }
+                }
+                return new ConditionResult(true, Map.copyOf(merged));
+            }
+            if (condition instanceof Ast.TypeTestExpr test) {
+                Object value = eval(test.value(), env);
+                if (!oresTypeMatches(value, test.targetType())) return ConditionResult.noMatch();
+                if (test.binding() == null) return ConditionResult.match();
+                return new ConditionResult(true, Map.of(test.binding(), value));
+            }
+            if (condition instanceof Ast.PatternTestExpr test) {
+                Object value = eval(test.value(), env);
+                LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+                return patternMatches(test.pattern(), value, bindings)
+                        ? new ConditionResult(true, Map.copyOf(bindings))
+                        : ConditionResult.noMatch();
+            }
+            return truth(eval(condition, env)) ? ConditionResult.match() : ConditionResult.noMatch();
+        }
+
+        private boolean patternMatches(Ast.Pattern pattern, Object value, Map<String, Object> bindings) {
+            if (pattern instanceof Ast.WildcardPattern) return true;
+            if (pattern instanceof Ast.BindingPattern binding) {
+                if (bindings.putIfAbsent(binding.name(), value) != null) {
+                    throw new IllegalStateException("pattern binds '" + binding.name() + "' more than once");
+                }
+                return true;
+            }
+            if (pattern instanceof Ast.LiteralPattern literal) {
+                return Objects.equals(literal.value(), value);
+            }
+            if (pattern instanceof Ast.TypePattern typed) {
+                if (!oresTypeMatches(value, typed.type())) return false;
+                if (typed.binding() != null && bindings.putIfAbsent(typed.binding(), value) != null) {
+                    throw new IllegalStateException("pattern binds '" + typed.binding() + "' more than once");
+                }
+                return true;
+            }
+            if (pattern instanceof Ast.ConstructorPattern constructor) {
+                String name = constructor.constructor();
+                if (name.equals("Some")) {
+                    if (!(value instanceof OptionValue option) || !option.present() || constructor.arguments().size() != 1) return false;
+                    return patternMatches(constructor.arguments().getFirst(), option.value(), bindings);
+                }
+                if (name.equals("None")) {
+                    return value instanceof OptionValue option && !option.present() && constructor.arguments().isEmpty();
+                }
+                if (name.equals("Ok")) {
+                    if (!(value instanceof ResultValue result) || !result.ok() || constructor.arguments().size() != 1) return false;
+                    return patternMatches(constructor.arguments().getFirst(), result.value(), bindings);
+                }
+                if (name.equals("Err")) {
+                    if (!(value instanceof ResultValue result) || result.ok() || constructor.arguments().size() != 1) return false;
+                    return patternMatches(constructor.arguments().getFirst(), result.value(), bindings);
+                }
+                return false;
+            }
+            return false;
+        }
+
+        /**
+         * Host-neutral Oreslang type relation. The Truffle bootstrap evaluator reads Oreslang
+         * metadata here; native lowering must use the same relation against native type tags
+         * (directly or through the narrow JNI bridge), never JVM Class.isInstance/instanceof.
+         */
+        private boolean oresTypeMatches(Object value, Ast.TypeRef target) {
+            if (target.isUnion()) {
+                for (Ast.TypeRef option : target.arguments()) {
+                    if (oresTypeMatches(value, option)) return true;
+                }
+                return false;
+            }
+            String name = target.name();
+            if (name.equals("int") || name.equals("i8") || name.equals("i16") || name.equals("i32")
+                    || name.equals("i64") || name.equals("u8") || name.equals("u16")
+                    || name.equals("u32") || name.equals("u64") || name.equals("uint")
+                    || name.equals("bigint")) return value instanceof Byte || value instanceof Short
+                            || value instanceof Integer || value instanceof Long;
+            if (name.equals("float") || name.equals("f32") || name.equals("f64")
+                    || name.equals("decimal")) return value instanceof Float || value instanceof Double;
+            if (name.equals("bool") || name.equals("Bool")) return value instanceof Boolean;
+            if (name.equals("string") || name.equals("String")) return value instanceof String;
+            if (name.equals("complex") || name.equals("complex64") || name.equals("complex128")) return value instanceof Complex;
+            if (name.equals("Option")) return value instanceof OptionValue;
+            if (name.equals("Result")) return value instanceof ResultValue;
+            if (name.equals("DynamicStruct")) return value instanceof DynamicStructValue;
+            if (name.equals("Array") || name.equals("List")) return value instanceof List<?>;
+
+            if (value instanceof OresObject object) {
+                Ast.ClassDecl targetClass = findClass(name);
+                if (targetClass != null) return classIsA(object.klass, targetClass, new LinkedHashSet<>());
+                Ast.InterfaceDecl targetInterface = findInterface(name);
+                if (targetInterface != null) {
+                    return classImplements(object.klass, targetInterface, new LinkedHashSet<>(), new LinkedHashSet<>());
+                }
+            }
+
+            Ast.TypeAliasDecl alias = findTypeAlias(name);
+            if (alias != null && alias.genericParameters().isEmpty()) {
+                return oresTypeMatches(value, alias.target());
+            }
+
+            // Java host objects are intentionally not part of Oreslang nominal type identity.
+            // Interop must cross an explicit capability/adapter boundary.
+            return false;
+        }
+
+        private String oresRuntimeTypeName(Object value) {
+            if (value instanceof OresObject object) return object.klass.name();
+            if (value instanceof OptionValue) return "Option";
+            if (value instanceof ResultValue) return "Result";
+            if (value instanceof DynamicStructValue) return "DynamicStruct";
+            if (value instanceof List<?>) return "List";
+            if (value instanceof String) return "string";
+            if (value instanceof Boolean) return "bool";
+            if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long) return "int";
+            if (value instanceof Float || value instanceof Double) return "float";
+            if (value instanceof Complex) return "complex";
+            if (value instanceof HostObjectFacade) return "<host-object>";
+            return "<unknown>";
+        }
+
+        private boolean classIsA(Ast.ClassDecl actual, Ast.ClassDecl target, Set<Ast.ClassDecl> seen) {
+            if (actual == target || actual.name().equals(target.name())) return true;
+            if (!seen.add(actual)) return false;
+            for (Ast.TypeRef parentRef : actual.parents()) {
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent != null && classIsA(parent, target, seen)) return true;
+            }
+            return false;
+        }
+
+        private boolean classImplements(
+                Ast.ClassDecl actual,
+                Ast.InterfaceDecl target,
+                Set<Ast.ClassDecl> seenClasses,
+                Set<Ast.InterfaceDecl> seenInterfaces) {
+            if (!seenClasses.add(actual)) return false;
+            for (Ast.TypeRef interfaceRef : actual.interfaces()) {
+                Ast.InterfaceDecl iface = findInterface(interfaceRef.name());
+                if (iface != null && (iface == target || iface.name().equals(target.name())
+                        || interfaceExtends(iface, target, seenInterfaces))) return true;
+            }
+            for (Ast.TypeRef parentRef : actual.parents()) {
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent != null && classImplements(parent, target, seenClasses, seenInterfaces)) return true;
+            }
+            return false;
+        }
+
+        private boolean interfaceExtends(
+                Ast.InterfaceDecl actual, Ast.InterfaceDecl target, Set<Ast.InterfaceDecl> seen) {
+            if (actual == target || actual.name().equals(target.name())) return true;
+            if (!seen.add(actual)) return false;
+            for (Ast.TypeRef parentRef : actual.parents()) {
+                Ast.InterfaceDecl parent = findInterface(parentRef.name());
+                if (parent != null && interfaceExtends(parent, target, seen)) return true;
+            }
+            return false;
+        }
+
+        private record ConditionResult(boolean matched, Map<String, Object> bindings) {
+            private static ConditionResult match() { return new ConditionResult(true, Map.of()); }
+            private static ConditionResult noMatch() { return new ConditionResult(false, Map.of()); }
         }
 
         private Object binary(String op, Object left, Object right) {
@@ -1416,7 +2386,7 @@ public final class OresEvalRootNode extends RootNode {
                 for (int i = 0; i < fixed.length; i++) {
                     fixed[i] = shapeReturnedValue(declared.arguments().get(i), fixed[i], callable + " tuple[" + i + "]", resolving);
                 }
-                return fixed;
+                return java.util.Arrays.asList(fixed);
             }
 
             if (declared.isRecordType()) {
@@ -1430,23 +2400,22 @@ public final class OresEvalRootNode extends RootNode {
             if (declared.name().equals("Array") || declared.name().equals("List")) {
                 if (declared.arguments().size() != 1) return value;
                 List<?> items = asSequence(value);
+                ArrayList<Object> shaped = new ArrayList<>(items.size());
                 for (int i = 0; i < items.size(); i++) {
-                    shapeReturnedValue(declared.arguments().getFirst(), items.get(i), callable + "[" + i + "]", resolving);
+                    shaped.add(shapeReturnedValue(declared.arguments().getFirst(), items.get(i), callable + "[" + i + "]", resolving));
                 }
-                return value;
+                return shaped;
             }
 
             if (declared.name().equals("DynamicStruct")) {
-                if (declared.arguments().size() != 1 || !(value instanceof NativeValues.DynamicStructValue dynamic)) {
+                if (declared.arguments().size() != 1 || !(value instanceof DynamicStructValue dynamic)) {
                     throw returnTypeMismatch(callable, declared, value);
                 }
-                String[] keys = dynamic.keysSnapshot();
-                Object[] values = dynamic.valuesSnapshot();
-                for (int i = 0; i < keys.length; i++) {
+                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
                     shapeReturnedValue(
                             declared.arguments().getFirst(),
-                            values[i],
-                            callable + "[" + keys[i] + "]",
+                            entry.getValue(),
+                            callable + "[" + entry.getKey() + "]",
                             resolving);
                 }
                 return value;
@@ -1494,19 +2463,34 @@ public final class OresEvalRootNode extends RootNode {
                     + " but declared " + declared);
         }
 
-        private List<?> asSequence(Object value) { if (value instanceof NativeValues.ListValue l) return l.interpreterView(); if (value instanceof List<?> l) return l; if (value instanceof Object[] a) return List.of(a); throw new IllegalArgumentException("value is not sequence-destructurable"); }
+        private List<?> asSequence(Object value) { if (value instanceof List<?> l) return l; if (value instanceof Object[] a) return List.of(a); throw new IllegalArgumentException("value is not sequence-destructurable"); }
+
+        private Object destructureMember(Object value, String name, Env env) {
+            if (value instanceof OresObject object) {
+                OwnedField ownedField = object.owner.findField(
+                        object.klass, name, new LinkedHashSet<>());
+                if (ownedField != null) {
+                    object.owner.requireClassMemberVisible(
+                            ownedField.field().visibility(),
+                            ownedField.owner(),
+                            env == null ? null : env.accessClass(),
+                            "field",
+                            ownedField.field().name());
+                }
+            }
+            return destructureMember(value, name);
+        }
+
         private Object destructureMember(Object value, String name) {
-            if (value instanceof NativeValues.DynamicStructValue dynamic) {
-                if (!dynamic.containsString(name)) throw new IllegalArgumentException("object destructure missing member " + name);
-                return dynamic.getString(name);
+            if (value instanceof DynamicStructValue dynamic) {
+                if (!dynamic.fields.containsKey(name)) {
+                    throw new IllegalArgumentException("object destructure missing member " + name);
+                }
+                return dynamic.fields.get(name);
             }
-            if (value instanceof NativeValues.RecordValue record) {
-                if (!record.containsString(name)) throw new IllegalArgumentException("object destructure missing member " + name);
-                return record.getString(name);
-            }
-            if (value instanceof NativeValues.StructValue struct) {
-                if (!struct.containsString(name)) throw new IllegalArgumentException("object destructure missing member " + name);
-                return struct.getString(name);
+            if (value instanceof Map<?, ?> map) {
+                if (!map.containsKey(name)) throw new IllegalArgumentException("object destructure missing member " + name);
+                return map.get(name);
             }
             if (value instanceof OresObject object) {
                 if (!object.fields.containsKey(name)) throw new IllegalArgumentException("object destructure missing field " + name);
@@ -1518,18 +2502,39 @@ public final class OresEvalRootNode extends RootNode {
     }
 
     @FunctionalInterface private interface Invokable { Object call(List<Object> arguments); }
+    private interface TailInvokable extends Invokable { }
+
+    private record TailCallable(Evaluator owner, Invokable delegate) implements TailInvokable {
+        @Override public Object call(List<Object> arguments) {
+            return delegate.call(arguments);
+        }
+    }
 
     private static final class Env {
         private static final Object MISSING = new Object();
         private final Env parent;
         private final boolean descendantsNonLexical;
+        private final Ast.ClassDecl accessClass;
         private final Map<String, Slot> slots = new HashMap<>();
-        private Env(Env parent) { this(parent, parent != null && parent.descendantsNonLexical); }
+        private Env(Env parent) {
+            this(
+                    parent,
+                    parent != null && parent.descendantsNonLexical,
+                    parent == null ? null : parent.accessClass);
+        }
         private Env(Env parent, boolean descendantsNonLexical) {
+            this(
+                    parent,
+                    descendantsNonLexical,
+                    parent == null || descendantsNonLexical ? null : parent.accessClass);
+        }
+        private Env(Env parent, boolean descendantsNonLexical, Ast.ClassDecl accessClass) {
             this.parent = parent;
             this.descendantsNonLexical = descendantsNonLexical;
+            this.accessClass = accessClass;
         }
         private boolean descendantsNonLexical() { return descendantsNonLexical; }
+        private Ast.ClassDecl accessClass() { return accessClass; }
         private void define(String name, Object value, Ast.BindingKind kind) {
             if (slots.putIfAbsent(name, new Slot(value, kind)) != null) throw new IllegalArgumentException("duplicate binding " + name);
         }
@@ -1553,10 +2558,72 @@ public final class OresEvalRootNode extends RootNode {
             throw new IllegalArgumentException("unknown binding " + name);
         }
         private Env snapshot() {
-            Env cp = new Env(parent == null ? null : parent.snapshot(), descendantsNonLexical);
+            Env cp = new Env(
+                    parent == null ? null : parent.snapshot(),
+                    descendantsNonLexical,
+                    accessClass);
             cp.slots.putAll(slots);
             return cp;
         }
+        private boolean hasLiveMutexGuards() {
+            Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            for (Slot slot : slots.values()) {
+                if (containsLiveMutexGuard(slot.value, seen)) return true;
+            }
+            return parent != null && parent.hasLiveMutexGuards();
+        }
+
+        private static boolean containsLiveMutexGuard(Object value, Set<Object> seen) {
+            if (value == null) return false;
+            if (value instanceof OresMutex.Guard<?> guard) return !guard.released();
+            if (!seen.add(value)) return false;
+
+            if (value instanceof OptionValue option) {
+                return option.present() && containsLiveMutexGuard(option.value(), seen);
+            }
+            if (value instanceof ResultValue result) {
+                return containsLiveMutexGuard(result.value(), seen);
+            }
+            if (value instanceof OresMutex.GuardFuture<?> future) {
+                return future.isDone()
+                        && !future.isCancelled()
+                        && !future.isCompletedExceptionally()
+                        && containsLiveMutexGuard(future.getNow(null), seen);
+            }
+            if (value instanceof OresObject object) {
+                for (Object field : object.fields.values()) {
+                    if (containsLiveMutexGuard(field, seen)) return true;
+                }
+                return false;
+            }
+            if (value instanceof List<?> list) {
+                for (Object item : list) if (containsLiveMutexGuard(item, seen)) return true;
+                return false;
+            }
+            if (value instanceof Set<?> set) {
+                for (Object item : set) if (containsLiveMutexGuard(item, seen)) return true;
+                return false;
+            }
+            if (value instanceof DynamicStructValue dynamic) {
+                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
+                    if (containsLiveMutexGuard(entry.getKey(), seen)
+                            || containsLiveMutexGuard(entry.getValue(), seen)) return true;
+                }
+                return false;
+            }
+            if (value instanceof Map<?, ?> map) {
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    if (containsLiveMutexGuard(entry.getKey(), seen)
+                            || containsLiveMutexGuard(entry.getValue(), seen)) return true;
+                }
+                return false;
+            }
+            if (value instanceof Object[] array) {
+                for (Object item : array) if (containsLiveMutexGuard(item, seen)) return true;
+            }
+            return false;
+        }
+
         private void releaseMutexGuards(boolean failed) {
             Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
             for (Slot slot : slots.values()) releaseMutexGuardsInValue(slot.value, failed, seen);
@@ -1597,10 +2664,6 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 return;
             }
-            if (value instanceof NativeValues.ListValue list) {
-                for (Object item : list.snapshot()) releaseMutexGuardsInValue(item, failed, seen);
-                return;
-            }
             if (value instanceof List<?> list) {
                 for (Object item : list) releaseMutexGuardsInValue(item, failed, seen);
                 return;
@@ -1609,12 +2672,10 @@ public final class OresEvalRootNode extends RootNode {
                 for (Object item : set) releaseMutexGuardsInValue(item, failed, seen);
                 return;
             }
-            if (value instanceof NativeValues.DynamicStructValue
-                    || value instanceof NativeValues.RecordValue
-                    || value instanceof NativeValues.StructValue
-                    || value instanceof NativeValues.MapValue) {
-                for (Object child : ((OresMutex.SharedState) value).sharedStateChildren()) {
-                    releaseMutexGuardsInValue(child, failed, seen);
+            if (value instanceof DynamicStructValue dynamic) {
+                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
+                    releaseMutexGuardsInValue(entry.getKey(), failed, seen);
+                    releaseMutexGuardsInValue(entry.getValue(), failed, seen);
                 }
                 return;
             }
@@ -1642,6 +2703,22 @@ public final class OresEvalRootNode extends RootNode {
         private ReturnSignal(Object value) { super(null,null,false,false); this.value=value; }
     }
 
+    private static final class BreakSignal extends RuntimeException {
+        private BreakSignal() { super(null, null, false, false); }
+    }
+
+    private static final class ContinueSignal extends RuntimeException {
+        private ContinueSignal() { super(null, null, false, false); }
+    }
+
+    private enum StartupPhase {
+        CREATED,
+        LINKED,
+        INITIALIZING,
+        READY,
+        FAILED
+    }
+
     private record Complex(double real, double imaginary) implements OresMutex.SharedState {
         @Override public Iterable<?> sharedStateChildren(){return List.of();}
         private Complex add(Complex o){return new Complex(real+o.real,imaginary+o.imaginary);}
@@ -1649,6 +2726,14 @@ public final class OresEvalRootNode extends RootNode {
         private Complex mul(Complex o){return new Complex(real*o.real-imaginary*o.imaginary,real*o.imaginary+imaginary*o.real);}
         private Complex div(Complex o){double d=o.real*o.real+o.imaginary*o.imaginary;return new Complex((real*o.real+imaginary*o.imaginary)/d,(imaginary*o.real-real*o.imaginary)/d);}
         @Override public String toString(){return real+(imaginary<0?"":"+")+imaginary+"i";}
+    }
+
+    private static final class DynamicStructValue implements OresMutex.SharedState {
+        private final LinkedHashMap<String, Object> fields;
+        private DynamicStructValue() { this.fields = new LinkedHashMap<>(); }
+        private DynamicStructValue(Map<String, Object> initial) { this.fields = new LinkedHashMap<>(initial); }
+        @Override public Iterable<?> sharedStateChildren() { return fields.values(); }
+        @Override public String toString() { return "DynamicStruct" + fields; }
     }
 
     private static final class OresObject implements OresMutex.SharedState {
@@ -1724,16 +2809,12 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 return true;
             }
-            if (value instanceof NativeValues.ListValue list) {
-                for (Object item : list.snapshot()) if (!runtimeSharedSafe(item, seen)) return false;
-                return true;
-            }
-            if (value instanceof NativeValues.DynamicStructValue
-                    || value instanceof NativeValues.RecordValue
-                    || value instanceof NativeValues.StructValue
-                    || value instanceof NativeValues.MapValue) {
-                for (Object child : ((OresMutex.SharedState) value).sharedStateChildren()) {
-                    if (!runtimeSharedSafe(child, seen)) return false;
+            if (value instanceof DynamicStructValue dynamic) {
+                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
+                    if (!runtimeSharedSafe(entry.getKey(), seen)
+                            || !runtimeSharedSafe(entry.getValue(), seen)) {
+                        return false;
+                    }
                 }
                 return true;
             }
@@ -1771,6 +2852,9 @@ public final class OresEvalRootNode extends RootNode {
     }
     private static final class OresPanic extends RuntimeException {
         private OresPanic(String message) { super(message, null, false, false); }
+    }
+    private static final class OresCastError extends RuntimeException {
+        private OresCastError(String message) { super(message, null, false, false); }
     }
     private record StdioFacade(OresContext context) {
         private Object print(List<Object> args){context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.print");requireOne(args,"stdio.print");context.output().print(String.valueOf(args.getFirst()));context.output().flush();return null;}

@@ -112,6 +112,10 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum ActorKind { PRIVATE, SHARED }
 
+    public enum CarrierBackend { NATIVE_PTHREAD, JVM_THREAD_POOL }
+
+    private static final String CARRIER_BACKEND_PROPERTY = "ores.runtime.carriers";
+
     public record DispatcherConfig(
             int privateParallelism,
             int sharedParallelism,
@@ -248,6 +252,19 @@ public final class ActorRuntime implements AutoCloseable {
     public IsolatePolicy policyCeiling() { return policyCeiling; }
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
     public int maxActors() { return dispatcherConfig.maxActors(); }
+
+    /**
+     * Physical carrier implementation currently backing actor turns.
+     *
+     * <p>This is diagnostic/control-plane information only. Actor identity is
+     * never carrier identity and source semantics do not depend on this value.</p>
+     */
+    public CarrierBackend carrierBackend() {
+        return privateDispatcher instanceof NativeCarrierExecutor
+                && sharedDispatcher instanceof NativeCarrierExecutor
+                ? CarrierBackend.NATIVE_PTHREAD
+                : CarrierBackend.JVM_THREAD_POOL;
+    }
 
     /**
      * Installs a host-owned hook invoked exactly once when an actor execution
@@ -1149,7 +1166,29 @@ public final class ActorRuntime implements AutoCloseable {
             }
             if (timeoutNanos <= 0) timeoutNanos = 1;
 
-            return completion.get(timeoutNanos, TimeUnit.NANOSECONDS);
+            long startedAt = System.nanoTime();
+            R result = null;
+            ExecutionException executionFailure = null;
+            try {
+                result = completion.get(timeoutNanos, TimeUnit.NANOSECONDS);
+            } catch (ExecutionException failed) {
+                // The guest result/failure is not externally complete until
+                // the one-shot actor has unwound and its carrier has crossed
+                // back out of TurnExecutor (TruffleContext.leave in OresVM).
+                executionFailure = failed;
+            }
+
+            long elapsed = Math.max(0L, System.nanoTime() - startedAt);
+            long remaining = timeoutNanos == Long.MAX_VALUE
+                    ? Long.MAX_VALUE
+                    : Math.max(0L, timeoutNanos - elapsed);
+            if (!ref.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                throw new TimeoutException(
+                        "actor callable completed its guest result but did not leave its carrier before the wall-time deadline");
+            }
+
+            if (executionFailure != null) throw executionFailure;
+            return result;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new CancellationException("actor callable invocation interrupted");
@@ -2444,6 +2483,12 @@ public final class ActorRuntime implements AutoCloseable {
             // reporting success until they actually leave the runtime.
             privateDispatcher.shutdownNow();
             sharedDispatcher.shutdownNow();
+
+            // shutdownNow() removes queued tasks without invoking runBatch().
+            // Clear those cells' scheduled bits only when no carrier actually
+            // entered the TurnExecutor boundary. Active carriers retain the bit
+            // until their executor finally exits.
+            for (ActorCell<?> cell : snapshot) cell.cancelQueuedScheduleOnShutdown();
         }
 
         long deadline = System.nanoTime() + CLOSE_WAIT_NANOS;
@@ -2462,6 +2507,25 @@ public final class ActorRuntime implements AutoCloseable {
             if (!cell.finalized()) stillRunning.add(cell.ref.id());
         }
 
+        boolean dispatchersTerminated = true;
+        for (ExecutorService dispatcher : List.of(privateDispatcher, sharedDispatcher)) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                dispatchersTerminated = false;
+                break;
+            }
+            try {
+                if (!dispatcher.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                    dispatchersTerminated = false;
+                    break;
+                }
+            } catch (InterruptedException waitInterrupted) {
+                interrupted = true;
+                dispatchersTerminated = false;
+                break;
+            }
+        }
+
         for (SyncCell<?> cell : List.copyOf(syncCells)) cell.invalidateFromRuntime();
         syncCells.clear();
         for (Shared<?> shared : List.copyOf(sharedValues)) shared.closeFromRuntime();
@@ -2469,7 +2533,7 @@ public final class ActorRuntime implements AutoCloseable {
         sharedMemoryBytes.set(0L);
 
         if (interrupted) Thread.currentThread().interrupt();
-        if (!stillRunning.isEmpty() || interrupted) {
+        if (!stillRunning.isEmpty() || !dispatchersTerminated || interrupted) {
             if (interrupted) {
                 for (ActorCell<?> cell : snapshot) {
                     if (!cell.finalized() && !stillRunning.contains(cell.ref.id())) {
@@ -2478,8 +2542,9 @@ public final class ActorRuntime implements AutoCloseable {
                 }
             }
             throw new IllegalStateException(
-                    "ActorRuntime close did not observe full actor termination: "
-                            + stillRunning.size() + " actor(s) still running");
+                    "ActorRuntime close did not observe full actor termination/carrier exit: "
+                            + stillRunning.size() + " actor(s) still running, dispatchersTerminated="
+                            + dispatchersTerminated);
         }
         actors.clear();
         actorCount.set(0);
@@ -2493,6 +2558,39 @@ public final class ActorRuntime implements AutoCloseable {
             int parallelism,
             int readyQueueCapacity,
             String threadPrefix) {
+        String requested = System.getProperty(CARRIER_BACKEND_PROPERTY, "auto")
+                .trim()
+                .toLowerCase(java.util.Locale.ROOT);
+        if (!requested.equals("auto")
+                && !requested.equals("native")
+                && !requested.equals("java")) {
+            throw new IllegalArgumentException(
+                    CARRIER_BACKEND_PROPERTY + " must be one of auto, native, java");
+        }
+
+        boolean unix = isNativeCarrierPlatform();
+        if (!requested.equals("java") && (requested.equals("native") || unix)) {
+            if (!unix) {
+                throw new IllegalStateException(
+                        "native Oreslang carriers currently require Linux or macOS");
+            }
+            try {
+                return new NativeCarrierExecutor(
+                        parallelism,
+                        parallelism,
+                        readyQueueCapacity,
+                        threadPrefix);
+            } catch (UnsatisfiedLinkError | SecurityException unavailable) {
+                if (requested.equals("native")) {
+                    throw new IllegalStateException(
+                            "native Oreslang carrier backend was required but liboresthread could not be loaded",
+                            unavailable);
+                }
+                // Development portability fallback only. CI and production can
+                // set -Dores.runtime.carriers=native to make this fail closed.
+            }
+        }
+
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
                 parallelism,
                 parallelism,
@@ -2501,8 +2599,15 @@ public final class ActorRuntime implements AutoCloseable {
                 new ArrayBlockingQueue<>(readyQueueCapacity),
                 namedFactory(threadPrefix),
                 new ThreadPoolExecutor.AbortPolicy());
-        // Core workers are created lazily on first scheduled actor turn.
+        // JVM workers are a portability fallback, not the preferred Oreslang
+        // runtime backend. They are created lazily on first scheduled turn.
         return executor;
+    }
+
+    private static boolean isNativeCarrierPlatform() {
+        String os = System.getProperty("os.name", "")
+                .toLowerCase(java.util.Locale.ROOT);
+        return os.contains("linux") || os.contains("mac") || os.contains("darwin");
     }
 
     private static ThreadFactory namedFactory(String prefix) {
@@ -2529,6 +2634,7 @@ public final class ActorRuntime implements AutoCloseable {
         private final Object lifecycleLock = new Object();
         private final Object executionDomain = new Object();
         private int activeTurns;
+        private boolean carrierActive;
         private boolean finalized;
         private Behavior<M> behavior;
 
@@ -2586,7 +2692,10 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void finalizeStopLocked() {
-            if (finalized || activeTurns != 0) return;
+            // External termination is not observable until the dispatcher has
+            // fully crossed back out of the TurnExecutor boundary. For
+            // Truffle-backed runtimes that boundary owns context enter/leave.
+            if (finalized || activeTurns != 0 || scheduled.get() || carrierActive) return;
             finalized = true;
             drainMailboxReservations();
             if (memorySlice != null) memorySlice.close();
@@ -2616,6 +2725,16 @@ public final class ActorRuntime implements AutoCloseable {
                     if (remaining <= 0) return;
                     long millis = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remaining));
                     lifecycleLock.wait(millis);
+                }
+            }
+        }
+
+        private void cancelQueuedScheduleOnShutdown() {
+            synchronized (lifecycleLock) {
+                if (scheduled.get() && !carrierActive) {
+                    scheduled.set(false);
+                    if (stopped.get() && activeTurns == 0) finalizeStopLocked();
+                    lifecycleLock.notifyAll();
                 }
             }
         }
@@ -2665,16 +2784,50 @@ public final class ActorRuntime implements AutoCloseable {
 
         private void runBatch() {
             ACTOR_CARRIER.set(Boolean.TRUE);
+            boolean carrierEntered = false;
+            boolean reschedule = false;
             try {
+                synchronized (lifecycleLock) {
+                    // shutdownNow() may leave a queued executor task that races
+                    // with explicit queued-schedule cancellation. If shutdown
+                    // won that race, this task is an inert no-op.
+                    if (!scheduled.get()) return;
+
+                    if (stopped.get() || closed.get()) {
+                        scheduled.set(false);
+                        if (activeTurns == 0) finalizeStopLocked();
+                        lifecycleLock.notifyAll();
+                        return;
+                    }
+
+                    carrierActive = true;
+                    carrierEntered = true;
+                }
+
                 turnExecutor.execute(this::runBatchEntered);
             } catch (Throwable failure) {
                 fail(failure);
-                scheduled.set(false);
                 if (failure instanceof VirtualMachineError fatal) throw fatal;
                 if (failure instanceof ThreadDeath fatal) throw fatal;
                 if (failure instanceof LinkageError fatal) throw fatal;
             } finally {
+                // The actor remains logically scheduled until the TurnExecutor
+                // returns. OresContext's executor leaves the TruffleContext in
+                // its own finally block, so clearing this bit any earlier lets
+                // shutdown/finalization race a carrier that still owns guest
+                // context state.
+                synchronized (lifecycleLock) {
+                    if (carrierEntered) carrierActive = false;
+                    if (scheduled.get()) scheduled.set(false);
+                    if (stopped.get() && activeTurns == 0) finalizeStopLocked();
+                    reschedule = !stopped.get()
+                            && !closed.get()
+                            && !finalized
+                            && !mailbox.isEmpty();
+                    lifecycleLock.notifyAll();
+                }
                 ACTOR_CARRIER.remove();
+                if (reschedule) schedule();
             }
         }
 
@@ -2736,12 +2889,8 @@ public final class ActorRuntime implements AutoCloseable {
                 if (turnActive) endTurn();
                 CURRENT_ACTOR_EXECUTION.remove();
                 currentActor.remove();
-                scheduled.set(false);
-
-                if (!stopped.get() && !closed.get() && !mailbox.isEmpty()) {
-                    // Bounded batch/throughput handoff for dispatcher fairness.
-                    schedule();
-                }
+                // scheduled/finalization/rescheduling belong to runBatch(),
+                // after TurnExecutor.execute(...) has returned.
             }
         }
 

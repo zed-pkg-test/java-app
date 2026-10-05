@@ -18,10 +18,10 @@ final class ModulesNamespacesCallableSemanticsTest {
         String output = run("""
                 namespace callable_demo;
 
-                type IntFn = typeof fnc(int value) -> int;
+                type IntFn = typeof fnc(int value) => int;
 
                 define module math
-                  pub fnc factorial(int n) => int {
+                  pub fnc factorial(int n): int {
                     if n <= 1; do
                       return 1;
                     else
@@ -31,14 +31,14 @@ final class ModulesNamespacesCallableSemanticsTest {
                 end
 
                 define module closures
-                  pub fnc makeAdder(int base) => IntFn {
+                  pub fnc makeAdder(int base): IntFn {
                     return |value| -> {
                       return base + value;
                     };
                   }
                 end
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val IntFn addTen = closures.makeAdder(10);
                   stdio.stdout.write(math.factorial(5));
                   stdio.stdout.write("|");
@@ -51,19 +51,20 @@ final class ModulesNamespacesCallableSemanticsTest {
     }
 
     @Test
-    void routineIsNonRecursiveButFncMayRecurse() {
-        IllegalArgumentException routineError = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        routine boot() => void {
-                          boot();
-                          return;
-                        }
-                        """)));
-        assertTrue(routineError.getMessage().contains("routine"));
+    void routineAndFncMayBothRecurse() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                routine boot(bool finished): void {
+                  if finished; do
+                    return;
+                  else
+                    boot(true);
+                    return;
+                  fi
+                }
+                """)));
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc countdown(int n) => int {
+                fnc countdown(int n): int {
                   if n <= 0; do
                     return 0;
                   else
@@ -76,15 +77,15 @@ final class ModulesNamespacesCallableSemanticsTest {
     @Test
     void lambdaIsLexicalAndAnonymous() throws Exception {
         String output = run("""
-                type IntFn = typeof fnc(int value) -> int;
+                type IntFn = typeof fnc(int value) => int;
 
-                fnc makeAdder(int base) => IntFn {
+                fnc makeAdder(int base): IntFn {
                   return |value| -> {
                     return base + value;
                   };
                 }
 
-                pub routine main() => void {
+                pub routine main(): void {
                   val IntFn addTwo = makeAdder(2);
                   val IntFn addForty = makeAdder(40);
                   stdio.stdout.write(addTwo(5));

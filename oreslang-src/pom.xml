@@ -14,9 +14,17 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <graalvm.version>25.3.4.1</graalvm.version>
     <junit.version>5.11.4</junit.version>
+    <tomlj.version>1.1.1</tomlj.version>
+    <!-- Override with -Pnative-size to favor executable size over throughput. -->
+    <native.image.optimization>-O2</native.image.optimization>
   </properties>
 
   <dependencies>
+    <dependency>
+      <groupId>org.tomlj</groupId>
+      <artifactId>tomlj</artifactId>
+      <version>${tomlj.version}</version>
+    </dependency>
     <dependency>
       <groupId>org.graalvm.truffle</groupId>
       <artifactId>truffle-api</artifactId>
@@ -54,18 +62,6 @@
   </dependencies>
 
   <build>
-    <resources>
-      <resource>
-        <directory>src/main/resources</directory>
-      </resource>
-      <resource>
-        <directory>stdlib</directory>
-        <targetPath>stdlib</targetPath>
-        <includes>
-          <include>**/*.ores</include>
-        </includes>
-      </resource>
-    </resources>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -114,41 +110,34 @@
 
   <profiles>
     <profile>
-      <id>native-core-unix</id>
-      <activation><os><family>unix</family></os></activation>
-      <build><plugins><plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>exec-maven-plugin</artifactId>
-        <version>3.5.0</version>
-        <executions><execution>
-          <id>build-native-core</id>
-          <phase>generate-resources</phase>
-          <goals><goal>exec</goal></goals>
-          <configuration>
-            <executable>sh</executable>
-            <arguments><argument>${project.basedir}/scripts/build-native-core.sh</argument></arguments>
-          </configuration>
-        </execution></executions>
-      </plugin></plugins></build>
-    </profile>
-
-    <profile>
-      <id>native-net-unix</id>
-      <activation><os><family>unix</family></os></activation>
-      <build><plugins><plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>exec-maven-plugin</artifactId>
-        <version>3.5.0</version>
-        <executions><execution>
-          <id>build-native-net</id>
-          <phase>generate-resources</phase>
-          <goals><goal>exec</goal></goals>
-          <configuration>
-            <executable>sh</executable>
-            <arguments><argument>${project.basedir}/scripts/build-native-net.sh</argument></arguments>
-          </configuration>
-        </execution></executions>
-      </plugin></plugins></build>
+      <id>native-thread-unix</id>
+      <activation>
+        <os>
+          <family>unix</family>
+        </os>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <version>3.5.0</version>
+            <executions>
+              <execution>
+                <id>build-native-thread-carriers</id>
+                <phase>generate-resources</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>sh</executable>
+                  <arguments>
+                    <argument>${project.basedir}/scripts/build-native-thread.sh</argument>
+                  </arguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
 
     <profile>
@@ -167,7 +156,7 @@
                 <configuration>
                   <executable>${env.JAVA_HOME}/bin/native-image</executable>
                   <classpathScope>runtime</classpathScope>
-                  <commandlineArgs>-p %classpath --shared --features=com.oracle.svm.truffle.PolyglotIsolateGuestFeature -H:APIFunctionPrefix=truffle_isolate_ -H:+CopyLanguageResources -H:+UnlockExperimentalVMOptions -H:-InitializeVM -H:-UnlockExperimentalVMOptions -Dgraalvm.locatorDisabled=true -o ${project.build.directory}/oresvm</commandlineArgs>
+                  <commandlineArgs>${native.image.optimization} -p %classpath --shared --features=com.oracle.svm.truffle.PolyglotIsolateGuestFeature -H:APIFunctionPrefix=truffle_isolate_ -H:+CopyLanguageResources -H:+UnlockExperimentalVMOptions -H:-InitializeVM -H:-UnlockExperimentalVMOptions -Dgraalvm.locatorDisabled=true -o ${project.build.directory}/oresvm</commandlineArgs>
                 </configuration>
               </execution>
             </executions>
@@ -192,7 +181,7 @@
                 <configuration>
                   <executable>${env.JAVA_HOME}/bin/native-image</executable>
                   <classpathScope>runtime</classpathScope>
-                  <commandlineArgs>-p %classpath -H:+ReportExceptionStackTraces -Dgraalvm.locatorDisabled=true -Dtruffle.UseFallbackRuntime=true --no-fallback -m dev.oreslang/dev.oreslang.launcher.OresMain -o ${project.build.directory}/ores-aot</commandlineArgs>
+                  <commandlineArgs>${native.image.optimization} -p %classpath -H:+ReportExceptionStackTraces -Dgraalvm.locatorDisabled=true -Dtruffle.UseFallbackRuntime=true --no-fallback -m dev.oreslang/dev.oreslang.launcher.OresMain -o ${project.build.directory}/ores-aot</commandlineArgs>
                 </configuration>
               </execution>
             </executions>
@@ -217,13 +206,19 @@
                 <configuration>
                   <executable>${env.JAVA_HOME}/bin/native-image</executable>
                   <classpathScope>runtime</classpathScope>
-                  <commandlineArgs>-p %classpath -H:+ReportExceptionStackTraces -Dgraalvm.locatorDisabled=true --no-fallback -m dev.oreslang/dev.oreslang.launcher.OresMain -o ${project.build.directory}/ores-hybrid</commandlineArgs>
+                  <commandlineArgs>${native.image.optimization} -p %classpath -H:+ReportExceptionStackTraces -Dgraalvm.locatorDisabled=true --no-fallback -m dev.oreslang/dev.oreslang.launcher.OresMain -o ${project.build.directory}/ores-hybrid</commandlineArgs>
                 </configuration>
               </execution>
             </executions>
           </plugin>
         </plugins>
       </build>
+    </profile>
+    <profile>
+      <id>native-size</id>
+      <properties>
+        <native.image.optimization>-Os</native.image.optimization>
+      </properties>
     </profile>
   </profiles>
 </project>

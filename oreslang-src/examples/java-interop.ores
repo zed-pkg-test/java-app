@@ -1,6 +1,6 @@
 import class ArrayList as JArrayList from "java:java.util.ArrayList";
 
-pub routine main() => void {
+pub routine main(): void {
   val values = new JArrayList();
   values.add(19);
   values.add(23);

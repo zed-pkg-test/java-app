@@ -109,6 +109,118 @@ final class ActorRuntimeTest {
     }
 
     @Test
+    void carrierHandoffAndTerminationWaitForTurnExecutorExit() throws Exception {
+        CountDownLatch firstTurnReturnedToExecutor = new CountDownLatch(1);
+        CountDownLatch releaseFirstExecutor = new CountDownLatch(1);
+        CountDownLatch secondDelivered = new CountDownLatch(1);
+        AtomicInteger executorRuns = new AtomicInteger();
+        AtomicInteger activeExecutors = new AtomicInteger();
+        AtomicInteger maxActiveExecutors = new AtomicInteger();
+        AtomicInteger delivered = new AtomicInteger();
+
+        ActorRuntime.TurnExecutor executor = turn -> {
+            int active = activeExecutors.incrementAndGet();
+            maxActiveExecutors.accumulateAndGet(active, Math::max);
+            int runNumber = executorRuns.incrementAndGet();
+            try {
+                turn.run();
+                if (runNumber == 1) {
+                    firstTurnReturnedToExecutor.countDown();
+                    try {
+                        if (!releaseFirstExecutor.await(2, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("test executor release timed out");
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(interrupted);
+                    }
+                }
+            } finally {
+                activeExecutors.decrementAndGet();
+            }
+        };
+
+        var config = new ActorRuntime.DispatcherConfig(1, 2, 1, 16);
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config, executor)) {
+            var ref = runtime.<Integer>spawnShared(() -> (message, context) -> {
+                int seen = delivered.incrementAndGet();
+                if (seen == 2) {
+                    secondDelivered.countDown();
+                    context.self().stop();
+                }
+            });
+
+            ref.send(1);
+            ref.send(2);
+
+            assertTrue(firstTurnReturnedToExecutor.await(2, TimeUnit.SECONDS));
+            try {
+                Thread.sleep(50);
+                assertEquals(
+                        1,
+                        delivered.get(),
+                        "next mailbox batch must not start until the prior TurnExecutor boundary exits");
+                assertEquals(
+                        1,
+                        maxActiveExecutors.get(),
+                        "one actor must not occupy overlapping TurnExecutor/carrier boundaries");
+                assertFalse(
+                        ref.awaitTermination(25, TimeUnit.MILLISECONDS),
+                        "termination cannot become visible while a scheduled carrier still owns the executor boundary");
+            } finally {
+                releaseFirstExecutor.countDown();
+            }
+
+            assertTrue(secondDelivered.await(2, TimeUnit.SECONDS));
+            assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
+            assertEquals(1, maxActiveExecutors.get());
+            assertEquals(2, delivered.get());
+        } finally {
+            releaseFirstExecutor.countDown();
+        }
+    }
+
+    @Test
+    void closeFinalizesQueuedActorBatchCancelledBeforeCarrierEntry() throws Exception {
+        CountDownLatch executorEntered = new CountDownLatch(1);
+        CountDownLatch releaseExecutor = new CountDownLatch(1);
+
+        ActorRuntime.TurnExecutor executor = turn -> {
+            executorEntered.countDown();
+            try {
+                releaseExecutor.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            turn.run();
+        };
+
+        var config = new ActorRuntime.DispatcherConfig(1, 1, 1, 16);
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config, executor);
+        try {
+            var first = runtime.<Integer>spawnShared(() -> (message, context) -> { });
+            var queued = runtime.<Integer>spawnShared(() -> (message, context) -> { });
+
+            first.send(1);
+            assertTrue(executorEntered.await(2, TimeUnit.SECONDS));
+            queued.send(2);
+
+            assertDoesNotThrow(runtime::close);
+            assertFalse(first.isAlive());
+            assertFalse(queued.isAlive());
+        } finally {
+            releaseExecutor.countDown();
+            try {
+                runtime.close();
+            } catch (IllegalStateException ignored) {
+                // Preserve the primary assertion if a broken implementation
+                // already reported a close failure above.
+            }
+        }
+    }
+
+    @Test
     void privateAndSharedActorsUseDifferentDispatchers() throws Exception {
         var config = new ActorRuntime.DispatcherConfig(1, 1, 16);
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
@@ -989,6 +1101,112 @@ final class ActorRuntimeTest {
             assertTrue(ref.failure().isPresent());
             assertInstanceOf(SecurityException.class, ref.failure().orElseThrow());
         }
+    }
+
+    @Test
+    void synchronousInvokeWaitsForCarrierToLeaveTurnExecutor() throws Exception {
+        CountDownLatch guestTurnReturned = new CountDownLatch(1);
+        CountDownLatch releaseCarrier = new CountDownLatch(1);
+
+        ActorRuntime.TurnExecutor turnExecutor = turn -> {
+            turn.run();
+            guestTurnReturned.countDown();
+            try {
+                if (!releaseCarrier.await(2, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("test carrier release timed out");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("test carrier interrupted", interrupted);
+            }
+        };
+
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8),
+                turnExecutor)) {
+            AtomicReference<Integer> result = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+
+            Thread caller = new Thread(() -> {
+                try {
+                    result.set(runtime.invoke(
+                            ActorRuntime.ActorKind.PRIVATE,
+                            41,
+                            (value, context) -> value + 1));
+                } catch (Throwable thrown) {
+                    failure.set(thrown);
+                }
+            });
+            caller.start();
+
+            assertTrue(guestTurnReturned.await(2, TimeUnit.SECONDS));
+            Thread.sleep(50);
+            assertTrue(
+                    caller.isAlive(),
+                    "synchronous invoke must not return while its actor carrier is still inside the host turn executor");
+
+            releaseCarrier.countDown();
+            caller.join(1000);
+
+            assertFalse(caller.isAlive());
+            assertNull(failure.get());
+            assertEquals(42, result.get());
+        }
+    }
+
+    @Test
+    void closeWaitsForCarrierToLeaveTurnExecutorAfterActorFinalizes() throws Exception {
+        CountDownLatch turnExecutorAfterGuestTurn = new CountDownLatch(1);
+        CountDownLatch releaseCarrier = new CountDownLatch(1);
+
+        ActorRuntime.TurnExecutor turnExecutor = turn -> {
+            turn.run();
+            turnExecutorAfterGuestTurn.countDown();
+
+            boolean released = false;
+            while (!released) {
+                try {
+                    released = releaseCarrier.await(25, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ignored) {
+                    // shutdownNow() interrupts the carrier. Keep the wrapper
+                    // entered until the test explicitly releases it.
+                }
+            }
+        };
+
+        ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8),
+                turnExecutor);
+        CountDownLatch handled = new CountDownLatch(1);
+        var ref = runtime.<String>spawnShared(() -> (message, context) -> handled.countDown());
+
+        ref.send("ping");
+        assertTrue(handled.await(2, TimeUnit.SECONDS));
+        assertTrue(turnExecutorAfterGuestTurn.await(2, TimeUnit.SECONDS));
+
+        AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+        Thread closer = new Thread(() -> {
+            try {
+                runtime.close();
+            } catch (Throwable failure) {
+                closeFailure.set(failure);
+            }
+        });
+        closer.start();
+
+        Thread.sleep(50);
+        assertTrue(
+                closer.isAlive(),
+                "close must wait until the carrier exits the host turn executor/Truffle boundary");
+
+        releaseCarrier.countDown();
+        closer.join(1000);
+
+        assertFalse(closer.isAlive());
+        assertNull(closeFailure.get());
+        assertThrows(IllegalStateException.class, () -> ref.send("after-close"));
     }
 
     @Test
