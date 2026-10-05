@@ -392,16 +392,23 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      unqualified names until another binding kind appears. A leading binding
      kind (for example const [a, b]) seeds the whole pattern. "_" never binds.
    - A rest binding uses "...name", may carry its own binding kind (for example
-     [const head, let ...tail]), and must be the final pattern item. Sequence rest
-     on Array<T>/List<T> keeps a homogeneous sequence type. Sequence rest on a
-     finite tuple computes a new finite tuple from the statically remaining
-     slots. Object rest is allowed only when the source has a statically known
-     record shape; its type is the compile-time record obtained by omitting all
-     explicitly selected members. DynamicStruct/object shapes with unknown keys
-     cannot use rest destructuring because AOT compilation must know the complete
-     remainder type without runtime reflection.
-   - Sequence destructuring targets returned arrays/lists and finite tuple types;
-     object destructuring targets returned record/map-like values.
+     [const head, let ...tail]), and must be the final pattern item. The grammar
+     encodes this final-position rule and the parser also rejects violations.
+     Sequence rest on Array<T>/List<T> keeps a homogeneous sequence type.
+     Sequence rest on a finite tuple computes a new finite tuple from the
+     statically remaining slots. A statically known class may also participate
+     in sequence destructuring through public [Symbol.iterator](), but that
+     iterator must itself have a statically known Array<T>, List<T>, or finite
+     tuple return type. Vector-like classes therefore destructure through their
+     typed iterator snapshot without runtime type discovery. Object rest is
+     allowed only when the source has a statically known record shape; its type
+     is the compile-time record obtained by omitting all explicitly selected
+     members. DynamicStruct/object shapes with unknown keys cannot use rest
+     destructuring because AOT compilation must know the complete remainder type
+     without runtime reflection.
+   - Sequence destructuring targets returned arrays/lists, finite tuple types,
+     and statically typed iterable classes; object destructuring targets returned
+     record/map-like values.
    - Destructuring is not currently permitted in callable parameter lists.
    - Lambdas always have braces. Non-void lambdas must use explicit return and
      return on every path when a contextual function result type is known.
