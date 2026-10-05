@@ -293,7 +293,7 @@ final class AsyncSchedulerLanguageTest {
                   return 42;
                 }
 
-                async fnc guarded(Mutex<int> mutex) => int {
+                async fnc guarded(SharedMutex<int> mutex) => int {
                   val guard = mutex.lock();
                   return await leaf();
                 }
@@ -311,14 +311,14 @@ final class AsyncSchedulerLanguageTest {
                   return 42;
                 }
 
-                async fnc guarded(Mutex<int> mutex) => int {
+                async fnc guarded(SharedMutex<int> mutex) => int {
                   val guard = mutex.lock();
                   guard.release();
                   return await leaf();
                 }
 
                 pub async routine main() => void {
-                  val mutex = Mutex.new(1);
+                  val mutex = SharedMutex.new(1);
                   val value = await guarded(mutex);
                   stdio.println(value);
                   stdio.println(mutex.try_lock().is_some());
