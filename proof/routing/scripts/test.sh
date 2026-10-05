@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+bash "$repo_root/scripts/audit.sh"
 expected_ref="$(tr -d '[:space:]' < "$repo_root/SOURCE_REF")"
 compiler="${ORESLANG_COMPILER:-oreslang-compiler}"
 

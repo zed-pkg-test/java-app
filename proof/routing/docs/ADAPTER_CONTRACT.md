@@ -40,6 +40,10 @@ characters, and invalid request-target encodings before constructing
 RequestPath. Backslash handling should be explicit rather than platform
 dependent.
 
+Enforce request-target/segment-count limits before calling request_path(); that
+helper intentionally copies the supplied segment array to make RequestPath
+immutable from the caller's perspective.
+
 The router's max_segments and max_match_steps limits are a second defensive
 boundary, not a substitute for protocol parsing limits.
 
@@ -51,6 +55,8 @@ Decision is intentionally transport-neutral. A typical adapter maps it as:
 - is_not_found -> 404
 - is_method_not_allowed -> 405 and emit Allow from allow_method_at()
 - is_automatic_options -> adapter-generated OPTIONS response and Allow
+- endpoints with an explicit catch-all `*` target have no finite Allow set;
+  never serialize the internal `*` sentinel as an HTTP method
 - is_limit_exceeded -> defensive 400/414 policy chosen by the server
 
 For HEAD, suppress_body is true whether the match came from an explicit HEAD
