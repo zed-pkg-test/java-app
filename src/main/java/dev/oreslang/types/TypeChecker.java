@@ -375,6 +375,8 @@ public final class TypeChecker {
             }
         }
 
+        validateFieldLayout(klass);
+
         Set<String> effectiveFieldNames = new LinkedHashSet<>();
         for (ResolvedField field : effectiveFieldTargets(
                 klass, nominalClassType(klass), new LinkedHashSet<>())) {
@@ -409,8 +411,14 @@ public final class TypeChecker {
             }
             Type fieldType = classFieldType(klass, field);
             if (field.initializer() != null && field.type() != null) {
-                Type actual = typeOf(field.initializer(), new Env(null), classGenerics, self);
-                requireAssignable(actual, fieldType, "field initializer " + klass.name() + "." + field.name());
+                Ast.ClassDecl previousClassOwner = currentClassOwner;
+                currentClassOwner = klass;
+                try {
+                    Type actual = typeOf(field.initializer(), new Env(null), classGenerics, self);
+                    requireAssignable(actual, fieldType, "field initializer " + klass.name() + "." + field.name());
+                } finally {
+                    currentClassOwner = previousClassOwner;
+                }
             }
             if (field.bindingKind() == Ast.BindingKind.CONST && field.initializer() != null && !constant(field.initializer())) {
                 throw new IllegalArgumentException("const field '" + field.name() + "' needs a compile-time constant initializer");
@@ -1469,12 +1477,18 @@ public final class TypeChecker {
         if (source instanceof Named named) {
             Ast.ClassDecl klass = findClass(named.name());
             if (klass == null) throw new IllegalArgumentException("object destructuring requires a record/map-like value");
-            Record shape = (Record) substituteGenerics(
-                    publicClassShape(klass, new LinkedHashSet<>()),
-                    classGenericBindings(klass, named));
-            Type member = shape.members().get(memberName);
-            if (member == null) throw new IllegalArgumentException("object destructure requires member '" + memberName + "'");
-            return member;
+            ResolvedField field = findFieldTarget(
+                    klass, named, memberName, new LinkedHashSet<>());
+            if (field == null) {
+                throw new IllegalArgumentException(
+                        "object destructure requires field '" + memberName + "'");
+            }
+            requireClassMemberVisible(
+                    field.field().visibility(), field.owner(), "field", field.field().name());
+            Type pattern = classFieldType(field.owner(), field.field());
+            return substituteGenerics(
+                    pattern,
+                    classGenericBindings(field.owner(), field.ownerType()));
         }
         if (source instanceof Union union) {
             List<Type> alternatives = new ArrayList<>(union.options().size());
@@ -2097,6 +2111,55 @@ public final class TypeChecker {
                     + "' requires an initializer");
         }
         return typeOf(field.initializer(), new Env(null), generics, self);
+    }
+
+    private void validateFieldLayout(Ast.ClassDecl klass) {
+        collectFieldLayout(
+                klass,
+                nominalClassType(klass),
+                new LinkedHashMap<>(),
+                new LinkedHashSet<>());
+    }
+
+    private void collectFieldLayout(
+            Ast.ClassDecl klass,
+            Named concreteType,
+            Map<String, ResolvedField> fields,
+            Set<Ast.ClassDecl> stack) {
+        if (!stack.add(klass)) {
+            throw new IllegalArgumentException(
+                    "inheritance cycle involving class '" + klass.name() + "'");
+        }
+
+        for (Ast.TypeRef parentRef : klass.parents()) {
+            Ast.ClassDecl parent = resolveClassParent(parentRef, klass);
+            if (parent == null) continue;
+            Named parentType = concreteParentType(parentRef, klass, concreteType);
+            collectFieldLayout(parent, parentType, fields, stack);
+        }
+
+        Set<String> localNames = new LinkedHashSet<>();
+        for (Ast.FieldDecl field : klass.fields()) {
+            if (!localNames.add(field.name())) {
+                throw new IllegalArgumentException(
+                        "duplicate field '" + klass.name() + "." + field.name() + "'");
+            }
+
+            ResolvedField candidate = new ResolvedField(klass, concreteType, field);
+            ResolvedField previous = fields.putIfAbsent(field.name(), candidate);
+            if (previous != null
+                    && (previous.owner() != candidate.owner()
+                            || !previous.ownerType().equals(candidate.ownerType()))) {
+                throw new IllegalArgumentException(
+                        "field '" + klass.name() + "." + field.name()
+                                + "' collides with inherited field slot "
+                                + previous.owner().name() + previous.ownerType().arguments()
+                                + "; class storage field names must be unique across inheritance "
+                                + "and generic diamond paths must use the same concrete instantiation");
+            }
+        }
+
+        stack.remove(klass);
     }
 
     private List<ResolvedField> effectiveFieldTargets(Ast.ClassDecl klass, Named concreteType, Set<Ast.ClassDecl> stack) {

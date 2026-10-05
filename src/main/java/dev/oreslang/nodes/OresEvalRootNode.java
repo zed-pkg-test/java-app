@@ -733,7 +733,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (stmt instanceof Ast.ForOfDestructureStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
-                for (Object item : iterableValues(iterable)) {
+                for (Object item : iterableValues(iterable, env)) {
                     context.schedulerSafepoint();
                     List<?> items = asSequence(item);
                     if (items.size() != loop.bindings().size()) {
@@ -763,7 +763,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (stmt instanceof Ast.ForOfStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
-                for (Object item : iterableValues(iterable)) {
+                for (Object item : iterableValues(iterable, env)) {
                     context.schedulerSafepoint();
                     Env iteration = new Env(env);
                     iteration.define(loop.bindingName(), item, loop.bindingKind());
@@ -1743,7 +1743,7 @@ public final class OresEvalRootNode extends RootNode {
             List<Ast.FieldDecl> classFields = effectiveFields(klass, new LinkedHashSet<>());
             if (args.size() > classFields.size()) throw new IllegalArgumentException("too many constructor arguments for " + klass.name());
             LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
-            Env env = new Env(null);
+            Env env = new Env(null, false, klass);
             for (int i = 0; i < classFields.size(); i++) {
                 Ast.FieldDecl field = classFields.get(i);
                 Object value;
@@ -1947,14 +1947,20 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
-        private List<?> iterableValues(Object value) {
+        private List<?> iterableValues(Object value, Env env) {
             if (value instanceof List<?> list) return list;
             if (value instanceof Object[] array) return List.of(array);
             if (value instanceof OresObject object) {
                 Ast.MethodDecl iterator = findMethod(object.klass, "Symbol.iterator", 0, new LinkedHashSet<>());
                 if (iterator == null) throw new IllegalArgumentException("value has no [Symbol.iterator]()");
+                object.owner.requireClassMemberVisible(
+                        iterator.visibility(),
+                        object.owner.declaringClass(iterator),
+                        env == null ? null : env.accessClass(),
+                        "method",
+                        iterator.name());
                 Object produced = callMethod(object, iterator, List.of());
-                return iterableValues(produced);
+                return iterableValues(produced, env);
             }
             throw new IllegalArgumentException("value is not iterable");
         }
