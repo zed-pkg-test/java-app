@@ -291,4 +291,20 @@ final class OresObservableTest {
         }
     }
 
+    @Test
+    void mapRejectsNullReactiveValues() {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresSubscription<String> subscription =
+                    OresObservable.fromValues(List.of("x"))
+                            .map(scheduler, ignored -> null)
+                            .subscribe();
+
+            CompletionException failure =
+                    assertThrows(CompletionException.class, () -> subscription.next().join());
+            assertInstanceOf(IllegalArgumentException.class, failure.getCause());
+            assertTrue(failure.getCause().getMessage().contains("Option<T>"));
+            assertTrue(subscription.isTerminated());
+        }
+    }
+
 }
