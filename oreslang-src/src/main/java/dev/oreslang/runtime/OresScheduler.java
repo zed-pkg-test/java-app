@@ -5,11 +5,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -54,7 +50,7 @@ public final class OresScheduler implements AutoCloseable {
     }
 
     /** Result of one resumable task turn. */
-    public sealed interface Step<T> permits Done, Await { }
+    public sealed interface Step<T> permits Done, Await, TailAwait { }
 
     /** The async task has produced its final value. */
     public record Done<T>(T value) implements Step<T> { }
@@ -68,6 +64,12 @@ public final class OresScheduler implements AutoCloseable {
             Objects.requireNonNull(future, "future");
         }
     }
+
+    /**
+     * Proper async tail transfer. The current logical frame has already been
+     * replaced, but this remains a hard scheduler boundary.
+     */
+    public record TailAwait<T>() implements Step<T> { }
 
     /**
      * Input delivered to a compiler-generated state machine when it starts or
@@ -86,7 +88,7 @@ public final class OresScheduler implements AutoCloseable {
     private final String name;
     private final int parallelism;
     private final Executor executor;
-    private final ExecutorService ownedExecutor;
+    private final NativeCarrierExecutor ownedExecutor;
     private final TurnExecutor turnExecutor;
     private final Set<TaskRunner<?>> tasks = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -118,28 +120,19 @@ public final class OresScheduler implements AutoCloseable {
         this.parallelism = parallelism;
         this.turnExecutor = Objects.requireNonNull(turnExecutor, "turnExecutor");
 
-        AtomicInteger carrierId = new AtomicInteger();
-        ThreadFactory factory = task -> Thread.ofPlatform()
-                .daemon(true)
-                .name(name + "-carrier-" + carrierId.getAndIncrement())
-                .unstarted(() -> {
-                    SCHEDULER_CARRIER.set(Boolean.TRUE);
-                    try {
-                        task.run();
-                    } finally {
-                        SCHEDULER_CARRIER.remove();
-                    }
-                });
-        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+        NativeCarrierExecutor pool = new NativeCarrierExecutor(
                 parallelism,
                 parallelism,
-                0L,
-                TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(queueCapacity),
-                factory,
-                new ThreadPoolExecutor.AbortPolicy());
-        pool.prestartAllCoreThreads();
-        this.executor = pool;
+                queueCapacity,
+                name + "-carrier-");
+        this.executor = task -> pool.execute(() -> {
+            SCHEDULER_CARRIER.set(Boolean.TRUE);
+            try {
+                task.run();
+            } finally {
+                SCHEDULER_CARRIER.remove();
+            }
+        });
         this.ownedExecutor = pool;
     }
 
@@ -147,7 +140,7 @@ public final class OresScheduler implements AutoCloseable {
             String name,
             int parallelism,
             Executor executor,
-            ExecutorService ownedExecutor,
+            NativeCarrierExecutor ownedExecutor,
             TurnExecutor turnExecutor) {
         this.name = Objects.requireNonNull(name, "name");
         if (parallelism <= 0) {
@@ -265,6 +258,10 @@ public final class OresScheduler implements AutoCloseable {
 
     public static <T> Step<T> await(OresFuture<?> future) {
         return new Await<>(Objects.requireNonNull(future, "future"));
+    }
+
+    public static <T> Step<T> tailAwait() {
+        return new TailAwait<>();
     }
 
     /**
@@ -396,8 +393,6 @@ public final class OresScheduler implements AutoCloseable {
                 new AtomicReference<>(Resume.initialResume());
         private final AtomicReference<TerminalOutcome<T>> terminalOutcome =
                 new AtomicReference<>();
-        private final AtomicReference<OresFuture.RuntimeWaiterRegistration>
-                activeAwaitRegistration = new AtomicReference<>();
         private final OresFuture<T> completion;
 
         private TaskRunner(Task<T> task) {
@@ -432,7 +427,6 @@ public final class OresScheduler implements AutoCloseable {
             Object priorTaskDomain = CURRENT_TASK_DOMAIN.get();
             CURRENT_TASK_DOMAIN.set(this);
             try {
-                detachActiveAwaitRegistration();
                 Resume resume = pendingResume.getAndSet(null);
                 if (resume == null) {
                     failTerminal(new IllegalStateException(
@@ -465,6 +459,11 @@ public final class OresScheduler implements AutoCloseable {
                     return;
                 }
 
+                if (step instanceof TailAwait<?>) {
+                    armTailAwait();
+                    return;
+                }
+
                 failTerminal(new IllegalStateException(
                         "unknown OresScheduler task step " + step.getClass().getName()));
             } finally {
@@ -494,39 +493,33 @@ public final class OresScheduler implements AutoCloseable {
             }
 
             try {
-                OresFuture.RuntimeWaiterRegistration registration =
-                        awaited.whenCompleteRuntimeCancellable((value, failure) -> {
-                            if (phase.get() == TERMINAL) return;
-
-                            Resume resume = Resume.completed(
-                                    value,
-                                    failure == null ? null : OresFuture.unwrap(failure));
-                            if (!pendingResume.compareAndSet(null, resume)) {
-                                failTerminal(new IllegalStateException(
-                                        "await delivered more than one resume to the same task"));
-                                return;
-                            }
-
-                            if (phase.get() == TERMINAL) {
-                                pendingResume.compareAndSet(resume, null);
-                                return;
-                            }
-                            scheduleReadyResume();
-                        });
-
-                OresFuture.RuntimeWaiterRegistration previous =
-                        activeAwaitRegistration.getAndSet(registration);
-                if (previous != null) previous.detach();
-
-                // A terminal/already-completed Future may have invoked the
-                // callback synchronously before the registration was published.
-                // In that case the waiter is already claimed; clear our strong
-                // reference immediately.
-                if (phase.get() != WAITING || pendingResume.get() != null) {
-                    detachActiveAwaitRegistration();
-                }
+                awaited.whenCompleteRuntime((value, failure) -> {
+                    Resume resume = Resume.completed(
+                            value,
+                            failure == null ? null : OresFuture.unwrap(failure));
+                    if (!pendingResume.compareAndSet(null, resume)) {
+                        failTerminal(new IllegalStateException(
+                                "await delivered more than one resume to the same task"));
+                        return;
+                    }
+                    scheduleReadyResume();
+                });
             } catch (RuntimeException | Error registrationFailure) {
                 failTerminal(registrationFailure);
+            }
+        }
+
+        /**
+         * Publish only a synthetic resume token. executing remains true until
+         * afterCarrierTurn(), so the replacement frame cannot run inline.
+         */
+        private void armTailAwait() {
+            if (!phase.compareAndSet(RUNNING, WAITING)) {
+                return;
+            }
+            if (!pendingResume.compareAndSet(null, Resume.completed(null, null))) {
+                failTerminal(new IllegalStateException(
+                        "tail-await attempted to publish more than one resume"));
             }
         }
 
@@ -547,14 +540,7 @@ public final class OresScheduler implements AutoCloseable {
             }
         }
 
-        private void detachActiveAwaitRegistration() {
-            OresFuture.RuntimeWaiterRegistration registration =
-                    activeAwaitRegistration.getAndSet(null);
-            if (registration != null) registration.detach();
-        }
-
         private void finish(T value) {
-            detachActiveAwaitRegistration();
             if (!phase.compareAndSet(RUNNING, TERMINAL)) {
                 return;
             }
@@ -566,7 +552,6 @@ public final class OresScheduler implements AutoCloseable {
 
         private void failTerminal(Throwable failure) {
             Objects.requireNonNull(failure, "failure");
-            detachActiveAwaitRegistration();
             int observed;
             do {
                 observed = phase.get();
@@ -597,7 +582,6 @@ public final class OresScheduler implements AutoCloseable {
         }
 
         private void cancelFromFuture() {
-            detachActiveAwaitRegistration();
             int observed;
             do {
                 observed = phase.get();
