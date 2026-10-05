@@ -269,6 +269,7 @@ public final class CapabilityChecker {
             }
             else if (stmt instanceof Ast.DestructureStmt s) checkExpr(s.initializer(), policy);
             else if (stmt instanceof Ast.ReturnStmt s && s.value() != null) checkExpr(s.value(), policy);
+            else if (stmt instanceof Ast.YieldStmt s) checkExpr(s.value(), policy);
             else if (stmt instanceof Ast.ExprStmt s) checkExpr(s.expression(), policy);
             else if (stmt instanceof Ast.DeferStmt s) checkExpr(s.expression(), policy);
             else if (stmt instanceof Ast.BlockStmt s) checkStatements(s.body(), policy);
@@ -283,6 +284,9 @@ public final class CapabilityChecker {
                 checkStatements(s.body(), policy);
                 checkStatements(s.catchBody(), policy);
                 checkStatements(s.finallyBody(), policy);
+            } else if (stmt instanceof Ast.ForOfDestructureStmt s) {
+                checkExpr(s.iterable(), policy);
+                checkStatements(s.body(), policy);
             } else if (stmt instanceof Ast.ForOfStmt s) {
                 checkExpr(s.iterable(), policy);
                 checkStatements(s.body(), policy);
