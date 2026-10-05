@@ -390,6 +390,39 @@ execution domain that created it. `await future` is the only operation that
 extracts the future's result; Oreslang does not expose a blocking
 `Future.get()` / `join()` equivalent.
 
+`Awaitable<T>` is the nominal protocol behind `await`. A custom type opts in
+explicitly by implementing/extending `Awaitable<T>` and exposing exactly one
+projection hook named `getAwait()`:
+
+```ores
+define class ReadyValue implements Awaitable<int> as
+  pub val Future<int> future;
+
+  pub getAwait() => Future<int> {
+    return self.future;
+  }
+end
+```
+
+The hook may also be async:
+
+```ores
+define class DeferredValue implements Awaitable<int> as
+  pub async getAwait() => int {
+    // The async method call itself produces Future<int>.
+    return 42;
+  }
+end
+```
+
+For `await value`, Oreslang evaluates `value` exactly once, invokes
+`getAwait()` at most once, obtains one `Future<T>`, then suspends on that
+Future. There is no reflective field search or magic “future” field convention.
+`Future<T>` itself implements `Awaitable<T>` by returning itself from
+`getAwait()`. Even when the projected Future is already settled, `await`
+still yields through the owning scheduler before resumption; guest continuation
+code never resumes inline on the producer/completion thread.
+
 The built-in `Futures` control-flow facade provides:
 
 ```ores

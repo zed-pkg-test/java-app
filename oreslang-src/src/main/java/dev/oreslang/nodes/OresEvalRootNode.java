@@ -754,7 +754,32 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (receiver instanceof OresObject object) {
                 if (object.fields.containsKey(name)) return object.fields.get(name);
-                return new BoundMethod(object.owner, object, name);
+
+                List<Ast.MethodDecl> methods =
+                        object.owner.findMethodsByName(
+                                object.klass,
+                                name,
+                                new LinkedHashSet<>());
+                if (!methods.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "instance method '" + object.klass.name() + "." + name
+                                    + "' is not a first-class callback value; "
+                                    + "invoke it directly or wrap the call in an explicit fnc/lambda");
+                }
+
+                List<Ast.MethodDecl> staticFunctions =
+                        object.owner.findStaticFunctionsByName(
+                                object.klass,
+                                name,
+                                new LinkedHashSet<>());
+                if (!staticFunctions.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "static function '" + object.klass.name() + "." + name
+                                    + "' must be referenced through the class namespace, not an instance");
+                }
+
+                throw new IllegalArgumentException(
+                        "unknown member " + object.klass.name() + "." + name);
             }
             if (receiver instanceof Map<?, ?> map) {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
@@ -912,28 +937,6 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
-        /**
-         * Go-style method value: one shared method definition per class plus a
-         * tiny (receiver, method-name) pair only when a method is extracted as
-         * a first-class callback. Direct receiver.method(...) calls allocate no
-         * bound-method object.
-         */
-        private static final class BoundMethod implements Invokable {
-            private final Evaluator owner;
-            private final OresObject receiver;
-            private final String methodName;
-
-            private BoundMethod(Evaluator owner, OresObject receiver, String methodName) {
-                this.owner = owner;
-                this.receiver = receiver;
-                this.methodName = methodName;
-            }
-
-            @Override public Object call(List<Object> arguments) {
-                return owner.invokeMethod(receiver, methodName, arguments);
-            }
-        }
-
         private Object importedValue(String name) {
             Ast.ImportDecl direct = namedImports.get(name);
             if (direct != null) return importedTarget(direct).exportValue(direct.kind(), name);
@@ -1086,6 +1089,29 @@ public final class OresEvalRootNode extends RootNode {
             }
             seen.remove(klass);
             return null;
+        }
+
+        private List<Ast.MethodDecl> findMethodsByName(
+                Ast.ClassDecl klass,
+                String name,
+                Set<Ast.ClassDecl> seen) {
+            if (!seen.add(klass)) return List.of();
+            LinkedHashMap<Integer, Ast.MethodDecl> result = new LinkedHashMap<>();
+            for (Ast.MethodDecl method : klass.methods()) {
+                if (!method.isStatic() && method.name().equals(name)) {
+                    result.put(method.parameters().size(), method);
+                }
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent == null) continue;
+                for (Ast.MethodDecl method : findMethodsByName(parent, name, seen)) {
+                    result.putIfAbsent(method.parameters().size(), method);
+                }
+            }
+            seen.remove(klass);
+            return List.copyOf(result.values());
         }
 
         private Ast.MethodDecl findStaticFunction(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
