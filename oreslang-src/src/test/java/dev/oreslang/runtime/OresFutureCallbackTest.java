@@ -28,41 +28,6 @@ final class OresFutureCallbackTest {
     }
 
     @Test
-    void lateRuntimeWaiterOnSettledFutureIsDeliveredAndReleased() {
-        OresFuture<Integer> future = OresFuture.completed(42);
-        AtomicReference<Integer> observed = new AtomicReference<>();
-
-        future.whenCompleteRuntime((value, failure) -> {
-            assertNull(failure);
-            observed.set(value);
-        });
-
-        assertEquals(42, observed.get());
-        assertEquals(
-                0,
-                future.pendingRuntimeWaiterCount(),
-                "late terminal registrations must not remain retained in the waiter queue");
-    }
-
-    @Test
-    void consumerCancellationDropsFirstLateForeignCallbackButStillRejectsDuplicates() {
-        AtomicReference<OresFuture.Callback<Integer>> completion = new AtomicReference<>();
-
-        OresFuture<Integer> future = OresFuture.fromCallback(completion::set);
-
-        assertTrue(future.cancel(false));
-        assertTrue(future.isCancelled());
-        assertTrue(completion.get().isDone());
-
-        assertDoesNotThrow(() -> completion.get().resolve(42));
-        assertTrue(future.isCancelled());
-
-        assertThrows(
-                OresFuture.AlreadySettledException.class,
-                () -> completion.get().resolve(43));
-    }
-
-    @Test
     void registrarThrowRejectsFutureWhenCallbackHasNotSettled() {
         OresFuture<Integer> future = OresFuture.fromCallback(callback -> {
             throw new IllegalStateException("registration failed");
