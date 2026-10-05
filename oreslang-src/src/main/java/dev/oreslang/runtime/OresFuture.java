@@ -71,6 +71,31 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         }
     }
 
+    /**
+     * Runtime-only detachable completion registration.
+     *
+     * <p>Detaching never changes the Future's producer/cancellation state. It
+     * only prevents this runtime continuation waiter from retaining or being
+     * invoked after its owning scheduler/task has been cancelled.</p>
+     */
+    static final class RuntimeWaiterRegistration {
+        private final AtomicBoolean claimed;
+        private final Runnable remove;
+
+        private RuntimeWaiterRegistration(
+                AtomicBoolean claimed,
+                Runnable remove) {
+            this.claimed = claimed;
+            this.remove = remove;
+        }
+
+        boolean detach() {
+            if (!claimed.compareAndSet(false, true)) return false;
+            remove.run();
+            return true;
+        }
+    }
+
     private final Runnable cancelHook;
     private final AtomicBoolean cancelHookRun = new AtomicBoolean();
     private final AtomicReference<Object> state = new AtomicReference<>(PENDING);
@@ -280,14 +305,32 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
      * They must never execute Oreslang guest code directly.</p>
      */
     void whenCompleteRuntime(BiConsumer<? super T, ? super Throwable> callback) {
+        whenCompleteRuntimeCancellable(callback);
+    }
+
+    RuntimeWaiterRegistration whenCompleteRuntimeCancellable(
+            BiConsumer<? super T, ? super Throwable> callback) {
         Objects.requireNonNull(callback, "callback");
         Waiter<T> waiter = new Waiter<>(callback);
+        RuntimeWaiterRegistration registration =
+                new RuntimeWaiterRegistration(
+                        waiter.claimed,
+                        () -> waiters.remove(waiter));
         waiters.add(waiter);
 
         Object observed = state.get();
         if (observed != PENDING) {
             notifyWaiter(waiter, observed);
         }
+        return registration;
+    }
+
+    int pendingRuntimeWaiterCount() {
+        int count = 0;
+        for (Waiter<T> waiter : waiters) {
+            if (!waiter.claimed.get()) count++;
+        }
+        return count;
     }
 
     @Override
