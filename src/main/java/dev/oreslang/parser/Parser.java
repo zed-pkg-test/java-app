@@ -165,8 +165,11 @@ public final class Parser {
     }
 
     private Ast.Decl parseDeclarationAfterModifiers(List<Ast.Annotation> annotations, Modifiers modifiers) {
-        if (modifiers.gpu && !check(FNC) && !check(ROUTINE) && !check(ACTOR) && !check(ISOACTOR)) {
-            throw error(peek(), "'gpu' may only modify fnc/routine declarations or actor/isoactor callables");
+        if (modifiers.gpu && (check(ACTOR) || check(ISOACTOR))) {
+            throw error(peek(), "'gpu' cannot modify actor or isoactor declarations");
+        }
+        if (modifiers.gpu && !check(FNC) && !check(ROUTINE)) {
+            throw error(peek(), "'gpu' may only modify fnc or routine declarations");
         }
         if (match(ACTOR, ISOACTOR)) {
             Token actorToken = previous();
@@ -177,10 +180,6 @@ public final class Parser {
             Ast.ActorKind actorKind = isolated ? Ast.ActorKind.PRIVATE : Ast.ActorKind.SHARED;
             if (match(FNC)) return parseFunction(annotations, modifiers, Ast.CallableKind.FNC, actorKind);
             if (match(ROUTINE)) return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE, actorKind);
-            if (modifiers.gpu) {
-                throw error(actorToken,
-                        "'gpu actor' currently requires fnc/routine; persistent GPU actor classes need explicit device-state layout");
-            }
             if (modifiers.async || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
                 throw error(actorToken, "actor declarations do not accept async, nlex, static, or abstract modifiers");
             }
