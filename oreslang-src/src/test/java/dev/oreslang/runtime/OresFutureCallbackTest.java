@@ -28,6 +28,23 @@ final class OresFutureCallbackTest {
     }
 
     @Test
+    void lateRuntimeWaiterOnSettledFutureIsDeliveredAndReleased() {
+        OresFuture<Integer> future = OresFuture.completed(42);
+        AtomicReference<Integer> observed = new AtomicReference<>();
+
+        future.whenCompleteRuntime((value, failure) -> {
+            assertNull(failure);
+            observed.set(value);
+        });
+
+        assertEquals(42, observed.get());
+        assertEquals(
+                0,
+                future.pendingRuntimeWaiterCount(),
+                "late terminal registrations must not remain retained in the waiter queue");
+    }
+
+    @Test
     void registrarThrowRejectsFutureWhenCallbackHasNotSettled() {
         OresFuture<Integer> future = OresFuture.fromCallback(callback -> {
             throw new IllegalStateException("registration failed");
