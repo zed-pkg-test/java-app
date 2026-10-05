@@ -2,14 +2,14 @@ import class {TestOutcome, TestCase, TestSuite, TestOptions, RunSummary} from "s
 import fnc {pass, fail, run_suite, require_success} from "std/testing";
 
 define class Vector<T> as
-  let Array<T> items = new Array<T>();
+  let List<T> items = arr[];
 
   pub add(T value): void {
     self.items.add(value);
     return;
   }
 
-  pub [Symbol.iterator](): Array<T> {
+  pub [Symbol.iterator](): List<T> {
     return self.items;
   }
 end
