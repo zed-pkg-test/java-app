@@ -26,10 +26,13 @@ jobs:
           test "$(tr -d '[:space:]' < proof/ROUTING_COMMIT)" = "cf72dc56a707a6b7a495e66dd9f44306de9d2b77"
           test "$(tr -d '[:space:]' < proof/COMPILER_COMMIT)" = "ee19932f130204875c61d3e985a52aeba0e67c2b"
           test "$(tr -d '[:space:]' < proof/routing/SOURCE_REF)" = "ee19932f130204875c61d3e985a52aeba0e67c2b"
-          test -s proof/compiler/pom.xml
-          test -s proof/routing/src/http_routing.ores
-          test -s proof/routing/tests/router_semantics.ores
-          test -s proof/routing/tests/expected.txt
+          test "$(git hash-object proof/routing/src/http_routing.ores)" = "7e448d4e13de1e0c163c73424c85b37b969aef3a"
+          test "$(git hash-object proof/routing/scripts/test.sh)" = "009efe2d617a35816f5a546d09c2b3514ecf34bc"
+          test "$(git hash-object proof/routing/tests/router_semantics.ores)" = "958c62354b2248aa9cd8ac97ee1da4a85d6891fb"
+          test "$(git hash-object proof/routing/tests/expected.txt)" = "7503dc249e06dba3432eb0d80ce560612d23f8d2"
+          test "$(git hash-object proof/compiler/pom.xml)" = "b513f9a336fa808698c905476b629720094adc32"
+          test "$(git hash-object proof/compiler/scripts/build-native-core.sh)" = "0e1f696bf05f5fee37adcf147863b704a7da2cee"
+          test "$(git hash-object proof/compiler/scripts/build-native-net.sh)" = "9cb29e36127a6ac6df1d3f1a5931d34b09b22933"
 
       - name: Install Java 21 and Maven
         shell: bash
@@ -37,19 +40,23 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes openjdk-21-jdk maven
-          java -version
-          mvn -version
+          /usr/lib/jvm/java-21-openjdk-amd64/bin/java -version
+          JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn -version
 
       - name: Compile exact Oreslang compiler
         shell: bash
         run: |
           set -euo pipefail
+          export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
           mvn -B -ntp -f proof/compiler/pom.xml -DskipTests compile
 
       - name: Run exact routing golden semantics
         shell: bash
         run: |
           set -euo pipefail
+          export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
           cat > "$RUNNER_TEMP/oreslang-compiler" <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
