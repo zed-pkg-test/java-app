@@ -473,16 +473,17 @@ public final class Parser {
 
         if (method.visibility() != Ast.Visibility.PUBLIC) return;
 
-        if (isReservedActorRefMember(method.name())) {
+        if (method.name().equals("id")
+                || method.name().equals("is_alive")
+                || method.name().equals("mailbox")) {
             throw error(previous(),
                     "public actor protocol method '" + method.name()
-                            + "' conflicts with the reserved ActorRef control/runtime namespace");
+                            + "' collides with a reserved ActorRef control member");
         }
 
         // Public actor methods are the typed source-level protocol. The
         // compiler/runtime lowers all of them onto one hidden mailbox
-        // dispatcher. ActorRef control/runtime names stay reserved so every
-        // protocol method has one unambiguous source-level invocation path.
+        // dispatcher; no user-visible method name is privileged.
         if (!method.genericParameters().isEmpty()) {
             throw error(previous(),
                     "public actor protocol methods cannot declare method generic parameters");
@@ -495,13 +496,6 @@ public final class Parser {
             throw error(previous(),
                     "public actor protocol parameters cannot be 'mut'; mutable authority cannot cross the actor mailbox boundary");
         }
-    }
-
-    private boolean isReservedActorRefMember(String name) {
-        return switch (name) {
-            case "id", "is_alive", "send", "mailbox" -> true;
-            default -> false;
-        };
     }
 
     private void rejectReservedActorTypeName(String name) {
