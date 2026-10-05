@@ -44,6 +44,49 @@ final class AsyncAwaitLanguageTest {
     }
 
     @Test
+    void asyncCompositionRequiresAwaitRatherThanDirectTailTransfer() throws Exception {
+        assertThrows(IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        async fnc inner(): int {
+                          return 7;
+                        }
+
+                        async fnc bad_outer(): int {
+                          return inner();
+                        }
+                        """));
+
+        String program = """
+                async fnc inner(): int {
+                  return 7;
+                }
+
+                async fnc outer(): int {
+                  return await inner();
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(await outer());
+                  return;
+                }
+                """;
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "async-tail-boundary.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains("7"));
+    }
+
+    @Test
     void asyncTaskMovesOwnedArgumentsAndReturnsDetachedResult() throws Exception {
         String program = """
                 define module app

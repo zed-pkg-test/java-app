@@ -43,7 +43,7 @@ final class PrivateVisibilityTest {
                     return 7;
                   }
 
-                  pub bump_and_read(Vault other): int {
+                  pub bump_and_read(&mut Vault other): int {
                     other.secret = other.secret + 1;
                     return other.reveal();
                   }
@@ -69,7 +69,7 @@ final class PrivateVisibilityTest {
                   val right = new Vault();
                   val Fnc<int> callback = Vault.hidden_callback();
 
-                  stdio.stdout.write(left.bump_and_read(right));
+                  stdio.stdout.write(left.bump_and_read(&mut right));
                   stdio.stdout.write(":");
                   stdio.stdout.write(left.destructured(right));
                   stdio.stdout.write(":");
@@ -282,8 +282,8 @@ final class PrivateVisibilityTest {
                 }
                 """);
 
-        PolyglotException iteratorFailure = assertThrows(
-                PolyglotException.class,
+        Exception iteratorFailure = assertThrows(
+                Exception.class,
                 () -> runLinked(iteratorMain));
         assertTrue(iteratorFailure.getMessage().contains("private method"));
         assertTrue(iteratorFailure.getMessage().contains("Symbol.iterator"));
