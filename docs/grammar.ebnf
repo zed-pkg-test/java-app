@@ -116,12 +116,21 @@ binding_kind    = "val" | "const" | "let" ;
 
 destructure_stmt= [ binding_kind ] sequence_pattern "=" expression stmt_terminator
                 | [ binding_kind ] object_pattern "=" expression stmt_terminator ;
-sequence_pattern= "[" sequence_destructure_item { "," sequence_destructure_item } "]" ;
-object_pattern  = "{" object_destructure_item { "," object_destructure_item } "}" ;
+sequence_pattern= "[" ( sequence_rest_item
+                                  | sequence_destructure_item
+                                    { "," sequence_destructure_item }
+                                    [ "," sequence_rest_item ] ) "]" ;
+object_pattern  = "{" ( object_rest_item
+                                  | object_destructure_item
+                                    { "," object_destructure_item }
+                                    [ "," object_rest_item ] ) "}" ;
 sequence_destructure_item
                 = [ binding_kind ] IDENT | "_" ;
+sequence_rest_item
+                = [ binding_kind ] "..." IDENT ;
 object_destructure_item
                 = [ binding_kind ] IDENT ;
+object_rest_item= [ binding_kind ] "..." IDENT ;
 
 block           = "{" { statement } "}" ;
 statement       = binding_decl
@@ -187,9 +196,13 @@ for_update      = IDENT ( "++" | "--" ) | expression ;
 
 for_of_head     = [ binding_kind ] for_of_pattern "of" expression ;
 for_of_pattern  = IDENT
-                | "[" for_of_destructure_item { "," for_of_destructure_item } "]" ;
+                | "[" ( for_of_rest_item
+                      | for_of_destructure_item
+                        { "," for_of_destructure_item }
+                        [ "," for_of_rest_item ] ) "]" ;
 for_of_destructure_item
                 = "_" | [ binding_kind ] IDENT ;
+for_of_rest_item= [ binding_kind ] "..." IDENT ;
 loop_body       = block | "do" { statement } "done" ;
 expression      = assignment ;
 assignment      = conditional [ "=" assignment ] ;
@@ -378,6 +391,15 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - In a destructure pattern, an explicit binding kind propagates to subsequent
      unqualified names until another binding kind appears. A leading binding
      kind (for example const [a, b]) seeds the whole pattern. "_" never binds.
+   - A rest binding uses "...name", may carry its own binding kind (for example
+     [const head, let ...tail]), and must be the final pattern item. Sequence rest
+     on Array<T>/List<T> keeps a homogeneous sequence type. Sequence rest on a
+     finite tuple computes a new finite tuple from the statically remaining
+     slots. Object rest is allowed only when the source has a statically known
+     record shape; its type is the compile-time record obtained by omitting all
+     explicitly selected members. DynamicStruct/object shapes with unknown keys
+     cannot use rest destructuring because AOT compilation must know the complete
+     remainder type without runtime reflection.
    - Sequence destructuring targets returned arrays/lists and finite tuple types;
      object destructuring targets returned record/map-like values.
    - Destructuring is not currently permitted in callable parameter lists.
