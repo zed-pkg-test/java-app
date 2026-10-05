@@ -153,6 +153,7 @@ public final class Parser {
     private Ast.ModuleDecl parseModule(List<Ast.Annotation> annotations) {
         String name = consume(IDENT, "expected flat module name").lexeme();
         if (check(DOT)) throw error(peek(), "modules cannot be nested or dotted");
+        consume(AS, "expected 'as' after module header");
         List<Ast.Decl> declarations = new ArrayList<>();
         while (!check(END) && !check(EOF)) declarations.add(parseModuleMember());
         consume(END, "expected 'end' to close module " + name);
@@ -965,14 +966,14 @@ public final class Parser {
         List<Ast.IfBranch> branches = new ArrayList<>();
         Ast.Expr condition = parseCondition();
         match(SEMICOLON);
-        consume(DO, "expected 'do'");
+        if (!match(THEN, DO)) throw error(peek(), "expected 'then' or 'do'");
         List<Ast.Stmt> body = parseUntil(ELSEIF, ELSE, FI);
         branches.add(new Ast.IfBranch(condition, body));
 
         while (match(ELSEIF)) {
             condition = parseCondition();
             match(SEMICOLON);
-            consume(DO, "expected 'do'");
+            if (!match(THEN, DO)) throw error(peek(), "expected 'then' or 'do'");
             body = parseUntil(ELSEIF, ELSE, FI);
             branches.add(new Ast.IfBranch(condition, body));
         }
