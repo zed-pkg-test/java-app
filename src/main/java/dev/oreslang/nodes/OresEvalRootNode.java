@@ -581,8 +581,8 @@ public final class OresEvalRootNode extends RootNode {
                                 requireZero(args, "ActorRef.is_alive");
                                 yield ref.isAlive();
                             }
-                            case "send", "mailbox" -> throw new IllegalArgumentException(
-                                    "raw ActorRef mailbox operations are runtime-private; "
+                            case "mailbox" -> throw new IllegalArgumentException(
+                                    "ActorRef mailbox state is runtime-private; "
                                             + "invoke a declared typed actor protocol method instead");
                             default -> context.actors().invokeSourceProtocol(
                                     ref,
@@ -754,8 +754,8 @@ public final class OresEvalRootNode extends RootNode {
                         requireZero(args, "ActorRef.is_alive");
                         return ref.isAlive();
                     };
-                    case "send", "mailbox" -> throw new IllegalArgumentException(
-                            "raw ActorRef mailbox operations are runtime-private; "
+                    case "mailbox" -> throw new IllegalArgumentException(
+                            "ActorRef mailbox state is runtime-private; "
                                     + "invoke a declared typed actor protocol method instead");
                     default -> throw new IllegalArgumentException(
                             "actor protocol methods are not first-class values; invoke '"
@@ -1275,20 +1275,27 @@ public final class OresEvalRootNode extends RootNode {
                 }
             }
 
-            Ast.MethodDecl constructor = findMethod(
-                    klass,
-                    "constructor",
-                    constructorArguments.size(),
-                    new LinkedHashSet<>());
-            if (constructor == null) {
+            List<Ast.MethodDecl> constructors = klass.methods().stream()
+                    .filter(method -> !method.isStatic()
+                            && method.name().equals("constructor")
+                            && method.arity() == constructorArguments.size())
+                    .toList();
+            if (constructors.size() > 1) {
+                throw new IllegalStateException(
+                        "actor class '" + klass.name()
+                                + "' has multiple local constructors with arity "
+                                + constructorArguments.size());
+            }
+            if (constructors.isEmpty()) {
                 if (!constructorArguments.isEmpty()) {
                     throw new IllegalArgumentException(
                             "actor class '" + klass.name()
-                                    + "' has no constructor with arity "
-                                    + constructorArguments.size());
+                                    + "' has no local constructor with arity "
+                                    + constructorArguments.size()
+                                    + "; actor constructors are not inherited");
                 }
             } else {
-                callMethod(actor, constructor, constructorArguments);
+                callMethod(actor, constructors.getFirst(), constructorArguments);
             }
 
             for (Map.Entry<String, Object> field : fields.entrySet()) {
