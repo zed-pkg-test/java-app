@@ -52,6 +52,7 @@ final class OresVM {
 
     private static final String VM_BINDING_ARG = "--ores-vm-binding=";
     private static final String GENERATION_BINDING_ARG = "--ores-generation-binding=";
+    private static final String GENERATION_DIAGNOSTIC_ARG = "--ores-generation-id=";
     private static final java.util.concurrent.ConcurrentMap<String, OresVM> VM_BINDINGS =
             new ConcurrentHashMap<>();
 
@@ -128,17 +129,48 @@ final class OresVM {
     String[] bindApplicationArguments(
             String[] baseArguments,
             String generationBindingToken) {
+        return bindApplicationArguments(baseArguments, generationBindingToken, null);
+    }
+
+    String[] bindApplicationArguments(
+            String[] baseArguments,
+            String generationBindingToken,
+            Long generationDiagnosticId) {
         Objects.requireNonNull(baseArguments, "baseArguments");
         ensureRunning();
-        int extra = generationBindingToken == null ? 1 : 2;
-        String[] bound = java.util.Arrays.copyOf(baseArguments, baseArguments.length + extra);
-        bound[baseArguments.length] = VM_BINDING_ARG + contextBindingToken;
+
+        for (String argument : baseArguments) {
+            if (argument.startsWith(VM_BINDING_ARG)
+                    || argument.startsWith(GENERATION_BINDING_ARG)
+                    || argument.startsWith(GENERATION_DIAGNOSTIC_ARG)) {
+                throw new SecurityException(
+                        "application arguments may not supply OresVM internal binding metadata");
+            }
+        }
+
+        int extra = 1;
+        if (generationBindingToken != null) extra++;
+        if (generationDiagnosticId != null) extra++;
+
+        String[] bound = java.util.Arrays.copyOf(
+                baseArguments,
+                baseArguments.length + extra);
+        int cursor = baseArguments.length;
+        bound[cursor++] = VM_BINDING_ARG + contextBindingToken;
+
         if (generationBindingToken != null) {
             if (!generationBindings.containsKey(generationBindingToken)) {
                 throw new SecurityException("unknown Oreslang generation binding");
             }
-            bound[baseArguments.length + 1] =
-                    GENERATION_BINDING_ARG + generationBindingToken;
+            bound[cursor++] = GENERATION_BINDING_ARG + generationBindingToken;
+        }
+
+        if (generationDiagnosticId != null) {
+            if (generationDiagnosticId <= 0) {
+                throw new IllegalArgumentException(
+                        "generation diagnostic id must be positive");
+            }
+            bound[cursor] = GENERATION_DIAGNOSTIC_ARG + generationDiagnosticId;
         }
         return bound;
     }
@@ -158,15 +190,40 @@ final class OresVM {
         if (token != null) generationBindings.remove(token);
     }
 
-    ActorRuntime.ActorGenerationLeaseFactory generationLeaseFactory(
-            String[] applicationArguments) {
-        String token = null;
+    static String generationBindingId(String[] applicationArguments) {
         for (String argument : applicationArguments) {
             if (argument.startsWith(GENERATION_BINDING_ARG)) {
-                token = argument.substring(GENERATION_BINDING_ARG.length());
-                break;
+                return argument.substring(GENERATION_BINDING_ARG.length());
             }
         }
+        return null;
+    }
+
+    /**
+     * Non-authoritative generation label for stack traces/diagnostics. Unlike
+     * the generation binding token, this value grants no runtime capability.
+     */
+    static String generationDiagnosticId(String[] applicationArguments) {
+        for (String argument : applicationArguments) {
+            if (argument.startsWith(GENERATION_DIAGNOSTIC_ARG)) {
+                String raw = argument.substring(GENERATION_DIAGNOSTIC_ARG.length());
+                try {
+                    long id = Long.parseLong(raw);
+                    if (id <= 0) throw new NumberFormatException("non-positive");
+                    return Long.toString(id);
+                } catch (NumberFormatException invalid) {
+                    throw new SecurityException(
+                            "invalid Oreslang diagnostic generation id",
+                            invalid);
+                }
+            }
+        }
+        return null;
+    }
+
+    ActorRuntime.ActorGenerationLeaseFactory generationLeaseFactory(
+            String[] applicationArguments) {
+        String token = generationBindingId(applicationArguments);
         if (token == null) return null;
 
         ActorRuntime.ActorGenerationLeaseFactory factory =
@@ -303,6 +360,18 @@ final class OresVM {
         ensureRunning();
         return blockingIo.submitJava(
                 Objects.requireNonNull(operation, "operation"));
+    }
+
+    /**
+     * Adapt a host java.util.concurrent.Future without ever blocking an Ores
+     * carrier. CompletionStage values take their callback path; plain Future
+     * values are observed by the bounded Java virtual-thread bridge.
+     */
+    <T> OresFuture<T> adaptJavaFuture(
+            java.util.concurrent.Future<? extends T> future) {
+        ensureRunning();
+        return blockingIo.adaptJavaFuture(
+                Objects.requireNonNull(future, "future"));
     }
 
     /**
