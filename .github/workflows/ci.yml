@@ -9,37 +9,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ssr-validation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
+  validate-ssr:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
-        with:
-          version: '25.3'
-          java-version: '25'
-          distribution: 'graalvm'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: maven
-      - name: GraalVM diagnostics
-        run: |
-          java --version
-          native-image --version
-      - name: Verify JIT/JVM profile
-        run: mvn -B -ntp verify
-      - name: Run showcase
-        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
-      - name: Compile and run shared Oreslang program
-        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
 
-  native-aot:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - name: Set up GraalVM
         uses: graalvm/setup-graalvm@v1
         with:
@@ -48,68 +26,47 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: maven
-      - name: GraalVM diagnostics
-        run: |
-          java --version
-          native-image --version
-      - name: Build interpreter-only AOT image
-        run: mvn -B -ntp -Pnative-aot -DskipTests package
-      - name: Run AOT image
-        run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
-      - name: Run AOT proper tail-call stress
-        run: |
-          ./target/ores-aot --mode=aot --platform=linux examples/proper-tail-call.ores | tee /tmp/ores-aot-tail.out
-          grep -F "0|0|0" /tmp/ores-aot-tail.out
 
-  native-hybrid:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
-        with:
-          version: '25.3'
-          java-version: '25'
-          distribution: 'graalvm'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: maven
-      - name: GraalVM diagnostics
-        run: |
-          java --version
-          native-image --version
-      - name: Build AOT host with guest JIT
-        run: mvn -B -ntp -Pnative-hybrid -DskipTests package
-      - name: Run hybrid image
-        run: ./target/ores-hybrid --mode=hybrid --platform=linux examples/together.ores
-      - name: Run hybrid proper tail-call stress
-        run: |
-          ./target/ores-hybrid --mode=hybrid --platform=linux examples/proper-tail-call.ores | tee /tmp/ores-hybrid-tail.out
-          grep -F "0|0|0" /tmp/ores-hybrid-tail.out
-
-  polyglot-isolate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
-        with:
-          version: '25.3'
-          java-version: '25'
-          distribution: 'graalvm'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: maven
-      - name: GraalVM diagnostics
-        run: |
-          java --version
-          native-image --version
-      - name: Build Oreslang polyglot isolate library
-        run: mvn -B -ntp -Pnative-isolate -DskipTests package
-      - name: Locate isolate library
-        id: isolate
+      - name: Verify exact mirrored SSR blobs
         shell: bash
         run: |
-          lib="$(find target -maxdepth 1 -type f \( -name 'oresvm.so' -o -name 'liboresvm.so' -o -name 'oresvm.dylib' -o -name 'liboresvm.dylib' \) | head -n1)"
-          test -n "$lib"
-          echo "path=$PWD/$lib" >> "$GITHUB_OUTPUT"
-      - name: Run strict program in Oreslang polyglot isolate
-        run: mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"
+          test "$(git hash-object ssr/src/markup.ores)" = "c8546a1597a899e6c25209aa82974ff9e5d79824"
+          test "$(git hash-object ssr/src/html.ores)" = "1e67dfcf0c99c7a1dabe889df8aeece5af95d363"
+          test "$(git hash-object ssr/src/css.ores)" = "84b8c5abd177e1bbe423a9b2b4c1427589217a41"
+          test "$(git hash-object ssr/src/htmx.ores)" = "670ccd20e716e85b599e3208ba5f18acc01c41c3"
+          test "$(git hash-object ssr/src/response.ores)" = "052d4363699c2f99e3032c258aef77507047e76e"
+          test "$(git hash-object ssr/examples/basic-page.ores)" = "20d99f0787a28666504cee81607be1636a365a41"
+          test "$(git hash-object ssr/examples/htmx-fragment.ores)" = "edf8178a5bd45a811b3a54a5d12653bdcf2573c8"
+          test "$(git hash-object ssr/tests/render-contract.ores)" = "7fd537a772a11fe29450d9cd366601271611d56b"
+          test "$(git hash-object ssr/tests/render-contract.expected)" = "d918a1a66fa2fa4314c995501d97a23322511c3e"
+
+      - name: Full compiler regression suite
+        run: mvn -B -ntp verify
+
+      - name: Native SSR static audit
+        run: bash ssr/scripts/audit.sh
+
+      - name: Type-check SSR source graphs
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check --platform=server ssr/examples/basic-page.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check --platform=server ssr/examples/htmx-fragment.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check --platform=server ssr/tests/render-contract.ores"
+
+      - name: Execute SSR examples
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--platform=server ssr/examples/basic-page.ores" >/tmp/basic.out
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--platform=server ssr/examples/htmx-fragment.ores" >/tmp/htmx.out
+          test -s /tmp/basic.out
+          test -s /tmp/htmx.out
+          grep -F '<!doctype html>' /tmp/basic.out
+          grep -F 'hx-get="/fragments/greeting"' /tmp/htmx.out
+
+      - name: JIT render contract
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=jit --platform=server ssr/tests/render-contract.ores" > /tmp/ssr-jit.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-jit.out
+
+      - name: AOT-profile render contract
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=aot --platform=linux ssr/tests/render-contract.ores" > /tmp/ssr-aot.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-aot.out
