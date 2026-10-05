@@ -392,6 +392,16 @@ public final class ActorRuntime implements AutoCloseable {
             return sharedParallelism;
         }
 
+        /**
+         * Ordinary/root Oreslang code gets two logical scheduler lanes by
+         * default while the remaining CONTROL carriers stay available for
+         * supervisors and ActorMailman work. Explicit tiny test configs still
+         * retain at least one root lane.
+         */
+        public int rootParallelism() {
+            return Math.max(1, Math.min(2, controlParallelism() - 1));
+        }
+
         public int maxControlParallelism() {
             try {
                 return Math.addExact(controlParallelism(), maxCompensatingThreads);
@@ -1290,7 +1300,7 @@ public final class ActorRuntime implements AutoCloseable {
             this.config = Objects.requireNonNull(config);
             this.maxActorMemoryBytes = configuredProcessActorMemoryLimit();
             int controlParallelism = config.controlParallelism();
-            int rootPermits = Math.max(1, controlParallelism - 1);
+            int rootPermits = config.rootParallelism();
             int readyQueueCapacity;
             try {
                 readyQueueCapacity = Math.addExact(config.maxActors(), rootPermits);
@@ -1728,7 +1738,7 @@ public final class ActorRuntime implements AutoCloseable {
         this.sharedRejectedTurns = dispatcherGroup.sharedRejectedTurns;
         this.untrustedRejectedTurns = dispatcherGroup.untrustedRejectedTurns;
 
-        int rootParallelism = Math.max(1, dispatcherConfig.controlParallelism() - 1);
+        int rootParallelism = dispatcherConfig.rootParallelism();
         this.rootScheduler = OresScheduler.runtimeOwned(
                 "ores-root-" + Integer.toHexString(System.identityHashCode(this)),
                 rootParallelism,
