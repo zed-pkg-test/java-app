@@ -1001,15 +1001,8 @@ public final class OresEvalRootNode extends RootNode {
                         Ast.Param param = lambda.parameters().get(i);
                         local.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
                     }
+                    if (lambda.expressionBody() != null) return eval(lambda.expressionBody(), local);
                     try {
-                        if (lambda.expressionBody() != null) {
-                            // An expression-bodied lambda's sole expression is
-                            // inherently in tail position. Route it through the
-                            // same tail-return lowering as an explicit
-                            // `return expr;` in a block-bodied lambda.
-                            returnFrom(lambda.expressionBody(), local, false);
-                            throw new AssertionError("lambda expression return did not transfer control");
-                        }
                         executeBlock(lambda.blockBody(), local);
                         return null;
                     } catch (TailCallSignal signal) {
