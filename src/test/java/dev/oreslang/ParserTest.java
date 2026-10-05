@@ -92,10 +92,26 @@ final class ParserTest {
                   };
                 }
 
+                pub routine helper = || -> {
+                  return;
+                }
+
+                pub fnc no_result = || -> {
+                  helper();
+                  return;
+                }
+
                 pub routine main = || -> void {
                   val (() => void) callback = run();
                   callback();
+                  no_result();
                   return;
+                }
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                pub fnc bad_implicit_void = || -> {
+                  return 1;
                 }
                 """)));
 

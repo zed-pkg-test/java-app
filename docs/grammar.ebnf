@@ -37,12 +37,14 @@ callable_modifier = "abstract" | "async" | "nlex" ;
 method_modifier   = "abstract" | "async" ;
 
 callable_decl   = { annotation } visibility { callable_modifier } callable_kind IDENT [ generic_params ]
-                  "(" [ param_list ] ")" return_spec block ;
+                  ( "(" [ param_list ] ")" return_spec block
+                  | "=" "|" [ param_list ] "|" "->" [ type_ref ] block ) ;
 callable_kind   = "fnc" | "routine" ;
 
 actor_callable_decl
                 = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" ] "actor" "fnc" IDENT [ generic_params ]
-                  "(" [ param_list ] ")" return_spec block ;
+                  ( "(" [ param_list ] ")" return_spec block
+                  | "=" "|" [ param_list ] "|" "->" [ type_ref ] block ) ;
 
 actor_decl      = visibility [ "shared" ] "actor" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
@@ -273,8 +275,10 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      when a callback must call a method.
    - class-level functions use "static fnc"; they have no self receiver, are
      dispatched through the class namespace, and are reifiable when unambiguous.
-   - "=>" belongs to named callable return declarations.
-   - "->" belongs to function types and lambdas.
+   - "->" is executable syntax for lambdas and lambda-style callable
+     declarations. Ordinary named executable declarations use ": ReturnType".
+   - "=>" is type-level syntax for function types and interface callable
+     signatures; it is not an executable return separator.
    - Unqualified "actor" declarations are private actors; "shared actor" opts
      into the SHARED_MEMORY execution domain.
    - Actor fields are private mailbox-owned state; public actor API is exposed
