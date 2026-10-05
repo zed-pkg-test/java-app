@@ -242,6 +242,8 @@ public final class ActorRuntime implements AutoCloseable {
     private final Map<ActorGroupId, ActorGroup> actorGroups = new ConcurrentHashMap<>();
     private final Map<ActorId, Set<ActorGroupId>> actorGroupMemberships =
             new ConcurrentHashMap<>();
+    private final Map<ActorId, Set<ActorGroupId>> actorGroupOwnerships =
+            new ConcurrentHashMap<>();
     private final Object actorGroupMembershipLock = new Object();
     private final AtomicInteger actorCount = new AtomicInteger();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -1297,6 +1299,9 @@ public final class ActorRuntime implements AutoCloseable {
             for (ActorId actorId : departed) {
                 unregisterActorGroupMembership(actorId, id);
             }
+            if (creator != null) {
+                unregisterActorGroupOwnership(creator, id);
+            }
             eventBus.closeFromGroup();
             actorGroups.remove(id, this);
         }
@@ -1351,16 +1356,12 @@ public final class ActorRuntime implements AutoCloseable {
                                 + dispatcherConfig.maxActors());
             }
             if (creator != null) {
-                long ownedGroups = actorGroups.values().stream()
-                        .filter(group -> creator.equals(group.creator))
-                        .filter(group -> !group.closed())
-                        .count();
                 int ownerLimit = Math.max(
                         1,
                         Math.min(
                                 MAX_ACTOR_GROUPS_PER_ACTOR,
                                 creatorPolicy.maxMailboxMessages()));
-                if (ownedGroups >= ownerLimit) {
+                if (actorGroupOwnershipCount(creator) >= ownerLimit) {
                     throw new IllegalStateException(
                             "actor-owned ActorGroup limit exceeded for "
                                     + creator + ": maximum " + ownerLimit);
@@ -1373,6 +1374,7 @@ public final class ActorRuntime implements AutoCloseable {
                 if (actorGroups.putIfAbsent(id, group) == null) {
                     try {
                         if (creator != null) {
+                            registerActorGroupOwnership(creator, id);
                             group.addCreatorMembership(creator);
                         }
                         return group;
@@ -1383,6 +1385,36 @@ public final class ActorRuntime implements AutoCloseable {
                     }
                 }
             }
+        }
+    }
+
+    private int actorGroupOwnershipCount(ActorId actorId) {
+        synchronized (actorGroupMembershipLock) {
+            Set<ActorGroupId> groups = actorGroupOwnerships.get(actorId);
+            return groups == null ? 0 : groups.size();
+        }
+    }
+
+    private void registerActorGroupOwnership(
+            ActorId actorId,
+            ActorGroupId groupId) {
+        synchronized (actorGroupMembershipLock) {
+            actorGroupOwnerships
+                    .computeIfAbsent(
+                            actorId,
+                            ignored -> ConcurrentHashMap.newKeySet())
+                    .add(groupId);
+        }
+    }
+
+    private void unregisterActorGroupOwnership(
+            ActorId actorId,
+            ActorGroupId groupId) {
+        synchronized (actorGroupMembershipLock) {
+            Set<ActorGroupId> groups = actorGroupOwnerships.get(actorId);
+            if (groups == null) return;
+            groups.remove(groupId);
+            if (groups.isEmpty()) actorGroupOwnerships.remove(actorId, groups);
         }
     }
 
@@ -1421,10 +1453,22 @@ public final class ActorRuntime implements AutoCloseable {
         }
     }
 
-    private Set<ActorGroupId> detachActorGroupMemberships(ActorId actorId) {
+    private Set<ActorGroupId> detachActorGroupAssociations(ActorId actorId) {
         synchronized (actorGroupMembershipLock) {
-            Set<ActorGroupId> groups = actorGroupMemberships.remove(actorId);
-            return groups == null ? Set.of() : Set.copyOf(groups);
+            Set<ActorGroupId> memberships =
+                    actorGroupMemberships.remove(actorId);
+            Set<ActorGroupId> ownerships =
+                    actorGroupOwnerships.remove(actorId);
+
+            if ((memberships == null || memberships.isEmpty())
+                    && (ownerships == null || ownerships.isEmpty())) {
+                return Set.of();
+            }
+
+            LinkedHashSet<ActorGroupId> groups = new LinkedHashSet<>();
+            if (memberships != null) groups.addAll(memberships);
+            if (ownerships != null) groups.addAll(ownerships);
+            return Set.copyOf(groups);
         }
     }
 
@@ -1968,9 +2012,9 @@ public final class ActorRuntime implements AutoCloseable {
 
     private void unregisterActor(ActorCell<?> cell) {
         if (actors.remove(cell.ref.id(), cell)) {
-            Set<ActorGroupId> memberships =
-                    detachActorGroupMemberships(cell.ref.id());
-            for (ActorGroupId groupId : memberships) {
+            Set<ActorGroupId> associations =
+                    detachActorGroupAssociations(cell.ref.id());
+            for (ActorGroupId groupId : associations) {
                 ActorGroup group = actorGroups.get(groupId);
                 if (group != null) group.actorTerminated(cell.ref.id());
             }
@@ -3487,6 +3531,7 @@ public final class ActorRuntime implements AutoCloseable {
         for (ActorGroup group : List.copyOf(actorGroups.values())) group.closeFromRuntime();
         actorGroups.clear();
         actorGroupMemberships.clear();
+        actorGroupOwnerships.clear();
         for (SyncCell<?> cell : List.copyOf(syncCells)) cell.invalidateFromRuntime();
         syncCells.clear();
         for (Shared<?> shared : List.copyOf(sharedValues)) shared.closeFromRuntime();
