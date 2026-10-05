@@ -296,7 +296,7 @@ final class OresObservableTest {
         try (OresScheduler scheduler = new OresScheduler(1)) {
             OresSubscription<String> subscription =
                     OresObservable.fromValues(List.of("x"))
-                            .map(scheduler, ignored -> null)
+                            .<String>map(scheduler, ignored -> null)
                             .subscribe();
 
             CompletionException failure =
