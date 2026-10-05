@@ -234,7 +234,35 @@ final class ActorSpawnLanguageTest {
                           return;
                         }
                         """)));
-        assertTrue(rawMailbox.getMessage().contains("runtime-private"));
+        assertTrue(
+                rawMailbox.getMessage().contains("no public actor protocol method")
+                        || rawMailbox.getMessage().contains("no monomorphic actor protocol method"),
+                rawMailbox.getMessage());
+    }
+
+    @Test
+    void childActorDoesNotExecuteParentConstructorImplicitly() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define actor Parent as
+                          let int value = 0;
+                          constructor(initial: int) {
+                            self.value = initial;
+                          }
+                          pub current(): int { return self.value; }
+                        end
+
+                        define actor Child extends Parent as
+                          pub ping(): void { return; }
+                        end
+
+                        fnc main() -> void {
+                          val child = spawn Child(41);
+                          return;
+                        }
+                        """)));
+        assertTrue(failure.getMessage().contains("no constructor with arity 1"));
     }
 
     @Test
