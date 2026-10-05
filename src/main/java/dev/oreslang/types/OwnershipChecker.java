@@ -233,10 +233,15 @@ public final class OwnershipChecker {
             return;
         }
         if (stmt instanceof Ast.ForOfStmt loop) {
-            checkExpr(loop.iterable(), scope, false);
+            ValueInfo iterable = checkExpr(loop.iterable(), scope, false);
+            Ast.TypeRef elementType = iterableElementType(iterable.type);
             Map<VarState,Boolean> before = movedSnapshot(scope);
             Scope loopScope = new Scope(scope);
-            loopScope.define(loop.bindingName(), new VarState(Ast.TypeRef.inferred(), loop.bindingKind() == Ast.BindingKind.LET, ValueKind.MOVE_ONLY, Origin.LOCAL));
+            loopScope.define(loop.bindingName(), new VarState(
+                    elementType,
+                    loop.bindingKind() == Ast.BindingKind.LET,
+                    kindOfType(elementType),
+                    Origin.LOCAL));
             checkLoopBlock(loop.body(), loopScope, returnType);
             loopScope.close();
             rejectLoopMoves(before, scope);
@@ -463,11 +468,19 @@ public final class OwnershipChecker {
             return awaitedValue;
         }
         if (expr instanceof Ast.ListExpr list) {
+            Ast.TypeRef elementType = null;
             for (Ast.Expr item : list.elements()) {
                 ValueInfo info = checkExpr(item, scope, true);
                 if (containsMutexGuardType(info.type)) throw error("MutexGuard cannot be stored in an array/list");
+                elementType = elementType == null
+                        ? info.type
+                        : joinConditionalType(elementType, info.type);
             }
-            return new ValueInfo(Ast.TypeRef.simple("Array"), ValueKind.MOVE_ONLY, null);
+            if (elementType == null) elementType = Ast.TypeRef.inferred();
+            return new ValueInfo(
+                    new Ast.TypeRef("Array", List.of(elementType), false),
+                    ValueKind.MOVE_ONLY,
+                    null);
         }
         if (expr instanceof Ast.TupleExpr tuple) {
             boolean copy = true;
@@ -1444,6 +1457,15 @@ public final class OwnershipChecker {
                             genericBindings(target.owner().genericParameters(), target.ownerType().arguments()));
                 }
             }
+        }
+        return Ast.TypeRef.inferred();
+    }
+
+    private Ast.TypeRef iterableElementType(Ast.TypeRef iterableType) {
+        if (iterableType == null) return Ast.TypeRef.inferred();
+        if ((iterableType.name().equals("Array") || iterableType.name().equals("List"))
+                && iterableType.arguments().size() == 1) {
+            return iterableType.arguments().getFirst();
         }
         return Ast.TypeRef.inferred();
     }
