@@ -99,7 +99,7 @@ final class OresFuturesTest {
     }
 
     @Test
-    void allChildCancellationDetachesOtherWaitersWithoutCancellingSharedChildren() {
+    void allChildCancellationCancelsSiblingsAndDetachesAllWaiters() {
         OresFuture<Integer> pending = new OresFuture<>();
         OresFuture<Integer> cancelled = new OresFuture<>();
 
@@ -111,8 +111,8 @@ final class OresFuturesTest {
         assertThrows(CancellationException.class, all::join);
         assertEquals(0, pending.pendingRuntimeWaiterCount());
         assertEquals(0, cancelled.pendingRuntimeWaiterCount());
-        assertFalse(pending.isCancelled(),
-                "one child cancelling all() must not cancel a shared sibling");
+        assertTrue(pending.isCancelled(),
+                "all() owns its child set: aggregate cancellation cancels remaining siblings");
     }
 
     @Test
