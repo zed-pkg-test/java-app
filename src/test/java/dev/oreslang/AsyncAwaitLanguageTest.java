@@ -44,23 +44,22 @@ final class AsyncAwaitLanguageTest {
     }
 
     @Test
-    void asyncTaskGetsDetachedOwnedArguments() throws Exception {
+    void asyncTaskMovesOwnedArgumentsAndReturnsDetachedResult() throws Exception {
         String program = """
                 define module app
                   define class Box as
                     pub let int value = 1;
                   end
 
-                  async fnc change(Box mut box): int {
+                  async fnc change(Box mut box): Box {
                     box.value = 99;
-                    return box.value;
+                    return box;
                   }
 
                   pub fnc main(): void {
                     let original = new Box();
                     val changed = await change(original);
-                    stdio.println(original.value);
-                    stdio.println(changed);
+                    stdio.println(changed.value);
                     return;
                   }
                 end
@@ -79,7 +78,6 @@ final class AsyncAwaitLanguageTest {
         }
 
         String text = output.toString(StandardCharsets.UTF_8);
-        assertTrue(text.contains("1"));
         assertTrue(text.contains("99"));
     }
     @Test
