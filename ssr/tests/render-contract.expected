@@ -12,6 +12,6 @@ text/html; charset=utf-8
 @media (min-width: 10px){p{margin:0;}}
 <button hx-boost="true">Boost</button>
 <!doctype html><html><head><title>T</title></head><body><p>B</p></body></html>
-HTTP status must be between 100 and 599
+true
 418
 teapot
