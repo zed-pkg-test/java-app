@@ -1,7 +1,6 @@
-/target
-Cargo.lock
-
-# Fleet-local scratch/worktrees and agent-policy link
-.ores/
-tmp/
-temp/
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+*.log
