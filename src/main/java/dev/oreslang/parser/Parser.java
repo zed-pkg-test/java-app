@@ -12,6 +12,7 @@ public final class Parser {
 
     private final List<Token> tokens;
     private int current;
+    private int expressionLineLimit = -1;
 
     public Parser(List<Token> tokens) {
         this.tokens = List.copyOf(tokens);
@@ -1227,7 +1228,19 @@ public final class Parser {
 
     private Ast.MatchStmt parseMatch() {
         boolean ordered = matchContextualFirst();
-        Ast.Expr subject = parseExpression();
+
+        // Match arms commonly begin with the expression-level 'is' token on
+        // the following physical line. Do not let subject parsing consume that
+        // first arm as a type-test expression. Multiline match subjects should
+        // be parenthesized or terminated explicitly with ';'.
+        int previousLineLimit = expressionLineLimit;
+        expressionLineLimit = peek().line();
+        Ast.Expr subject;
+        try {
+            subject = parseExpression();
+        } finally {
+            expressionLineLimit = previousLineLimit;
+        }
         match(SEMICOLON);
 
         List<Ast.MatchArm> arms = new ArrayList<>();
@@ -1812,7 +1825,14 @@ public final class Parser {
         throw error(peek(), message);
     }
 
-    private boolean check(Token.Type type) { return peek().type() == type; }
+    private boolean check(Token.Type type) {
+        if (expressionLineLimit >= 0
+                && peek().type() != EOF
+                && peek().line() > expressionLineLimit) {
+            return false;
+        }
+        return peek().type() == type;
+    }
     private boolean checkNext(Token.Type type) { return current + 1 < tokens.size() && tokens.get(current + 1).type() == type; }
 
     private boolean adjacent(Token left, Token right) {

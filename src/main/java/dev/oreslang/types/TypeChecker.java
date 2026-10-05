@@ -93,9 +93,13 @@ public final class TypeChecker {
                     throw new IllegalArgumentException("imported name '" + name + "' conflicts with a local or builtin name");
                 }
                 // Cross-file imports are opaque to this per-unit typechecker.
-                // Track class aliases too so ClassAlias.member can survive static
-                // checking and be resolved/validated by the linked runtime.
-                importedValues.add(name);
+                // Actor selectors grant actor-entry/spawn authority only; they
+                // must never become ordinary runtime values such as
+                // `val x = ImportedActor`. Other linked namespaces remain
+                // opaque here and are resolved by the linked runtime.
+                if (imported.kind() != Ast.ImportKind.ACTOR) {
+                    importedValues.add(name);
+                }
             }
         }
     }
