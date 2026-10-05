@@ -3,6 +3,7 @@ package dev.oreslang.runtime;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
@@ -23,6 +24,44 @@ final class OresFuturesTest {
 
         second.complete(2);
         assertEquals(List.of(1, 2, 3), all.join());
+    }
+
+    @Test
+    void completionStageCancellationNormalizesToCancelledOresFuture() {
+        CompletableFuture<Integer> host = new CompletableFuture<>();
+        OresFuture<Integer> ores = OresFuture.from(host);
+
+        assertTrue(host.cancel(true));
+
+        assertTrue(ores.isCancelled());
+        assertThrows(CancellationException.class, ores::join);
+    }
+
+    @Test
+    void allPreservesChildCancellationIdentity() {
+        CompletableFuture<Integer> first = new CompletableFuture<>();
+        CompletableFuture<Integer> second = new CompletableFuture<>();
+        OresFuture<List<Integer>> all = OresFutures.all(List.of(first, second));
+
+        first.complete(1);
+        assertTrue(second.cancel(true));
+
+        assertTrue(all.isCancelled());
+        assertThrows(CancellationException.class, all::join);
+    }
+
+    @Test
+    void racePreservesFirstCancellationIdentity() {
+        CompletableFuture<Integer> cancelled = new CompletableFuture<>();
+        CompletableFuture<Integer> later = new CompletableFuture<>();
+        OresFuture<Integer> race = OresFutures.race(List.of(cancelled, later));
+
+        assertTrue(cancelled.cancel(true));
+
+        assertTrue(race.isCancelled());
+        assertThrows(CancellationException.class, race::join);
+        later.complete(9);
+        assertTrue(race.isCancelled());
     }
 
     @Test
