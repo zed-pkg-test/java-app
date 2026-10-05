@@ -20,57 +20,8 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class GpuRuntime {
     private static final AtomicReference<Backend> PROCESS_BACKEND = new AtomicReference<>();
-    private static final int MAX_AFFINITY_KEY_LENGTH = 256;
 
     public enum CallableKind { FNC, ROUTINE }
-
-    /** Logical execution origin. Physical GPU placement remains a backend mapping decision. */
-    public enum ExecutionClass { HOST, ACTOR }
-
-    /**
-     * Regent-inspired logical placement request. This intentionally does not expose a
-     * physical "GPU core" number: GPU schedulers own SM/CU/warp placement. A backend
-     * may honor a device ordinal and/or a logical partition while preserving affinity.
-     */
-    public record Placement(Integer deviceOrdinal, Integer partitionOrdinal, String affinityKey) {
-        public Placement {
-            if (deviceOrdinal != null && deviceOrdinal < 0) throw new IllegalArgumentException("GPU device ordinal must be non-negative");
-            if (partitionOrdinal != null && partitionOrdinal < 0) throw new IllegalArgumentException("GPU partition ordinal must be non-negative");
-            if (affinityKey != null && affinityKey.isBlank()) throw new IllegalArgumentException("GPU affinity key cannot be blank");
-            if (affinityKey != null && affinityKey.length() > MAX_AFFINITY_KEY_LENGTH) throw new IllegalArgumentException("GPU affinity key cannot exceed " + MAX_AFFINITY_KEY_LENGTH + " characters");
-        }
-
-        public static Placement any() { return new Placement(null, null, null); }
-        public static Placement device(int ordinal) { return new Placement(ordinal, null, null); }
-        public static Placement partition(int ordinal) { return new Placement(null, ordinal, null); }
-        public Placement withAffinity(String key) { return new Placement(deviceOrdinal, partitionOrdinal, key); }
-    }
-
-    /** Metadata available to a backend mapper for one dispatch. */
-    public record DispatchContext(
-            ExecutionClass executionClass,
-            UUID actorId,
-            String actorKind,
-            Placement placement) {
-        public DispatchContext {
-            Objects.requireNonNull(executionClass, "executionClass");
-            placement = placement == null ? Placement.any() : placement;
-            if (executionClass == ExecutionClass.HOST) {
-                if (actorId != null || actorKind != null) throw new IllegalArgumentException("host GPU dispatch cannot carry actor identity");
-            } else {
-                Objects.requireNonNull(actorId, "actorId");
-                if (actorKind == null || actorKind.isBlank()) throw new IllegalArgumentException("actor GPU dispatch requires actor kind");
-            }
-        }
-
-        public static DispatchContext host() {
-            return new DispatchContext(ExecutionClass.HOST, null, null, Placement.any());
-        }
-
-        public static DispatchContext actor(UUID actorId, String actorKind, Placement placement) {
-            return new DispatchContext(ExecutionClass.ACTOR, actorId, actorKind, placement);
-        }
-    }
 
     /** Marker used by private guest-runtime values that have a safe GPU wire form. */
     public interface Transferable {
@@ -169,19 +120,11 @@ public final class GpuRuntime {
     public record Invocation(
             String callable,
             CallableKind callableKind,
-            List<?> arguments,
-            DispatchContext dispatchContext) {
+            List<?> arguments) {
         public Invocation {
             Objects.requireNonNull(callable, "callable");
-            if (callable.isBlank()) throw new IllegalArgumentException("GPU callable cannot be blank");
             Objects.requireNonNull(callableKind, "callableKind");
-            Objects.requireNonNull(arguments, "arguments");
-            dispatchContext = dispatchContext == null ? DispatchContext.host() : dispatchContext;
             arguments = freezeArguments(arguments);
-        }
-
-        public Invocation(String callable, CallableKind callableKind, List<?> arguments) {
-            this(callable, callableKind, arguments, DispatchContext.host());
         }
     }
 
@@ -211,26 +154,7 @@ public final class GpuRuntime {
     }
 
     public Object dispatch(String callable, CallableKind callableKind, List<?> arguments) {
-        return dispatch(callable, callableKind, arguments, DispatchContext.host());
-    }
-
-    public Object dispatchActor(
-            String callable,
-            CallableKind callableKind,
-            List<?> arguments,
-            UUID actorId,
-            String actorKind,
-            Placement placement) {
-        return dispatch(callable, callableKind, arguments,
-                DispatchContext.actor(actorId, actorKind, placement));
-    }
-
-    private Object dispatch(
-            String callable,
-            CallableKind callableKind,
-            List<?> arguments,
-            DispatchContext dispatchContext) {
-        Invocation invocation = new Invocation(callable, callableKind, arguments, dispatchContext);
+        Invocation invocation = new Invocation(callable, callableKind, arguments);
         Backend backend = PROCESS_BACKEND.get();
         if (backend == null) {
             throw new GpuUnavailableException("gpu callable '" + callable
