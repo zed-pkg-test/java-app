@@ -1,0 +1,62 @@
+name: oreslang-http-routing-proof
+
+on:
+  push:
+    branches:
+      - proof/oreslang-http-routing-cf72dc5-20261005
+
+permissions:
+  contents: read
+
+jobs:
+  exact-tree-routing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out mirrored proof tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          show-progress: false
+
+      - name: Verify exact source identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '[:space:]' < proof/ROUTING_COMMIT)" = "cf72dc56a707a6b7a495e66dd9f44306de9d2b77"
+          test "$(tr -d '[:space:]' < proof/COMPILER_COMMIT)" = "ee19932f130204875c61d3e985a52aeba0e67c2b"
+          test "$(tr -d '[:space:]' < proof/routing/SOURCE_REF)" = "ee19932f130204875c61d3e985a52aeba0e67c2b"
+          test -s proof/compiler/pom.xml
+          test -s proof/routing/src/http_routing.ores
+          test -s proof/routing/tests/router_semantics.ores
+          test -s proof/routing/tests/expected.txt
+
+      - name: Install Java 21 and Maven
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes openjdk-21-jdk maven
+          java -version
+          mvn -version
+
+      - name: Compile exact Oreslang compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mvn -B -ntp -f proof/compiler/pom.xml -DskipTests compile
+
+      - name: Run exact routing golden semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/oreslang-compiler" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          : "${COMPILER_POM:?COMPILER_POM must be set}"
+          exec mvn -B -ntp -q -f "$COMPILER_POM" -DskipTests exec:java -Dexec.args="$*"
+          SH
+          chmod +x "$RUNNER_TEMP/oreslang-compiler"
+          export COMPILER_POM="$GITHUB_WORKSPACE/proof/compiler/pom.xml"
+          export ORESLANG_COMPILER="$RUNNER_TEMP/oreslang-compiler"
+          bash proof/routing/scripts/test.sh

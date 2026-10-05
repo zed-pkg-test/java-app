@@ -1,0 +1,829 @@
+// Transport-neutral HTTP routing for Oreslang.
+//
+// The core router owns route compilation and dispatch semantics. Socket/HTTP
+// adapters own raw request parsing and supply an uppercase method plus decoded
+// path segments. This keeps the routing table pure Oreslang, AOT-friendly,
+// actor-safe, and independent of Java/host authority.
+
+define module http_routing as
+
+  // Segment kinds are deliberately numeric and private to the implementation:
+  // 0 = static literal, 1 = named parameter, 2 = terminal wildcard.
+  define class PathSegment as
+    pub val int kind;
+    pub val String value;
+  end
+
+  define class PathPattern as
+    val String template_value;
+    val Array<PathSegment> segments_value;
+
+    pub template() -> String {
+      return self.template_value;
+    }
+
+    pub size() -> int {
+      return self.segments_value.size;
+    }
+
+    pub segment_at(int index) -> PathSegment {
+      return self.segments_value.get(index);
+    }
+
+    pub copy() -> PathPattern {
+      let Array<PathSegment> copied = new Array<PathSegment>();
+      for (const segment of self.segments_value) {
+        copied.add(new PathSegment(segment.kind, segment.value));
+      }
+      return new PathPattern(self.template_value, copied);
+    }
+
+    pub is_valid() -> bool {
+      for (let int index = 0; index < self.segments_value.size; index = index + 1) {
+        val PathSegment segment = self.segments_value.get(index);
+
+        if segment.kind < 0 || segment.kind > 2; do
+          return false;
+        fi
+
+        if segment.kind == 1 || segment.kind == 2; do
+          if segment.value == ""; do
+            return false;
+          fi
+
+          for (let int earlier = 0; earlier < index; earlier = earlier + 1) {
+            val PathSegment previous = self.segments_value.get(earlier);
+            if (previous.kind == 1 || previous.kind == 2) && previous.value == segment.value; do
+              return false;
+            fi
+          }
+
+          if segment.kind == 2 && index != self.segments_value.size - 1; do
+            return false;
+          fi
+        fi
+      }
+
+      return true;
+    }
+
+    // Scope/group composition stays explicit because current Oreslang does not
+    // yet expose a general String concatenation/splitting standard-library
+    // contract. The caller supplies the canonical combined route template.
+    pub concat(String combined_template, PathPattern suffix) -> PathPattern {
+      let Array<PathSegment> combined = new Array<PathSegment>();
+
+      for (const segment of self.segments_value) {
+        combined.add(new PathSegment(segment.kind, segment.value));
+      }
+
+      for (const segment of suffix.segments_value) {
+        combined.add(new PathSegment(segment.kind, segment.value));
+      }
+
+      return new PathPattern(combined_template, combined);
+    }
+  end
+
+  define class RequestPath as
+    val Array<String> segments_value;
+
+    pub size() -> int {
+      return self.segments_value.size;
+    }
+
+    pub segment_at(int index) -> String {
+      return self.segments_value.get(index);
+    }
+  end
+
+  // A capture is a zero-copy view over the request path.
+  define class PathCapture as
+    val RequestPath path_value;
+    val int start_index;
+    val int count_value;
+
+    pub size() -> int {
+      return self.count_value;
+    }
+
+    pub at(int offset) -> Option<String> {
+      if offset < 0 || offset >= self.count_value; do
+        return None;
+      fi
+      return Some(self.path_value.segment_at(self.start_index + offset));
+    }
+
+    pub one() -> Option<String> {
+      if self.count_value != 1; do
+        return None;
+      fi
+      return Some(self.path_value.segment_at(self.start_index));
+    }
+  end
+
+  // RouteTarget deliberately stores opaque IDs instead of executable host
+  // objects. A server adapter can resolve these IDs into actor messages,
+  // callables, middleware pipelines, and schema validators after routing.
+  define class RouteTarget as
+    pub val String method;
+    pub val int handler_id;
+    pub val int pipeline_id;
+    pub val int contract_id;
+    pub val String operation_id;
+  end
+
+  define class Endpoint as
+    val PathPattern pattern_value;
+    val Array<RouteTarget> targets_value;
+
+    pub template() -> String {
+      return self.pattern_value.template();
+    }
+
+    pub pattern() -> PathPattern {
+      return self.pattern_value;
+    }
+
+    pub target_count() -> int {
+      return self.targets_value.size;
+    }
+
+    pub target_at(int index) -> RouteTarget {
+      return self.targets_value.get(index);
+    }
+  end
+
+  // Decision kinds:
+  // 0 = matched route
+  // 1 = path not found
+  // 2 = method not allowed
+  // 3 = automatic OPTIONS
+  // 4 = routing limit exceeded
+  define class Decision as
+    pub val int kind;
+    pub val int endpoint_index;
+    pub val int target_index;
+    pub val int handler_id;
+    pub val int pipeline_id;
+    pub val int contract_id;
+    pub val String operation_id;
+    pub val String route_template;
+    pub val bool suppress_body;
+    val RequestPath path_value;
+
+    pub is_match() -> bool {
+      return self.kind == 0;
+    }
+
+    pub is_not_found() -> bool {
+      return self.kind == 1;
+    }
+
+    pub is_method_not_allowed() -> bool {
+      return self.kind == 2;
+    }
+
+    pub is_automatic_options() -> bool {
+      return self.kind == 3;
+    }
+
+    pub is_limit_exceeded() -> bool {
+      return self.kind == 4;
+    }
+
+    pub path() -> RequestPath {
+      return self.path_value;
+    }
+  end
+
+  // Mutable construction node. This representation is used only while routes
+  // are registered. RouterBuilder.build() compiles it into a flat immutable
+  // structure-of-arrays table used by request dispatch.
+  define class BuildNode as
+    pub let Array<String> static_names = new Array<String>();
+    pub let Array<int> static_children = new Array<int>();
+    pub let int param_child = -1;
+    pub let String param_name = "";
+    pub let int wildcard_child = -1;
+    pub let String wildcard_name = "";
+    pub let int endpoint_index = -1;
+
+    pub child_for_literal(String literal_value) -> int {
+      for (let int index = 0; index < self.static_names.size; index = index + 1) {
+        if self.static_names.get(index) == literal_value; do
+          return self.static_children.get(index);
+        fi
+      }
+      return -1;
+    }
+
+    pub add_literal(String literal_value, int child_index): void {
+      self.static_names.add(literal_value);
+      self.static_children.add(child_index);
+      return;
+    }
+  end
+
+  define class BuildEndpoint as
+    val PathPattern pattern_value;
+    let Array<RouteTarget> targets_value = new Array<RouteTarget>();
+
+    pub template() -> String {
+      return self.pattern_value.template();
+    }
+
+    pub size() -> int {
+      return self.pattern_value.size();
+    }
+
+    pub find_method(String method_value) -> int {
+      for (let int index = 0; index < self.targets_value.size; index = index + 1) {
+        if self.targets_value.get(index).method == method_value; do
+          return index;
+        fi
+      }
+      return -1;
+    }
+
+    pub add_target(RouteTarget target): void {
+      self.targets_value.add(target);
+      return;
+    }
+
+    pub freeze() -> Endpoint {
+      let Array<RouteTarget> copied = new Array<RouteTarget>();
+      for (const target of self.targets_value) {
+        copied.add(new RouteTarget(
+          target.method,
+          target.handler_id,
+          target.pipeline_id,
+          target.contract_id,
+          target.operation_id
+        ));
+      }
+      return new Endpoint(self.pattern_value.copy(), copied);
+    }
+  end
+
+  define class SearchBudget as
+    pub let int remaining;
+  end
+
+  define class RouterBuilder as
+    let Array<BuildNode> nodes = new Array<BuildNode>();
+    let Array<BuildEndpoint> endpoints = new Array<BuildEndpoint>();
+    let bool automatic_head_value = true;
+    let bool automatic_options_value = true;
+    let int max_segments_value = 128;
+    let int max_match_steps_value = 4096;
+
+    ensure_root(): void {
+      if self.nodes.size == 0; do
+        self.nodes.add(new BuildNode());
+      fi
+      return;
+    }
+
+    new_node() -> int {
+      self.nodes.add(new BuildNode());
+      return self.nodes.size - 1;
+    }
+
+    pub set_automatic_head(bool enabled): void {
+      self.automatic_head_value = enabled;
+      return;
+    }
+
+    pub set_automatic_options(bool enabled): void {
+      self.automatic_options_value = enabled;
+      return;
+    }
+
+    pub set_limits(int max_segments, int max_match_steps) -> Result<bool, String> {
+      if max_segments <= 0; do
+        return Err("max_segments must be positive");
+      fi
+      if max_match_steps <= 0; do
+        return Err("max_match_steps must be positive");
+      fi
+      for (const endpoint of self.endpoints) {
+        if endpoint.size() > max_segments; do
+          return Err("max_segments is smaller than an already registered route");
+        fi
+      }
+
+      self.max_segments_value = max_segments;
+      self.max_match_steps_value = max_match_steps;
+      return Ok(true);
+    }
+
+    pub route(
+      String method_value,
+      PathPattern pattern,
+      int handler_id
+    ) -> Result<bool, String> {
+      return self.route(method_value, pattern, handler_id, -1, -1, "");
+    }
+
+    pub route(
+      String method_value,
+      PathPattern pattern,
+      int handler_id,
+      int pipeline_id,
+      int contract_id,
+      String operation_id
+    ) -> Result<bool, String> {
+      if method_value == ""; do
+        return Err("HTTP method must not be empty");
+      fi
+      if handler_id < 0; do
+        return Err("handler_id must be non-negative");
+      fi
+      if !pattern.is_valid(); do
+        return Err("invalid route pattern");
+      fi
+      if pattern.size() > self.max_segments_value; do
+        return Err("route pattern exceeds max_segments");
+      fi
+
+      self.ensure_root();
+      let int node_index = 0;
+
+      for (let int segment_index = 0; segment_index < pattern.size(); segment_index = segment_index + 1) {
+        val PathSegment segment = pattern.segment_at(segment_index);
+        val BuildNode current = self.nodes.get(node_index);
+
+        if segment.kind == 0; do
+          let int child_index = current.child_for_literal(segment.value);
+          if child_index < 0; do
+            child_index = self.new_node();
+            current.add_literal(segment.value, child_index);
+          fi
+          node_index = child_index;
+        elseif segment.kind == 1; do
+          if current.param_child < 0; do
+            current.param_child = self.new_node();
+            current.param_name = segment.value;
+          elseif current.param_name != segment.value; do
+            return Err("conflicting parameter name at the same route position");
+          fi
+          node_index = current.param_child;
+        else
+          if current.wildcard_child < 0; do
+            current.wildcard_child = self.new_node();
+            current.wildcard_name = segment.value;
+          elseif current.wildcard_name != segment.value; do
+            return Err("conflicting wildcard name at the same route position");
+          fi
+          node_index = current.wildcard_child;
+        fi
+      }
+
+      val BuildNode leaf = self.nodes.get(node_index);
+
+      if leaf.endpoint_index < 0; do
+        self.endpoints.add(new BuildEndpoint(pattern.copy()));
+        leaf.endpoint_index = self.endpoints.size - 1;
+      else
+        val BuildEndpoint existing_endpoint = self.endpoints.get(leaf.endpoint_index);
+        if existing_endpoint.template() != pattern.template(); do
+          return Err("same route shape registered with a different canonical template");
+        fi
+      fi
+
+      val BuildEndpoint endpoint = self.endpoints.get(leaf.endpoint_index);
+
+      if endpoint.find_method(method_value) >= 0; do
+        return Err("duplicate method for route");
+      fi
+
+      endpoint.add_target(new RouteTarget(
+        method_value,
+        handler_id,
+        pipeline_id,
+        contract_id,
+        operation_id
+      ));
+      return Ok(true);
+    }
+
+    pub get(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("GET", pattern, handler_id);
+    }
+
+    pub get(
+      PathPattern pattern,
+      int handler_id,
+      int pipeline_id,
+      int contract_id,
+      String operation_id
+    ) -> Result<bool, String> {
+      return self.route("GET", pattern, handler_id, pipeline_id, contract_id, operation_id);
+    }
+
+    pub post(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("POST", pattern, handler_id);
+    }
+
+    pub post(
+      PathPattern pattern,
+      int handler_id,
+      int pipeline_id,
+      int contract_id,
+      String operation_id
+    ) -> Result<bool, String> {
+      return self.route("POST", pattern, handler_id, pipeline_id, contract_id, operation_id);
+    }
+
+    pub put(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("PUT", pattern, handler_id);
+    }
+
+    pub patch(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("PATCH", pattern, handler_id);
+    }
+
+    pub delete(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("DELETE", pattern, handler_id);
+    }
+
+    pub head(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("HEAD", pattern, handler_id);
+    }
+
+    pub options(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("OPTIONS", pattern, handler_id);
+    }
+
+    pub any(PathPattern pattern, int handler_id) -> Result<bool, String> {
+      return self.route("*", pattern, handler_id);
+    }
+
+    pub build() -> Router {
+      self.ensure_root();
+
+      let Array<int> node_static_start = new Array<int>();
+      let Array<int> node_static_count = new Array<int>();
+      let Array<int> node_param_child = new Array<int>();
+      let Array<int> node_wildcard_child = new Array<int>();
+      let Array<int> node_endpoint = new Array<int>();
+      let Array<String> static_literals = new Array<String>();
+      let Array<int> static_children = new Array<int>();
+      let Array<Endpoint> frozen_endpoints = new Array<Endpoint>();
+
+      for (const node of self.nodes) {
+        node_static_start.add(static_literals.size);
+        node_static_count.add(node.static_names.size);
+        node_param_child.add(node.param_child);
+        node_wildcard_child.add(node.wildcard_child);
+        node_endpoint.add(node.endpoint_index);
+
+        for (let int index = 0; index < node.static_names.size; index = index + 1) {
+          static_literals.add(node.static_names.get(index));
+          static_children.add(node.static_children.get(index));
+        }
+      }
+
+      for (const endpoint of self.endpoints) {
+        frozen_endpoints.add(endpoint.freeze());
+      }
+
+      return new Router(
+        node_static_start,
+        node_static_count,
+        node_param_child,
+        node_wildcard_child,
+        node_endpoint,
+        static_literals,
+        static_children,
+        frozen_endpoints,
+        self.automatic_head_value,
+        self.automatic_options_value,
+        self.max_segments_value,
+        self.max_match_steps_value
+      );
+    }
+  end
+
+  define class Router as
+    val Array<int> node_static_start;
+    val Array<int> node_static_count;
+    val Array<int> node_param_child;
+    val Array<int> node_wildcard_child;
+    val Array<int> node_endpoint;
+    val Array<String> static_literals;
+    val Array<int> static_children;
+    val Array<Endpoint> endpoints;
+    val bool automatic_head_value;
+    val bool automatic_options_value;
+    val int max_segments_value;
+    val int max_match_steps_value;
+
+    static_child(int node_index, String segment) -> int {
+      val int start = self.node_static_start.get(node_index);
+      val int count = self.node_static_count.get(node_index);
+
+      for (let int offset = 0; offset < count; offset = offset + 1) {
+        val int edge_index = start + offset;
+        if self.static_literals.get(edge_index) == segment; do
+          return self.static_children.get(edge_index);
+        fi
+      }
+
+      return -1;
+    }
+
+    match_node(
+      int node_index,
+      int segment_index,
+      RequestPath request_path_value,
+      SearchBudget budget
+    ) -> int {
+      if budget.remaining <= 0; do
+        return -2;
+      fi
+      budget.remaining = budget.remaining - 1;
+
+      if segment_index == request_path_value.size(); do
+        val int endpoint_index = self.node_endpoint.get(node_index);
+        if endpoint_index >= 0; do
+          return endpoint_index;
+        fi
+
+        val int empty_wildcard = self.node_wildcard_child.get(node_index);
+        if empty_wildcard >= 0; do
+          return self.match_node(empty_wildcard, segment_index, request_path_value, budget);
+        fi
+
+        return -1;
+      fi
+
+      val String current_segment = request_path_value.segment_at(segment_index);
+
+      val int literal_child = self.static_child(node_index, current_segment);
+      if literal_child >= 0; do
+        val int literal_match = self.match_node(
+          literal_child,
+          segment_index + 1,
+          request_path_value,
+          budget
+        );
+        if literal_match != -1; do
+          return literal_match;
+        fi
+      fi
+
+      val int parameter_child = self.node_param_child.get(node_index);
+      if parameter_child >= 0; do
+        val int parameter_match = self.match_node(
+          parameter_child,
+          segment_index + 1,
+          request_path_value,
+          budget
+        );
+        if parameter_match != -1; do
+          return parameter_match;
+        fi
+      fi
+
+      val int wildcard_child = self.node_wildcard_child.get(node_index);
+      if wildcard_child >= 0; do
+        return self.match_node(
+          wildcard_child,
+          request_path_value.size(),
+          request_path_value,
+          budget
+        );
+      fi
+
+      return -1;
+    }
+
+    target_for_method(Endpoint endpoint, String method_value) -> int {
+      for (let int index = 0; index < endpoint.target_count(); index = index + 1) {
+        if endpoint.target_at(index).method == method_value; do
+          return index;
+        fi
+      }
+
+      for (let int index = 0; index < endpoint.target_count(); index = index + 1) {
+        if endpoint.target_at(index).method == "*"; do
+          return index;
+        fi
+      }
+
+      if method_value == "HEAD" && self.automatic_head_value; do
+        for (let int index = 0; index < endpoint.target_count(); index = index + 1) {
+          if endpoint.target_at(index).method == "GET"; do
+            return index;
+          fi
+        }
+      fi
+
+      return -1;
+    }
+
+    has_method(Endpoint endpoint, String method_value) -> bool {
+      for (let int index = 0; index < endpoint.target_count(); index = index + 1) {
+        if endpoint.target_at(index).method == method_value; do
+          return true;
+        fi
+      }
+      return false;
+    }
+
+    pub resolve(String method_value, RequestPath request_path_value) -> Decision {
+      if request_path_value.size() > self.max_segments_value; do
+        return new Decision(4, -1, -1, -1, -1, -1, "", "", false, request_path_value);
+      fi
+
+      let SearchBudget budget = new SearchBudget(self.max_match_steps_value);
+      val int endpoint_index = self.match_node(0, 0, request_path_value, budget);
+
+      if endpoint_index == -2; do
+        return new Decision(4, -1, -1, -1, -1, -1, "", "", false, request_path_value);
+      fi
+
+      if endpoint_index < 0; do
+        return new Decision(1, -1, -1, -1, -1, -1, "", "", false, request_path_value);
+      fi
+
+      val Endpoint endpoint = self.endpoints.get(endpoint_index);
+      val int target_index = self.target_for_method(endpoint, method_value);
+
+      if target_index >= 0; do
+        val RouteTarget target = endpoint.target_at(target_index);
+        return new Decision(
+          0,
+          endpoint_index,
+          target_index,
+          target.handler_id,
+          target.pipeline_id,
+          target.contract_id,
+          target.operation_id,
+          endpoint.template(),
+          method_value == "HEAD",
+          request_path_value
+        );
+      fi
+
+      if method_value == "OPTIONS" && self.automatic_options_value; do
+        return new Decision(
+          3,
+          endpoint_index,
+          -1,
+          -1,
+          -1,
+          -1,
+          "",
+          endpoint.template(),
+          false,
+          request_path_value
+        );
+      fi
+
+      return new Decision(
+        2,
+        endpoint_index,
+        -1,
+        -1,
+        -1,
+        -1,
+        "",
+        endpoint.template(),
+        false,
+        request_path_value
+      );
+    }
+
+    pub capture(Decision decision, String name) -> Option<PathCapture> {
+      if decision.endpoint_index < 0; do
+        return None;
+      fi
+
+      val Endpoint endpoint = self.endpoints.get(decision.endpoint_index);
+      let int request_index = 0;
+
+      for (let int pattern_index = 0; pattern_index < endpoint.pattern().size(); pattern_index = pattern_index + 1) {
+        val PathSegment segment = endpoint.pattern().segment_at(pattern_index);
+
+        if segment.kind == 0; do
+          request_index = request_index + 1;
+        elseif segment.kind == 1; do
+          if segment.value == name; do
+            return Some(new PathCapture(decision.path(), request_index, 1));
+          fi
+          request_index = request_index + 1;
+        else
+          if segment.value == name; do
+            return Some(new PathCapture(
+              decision.path(),
+              request_index,
+              decision.path().size() - request_index
+            ));
+          fi
+          request_index = decision.path().size();
+        fi
+      }
+
+      return None;
+    }
+
+    pub capture_one(Decision decision, String name) -> Option<String> {
+      val Option<PathCapture> captured = self.capture(decision, name);
+      if captured.is_none(); do
+        return None;
+      fi
+      return captured.unwrap().one();
+    }
+
+    pub allow_count(Decision decision) -> int {
+      if decision.endpoint_index < 0; do
+        return 0;
+      fi
+
+      val Endpoint endpoint = self.endpoints.get(decision.endpoint_index);
+      let int count = endpoint.target_count();
+
+      if self.automatic_head_value && self.has_method(endpoint, "GET") && !self.has_method(endpoint, "HEAD"); do
+        count = count + 1;
+      fi
+
+      if self.automatic_options_value && !self.has_method(endpoint, "OPTIONS"); do
+        count = count + 1;
+      fi
+
+      return count;
+    }
+
+    pub allow_method_at(Decision decision, int requested_index) -> Option<String> {
+      if decision.endpoint_index < 0 || requested_index < 0; do
+        return None;
+      fi
+
+      val Endpoint endpoint = self.endpoints.get(decision.endpoint_index);
+      if requested_index < endpoint.target_count(); do
+        return Some(endpoint.target_at(requested_index).method);
+      fi
+
+      let int synthetic_index = endpoint.target_count();
+
+      if self.automatic_head_value && self.has_method(endpoint, "GET") && !self.has_method(endpoint, "HEAD"); do
+        if requested_index == synthetic_index; do
+          return Some("HEAD");
+        fi
+        synthetic_index = synthetic_index + 1;
+      fi
+
+      if self.automatic_options_value && !self.has_method(endpoint, "OPTIONS"); do
+        if requested_index == synthetic_index; do
+          return Some("OPTIONS");
+        fi
+      fi
+
+      return None;
+    }
+
+    pub route_count() -> int {
+      return self.endpoints.size;
+    }
+  end
+
+  pub fnc literal(String value) -> PathSegment {
+    return new PathSegment(0, value);
+  }
+
+  pub fnc param(String name) -> PathSegment {
+    return new PathSegment(1, name);
+  }
+
+  pub fnc wildcard(String name) -> PathSegment {
+    return new PathSegment(2, name);
+  }
+
+  pub fnc path(String canonical_template, Array<PathSegment> segments) -> PathPattern {
+    let Array<PathSegment> copied = new Array<PathSegment>();
+    for (const segment of segments) {
+      copied.add(new PathSegment(segment.kind, segment.value));
+    }
+    return new PathPattern(canonical_template, copied);
+  }
+
+  pub fnc root() -> PathPattern {
+    return new PathPattern("/", new Array<PathSegment>());
+  }
+
+  pub fnc request_path(Array<String> segments) -> RequestPath {
+    let Array<String> copied = new Array<String>();
+    for (const segment of segments) {
+      copied.add(segment);
+    }
+    return new RequestPath(copied);
+  }
+
+  pub fnc builder() -> RouterBuilder {
+    return new RouterBuilder();
+  }
+
+end
