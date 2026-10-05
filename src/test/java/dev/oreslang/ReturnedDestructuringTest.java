@@ -666,6 +666,33 @@ final class ReturnedDestructuringTest {
     }
 
     @Test
+    void borrowedHolderMemberKeepsStaticSequenceRestType() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Holder as
+                  pub val Array<int> values;
+                end
+
+                fnc acceptsInts(Array<int> values): void {
+                  stdio.println(values[0]);
+                  return;
+                }
+
+                fnc inspect(&Holder holder): void {
+                  const [first, ...rest] = holder.values;
+                  acceptsInts(rest);
+                  stdio.println(first);
+                  return;
+                }
+
+                pub fnc main(): void {
+                  val Holder holder = new Holder([1, 2, 3]);
+                  inspect(&holder);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
     void restDestructuringExecutesWithoutRuntimeTypeDiscovery() throws Exception {
         String program = """
                 type Row = {v: int, label: string, ok: bool};
