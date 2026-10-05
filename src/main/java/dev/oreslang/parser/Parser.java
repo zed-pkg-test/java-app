@@ -12,6 +12,7 @@ public final class Parser {
 
     private final List<Token> tokens;
     private int current;
+    private int implicitNewlineTerminatorDepth;
 
     public Parser(List<Token> tokens) {
         this.tokens = List.copyOf(tokens);
@@ -1040,8 +1041,13 @@ public final class Parser {
         }
 
         List<Ast.Stmt> body = new ArrayList<>();
-        while (!check(EOF) && !isBareDoneDelimiter()) {
-            body.add(parseStatement());
+        implicitNewlineTerminatorDepth++;
+        try {
+            while (!check(EOF) && !isBareDoneDelimiter()) {
+                body.add(parseStatement());
+            }
+        } finally {
+            implicitNewlineTerminatorDepth--;
         }
         consume(DONE, "expected 'done' to close loop body");
         return body;
@@ -1212,9 +1218,14 @@ public final class Parser {
 
     private List<Ast.Stmt> parseUntil(Token.Type... terminators) {
         List<Ast.Stmt> body = new ArrayList<>();
-        outer: while (!check(EOF)) {
-            for (Token.Type terminator : terminators) if (check(terminator)) break outer;
-            body.add(parseStatement());
+        implicitNewlineTerminatorDepth++;
+        try {
+            outer: while (!check(EOF)) {
+                for (Token.Type terminator : terminators) if (check(terminator)) break outer;
+                body.add(parseStatement());
+            }
+        } finally {
+            implicitNewlineTerminatorDepth--;
         }
         return body;
     }
@@ -1622,8 +1633,13 @@ public final class Parser {
     }
 
     private void consumeStatementTerminator(String message) {
-        if (match(SEMICOLON) || isSafeStatementBoundary()) return;
+        if (match(SEMICOLON) || isSafeStatementBoundary() || isImplicitNewlineTerminator()) return;
         throw error(peek(), message);
+    }
+
+    private boolean isImplicitNewlineTerminator() {
+        if (implicitNewlineTerminatorDepth <= 0 || current == 0 || check(EOF)) return false;
+        return previous().line() < peek().line();
     }
 
     private boolean isSafeStatementBoundary() {
