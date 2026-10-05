@@ -1,0 +1,17 @@
+<div id="app" class="card"><span>hello</span></div>
+body{margin:0;color:#222;}
+<button hx-post="/counter" hx-target="#counter" hx-swap="outerHTML">Increment</button>
+<input disabled>
+<input>
+404
+text/html; charset=utf-8
+<p>missing</p>
+[]
+[shown]
+<b>bold</b>
+@media (min-width: 10px){p{margin:0;}}
+<button hx-boost="true">Boost</button>
+<!doctype html><html><head><title>T</title></head><body><p>B</p></body></html>
+HTTP status must be between 100 and 599
+418
+teapot
