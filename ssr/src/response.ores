@@ -1,0 +1,37 @@
+import type Markup from './markup';
+
+// Axum-like response boundary: rendering stays separate from the HTTP server.
+// An Oreslang HTTP/router implementation can adapt this small value directly.
+type HtmlResponse = {
+  status: int,
+  content_type: string,
+  body: string
+};
+
+define module response as
+
+  pub fnc with_status(int status, Markup body): HtmlResponse {
+    return obj{
+      status: status,
+      content_type: "text/html; charset=utf-8",
+      body: body.html
+    };
+  }
+
+  pub fnc ok(Markup body): HtmlResponse {
+    return with_status(200, body);
+  }
+
+  pub fnc fragment(Markup body): HtmlResponse {
+    return with_status(200, body);
+  }
+
+  pub fnc created(Markup body): HtmlResponse {
+    return with_status(201, body);
+  }
+
+  pub fnc not_found(Markup body): HtmlResponse {
+    return with_status(404, body);
+  }
+
+end
