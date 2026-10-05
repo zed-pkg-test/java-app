@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** Static semantic pass run before Oreslang code is lowered/executed. */
@@ -606,6 +607,93 @@ public final class TypeChecker {
                                     + "' cannot narrow inherited public receive to private");
                 }
             }
+        }
+    }
+
+    private void validateOrdinaryFunctionForActorContext(Ast.FunctionDecl fn) {
+        if (currentActorKind == Ast.ActorKind.NONE) return;
+        ActorEffectContext effect = new ActorEffectContext(currentActorKind, currentActorConstructor);
+        Set<ActorEffectContext> checked =
+                actorEffectCheckedFunctions.computeIfAbsent(fn, ignored -> new HashSet<>());
+        if (checked.contains(effect)) return;
+        Set<ActorEffectContext> checking =
+                actorEffectCheckingFunctions.computeIfAbsent(fn, ignored -> new HashSet<>());
+        if (!checking.add(effect)) return;
+
+        Ast.ActorKind previousKind = currentActorKind;
+        boolean previousConstructor = currentActorConstructor;
+        try {
+            Set<String> generics = uniqueGenerics(
+                    fn.genericParameters(),
+                    "actor-context helper " + fn.name());
+            Env env = new Env(null);
+            for (Ast.Param param : fn.parameters()) {
+                Type parameterType = resolveParam(param, generics, null);
+                env.define(
+                        param.name(),
+                        parameterType,
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            Type returns = resolve(fn.returnType(), generics, null);
+            currentActorKind = effect.kind();
+            currentActorConstructor = effect.constructor();
+            checkBlock(fn.body(), env, generics, returns, null);
+            checked.add(effect);
+        } finally {
+            currentActorKind = previousKind;
+            currentActorConstructor = previousConstructor;
+            checking.remove(effect);
+        }
+    }
+
+    private void validateOrdinaryMethodForActorContext(
+            Ast.ClassDecl owner,
+            Named ownerType,
+            Ast.MethodDecl method) {
+        if (currentActorKind == Ast.ActorKind.NONE) return;
+        if (owner.actorKind() != Ast.ActorKind.NONE && !currentActorConstructor) {
+            return;
+        }
+        ActorEffectContext effect = new ActorEffectContext(currentActorKind, currentActorConstructor);
+        Set<ActorEffectContext> checked =
+                actorEffectCheckedMethods.computeIfAbsent(method, ignored -> new HashSet<>());
+        if (checked.contains(effect)) return;
+        Set<ActorEffectContext> checking =
+                actorEffectCheckingMethods.computeIfAbsent(method, ignored -> new HashSet<>());
+        if (!checking.add(effect)) return;
+
+        Ast.ActorKind previousKind = currentActorKind;
+        boolean previousConstructor = currentActorConstructor;
+        try {
+            Set<String> generics = new HashSet<>(owner.genericParameters());
+            for (String generic : method.genericParameters()) {
+                if (!generics.add(generic)) {
+                    throw new IllegalArgumentException(
+                            "duplicate/shadowed generic '" + generic
+                                    + "' in actor-context helper " + owner.name() + "." + method.name());
+                }
+            }
+            Type callableSelf = method.isStatic() ? null : ownerType;
+            Env env = new Env(null);
+            if (!method.isStatic()) {
+                env.define("self", ownerType, Ast.BindingKind.VAL);
+            }
+            for (Ast.Param param : method.parameters()) {
+                Type parameterType = resolveParam(param, generics, callableSelf);
+                env.define(
+                        param.name(),
+                        parameterType,
+                        param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+            Type returns = resolve(method.returnType(), generics, callableSelf);
+            currentActorKind = effect.kind();
+            currentActorConstructor = effect.constructor();
+            checkBlock(method.body(), env, generics, returns, callableSelf);
+            checked.add(effect);
+        } finally {
+            currentActorKind = previousKind;
+            currentActorConstructor = previousConstructor;
+            checking.remove(effect);
         }
     }
 
@@ -1870,12 +1958,28 @@ public final class TypeChecker {
                 throw new IllegalArgumentException(
                         where + " receive(Message) must return void");
             }
-            return substituteGenerics(
+
+            Record effective = (Record) substituteGenerics(
+                    publicClassShape(actorClass, new LinkedHashSet<>()),
+                    classGenericBindings(actorClass, protocolType));
+            Type endpoint = effective.members().get(methodContractKey("receive", 1, 0));
+            if (effective.members().size() != 1 || !(endpoint instanceof Function fn)
+                    || fn.parameters().size() != 1 || fn.result() != Primitive.VOID) {
+                throw new IllegalArgumentException(
+                        where + " actor class must expose exactly receive(Message): void");
+            }
+
+            Type message = substituteGenerics(
                     resolveParam(
                             receive.method().parameters().getFirst(),
                             Set.copyOf(receive.owner().genericParameters()),
                             receive.ownerType()),
                     bindings);
+            if (!Objects.equals(message, fn.parameters().getFirst())) {
+                throw new IllegalArgumentException(
+                        where + " receive(Message) projection is inconsistent with its effective public shape");
+            }
+            return message;
         }
 
         Ast.InterfaceDecl protocol = findInterface(protocolType.name());
