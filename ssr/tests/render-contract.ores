@@ -49,5 +49,43 @@ pub routine main(): void {
   stdio.println(missing.status);
   stdio.println(missing.content_type);
   stdio.println(missing.body);
+
+  stdio.println("[" + markup.render(
+    markup.when(false, markup.trusted_raw("hidden"))
+  ) + "]");
+  stdio.println("[" + markup.render(
+    markup.when(true, markup.trusted_raw("shown"))
+  ) + "]");
+
+  stdio.println(markup.render(
+    markup.concat(
+      markup.trusted_raw("<b>"),
+      markup.trusted_raw("bold</b>")
+    )
+  ));
+
+  stdio.println(css.render(
+    css.media_trusted(
+      "(min-width: 10px)",
+      css.rule_trusted(
+        "p",
+        css.declaration_trusted("margin", "0")
+      )
+    )
+  ));
+
+  stdio.println(markup.render(
+    html.button(
+      htmx.boost(true),
+      markup.trusted_raw("Boost")
+    )
+  ));
+
+  stdio.println(markup.render(
+    html.document(
+      html.title(html.attrs_empty(), markup.trusted_raw("T")),
+      html.p(html.attrs_empty(), markup.trusted_raw("B"))
+    )
+  ));
   return;
 }
