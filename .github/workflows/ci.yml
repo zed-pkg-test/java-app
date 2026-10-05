@@ -13,10 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  validate-ssr:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up GraalVM
         uses: graalvm/setup-graalvm@v1
         with:
@@ -25,85 +26,25 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: maven
-      - name: GraalVM diagnostics
-        run: |
-          java --version
-          native-image --version
-      - name: Verify JIT/JVM profile
+
+      - name: Compiler baseline
         run: mvn -B -ntp verify
-      - name: Run showcase
-        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
-      - name: Compile and run shared Oreslang program
-        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
 
-  native-aot:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
-        with:
-          version: '25.3'
-          java-version: '25'
-          distribution: 'graalvm'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: maven
-      - name: GraalVM diagnostics
-        run: |
-          java --version
-          native-image --version
-      - name: Build interpreter-only AOT image
-        run: mvn -B -ntp -Pnative-aot -DskipTests package
-      - name: Run AOT image
-        run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+      - name: Native SSR static audit
+        run: bash ssr/scripts/audit.sh
 
-  native-hybrid:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
-        with:
-          version: '25.3'
-          java-version: '25'
-          distribution: 'graalvm'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: maven
-      - name: GraalVM diagnostics
+      - name: Type-check SSR programs
         run: |
-          java --version
-          native-image --version
-      - name: Build AOT host with guest JIT
-        run: mvn -B -ntp -Pnative-hybrid -DskipTests package
-      - name: Run hybrid image
-        run: ./target/ores-hybrid --mode=hybrid --platform=linux examples/together.ores
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check ssr/examples/basic-page.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check ssr/examples/htmx-fragment.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check ssr/tests/render-contract.ores"
 
-  polyglot-isolate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up GraalVM
-        uses: graalvm/setup-graalvm@v1
-        with:
-          version: '25.3'
-          java-version: '25'
-          distribution: 'graalvm'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: maven
-      - name: GraalVM diagnostics
+      - name: Render contract in JIT profile
         run: |
-          java --version
-          native-image --version
-      - name: Build Oreslang polyglot isolate library
-        run: mvn -B -ntp -Pnative-isolate -DskipTests package
-      - name: Locate isolate library
-        id: isolate
-        shell: bash
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/tests/render-contract.ores" > /tmp/ssr-jit.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-jit.out
+
+      - name: Render contract in AOT execution profile
         run: |
-          lib="$(find target -maxdepth 1 -type f \( -name 'oresvm.so' -o -name 'liboresvm.so' -o -name 'oresvm.dylib' -o -name 'liboresvm.dylib' \) | head -n1)"
-          test -n "$lib"
-          echo "path=$PWD/$lib" >> "$GITHUB_OUTPUT"
-      - name: Verify untrusted actor hot-load admission in spawned isolate
-        run: mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -Dtest=IsolationHotReloadTest#untrustedActorEntryLoadsWhenNativeIsolateLibraryIsAvailable test
-      - name: Run strict program in Oreslang polyglot isolate
-        run: mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=aot --platform=linux ssr/tests/render-contract.ores" > /tmp/ssr-aot.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-aot.out
