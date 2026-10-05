@@ -5,12 +5,14 @@ namespace_decl  = "namespace" IDENT ";" ;
 
 import_decl     = "import" import_spec "from" STRING_LITERAL ";" ;
 import_spec     = "*" "as" IDENT
-                | "module" import_names
-                | "class" import_names
-                | "fnc" import_names ;
-import_names    = IDENT [ "as" IDENT ]
-                | "{" IDENT { "," IDENT } "}"
+                | import_kind import_names ;
+import_kind     = "module" | "class" | "actor" | "fnc"
+                | "interface" | "type" | "trait" | "struct" | "types" ;
+import_names    = import_name { "," import_name } [ "as" IDENT ]
+                | "(" import_name { "," import_name } ")"
+                | "{" import_name { "," import_name } "}"
                 | "*" "as" IDENT ;
+import_name     = IDENT ;
 
 top_level_item  = annotated_module_decl
                 | actor_decl
@@ -231,6 +233,17 @@ qualified_name  = IDENT { "." IDENT } ;
 stmt_terminator   = ";" | SAFE_STRUCTURAL_BOUNDARY ;
 member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
 
+(* Import semantics:
+   - import actor names only actor callables/classes and preserves scheduler dispatch.
+   - import class names only ordinary non-actor classes.
+   - import interface and import type are type-only.
+   - import types is the grouped type namespace for type/interface/trait/struct
+     declarations; comma, parenthesized, and brace selections are equivalent.
+   - trait/struct import spellings are forward-compatible in v0.6, but fail
+     linked-import validation until first-class trait/struct declarations land.
+   - type-only imports cannot be wildcard runtime namespaces or Java host imports.
+*)
+
 (* Semantic restrictions:
    - Single- and double-quoted object keys are equivalent static string keys.
      Reserved stop/do/done are legal static object/map/member keys.
@@ -253,7 +266,9 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - fnc declarations are reifiable first-class callable values; routine
      declarations are direct-call-only and cannot be stored, returned, or
      passed as callbacks without an explicit wrapping lambda. Reified module
-     aliases preserve this distinction.
+     aliases preserve this distinction. `import fnc` accepts only public,
+     non-actor, non-generic fnc declarations because generic fnc values require
+     direct-call specialization until polymorphic function values exist.
    - Fnc<...>-valued fields are callable data and remain reifiable. A class or
      interface field name may not collide with an instance-method name across
      inheritance; module callables/classes/bindings likewise share one runtime
