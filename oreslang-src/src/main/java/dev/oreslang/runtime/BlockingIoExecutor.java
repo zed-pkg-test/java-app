@@ -3,6 +3,9 @@ package dev.oreslang.runtime;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -103,7 +106,14 @@ final class BlockingIoExecutor implements AutoCloseable {
     }
 
     <T> OresFuture<T> submitJava(Callable<? extends T> operation) {
+        return submitJava(operation, () -> { });
+    }
+
+    <T> OresFuture<T> submitJava(
+            Callable<? extends T> operation,
+            Runnable externalCancel) {
         Objects.requireNonNull(operation, "operation");
+        Objects.requireNonNull(externalCancel, "externalCancel");
         if (closed.get()) return rejected("blocking I/O executor is closed");
         if (!javaAdmissions.tryAcquire()) {
             return rejected(
@@ -121,6 +131,12 @@ final class BlockingIoExecutor implements AutoCloseable {
         };
         AtomicReference<Future<?>> taskRef = new AtomicReference<>();
         OresFuture<T> result = new OresFuture<>(() -> {
+            try {
+                externalCancel.run();
+            } catch (RuntimeException | Error ignored) {
+                // Ores cancellation state remains authoritative even if a host
+                // cancellation hook refuses or fails.
+            }
             Future<?> task = taskRef.get();
             if (task != null) task.cancel(true);
             // Only cancellation that wins before the worker starts may release
@@ -141,6 +157,8 @@ final class BlockingIoExecutor implements AutoCloseable {
                     if (!result.isCancelled()) {
                         try {
                             result.completeFromRuntime(operation.call());
+                        } catch (CancellationException cancelled) {
+                            result.cancel(false);
                         } catch (VirtualMachineError fatal) {
                             result.failFromRuntime(fatal);
                             throw fatal;
@@ -172,6 +190,36 @@ final class BlockingIoExecutor implements AutoCloseable {
             if (lifecycle.compareAndSet(0, 2)) releaseAdmission.run();
         }
         return result;
+    }
+
+    /**
+     * Normalize an ordinary host Future (including FutureTask values returned
+     * by virtual-thread executors) into the Ores Future domain.
+     *
+     * <p>CompletionStage gets the nonblocking callback adapter. A plain Future
+     * is observed from this executor's bounded virtual-thread bridge so
+     * Future.get() can never pin an Ores pthread carrier. Cancelling the
+     * OresFuture requests cancellation of both the host Future and bridge.</p>
+     */
+    @SuppressWarnings("unchecked")
+    <T> OresFuture<T> adaptJavaFuture(Future<? extends T> future) {
+        Objects.requireNonNull(future, "future");
+        if (future instanceof OresFuture<?> oresFuture) {
+            return (OresFuture<T>) oresFuture;
+        }
+        if (future instanceof CompletionStage<?> stage) {
+            return OresFuture.from((CompletionStage<? extends T>) stage);
+        }
+        return submitJava(() -> {
+            try {
+                return future.get();
+            } catch (ExecutionException wrapped) {
+                Throwable cause = wrapped.getCause() == null ? wrapped : wrapped.getCause();
+                if (cause instanceof Exception exception) throw exception;
+                if (cause instanceof Error error) throw error;
+                throw new RuntimeException(cause);
+            }
+        }, () -> future.cancel(true));
     }
 
     <T> OresFuture<T> submitNative(Callable<? extends T> operation) {
