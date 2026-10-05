@@ -81,22 +81,22 @@ Actor startup uses the same runtime protocol without exposing the internal
 two-phase ticket as an ordinary source value:
 
 ```ores
-val id = spawn Worker();              // ActorId immediately; does not wait for READY
+val id = spawn Worker();              // string id immediately; does not wait for READY
 val started = await spawn Worker();   // scheduler yield + wait for READY
 ```
 
 The runtime internally creates an `ActorSpawn<R>` ticket whose readiness Future
 implements the await projection. Plain `spawn` immediately projects that ticket
-to its copyable `ActorId`. Only the direct syntactic form `await spawn ...`
+to its copyable `string` id. Only the direct syntactic form `await spawn ...`
 retains the hidden ticket across the scheduling boundary; after READY it exposes
 a compiler-managed `StartedActor<R>` control value with identity/liveness and
 completion/result Futures.
 
-An `ActorId` is deliberately **not** Awaitable:
+A plain spawn `string` id is deliberately **not** Awaitable:
 
 ```ores
 val id = spawn Worker();
-val bad = await id; // compile error: ActorId does not implement Awaitable<T>
+val bad = await id; // compile error: string does not implement Awaitable<T>
 ```
 
 This prevents a plain identity token from silently retaining startup Future or

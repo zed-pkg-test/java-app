@@ -247,7 +247,11 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object spawnFunction(Ast.CallExpr call, Env env) {
-            return spawnTicket(call, env).id();
+            return actorIdString(spawnTicket(call, env).id());
+        }
+
+        private static String actorIdString(ActorRuntime.ActorId id) {
+            return Objects.requireNonNull(id, "actor id").value().toString();
         }
 
         private List<?> normalizeFunctionArguments(Ast.FunctionDecl fn, List<?> args) {
@@ -1206,7 +1210,7 @@ public final class OresEvalRootNode extends RootNode {
                                 throw new IllegalStateException(
                                         "spawn lowering did not produce an internal ActorSpawn ticket");
                             }
-                            return asyncPure(spawn.id());
+                            return asyncPure(actorIdString(spawn.id()));
                         }));
             }
 
@@ -1918,7 +1922,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (receiver instanceof ActorRuntime.ActorSpawn<?, ?> spawn) {
                 return switch (name) {
-                    case "id" -> spawn.id();
+                    case "id" -> actorIdString(spawn.id());
                     case "is_alive" -> (Invokable) args -> {
                         requireZero(args, "StartedActor.is_alive");
                         return spawn.isAlive();
@@ -1935,7 +1939,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (receiver instanceof ActorRuntime.ActorRef<?> ref) {
                 return switch (name) {
-                    case "id" -> ref.id();
+                    case "id" -> actorIdString(ref.id());
                     case "is_alive" -> (Invokable) args -> {
                         requireZero(args, "ActorRef.is_alive");
                         return ref.isAlive();

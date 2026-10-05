@@ -1185,10 +1185,10 @@ public final class TypeChecker {
         }
         if (expr instanceof Ast.SpawnExpr spawned) {
             // Plain spawn is intentionally identity-only at the source level.
-            // The runtime still creates an internal two-phase ActorSpawn ticket,
-            // but ordinary source evaluation projects that ticket to ActorId.
+            // The runtime keeps an internal ActorId capability, but ordinary
+            // source receives only its stable string representation.
             checkSpawnCallableResult(spawned, env, generics, self);
-            return new Named("ActorId", List.of());
+            return Primitive.STRING;
         }
         if (expr instanceof Ast.AwaitExpr awaited) {
             if (!currentMaySuspend) {
@@ -1748,7 +1748,7 @@ public final class TypeChecker {
         if (named.name().equals("StartedActor") && named.arguments().size() == 1) {
             Type result = named.arguments().getFirst();
             return switch (member) {
-                case "id" -> new Named("ActorId", List.of());
+                case "id" -> Primitive.STRING;
                 case "is_alive" -> {
                     if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
                         throw new IllegalArgumentException(
@@ -1771,7 +1771,7 @@ public final class TypeChecker {
         }
         if (named.name().equals("ActorRef") && named.arguments().isEmpty()) {
             return switch (member) {
-                case "id" -> new Named("ActorId", List.of());
+                case "id" -> Primitive.STRING;
                 case "is_alive" -> {
                     if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
                         throw new IllegalArgumentException(

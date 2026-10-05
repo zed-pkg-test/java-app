@@ -385,7 +385,7 @@ public final class OwnershipChecker {
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
             if (concreteReceiver != null && concreteReceiver.name().equals("StartedActor")) {
                 return switch (member.member()) {
-                    case "id" -> new ValueInfo(Ast.TypeRef.simple("ActorId"), ValueKind.COPY, null);
+                    case "id" -> new ValueInfo(Ast.TypeRef.simple("string"), ValueKind.COPY, null);
                     case "done", "result" ->
                             new ValueInfo(Ast.TypeRef.simple("Future"), ValueKind.MOVE_ONLY, null);
                     case "is_alive" ->
@@ -395,7 +395,7 @@ public final class OwnershipChecker {
             }
             if (concreteReceiver != null && concreteReceiver.name().equals("ActorRef")) {
                 return switch (member.member()) {
-                    case "id" -> new ValueInfo(Ast.TypeRef.simple("ActorId"), ValueKind.COPY, null);
+                    case "id" -> new ValueInfo(Ast.TypeRef.simple("string"), ValueKind.COPY, null);
                     default -> new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
                 };
             }
@@ -440,7 +440,7 @@ public final class OwnershipChecker {
         }
         if (expr instanceof Ast.SpawnExpr spawned) {
             checkSpawnArguments(spawned, scope);
-            return new ValueInfo(Ast.TypeRef.simple("ActorId"), ValueKind.COPY, null);
+            return new ValueInfo(Ast.TypeRef.simple("string"), ValueKind.COPY, null);
         }
         if (expr instanceof Ast.AwaitExpr awaited) {
             if (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard()) {

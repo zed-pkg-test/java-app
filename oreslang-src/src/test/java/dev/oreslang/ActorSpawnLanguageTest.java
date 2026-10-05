@@ -22,8 +22,9 @@ final class ActorSpawnLanguageTest {
                 }
 
                 pub async routine main() => void {
-                  val pending = spawn worker(1);
+                  val string pending = spawn worker(1);
                   val ready = await spawn worker(2);
+                  val string ready_id = ready.id;
                   return;
                 }
                 """);
@@ -126,7 +127,7 @@ final class ActorSpawnLanguageTest {
     }
 
     @Test
-    void actorIdFromPlainSpawnIsNotAwaitableStartupAuthority() {
+    void plainSpawnStringIsNotAwaitableStartupAuthority() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
@@ -167,12 +168,13 @@ final class ActorSpawnLanguageTest {
                 }
 
                 pub async routine main() => void {
-                  val id = spawn add_one(1);
+                  val string id = spawn add_one(1);
                   val started = await spawn add_one(41);
+                  val string started_id = started.id;
                   val answer = await started.result;
                   stdio.println(id);
                   stdio.println(answer);
-                  stdio.println(started.id);
+                  stdio.println(started_id);
                   return;
                 }
                 """;
@@ -191,7 +193,14 @@ final class ActorSpawnLanguageTest {
 
         String rendered = output.toString(StandardCharsets.UTF_8);
         assertTrue(rendered.contains("42"));
-        assertTrue(rendered.contains("ActorId"));
+        assertFalse(rendered.contains("ActorId"),
+                "source-level spawn identity must be a plain string, not a runtime ActorId object");
+        long uuidLines = rendered.lines()
+                .filter(line -> line.matches(
+                        "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))
+                .count();
+        assertEquals(2, uuidLines,
+                "plain spawn and StartedActor.id should both render as UUID strings");
     }
 
     @Test

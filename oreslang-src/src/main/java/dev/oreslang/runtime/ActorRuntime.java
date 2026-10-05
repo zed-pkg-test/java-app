@@ -877,6 +877,11 @@ public final class ActorRuntime implements AutoCloseable {
     public record ActorId(UUID value) {
         public ActorId { Objects.requireNonNull(value); }
         public static ActorId create() { return new ActorId(UUID.randomUUID()); }
+
+        @Override
+        public String toString() {
+            return value.toString();
+        }
     }
 
     public static final class ActorTerminatedException extends IllegalStateException {
