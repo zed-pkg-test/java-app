@@ -38,7 +38,7 @@ jobs:
         run: |
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/scheduler-await.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/modules-namespaces-callables.ores"
       - name: Build Oreslang AOT native executable
         run: mvn -B -ntp -Pnative-aot -DskipTests package
       - name: Smoke test AOT native executable
@@ -46,4 +46,4 @@ jobs:
           test -x target/ores-aot
           ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/together.ores
           ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/showcase.ores
-          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/scheduler-await.ores
+          ./target/ores-aot -XX:MissingRegistrationReportingMode=Exit --mode=aot --platform=linux examples/modules-namespaces-callables.ores
