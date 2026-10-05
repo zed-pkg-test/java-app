@@ -91,14 +91,18 @@ final class OresObservableTest {
         OresFuture<OresNotification<Integer>> first = one.next();
         OresFuture<OresNotification<Integer>> second = two.next();
 
+        assertEquals(2, source.pendingRuntimeWaiterCount());
+
         assertTrue(one.cancel());
         assertFalse(source.isCancelled(),
                 "one rx subscriber must not cancel a shared source Future");
+        assertEquals(1, source.pendingRuntimeWaiterCount());
 
         source.completeFromRuntime(99);
 
         assertThrows(CancellationException.class, first::join);
         assertEquals(99, second.join().value());
+        assertEquals(0, source.pendingRuntimeWaiterCount());
     }
 
     @Test
