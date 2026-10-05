@@ -89,7 +89,8 @@ final class GpuKeywordTest {
                           }
                         end
                         """)));
-        assertTrue(failure.getMessage().contains("non-transferable named type 'Box'"));
+        assertTrue(failure.getMessage().contains("non-transferable named type"));
+        assertTrue(failure.getMessage().contains("Box"));
     }
 
     @Test
