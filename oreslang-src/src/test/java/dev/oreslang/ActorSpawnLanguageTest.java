@@ -74,7 +74,7 @@ final class ActorSpawnLanguageTest {
     }
 
     @Test
-    void voidStartedActorDoesNotExposeResultFuture() {
+    void voidActorCallableDoesNotExposeResultFuture() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
@@ -82,9 +82,9 @@ final class ActorSpawnLanguageTest {
                           return;
                         }
 
-                        pub async routine main() => void {
-                          val started = await spawn worker();
-                          val nope = started.result;
+                        pub routine main() => void {
+                          val pending = spawn worker();
+                          val nope = pending.result;
                           return;
                         }
                         """)));
@@ -92,17 +92,17 @@ final class ActorSpawnLanguageTest {
     }
 
     @Test
-    void awaitedSpawnExposesStartedIdentityControlOnly() {
+    void readyRefIsIdentityControlOnlyForOneShotCallable() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 pub actor fnc worker(int value) => int {
                   return value;
                 }
 
                 pub async routine main() => void {
-                  val started = await spawn worker(1);
-                  val id = started.id;
-                  val alive = started.is_alive();
-                  val answer = await started.result;
+                  val pending = spawn worker(1);
+                  val ready = await pending;
+                  val id = ready.id;
+                  val alive = ready.is_alive();
                   return;
                 }
                 """)));
@@ -115,64 +115,42 @@ final class ActorSpawnLanguageTest {
                         }
 
                         pub async routine main() => void {
-                          val started = await spawn worker(1);
-                          val denied = started.mailbox;
+                          val ready = await spawn worker(1);
+                          val denied = ready.mailbox;
                           return;
                         }
                         """)));
-        assertTrue(
-                failure.getMessage().contains("StartedActor")
-                        || failure.getMessage().contains("identity/lifecycle/completion"));
+        assertTrue(failure.getMessage().contains("not an application mailbox"));
     }
 
     @Test
-    void actorIdFromPlainSpawnIsNotAwaitableStartupAuthority() {
-        IllegalArgumentException failure = assertThrows(
-                IllegalArgumentException.class,
-                () -> TypeChecker.check(Parser.parse("""
-                        pub actor fnc worker() => int {
-                          return 1;
-                        }
-
-                        pub async routine main() => void {
-                          val id = spawn worker();
-                          val denied = await id;
-                          return;
-                        }
-                        """)));
-
-        assertTrue(failure.getMessage().contains("Awaitable"));
-    }
-
-    @Test
-    void nonVoidAwaitedSpawnExposesResultFuture() {
+    void nonVoidActorRoutineExposesResultFuture() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 pub actor routine compute(int value) => int {
                   return value + 1;
                 }
 
                 pub async routine main() => void {
-                  val started = await spawn compute(41);
-                  val answer = await started.result;
+                  val pending = spawn compute(41);
+                  val answer = await pending.result;
                   return;
                 }
                 """)));
     }
 
     @Test
-    void plainSpawnReturnsIdAndAwaitedSpawnReturnsStartedControl() throws Exception {
+    void spawnReturnsImmediatelyAndResultIsAwaitedSeparately() throws Exception {
         String program = """
                 pub actor fnc add_one(int value) => int {
                   return value + 1;
                 }
 
                 pub async routine main() => void {
-                  val id = spawn add_one(1);
-                  val started = await spawn add_one(41);
-                  val answer = await started.result;
-                  stdio.println(id);
+                  val pending = spawn add_one(41);
+                  val ready = await pending.ready;
+                  val answer = await pending.result;
                   stdio.println(answer);
-                  stdio.println(started.id);
+                  stdio.println(ready.id);
                   return;
                 }
                 """;
@@ -252,14 +230,15 @@ final class ActorSpawnLanguageTest {
     }
 
     @Test
-    void trustedActorMaySpawnAndReceiveIdentityWithoutWaiting() {
+    void trustedActorMaySpawnWithoutSynchronouslyWaiting() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 pub actor fnc child() => int {
                   return 1;
                 }
 
                 pub actor routine parent() => void {
-                  val id = spawn child();
+                  val pending = spawn child();
+                  val id = pending.id;
                   return;
                 }
                 """)));
