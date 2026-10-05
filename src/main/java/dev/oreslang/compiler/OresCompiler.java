@@ -11,7 +11,19 @@ public final class OresCompiler {
     private OresCompiler() { }
 
     public static Ast.Program parseAndTypeCheck(String source) {
-        return TypeChecker.check(Parser.parse(source));
+        Ast.Program program = TypeChecker.check(Parser.parse(source));
+        EcsEffectAnalyzer.analyze(program);
+        return program;
+    }
+
+    /** Extract validated ECS system read/write metadata from an already checked program. */
+    public static java.util.Map<String, EcsEffectAnalyzer.SystemEffects> ecsEffects(Ast.Program program) {
+        return EcsEffectAnalyzer.analyze(program);
+    }
+
+    /** Compute deterministic non-conflicting ECS system batches for scheduler planning. */
+    public static java.util.List<java.util.List<EcsEffectAnalyzer.SystemEffects>> ecsParallelBatches(Ast.Program program) {
+        return EcsEffectAnalyzer.parallelBatches(program);
     }
 
     /**

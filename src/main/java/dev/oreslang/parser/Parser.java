@@ -56,12 +56,19 @@ public final class Parser {
                     rootDeclarations.add(parseClass(modifiers.isAbstract || afterDefineAbstract));
                     continue;
                 }
+                if (match(COMPONENT)) {
+                    if (afterDefineAbstract || modifiers.async || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
+                        throw error(previous(), "components do not accept async, nlex, static, or abstract modifiers");
+                    }
+                    rootDeclarations.add(parseComponent(modifiers.visibility));
+                    continue;
+                }
                 if (match(INTERFACE)) {
                     if (modifiers.nonLexical) throw error(previous(), "'nlex' applies only to fnc, routine, or lambda");
                     rootDeclarations.add(parseInterface(modifiers.visibility));
                     continue;
                 }
-                throw error(previous(), "expected module, class, or interface after 'define'");
+                throw error(previous(), "expected module, class, component, or interface after 'define'");
             }
 
             Ast.Decl declaration = parseDeclarationAfterModifiers(annotations, modifiers);
@@ -92,22 +99,20 @@ public final class Parser {
                 throw error(peek(), "function imports use 'import fnc', not 'import fn'");
             }
             if (match(MODULE)) kind = Ast.ImportKind.MODULE;
-            else if (match(ACTOR)) kind = Ast.ImportKind.ACTOR;
             else if (match(CLASS)) kind = Ast.ImportKind.CLASS;
             else if (match(FNC)) kind = Ast.ImportKind.FUNCTION;
-            else if (match(INTERFACE)) kind = Ast.ImportKind.INTERFACE;
-            else if (match(TRAIT)) kind = Ast.ImportKind.TRAIT;
-            else if (match(STRUCT)) kind = Ast.ImportKind.STRUCT;
-            else if (match(TYPE)) kind = Ast.ImportKind.TYPE;
-            else if (match(TYPES)) kind = Ast.ImportKind.TYPES;
-            else throw error(peek(), "expected module, actor, class, fnc, interface, trait, struct, type, types, or * after import");
+            else throw error(peek(), "expected module, class, fnc, or * after import");
 
             if (match(STAR)) {
                 wildcard = true;
                 consume(AS, "wildcard import requires 'as <namespace>'");
                 namespace = consume(IDENT, "expected import namespace").lexeme();
+            } else if (match(LBRACE)) {
+                if (check(RBRACE)) throw error(peek(), "import selection cannot be empty");
+                do names.add(consumeImportName(kind)); while (match(COMMA));
+                consume(RBRACE, "expected '}' after imported names");
             } else {
-                parseImportSelection(kind, names);
+                names.add(consumeImportName(kind));
             }
 
             if (!wildcard && match(AS)) {
@@ -123,24 +128,6 @@ public final class Parser {
         if (path.isBlank()) throw error(previous(), "import path cannot be empty");
         consume(SEMICOLON, "expected ';' after import");
         return new Ast.ImportDecl(kind, names, wildcard, namespace, path);
-    }
-
-    private void parseImportSelection(Ast.ImportKind kind, List<String> names) {
-        Token.Type closing = null;
-        if (match(LBRACE)) closing = RBRACE;
-        else if (match(LPAREN)) closing = RPAREN;
-
-        if (closing != null) {
-            if (check(closing)) throw error(peek(), "import selection cannot be empty");
-            do names.add(consumeImportName(kind)); while (match(COMMA));
-            consume(closing, closing == RBRACE
-                    ? "expected '}' after imported names"
-                    : "expected ')' after imported names");
-            return;
-        }
-
-        names.add(consumeImportName(kind));
-        while (match(COMMA)) names.add(consumeImportName(kind));
     }
 
     private String consumeImportName(Ast.ImportKind kind) {
@@ -172,11 +159,17 @@ public final class Parser {
                 if (modifiers.nonLexical) throw error(previous(), "'nlex' applies only to fnc, routine, or lambda");
                 return parseClass(modifiers.isAbstract || afterDefineAbstract);
             }
+            if (match(COMPONENT)) {
+                if (afterDefineAbstract || modifiers.async || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
+                    throw error(previous(), "components do not accept async, nlex, static, or abstract modifiers");
+                }
+                return parseComponent(modifiers.visibility);
+            }
             if (match(INTERFACE)) {
                 if (modifiers.nonLexical) throw error(previous(), "'nlex' applies only to fnc, routine, or lambda");
                 return parseInterface(modifiers.visibility);
             }
-            throw error(previous(), "expected class or interface after 'define'");
+            throw error(previous(), "expected class, component, or interface after 'define'");
         }
 
         Ast.Decl declaration = parseDeclarationAfterModifiers(annotations, modifiers);
@@ -289,6 +282,39 @@ public final class Parser {
         }
         consume(END, "expected 'end' to close class " + name);
         return new Ast.ClassDecl(name, isAbstract, Ast.ActorKind.NONE, generics, parents, interfaces, fields, methods);
+    }
+
+    private Ast.ComponentDecl parseComponent(Ast.Visibility visibility) {
+        String name = consume(IDENT, "expected component name").lexeme();
+        consume(AS, "expected 'as' after component header");
+
+        List<Ast.FieldDecl> fields = new ArrayList<>();
+        java.util.Set<String> names = new java.util.LinkedHashSet<>();
+        while (!check(END) && !check(EOF)) {
+            if (!check(IDENT) || !checkNext(COLON)) {
+                throw error(peek(),
+                        "components are data-only; expected a field in 'name: Type' form (methods, initializers, annotations, and field modifiers are forbidden)");
+            }
+            String fieldName = advance().lexeme();
+            if (!names.add(fieldName)) {
+                throw error(previous(), "duplicate component field '" + fieldName + "'");
+            }
+            consume(COLON, "expected ':' after component field name");
+            Ast.TypeRef type = parseTypeRef();
+            if (match(EQUAL)) {
+                throw error(previous(), "component fields cannot have initializers; component values are supplied when entities are spawned");
+            }
+            consumeClassFieldTerminator("component field declaration should end with ';'");
+            fields.add(new Ast.FieldDecl(
+                    fieldName,
+                    Ast.Visibility.PUBLIC,
+                    Ast.BindingKind.LET,
+                    type,
+                    List.of(),
+                    null));
+        }
+        consume(END, "expected 'end' to close component " + name);
+        return new Ast.ComponentDecl(name, visibility, fields);
     }
 
     private Ast.ClassDecl parseActorClass(Ast.ActorKind actorKind) {
@@ -1472,7 +1498,7 @@ public final class Parser {
     private static boolean isMemberNameToken(Token.Type type) {
         return switch (type) {
             case IDENT,
-                    DEFINE, CLASS, MODULE, NAMESPACE, IMPORT, FROM, AS, EXTENDS, IMPLEMENTS,
+                    DEFINE, CLASS, COMPONENT, MODULE, NAMESPACE, IMPORT, FROM, AS, EXTENDS, IMPLEMENTS,
                     TRY, CATCH, FINALLY, END, FI, IF, DO, ELSE, THEN,
                     NEW, STOP, DONE, AWAIT, ASYNC, NLEX, ACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, TYPE, TYPEOF,
                     INTERFACE, IMPL, ABSTRACT, VOID, STATIC, PUB, PRIVATE, STRUCTURAL, RETURN, DEFER,
@@ -1642,8 +1668,13 @@ public final class Parser {
     }
 
     private void consumeStatementTerminator(String message) {
-        if (match(SEMICOLON) || isSafeStatementBoundary()) return;
+        if (match(SEMICOLON) || isSafeStatementBoundary() || isImplicitNewlineTerminator()) return;
         throw error(peek(), message);
+    }
+
+    private boolean isImplicitNewlineTerminator() {
+        if (current == 0 || check(EOF)) return false;
+        return previous().line() < peek().line();
     }
 
     private boolean isSafeStatementBoundary() {

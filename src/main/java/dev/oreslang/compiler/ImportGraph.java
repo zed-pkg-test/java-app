@@ -130,40 +130,26 @@ final class ImportGraph {
                 if (module.name().equals(name)) matches++;
                 continue;
             }
-
             for (Ast.Decl decl : module.declarations()) {
-                boolean matched = switch (kind) {
-                    case FUNCTION -> decl instanceof Ast.FunctionDecl fn
+                if (kind == Ast.ImportKind.FUNCTION
+                        && decl instanceof Ast.FunctionDecl fn
+                        && fn.visibility() == Ast.Visibility.PUBLIC
+                        && fn.kind() == Ast.CallableKind.FNC
+                        && fn.actorKind() == Ast.ActorKind.NONE
+                        && fn.genericParameters().isEmpty()
+                        && fn.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.CLASS
+                        && decl instanceof Ast.ClassDecl klass
+                        && klass.name().equals(name)) {
+                    matches++;
+                } else if (kind == Ast.ImportKind.ALL) {
+                    if (decl instanceof Ast.FunctionDecl fn
                             && fn.visibility() == Ast.Visibility.PUBLIC
-                            && fn.kind() == Ast.CallableKind.FNC
-                            && fn.actorKind() == Ast.ActorKind.NONE
-                            && fn.genericParameters().isEmpty()
-                            && fn.name().equals(name);
-                    case ACTOR -> decl instanceof Ast.ClassDecl klass
-                            && klass.actorKind() != Ast.ActorKind.NONE
-                            && klass.name().equals(name);
-                    case CLASS -> decl instanceof Ast.ClassDecl klass
-                            && klass.actorKind() == Ast.ActorKind.NONE
-                            && klass.name().equals(name);
-                    case INTERFACE -> decl instanceof Ast.InterfaceDecl iface
-                            && iface.visibility() == Ast.Visibility.PUBLIC
-                            && iface.name().equals(name);
-                    case TYPE -> decl instanceof Ast.TypeAliasDecl alias
-                            && alias.name().equals(name);
-                    case TYPES -> (decl instanceof Ast.InterfaceDecl iface
-                                    && iface.visibility() == Ast.Visibility.PUBLIC
-                                    && iface.name().equals(name))
-                            || (decl instanceof Ast.TypeAliasDecl alias
-                                    && alias.name().equals(name));
-                    case TRAIT, STRUCT -> false;
-                    case ALL -> (decl instanceof Ast.FunctionDecl fn
-                                    && fn.visibility() == Ast.Visibility.PUBLIC
-                                    && fn.name().equals(name))
-                            || (decl instanceof Ast.ClassDecl klass
-                                    && klass.name().equals(name));
-                    case MODULE -> false;
-                };
-                if (matched) matches++;
+                            && fn.name().equals(name)) matches++;
+                    else if (decl instanceof Ast.ClassDecl klass
+                            && klass.name().equals(name)) matches++;
+                }
             }
         }
         return matches;

@@ -49,13 +49,6 @@ public final class ImportRules {
         return imported.names().stream().map(name -> localName(imported, name)).toList();
     }
 
-    public static boolean isTypeOnlyKind(Ast.ImportKind kind) {
-        return switch (kind) {
-            case ACTOR, CLASS, INTERFACE, TRAIT, STRUCT, TYPE, TYPES -> true;
-            case MODULE, FUNCTION, ALL -> false;
-        };
-    }
-
     public static void validate(Ast.ImportDecl imported) {
         if (imported == null) throw new IllegalArgumentException("import declaration cannot be null");
         if (imported.path() == null || imported.path().isBlank()) {
@@ -89,12 +82,8 @@ public final class ImportRules {
         if (!isJavaPath(imported.path())) return;
 
         String simpleName = javaSimpleName(imported.path());
-        if (imported.kind() != Ast.ImportKind.CLASS
-                && imported.kind() != Ast.ImportKind.FUNCTION
-                && imported.kind() != Ast.ImportKind.ALL) {
-            throw new IllegalArgumentException(
-                    "Java host imports support only class, fnc, or * selectors; got "
-                            + imported.kind().name().toLowerCase());
+        if (imported.kind() == Ast.ImportKind.MODULE) {
+            throw new IllegalArgumentException("Java host classes cannot be imported as Oreslang modules");
         }
         if (imported.kind() == Ast.ImportKind.CLASS) {
             if (imported.wildcard() || imported.names().size() != 1) {

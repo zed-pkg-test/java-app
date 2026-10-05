@@ -841,6 +841,9 @@ public final class TreeShaker {
             if (declaration instanceof Ast.InterfaceDecl iface) {
                 return iface.visibility() == Ast.Visibility.PUBLIC;
             }
+            if (declaration instanceof Ast.ComponentDecl component) {
+                return component.visibility() == Ast.Visibility.PUBLIC;
+            }
             // Classes and aliases currently have no declaration-level visibility.
             return declaration instanceof Ast.ClassDecl || declaration instanceof Ast.TypeAliasDecl;
         }
@@ -914,6 +917,10 @@ public final class TreeShaker {
                     for (Ast.Param parameter : method.parameters()) locals.add(parameter.name());
                     scanStatements(module, method.body(), locals);
                 }
+                return;
+            }
+            if (declaration instanceof Ast.ComponentDecl component) {
+                for (Ast.FieldDecl field : component.fields()) scanType(field.type());
                 return;
             }
             if (declaration instanceof Ast.InterfaceDecl iface) {
@@ -1159,6 +1166,7 @@ public final class TreeShaker {
         private static String declarationName(Ast.Decl declaration) {
             if (declaration instanceof Ast.FunctionDecl function) return function.name();
             if (declaration instanceof Ast.ClassDecl klass) return klass.name();
+            if (declaration instanceof Ast.ComponentDecl component) return component.name();
             if (declaration instanceof Ast.InterfaceDecl iface) return iface.name();
             if (declaration instanceof Ast.FieldDecl field) return field.name();
             if (declaration instanceof Ast.TypeAliasDecl alias) return alias.name();

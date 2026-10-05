@@ -5,12 +5,10 @@ namespace_decl  = "namespace" IDENT ";" ;
 
 import_decl     = "import" import_spec "from" STRING_LITERAL ";" ;
 import_spec     = "*" "as" IDENT
-                | import_kind import_names ;
-import_kind     = "module" | "actor" | "class" | "fnc"
-                | "interface" | "trait" | "struct"
-                | "type" | "types" ;
-import_names    = IDENT { "," IDENT } [ "as" IDENT ]
-                | "(" IDENT { "," IDENT } ")"
+                | "module" import_names
+                | "class" import_names
+                | "fnc" import_names ;
+import_names    = IDENT [ "as" IDENT ]
                 | "{" IDENT { "," IDENT } "}"
                 | "*" "as" IDENT ;
 
@@ -186,7 +184,8 @@ unary           = [ "!" | "-" | "+" | "await" ] postfix
                 | "&" [ "mut" ] unary ;
 postfix         = primary { call_suffix | member_suffix | index_suffix } ;
 call_suffix     = "(" [ argument_list ] ")" ;
-member_suffix   = "." member_name ;\nmember_name     = IDENT | "stop" | "do" | "done" ;
+member_suffix   = "." member_name ;
+member_name     = IDENT | "stop" | "do" | "done" ;
 index_suffix    = "[" expression "]" ;
 argument_list   = expression { "," expression } ;
 

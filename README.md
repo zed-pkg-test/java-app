@@ -25,6 +25,7 @@ The language is intentionally opinionated:
 - direct method calls reuse shared class method definitions; instance/actor methods are direct-call-only, and callbacks use explicit lambdas instead of implicit bound-method values;
 - multiple named modules may appear in one source file;
 - explicit `return` statements;
-- generics, tuples, arrays, complex numbers, futures/`await`, lambdas, `defer`, and `try/catch/finally` are language-level features.
+- generics, tuples, arrays, complex numbers, futures/`await`, lambdas, `defer`, and `try/catch/finally` are language-level features;
+- opt-in data-oriented/ECS execution with data-only `define component` declarations, archetype/chunk SoA storage, explicit system read/write effects, and deferred structural mutation — see [`docs/ECS_DOP.md`](docs/ECS_DOP.md).
 
 The first implementation is developed on a feature branch and will land with an executable Truffle skeleton, grammar/specification, examples, tests, and CI.

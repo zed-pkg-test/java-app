@@ -136,6 +136,40 @@ Actor transport is independently hardened from mutex synchronization. Ordinary m
 
 Compiler-generated/context-aware `BehaviorFactory` values are capture-free for both private and shared actors. This prevents a shared actor from bypassing mailbox/capability semantics by closing over an arbitrary mutable JVM object. `spawnPrivateTrusted(...)`, `spawnSharedTrusted(...)`, and trusted `Supplier` construction are host/supervisor escape hatches only; adversarial policies reject them.
 
+## Async task runtime
+
+Ordinary `async` callables are separate from actor dispatchers. The reference interpreter owns one context-local async scheduler and returns `CompletionStage`/language `Future<T>` values immediately. Its first backend uses Java virtual threads so blocking host/runtime operations do not consume the bounded private/shared actor worker pools. This is a transitional execution strategy: Oreslang source semantics are future/continuation based, not virtual-thread based.
+
+The design intentionally mirrors the strongest C# async/await practices:
+
+- do not make `async` synonymous with "new OS thread";
+- avoid sync-over-async on bounded actor workers;
+- propagate cancellation to the underlying task;
+- preserve the original exception at `await`;
+- keep the execution scheduler out of the source-level future contract;
+- separate I/O/task concurrency from explicitly CPU-bound scheduling.
+
+Because the current interpreter has not yet lowered `await` into a resumable state machine, an ordinary async virtual carrier may block while awaiting another future. Actor carriers are different: an incomplete `await` from an actor turn is rejected rather than parking the dispatcher. Adversarial contexts also fail closed for ordinary async execution until continuation lowering can release the strict guest-turn serialization lock at suspension points.
+
+Async callable arguments/results are detached at the evaluator boundary. This is stricter than C#'s shared managed heap and preserves Oreslang's ownership direction: mutable task state is owned by the task instead of becoming an implicit cross-thread alias. Generic async boundaries remain closed until a Send/task-safe generic contract exists.
+
+## HungryActor: explicit dedicated CPU carrier
+
+`HungryActor<M>` is the deliberate exception to the ordinary multiplexed actor rule. It is a runtime primitive for sustained CPU-bound or thread-affine work and owns one dedicated **platform thread** from construction until `release()`/termination.
+
+Its invariants are:
+
+- exactly one dedicated platform carrier per live HungryActor;
+- bounded nonblocking mailbox admission;
+- messages are frozen before delivery;
+- serial message execution;
+- fail-stop behavior on callback failure;
+- cooperative CPU-loop cancellation through `schedulerSafepoint()`;
+- `release()`/close relinquishes the carrier, with bounded shutdown observation;
+- it never consumes a private/shared ActorRuntime dispatcher worker.
+
+A HungryActor is intentionally expensive. It is appropriate when reserving a whole carrier is the requirement—not as the default way to obtain parallelism. Ordinary actors should remain multiplexed, and ordinary `async` should remain task/future based. The current class is a host/compiler runtime primitive; exposing a richer source-level constructor must preserve the same ownership and capability checks rather than becoming a raw guest thread API.
+
 ## Actor dispatchers
 
 The host actor runtime follows the same scheduling shape as Akka's event-based dispatcher: many actors share an executor, each actor has its own mailbox, and a scheduled actor drains only a bounded number of messages before yielding back to the executor. The configured throughput bound prevents one hot mailbox from monopolizing a worker.
