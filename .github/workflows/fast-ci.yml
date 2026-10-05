@@ -36,3 +36,5 @@ jobs:
           grep -F "144" /tmp/oreslang-async-await.out
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/callables.ores" | tee /tmp/oreslang-callables.out
           grep -F "120:9:13" /tmp/oreslang-callables.out
+      - name: Run data-science embedding suite
+        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="vendor/oreslang-data-science/tests/embeddings.ores"
