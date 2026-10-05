@@ -1,0 +1,67 @@
+name: oreslang-http-routing-refsem-proof
+
+on:
+  push:
+    branches:
+      - proof/oreslang-http-routing-refsem-f849-20261005
+
+permissions:
+  contents: read
+
+jobs:
+  route-library:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out self-contained proof tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          show-progress: false
+
+      - name: Verify exact source blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '[:space:]' < proof245/COMPILER_SOURCE_REF)" = "f849ba4dd60bf0dda87030ef8a40c273a71e60ea"
+          test "$(tr -d '[:space:]' < proof245/ROUTING_BASE_COMMIT)" = "cf72dc56a707a6b7a495e66dd9f44306de9d2b77"
+          test "$(tr -d '[:space:]' < proof245/routing/SOURCE_REF)" = "f849ba4dd60bf0dda87030ef8a40c273a71e60ea"
+          while IFS=$'\t' read -r expected mode path; do
+            test "$(git hash-object "proof245/compiler/$path")" = "$expected"
+          done < proof245/COMPILER_BLOBS.tsv
+          while IFS=$'\t' read -r expected mode path; do
+            test "$(git hash-object "proof245/routing/$path")" = "$expected"
+          done < proof245/ROUTING_BLOBS.tsv
+
+      - name: Install Java 21 and Maven
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes openjdk-21-jdk maven
+          JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn -version
+
+      - name: Compile exact reference-semantics compiler slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
+          mvn -B -ntp -f proof245/compiler/pom.xml -DskipTests compile
+
+      - name: Run unchanged router semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
+          cat > "$RUNNER_TEMP/oreslang-compiler" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          : "${COMPILER_POM:?COMPILER_POM must be set}"
+          exec mvn -B -ntp -q -f "$COMPILER_POM" -DskipTests exec:java -Dexec.args="$*"
+          SH
+          chmod +x "$RUNNER_TEMP/oreslang-compiler"
+          export COMPILER_POM="$GITHUB_WORKSPACE/proof245/compiler/pom.xml"
+          export ORESLANG_COMPILER="$RUNNER_TEMP/oreslang-compiler"
+          bash proof245/routing/scripts/test.sh
