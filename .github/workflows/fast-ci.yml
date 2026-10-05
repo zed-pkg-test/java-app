@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up GraalVM
         uses: graalvm/setup-graalvm@v1
         with:
@@ -25,12 +26,45 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache: maven
-      - name: Verify compiler/runtime tests
-        run: mvn -B -ntp verify
-      - name: Run examples
+
+      - name: Verify exact mirrored SSR blobs
+        shell: bash
         run: |
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/modules-namespaces-callables.ores"
-          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/callables.ores" | tee /tmp/oreslang-callables.out
-          grep -F "120:9:13" /tmp/oreslang-callables.out
+          test "$(git hash-object ssr/src/markup.ores)" = "c8546a1597a899e6c25209aa82974ff9e5d79824"
+          test "$(git hash-object ssr/src/html.ores)" = "1e67dfcf0c99c7a1dabe889df8aeece5af95d363"
+          test "$(git hash-object ssr/src/css.ores)" = "84b8c5abd177e1bbe423a9b2b4c1427589217a41"
+          test "$(git hash-object ssr/src/htmx.ores)" = "670ccd20e716e85b599e3208ba5f18acc01c41c3"
+          test "$(git hash-object ssr/src/response.ores)" = "052d4363699c2f99e3032c258aef77507047e76e"
+          test "$(git hash-object ssr/examples/basic-page.ores)" = "20d99f0787a28666504cee81607be1636a365a41"
+          test "$(git hash-object ssr/examples/htmx-fragment.ores)" = "edf8178a5bd45a811b3a54a5d12653bdcf2573c8"
+          test "$(git hash-object ssr/tests/render-contract.ores)" = "7fd537a772a11fe29450d9cd366601271611d56b"
+          test "$(git hash-object ssr/tests/render-contract.expected)" = "d918a1a66fa2fa4314c995501d97a23322511c3e"
+
+      - name: Full compiler regression suite
+        run: mvn -B -ntp verify
+
+      - name: Native SSR static audit
+        run: bash ssr/scripts/audit.sh
+
+      - name: Type-check SSR source graphs
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check --platform=server ssr/examples/basic-page.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check --platform=server ssr/examples/htmx-fragment.ores"
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--check --platform=server ssr/tests/render-contract.ores"
+
+      - name: Execute SSR examples
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--platform=server ssr/examples/basic-page.ores" >/tmp/basic.out
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--platform=server ssr/examples/htmx-fragment.ores" >/tmp/htmx.out
+          grep -F '<!doctype html>' /tmp/basic.out
+          grep -F 'hx-get="/fragments/greeting"' /tmp/htmx.out
+
+      - name: JIT render contract
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=jit --platform=server ssr/tests/render-contract.ores" > /tmp/ssr-jit.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-jit.out
+
+      - name: AOT-profile render contract
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="--mode=aot --platform=linux ssr/tests/render-contract.ores" > /tmp/ssr-aot.out
+          diff -u ssr/tests/render-contract.expected /tmp/ssr-aot.out
