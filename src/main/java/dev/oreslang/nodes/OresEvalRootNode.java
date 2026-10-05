@@ -278,10 +278,21 @@ public final class OresEvalRootNode extends RootNode {
 
         private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
             List<?> normalized = normalizeFunctionArguments(fn, args);
+            if (fn.gpu()) {
+                String module = functionOwners.getOrDefault(fn, Parser.ROOT_MODULE);
+                String callable = module + "." + fn.name();
+                context.requireCapability(IsolatePolicy.Capability.GPU, "gpu callable " + callable);
+                try {
+                    return thawGpuValue(context.gpu().dispatch(
+                            callable,
+                            GpuRuntime.CallableKind.valueOf(fn.kind().name()),
+                            normalized));
+                } catch (GpuRuntime.GpuException failure) {
+                    throw new OresGuestException(failure.getMessage());
+                }
+            }
             if (fn.actorKind() == Ast.ActorKind.NONE) {
-                return fn.gpu()
-                        ? callGpuFunction(fn, normalized, null)
-                        : callFunctionBody(fn, normalized);
+                return callFunctionBody(fn, normalized);
             }
 
             ActorRuntime.ActorKind runtimeKind = switch (fn.actorKind()) {
@@ -293,35 +304,7 @@ public final class OresEvalRootNode extends RootNode {
             return context.actors().invoke(
                     runtimeKind,
                     normalized,
-                    (delivered, actorContext) -> fn.gpu()
-                            ? callGpuFunction(fn, delivered, actorContext)
-                            : callFunctionBody(fn, delivered));
-        }
-
-        private Object callGpuFunction(
-                Ast.FunctionDecl fn,
-                List<?> arguments,
-                ActorRuntime.ActorContext<?> actorContext) {
-            String module = functionOwners.getOrDefault(fn, Parser.ROOT_MODULE);
-            String callable = module + "." + fn.name();
-            context.requireCapability(IsolatePolicy.Capability.GPU, "gpu callable " + callable);
-            try {
-                Object result = actorContext == null
-                        ? context.gpu().dispatch(
-                                callable,
-                                GpuRuntime.CallableKind.valueOf(fn.kind().name()),
-                                arguments)
-                        : context.gpu().dispatchActor(
-                                callable,
-                                GpuRuntime.CallableKind.valueOf(fn.kind().name()),
-                                arguments,
-                                actorContext.self().id().value(),
-                                actorContext.kind().name(),
-                                GpuRuntime.Placement.any());
-                return thawGpuValue(result);
-            } catch (GpuRuntime.GpuException failure) {
-                throw new OresGuestException(failure.getMessage());
-            }
+                    (delivered, actorContext) -> callFunctionBody(fn, delivered));
         }
 
         private List<?> normalizeFunctionArguments(Ast.FunctionDecl fn, List<?> args) {
