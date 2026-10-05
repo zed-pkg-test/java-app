@@ -320,17 +320,19 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
 
         Object observed = state.get();
         if (observed != PENDING) {
+            // A registration racing with (or following) settlement must not
+            // leave an already-claimed callback strongly retained in the
+            // pending waiter queue. Removing before notification is race-safe:
+            // if settle() already polled it, remove is a no-op and the claimed
+            // bit still guarantees exactly-once callback delivery.
+            waiters.remove(waiter);
             notifyWaiter(waiter, observed);
         }
         return registration;
     }
 
     int pendingRuntimeWaiterCount() {
-        int count = 0;
-        for (Waiter<T> waiter : waiters) {
-            if (!waiter.claimed.get()) count++;
-        }
-        return count;
+        return waiters.size();
     }
 
     @Override
