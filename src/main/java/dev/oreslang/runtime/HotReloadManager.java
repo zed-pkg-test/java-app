@@ -274,10 +274,7 @@ public final class HotReloadManager implements AutoCloseable {
             String sourceText,
             Ast.EntryExportDecl entryExport,
             String actorEntryAbiDigest) {
-        requireCompatibleCandidate(
-                activeByCodeUnit.get(codeUnitId),
-                codeUnitId,
-                actorEntryAbiDigest);
+        requireCompatibleWithLiveGenerations(codeUnitId, actorEntryAbiDigest);
         enforceGenerationQuota(codeUnitId);
 
         long id = PROCESS_GENERATION_SEQUENCE.incrementAndGet();
@@ -417,17 +414,17 @@ public final class HotReloadManager implements AutoCloseable {
 
     /**
      * Internal actor birth pin. Generation startup code may create actors before
-     * activation, and already-running old actors may finish their lifecycle
-     * while the generation is draining. No new actor may be born from a staged,
-     * failed, or closed generation.
+     * activation. Once draining begins, existing actor/request leases remain
+     * valid, but the generation is closed to new actor births so drain converges
+     * monotonically. No new actor may be born from a staged, draining, failed,
+     * or closed generation.
      */
     private synchronized GenerationLease acquireActorLease(Generation generation) {
         ensureOpen();
         requireOwned(generation);
         GenerationState state = generation.state();
         if (state != GenerationState.STARTED
-                && state != GenerationState.ACTIVE
-                && state != GenerationState.DRAINING) {
+                && state != GenerationState.ACTIVE) {
             throw new IllegalStateException(
                     "generation " + generation.id()
                             + " cannot admit an actor while " + state);
@@ -603,6 +600,20 @@ public final class HotReloadManager implements AutoCloseable {
      * role changes and actor ABI drift require a future explicit migration path;
      * they can never happen as an ordinary hot swap.
      */
+    private void requireCompatibleWithLiveGenerations(
+            String codeUnitId,
+            String nextActorEntryAbiDigest) {
+        for (Generation generation : generations.values()) {
+            if (!generation.codeUnitId().equals(codeUnitId)) continue;
+            GenerationState state = generation.state();
+            if (state == GenerationState.CLOSED || state == GenerationState.FAILED) continue;
+            requireCompatibleCandidate(
+                    generation,
+                    codeUnitId,
+                    nextActorEntryAbiDigest);
+        }
+    }
+
     private static void requireCompatibleReplacement(
             Generation previous,
             Generation next) {

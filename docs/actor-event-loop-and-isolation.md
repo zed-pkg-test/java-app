@@ -79,7 +79,9 @@ For hot-loaded persistent actors, the entry ABI is verified before generation
 allocation and hashed from actor identity, isolation domain, constructor
 boundary, `Actor<Message, Reply, Error>`, and `receive(Message): void`.
 Ordinary activation refuses actor ABI drift; existing actors remain pinned to
-their birth generation while it drains.
+their birth generation while it drains. Draining generations keep existing
+leases valid but cannot admit new actor births, so reclamation converges
+monotonically.
 
 ## Private / isoactors
 

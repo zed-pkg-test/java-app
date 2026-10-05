@@ -877,7 +877,8 @@ Actor cells may receive a policy stricter than their parent runtime. Their mailb
 7. activation atomically publishes it only if its actor ABI matches the
    currently active generation for that code-unit id;
 8. the previous compatible generation may remain pinned while existing
-   requests/actors drain, then is retired.
+   requests/actors drain, but a DRAINING generation admits no new actor births;
+   after the final lease releases, it is retired.
 
 Each generation receives a process-monotonic id, SHA-256 source digest, explicit
 entry metadata, and (for persistent actors) a versioned SHA-256 ABI digest.

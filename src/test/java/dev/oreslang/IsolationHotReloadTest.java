@@ -368,6 +368,56 @@ final class IsolationHotReloadTest {
     }
 
     @Test
+    void drainingActorGenerationStillPinsItsAbiUntilFinalLeaseRelease() throws Exception {
+        IsolatePolicy policy = IsolatePolicy.developer();
+        String source = """
+                define class Worker extends Actor<int, String, String> as
+                  pub receive(message: int): void { return; }
+                end
+                export entry Worker;
+                """;
+        ActorEntryContract contract = ActorEntryContract.of(
+                "Worker",
+                Ast.ActorKind.SHARED,
+                List.of(),
+                Ast.TypeRef.simple("int"),
+                Ast.TypeRef.simple("String"),
+                Ast.TypeRef.simple("String"));
+
+        try (HotReloadManager hot =
+                     new HotReloadManager(policy, ExecutionProfile.serverJit())) {
+            var generation = hot.loadActorEntry("worker.ores", source, contract);
+            generation.start();
+            generation.activate();
+
+            HotReloadManager.GenerationLease lease = hot.pinActive("worker.ores");
+            hot.retire(generation.id());
+            assertEquals(HotReloadManager.GenerationState.DRAINING, generation.state());
+            assertNull(hot.active("worker.ores"));
+
+            IllegalStateException roleChange = assertThrows(
+                    IllegalStateException.class,
+                    () -> hot.loadEntry("worker.ores", """
+                            pub fnc run() -> void { return; }
+                            export entry run;
+                            """));
+            assertTrue(roleChange.getMessage().contains("persistent-actor"));
+            assertEquals(1, hot.liveGenerations(),
+                    "draining actor generation must continue to pin its ABI");
+
+            lease.close();
+            long deadline = System.nanoTime()
+                    + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+            while ((!generation.closed() || hot.liveGenerations() != 0)
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(1);
+            }
+            assertTrue(generation.closed());
+            assertEquals(0, hot.liveGenerations());
+        }
+    }
+
+    @Test
     void actorEntryIsolationMustMatchRuntimeExecutionDomain() {
         IsolatePolicy policy = IsolatePolicy.developer();
         String source = """

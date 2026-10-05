@@ -6796,7 +6796,16 @@ public final class ActorRuntime implements AutoCloseable {
                         "no suspended typed actor protocol request is active");
             }
             Object prepared = prepareProtocolReply(value);
-            if (!protocol.reply().completeFromRuntime(prepared)) {
+            OresFuture<Object> reply = protocol.reply();
+            if (reply.isCancelled()) {
+                // Reply cancellation revokes only the caller's observation
+                // capability. It never rewinds or fail-stops the actor turn.
+                return;
+            }
+            if (!reply.completeFromRuntime(prepared)) {
+                // Cancellation may race the completion CAS after the check
+                // above; that race is benign for actor execution.
+                if (reply.isCancelled()) return;
                 throw new IllegalStateException(
                         "typed actor protocol reply was already settled");
             }
