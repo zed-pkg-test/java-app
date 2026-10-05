@@ -64,8 +64,10 @@ public final class OresEvalRootNode extends RootNode {
             return null;
         }
         if (isControl(arguments, INIT_ONLY_COMMAND)) {
+            // Legacy host-control spelling retained as a link-only no-op.
+            // Oreslang has no implicit file/module/class init lifecycle.
             current.link();
-            return current.initialize();
+            return null;
         }
         if (isControl(arguments, MAIN_ONLY_COMMAND)) {
             current.link();
@@ -78,7 +80,6 @@ public final class OresEvalRootNode extends RootNode {
         // entering Graal; direct embedders retain ownership of their entry
         // thread unless they opt into ActorRuntime.executeProcessRoot(...).
         current.link();
-        current.initialize();
         return current.executeMain(arguments);
     }
 
@@ -109,7 +110,6 @@ public final class OresEvalRootNode extends RootNode {
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
-        private boolean initialized;
 
         private Evaluator(Ast.Program program, OresContext context, String codeUnitId) {
             this.program = program;
@@ -170,14 +170,6 @@ public final class OresEvalRootNode extends RootNode {
             context.registerLinkedCodeUnit(codeUnitId, this);
         }
 
-        private synchronized Object initialize() {
-            if (initialized) return null;
-            // Mark before invocation so a recursive path cannot run init twice.
-            initialized = true;
-            Ast.FunctionDecl init = functions.get(Parser.ROOT_MODULE + ".init");
-            if (init == null) return null;
-            return callFunction(init, List.of());
-        }
 
         private Object executeMain(Object[] arguments) {
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
@@ -278,23 +270,25 @@ public final class OresEvalRootNode extends RootNode {
                     .map(context.actors()::prepareSourceSharedActorInput)
                     .toList();
 
-            Ast.MethodDecl receive = findMethod(
-                    klass,
-                    "receive",
-                    1,
-                    new LinkedHashSet<>());
-            if (receive == null
-                    || receive.isStatic()
-                    || receive.visibility() != Ast.Visibility.PUBLIC) {
-                throw new IllegalStateException(
-                        "actor class '" + klass.name()
-                                + "' has no public receive(message) method");
-            }
-
-            return context.actors().spawnSourceSharedActor(actorContext -> {
+            return context.actors().spawnSourceSharedProtocolActor(actorContext -> {
                 OresObject actor = instantiateActorState(klass, prepared);
-                return (message, turnContext) ->
-                        callMethod(actor, receive, List.of(message));
+                return (methodName, arguments, turnContext) -> {
+                    Ast.MethodDecl endpoint = findMethod(
+                            klass,
+                            methodName,
+                            arguments.size(),
+                            new LinkedHashSet<>());
+                    if (endpoint == null
+                            || endpoint.isStatic()
+                            || endpoint.visibility() != Ast.Visibility.PUBLIC
+                            || endpoint.name().equals("constructor")) {
+                        throw new IllegalArgumentException(
+                                "actor class '" + klass.name()
+                                        + "' has no public protocol method '"
+                                        + methodName + "' with arity " + arguments.size());
+                    }
+                    return callMethod(actor, endpoint, arguments);
+                };
             });
         }
 
@@ -587,19 +581,13 @@ public final class OresEvalRootNode extends RootNode {
                                 requireZero(args, "ActorRef.is_alive");
                                 yield ref.isAlive();
                             }
-                            case "send" -> {
-                                requireOne(args, "ActorRef.send");
-                                @SuppressWarnings("unchecked")
-                                ActorRuntime.ActorRef<Object> typed =
-                                        (ActorRuntime.ActorRef<Object>) ref;
-                                typed.send(args.getFirst());
-                                yield null;
-                            }
-                            case "receive", "mailbox" -> throw new IllegalArgumentException(
-                                    "actor receive/mailbox is runtime-owned; use ActorRef.send(message)");
-                            default -> throw new IllegalArgumentException(
-                                    "unknown ActorRef behavioral operation '" + methodCall.member()
-                                            + "'; persistent actors expose send(message)");
+                            case "send", "mailbox" -> throw new IllegalArgumentException(
+                                    "raw ActorRef mailbox operations are runtime-private; "
+                                            + "invoke a declared typed actor protocol method instead");
+                            default -> context.actors().invokeSourceProtocol(
+                                    ref,
+                                    methodCall.member(),
+                                    args);
                         };
                     }
                     Object callee = member(receiver, methodCall.member());
@@ -766,18 +754,12 @@ public final class OresEvalRootNode extends RootNode {
                         requireZero(args, "ActorRef.is_alive");
                         return ref.isAlive();
                     };
-                    case "send" -> (Invokable) args -> {
-                        requireOne(args, "ActorRef.send");
-                        @SuppressWarnings("unchecked")
-                        ActorRuntime.ActorRef<Object> typed =
-                                (ActorRuntime.ActorRef<Object>) ref;
-                        typed.send(args.getFirst());
-                        return null;
-                    };
-                    case "receive", "mailbox" -> throw new IllegalArgumentException(
-                            "actor receive/mailbox is runtime-owned; use ActorRef.send(message)");
+                    case "send", "mailbox" -> throw new IllegalArgumentException(
+                            "raw ActorRef mailbox operations are runtime-private; "
+                                    + "invoke a declared typed actor protocol method instead");
                     default -> throw new IllegalArgumentException(
-                            "unknown ActorRef member '" + name + "'");
+                            "actor protocol methods are not first-class values; invoke '"
+                                    + name + "(...)' directly through the ActorRef");
                 };
             }
             if (receiver instanceof OresFuture<?> future) {
@@ -1146,7 +1128,7 @@ public final class OresEvalRootNode extends RootNode {
             if (!(target instanceof Evaluator evaluator)) {
                 throw new IllegalStateException(
                         "import target '" + imported.path() + "' for '" + codeUnitId
-                                + "' is not linked yet; all members of an import cycle must be linked before init");
+                                + "' is not linked yet; all members of an import cycle must be linked before cross-unit use");
             }
             return evaluator;
         }
@@ -1641,8 +1623,17 @@ public final class OresEvalRootNode extends RootNode {
                 return map.get(name);
             }
             if (value instanceof OresObject object) {
-                if (!object.fields.containsKey(name)) throw new IllegalArgumentException("object destructure missing field " + name);
-                return object.fields.get(name);
+                if (!object.fields.containsKey(name)) {
+                    throw new IllegalArgumentException(
+                            "object destructure missing field " + name);
+                }
+                Object field = object.fields.get(name);
+                if (field == UninitializedActorField.INSTANCE) {
+                    throw new IllegalStateException(
+                            "actor/class field '" + object.klass.name() + "." + name
+                                    + "' was destructured before initialization");
+                }
+                return field;
             }
             throw new IllegalArgumentException("value is not object-destructurable");
         }
