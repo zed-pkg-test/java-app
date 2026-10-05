@@ -4,6 +4,8 @@ import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Lexer;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.parser.Token;
+import dev.oreslang.runtime.ExecutionProfile;
+import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.types.TypeChecker;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
@@ -11,6 +13,8 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -393,6 +397,57 @@ final class CallableScopeEffectKeywordTest {
                   return;
                 }
                 """));
+    }
+
+    @Test
+    void trapDoesNotConsumeSchedulerCancellation() throws Exception {
+        IsolatePolicy policy = IsolatePolicy.developer()
+                .withCapabilities(IsolatePolicy.Capability.JAVA_INTEROP);
+        AtomicReference<Throwable> observed = new AtomicReference<>();
+
+        Thread worker = Thread.ofPlatform()
+                .name("ores-trap-cancellation-test")
+                .unstarted(() -> {
+                    Context context = policy.restrictedContextBuilder(
+                            ExecutionProfile.serverJit(),
+                            Set.of("dev.oreslang.TrapCancellationTestHelper"))
+                            .build();
+                    try {
+                        context.eval(OresLanguage.ID, """
+                                import fnc interruptCurrentThread
+                                  from "java:dev.oreslang.TrapCancellationTestHelper";
+
+                                trap fnc guarded(): int {
+                                  interruptCurrentThread();
+                                  loop {
+                                    return 1;
+                                  }
+                                }
+
+                                pub fnc main(): void {
+                                  guarded();
+                                  return;
+                                }
+                                """);
+                    } catch (Throwable failure) {
+                        observed.set(failure);
+                    } finally {
+                        // Clear the worker's flag before closing host resources.
+                        Thread.interrupted();
+                        context.close();
+                    }
+                });
+
+        worker.start();
+        worker.join(10_000);
+        assertFalse(worker.isAlive(), "cancellation regression worker did not terminate");
+
+        Throwable failure = observed.get();
+        assertNotNull(failure, "trap incorrectly converted scheduler cancellation into a normal result");
+        String message = failure.toString();
+        assertTrue(message.contains("actor execution interrupted")
+                        || message.contains("CancellationException"),
+                message);
     }
 
     @Test
