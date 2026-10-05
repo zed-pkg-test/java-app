@@ -7,7 +7,6 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
-import java.util.function.Predicate;
 
 /**
  * Native rx-ores observable substrate.
@@ -17,11 +16,11 @@ import java.util.function.Predicate;
  * {@link OresFuture}, and therefore composes with the exact same scheduler
  * suspension primitive as Oreslang {@code await}.</p>
  *
- * <p>Guest transform callbacks are exposed only through scheduler-bound
- * operators such as {@link #map(OresScheduler, Function)} and
- * {@link #filter(OresScheduler, Predicate)}. The callback itself executes as an
- * OresScheduler task turn; producer/timer/I/O/JNI completion threads only make
- * that task runnable and never execute guest transform code directly.</p>
+ * <p>This class deliberately does not expose Consumer/Function callback-style
+ * subscribe/map/filter APIs yet. Guest callbacks must execute on the owning Ores
+ * scheduler domain, not on whichever timer/I/O/JNI thread happens to settle a
+ * Future. Higher-order operators will be enabled once source lowering can bind
+ * those lambdas to resumable Ores tasks safely.</p>
  *
  * <p><strong>Linking boundary:</strong> rx-ores is a core library, not an
  * implicit runtime dependency. Base OresVM/runtime initialization must not
@@ -114,160 +113,6 @@ public abstract class OresObservable<T> {
         };
     }
 
-
-    /**
-     * Transform each element on the supplied Ores scheduler.
-     *
-     * <p>The mapper is never invoked from an upstream completion thread. Each
-     * pull awaits the upstream Future through an OresScheduler task, then runs
-     * the mapper only after that task is resumed on the scheduler.</p>
-     */
-    public final <R> OresObservable<R> map(
-            OresScheduler scheduler,
-            Function<? super T, ? extends R> mapper) {
-        Objects.requireNonNull(scheduler, "scheduler");
-        Objects.requireNonNull(mapper, "mapper");
-
-        OresObservable<T> upstream = this;
-        return new OresObservable<>() {
-            @Override
-            public OresSubscription<R> subscribe() {
-                OresSubscription<T> inner = upstream.subscribe();
-
-                return new OresSubscription<>() {
-                    @Override
-                    protected OresFuture<OresNotification<R>> nextFromRuntime() {
-                        OresFuture<OresNotification<R>> task = scheduler.start(
-                                new OresScheduler.Task<>() {
-                                    private boolean awaiting;
-
-                                    @Override
-                                    public OresScheduler.Step<OresNotification<R>> resume(
-                                            OresScheduler.Resume resume) {
-                                        if (!awaiting) {
-                                            if (!resume.initial()) {
-                                                throw new IllegalStateException(
-                                                        "rx map task resumed before its first await");
-                                            }
-                                            awaiting = true;
-                                            return OresScheduler.await(inner.next());
-                                        }
-
-                                        if (resume.initial()) {
-                                            throw new IllegalStateException(
-                                                    "rx map task resumed as initial after awaiting upstream");
-                                        }
-                                        if (resume.failure() != null) {
-                                            throw propagate(resume.failure());
-                                        }
-
-                                        @SuppressWarnings("unchecked")
-                                        OresNotification<T> notification =
-                                                (OresNotification<T>) resume.value();
-                                        if (notification == null) {
-                                            throw new IllegalStateException(
-                                                    "rx map upstream returned null notification");
-                                        }
-                                        if (notification.isComplete()) {
-                                            return OresScheduler.done(
-                                                    OresNotification.complete());
-                                        }
-
-                                        R mapped = mapper.apply(notification.value());
-                                        return OresScheduler.done(
-                                                OresNotification.next(mapped));
-                                    }
-                                });
-
-                        return bindOperatorCancellation(task, inner);
-                    }
-
-                    @Override
-                    protected void cancelFromRuntime() {
-                        inner.cancel();
-                    }
-                };
-            }
-        };
-    }
-
-    /**
-     * Keep only elements whose predicate returns true, evaluating the predicate
-     * on the supplied Ores scheduler.
-     *
-     * <p>A rejected element yields through another scheduler await before the
-     * next predicate evaluation. Even an immediately available cold source
-     * therefore cannot recurse inline or monopolize a producer thread.</p>
-     */
-    public final OresObservable<T> filter(
-            OresScheduler scheduler,
-            Predicate<? super T> predicate) {
-        Objects.requireNonNull(scheduler, "scheduler");
-        Objects.requireNonNull(predicate, "predicate");
-
-        OresObservable<T> upstream = this;
-        return new OresObservable<>() {
-            @Override
-            public OresSubscription<T> subscribe() {
-                OresSubscription<T> inner = upstream.subscribe();
-
-                return new OresSubscription<>() {
-                    @Override
-                    protected OresFuture<OresNotification<T>> nextFromRuntime() {
-                        OresFuture<OresNotification<T>> task = scheduler.start(
-                                new OresScheduler.Task<>() {
-                                    private boolean awaiting;
-
-                                    @Override
-                                    public OresScheduler.Step<OresNotification<T>> resume(
-                                            OresScheduler.Resume resume) {
-                                        if (!awaiting) {
-                                            if (!resume.initial()) {
-                                                throw new IllegalStateException(
-                                                        "rx filter task resumed before its first await");
-                                            }
-                                            awaiting = true;
-                                            return OresScheduler.await(inner.next());
-                                        }
-
-                                        if (resume.initial()) {
-                                            throw new IllegalStateException(
-                                                    "rx filter task resumed as initial after awaiting upstream");
-                                        }
-                                        if (resume.failure() != null) {
-                                            throw propagate(resume.failure());
-                                        }
-
-                                        @SuppressWarnings("unchecked")
-                                        OresNotification<T> notification =
-                                                (OresNotification<T>) resume.value();
-                                        if (notification == null) {
-                                            throw new IllegalStateException(
-                                                    "rx filter upstream returned null notification");
-                                        }
-                                        if (notification.isComplete()) {
-                                            return OresScheduler.done(notification);
-                                        }
-                                        if (predicate.test(notification.value())) {
-                                            return OresScheduler.done(notification);
-                                        }
-
-                                        return OresScheduler.await(inner.next());
-                                    }
-                                });
-
-                        return bindOperatorCancellation(task, inner);
-                    }
-
-                    @Override
-                    protected void cancelFromRuntime() {
-                        inner.cancel();
-                    }
-                };
-            }
-        };
-    }
-
     /**
      * Emit at most {@code limit} items, then cancel the upstream subscription.
      */
@@ -348,60 +193,6 @@ public abstract class OresObservable<T> {
         });
 
         return result;
-    }
-
-
-    private static RuntimeException propagate(Throwable failure) {
-        Throwable unwrapped = OresFuture.unwrap(failure);
-        if (unwrapped instanceof RuntimeException runtime) return runtime;
-        if (unwrapped instanceof Error error) throw error;
-        return new RuntimeException(unwrapped);
-    }
-
-    /**
-     * Tie one operator task Future to its upstream subscription so cancelling a
-     * pull cannot leave an outstanding upstream next() permanently armed.
-     */
-    private static <T> OresFuture<T> bindOperatorCancellation(
-            OresFuture<T> task,
-            OresSubscription<?> upstream) {
-        Objects.requireNonNull(task, "task");
-        Objects.requireNonNull(upstream, "upstream");
-
-        AtomicReference<OresFuture.RuntimeWaiterRegistration> waiter =
-                new AtomicReference<>();
-
-        Runnable detach = () -> {
-            OresFuture.RuntimeWaiterRegistration registration =
-                    waiter.getAndSet(null);
-            if (registration != null) registration.detach();
-        };
-
-        OresFuture<T> exposed = new OresFuture<>(() -> {
-            detach.run();
-            task.cancel(true);
-            upstream.cancel();
-        });
-
-        OresFuture.RuntimeWaiterRegistration registration =
-                task.whenCompleteRuntimeCancellable((value, failure) -> {
-                    try {
-                        if (exposed.isDone()) return;
-                        if (failure == null) {
-                            exposed.completeFromRuntime(value);
-                        } else {
-                            exposed.failFromRuntime(OresFuture.unwrap(failure));
-                        }
-                    } finally {
-                        detach.run();
-                    }
-                });
-
-        waiter.set(registration);
-        if (exposed.isDone()) {
-            detach.run();
-        }
-        return exposed;
     }
 
     /**
