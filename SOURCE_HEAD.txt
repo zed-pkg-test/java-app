@@ -1,0 +1,4 @@
+source_repo=ores-truffle-oreslang/oreslang-source.java
+source_commit=9cab2fa3efb78db10ae54fe0805cd85724473b3d
+source_tree=c0611d7f1d40e466b095f998aea48d9eee93e453
+validation=all source blobs except this marker are exact Git-SHA mirrors
