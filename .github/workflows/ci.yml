@@ -56,6 +56,12 @@ jobs:
         run: mvn -B -ntp -Pnative-aot -DskipTests package
       - name: Run AOT image
         run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+      - name: Run AOT stdlib rest destructuring suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/ores-aot --mode=aot --platform=linux src/test/oreslang/stdlib/destructuring_rest.ores | tee /tmp/rest-destructuring-aot.out
+          grep -F "ORES_TEST|SUMMARY|total=5|passed=5|failed=0|skipped=0|filtered=0" /tmp/rest-destructuring-aot.out
       - name: Run AOT proper tail-call stress
         run: |
           ./target/ores-aot --mode=aot --platform=linux examples/proper-tail-call.ores | tee /tmp/ores-aot-tail.out
