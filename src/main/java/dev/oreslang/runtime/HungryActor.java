@@ -11,14 +11,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Explicit CPU-bound actor that owns one dedicated platform thread for its
- * entire lifetime.
+ * Explicit CPU-bound actor that owns one dedicated native pthread carrier for
+ * its entire lifetime.
  *
  * <p>This is intentionally different from ordinary Oreslang actors, which are
- * multiplexed over bounded dispatchers. A HungryActor is an opt-in escape hatch
- * for sustained CPU work, thread-affine native runtimes, or workloads whose
- * progress contract requires reserving one OS carrier until the actor releases
- * it or terminates. It must therefore be used sparingly.</p>
+ * multiplexed over bounded native dispatcher pools. A HungryActor is an opt-in
+ * escape hatch for sustained CPU work, thread-affine native runtimes, or
+ * workloads whose progress contract requires reserving one OS carrier until
+ * the actor releases it or terminates. It must therefore be used sparingly.</p>
  *
  * <p>The mailbox remains bounded and messages cross the boundary through
  * {@link ActorRuntime#freeze(Object)}. Execution is serial. Stop/release is
@@ -50,7 +50,10 @@ public final class HungryActor<M> implements AutoCloseable {
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private final CountDownLatch termination = new CountDownLatch(1);
     private final Object lifecycleLock = new Object();
-    private final Thread worker;
+    private final NativeCarrierExecutor carrier;
+    private final AtomicReference<Thread> worker = new AtomicReference<>();
+    private final AtomicReference<Long> nativeThreadId = new AtomicReference<>(0L);
+    private final String carrierThreadName;
     private final Context<M> context = new Context<>() {
         @Override
         public HungryActor<M> self() {
@@ -90,11 +93,15 @@ public final class HungryActor<M> implements AutoCloseable {
         this.behavior = Objects.requireNonNull(behavior, "behavior");
 
         String safeName = sanitizeName(name);
-        this.worker = Thread.ofPlatform()
-                .daemon(true)
-                .name("ores-hungry-actor-" + safeName + "-" + id)
-                .unstarted(this::runLoop);
-        this.worker.start();
+        String prefix = "ores-hungry-actor-" + safeName + "-" + id + "-";
+        this.carrierThreadName = prefix + "1";
+        this.carrier = new NativeCarrierExecutor(1, 1, 1, prefix);
+        try {
+            this.carrier.execute(this::runLoop);
+        } catch (RuntimeException | Error failure) {
+            this.carrier.shutdownNow();
+            throw failure;
+        }
     }
 
     public UUID id() {
@@ -102,15 +109,25 @@ public final class HungryActor<M> implements AutoCloseable {
     }
 
     public String threadName() {
-        return worker.getName();
+        Thread active = worker.get();
+        return active == null ? carrierThreadName : active.getName();
+    }
+
+    public long nativeThreadId() {
+        return nativeThreadId.get();
+    }
+
+    public boolean isNativeCarrier() {
+        return nativeThreadId.get() != 0L;
     }
 
     public boolean isVirtualCarrier() {
-        return worker.isVirtual();
+        Thread active = worker.get();
+        return active != null && active.isVirtual();
     }
 
     public boolean isAlive() {
-        return worker.isAlive() && !terminated.get();
+        return !terminated.get() && !carrier.isTerminated();
     }
 
     public boolean stopRequested() {
@@ -124,7 +141,6 @@ public final class HungryActor<M> implements AutoCloseable {
     /**
      * Enqueue one frozen message without ever blocking the caller.
      */
-    @SuppressWarnings("unchecked")
     public void send(M message) {
         Object frozen = ActorRuntime.freeze(message);
         synchronized (lifecycleLock) {
@@ -139,7 +155,7 @@ public final class HungryActor<M> implements AutoCloseable {
     }
 
     /**
-     * Relinquish the dedicated thread once the current callback unwinds.
+     * Relinquish the dedicated pthread once the current callback unwinds.
      */
     public void release() {
         requestStop();
@@ -150,13 +166,17 @@ public final class HungryActor<M> implements AutoCloseable {
     }
 
     private void requestStop() {
-        boolean interruptWorker;
         synchronized (lifecycleLock) {
             if (!stopRequested.compareAndSet(false, true)) return;
-            interruptWorker = Thread.currentThread() != worker;
         }
-        if (interruptWorker) {
-            worker.interrupt();
+
+        if (carrier.isCurrentCarrierThread()) {
+            // Do not inject an interrupt into the currently executing actor
+            // callback. The run loop observes stopRequested after it unwinds.
+            carrier.requestShutdownFromCarrier();
+        } else {
+            // Wakes a carrier blocked in mailbox.take() without pthread_cancel.
+            carrier.shutdownNow();
         }
     }
 
@@ -164,9 +184,9 @@ public final class HungryActor<M> implements AutoCloseable {
      * Cooperative cancellation point for long CPU-bound loops.
      */
     public void schedulerSafepoint() {
-        if (Thread.currentThread() != worker) {
+        if (!carrier.isCurrentCarrierThread()) {
             throw new IllegalStateException(
-                    "HungryActor schedulerSafepoint must run on its dedicated thread");
+                    "HungryActor schedulerSafepoint must run on its dedicated native carrier");
         }
         if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
             throw new CancellationException("HungryActor " + id + " is stopping");
@@ -182,6 +202,16 @@ public final class HungryActor<M> implements AutoCloseable {
 
     @SuppressWarnings("unchecked")
     private void runLoop() {
+        worker.set(Thread.currentThread());
+        nativeThreadId.set(NativeCarrierExecutor.currentNativeThreadId());
+        if (!carrier.isCurrentCarrierThread() || nativeThreadId.get() == 0L) {
+            failure.compareAndSet(
+                    null,
+                    new IllegalStateException(
+                            "HungryActor must execute on a JNI pthread carrier"));
+            stopRequested.set(true);
+        }
+
         try {
             while (!stopRequested.get()) {
                 final Object raw;
@@ -191,7 +221,7 @@ public final class HungryActor<M> implements AutoCloseable {
                     if (stopRequested.get()) break;
                     Thread.currentThread().interrupt();
                     throw new CancellationException(
-                            "HungryActor " + id + " carrier interrupted");
+                            "HungryActor " + id + " native carrier interrupted");
                 }
 
                 try {
@@ -214,6 +244,9 @@ public final class HungryActor<M> implements AutoCloseable {
                 mailbox.clear();
                 terminated.set(true);
             }
+            if (!carrier.isShutdown() && carrier.isCurrentCarrierThread()) {
+                carrier.requestShutdownFromCarrier();
+            }
             termination.countDown();
         }
     }
@@ -222,10 +255,17 @@ public final class HungryActor<M> implements AutoCloseable {
     public void close() {
         release();
         boolean interrupted = false;
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLOSE_WAIT_MILLIS);
         try {
             if (!termination.await(CLOSE_WAIT_MILLIS, TimeUnit.MILLISECONDS)) {
                 throw new IllegalStateException(
-                        "HungryActor " + id + " did not release its dedicated thread");
+                        "HungryActor " + id + " did not release its dedicated native carrier");
+            }
+            long remaining = deadline - System.nanoTime();
+            if (remaining > 0
+                    && !carrier.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                throw new IllegalStateException(
+                        "HungryActor " + id + " native carrier did not terminate");
             }
         } catch (InterruptedException waitInterrupted) {
             interrupted = true;
