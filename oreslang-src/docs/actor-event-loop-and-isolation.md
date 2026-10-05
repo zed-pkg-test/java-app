@@ -57,25 +57,26 @@ and deadlines. Arbitrary trusted native/JVM stacks are never asynchronously
 suspended at an unsafe instruction. A message that ignores safepoints is handled
 by the watchdog/fail-stop path rather than unsafe thread suspension.
 
-## Shared actors: typed protocol over one runtime mailbox
+## Shared actors: one typed receive contract over one runtime mailbox
 
-Shared actors expose a typed public method surface while retaining exactly one
-runtime-owned mailbox and one active execution lease.
+Shared actors retain exactly one runtime-owned mailbox, one active execution
+lease, and one public application ingress: `receive(message): void`.
 
 A shared actor may declare:
 
 - private mailbox-owned state;
 - private helper methods called directly on `self` during a turn;
-- one or more public instance methods forming its typed protocol.
+- exactly one public `receive(message): void` method.
 
-The compiler lowers those public methods into a hidden tagged mailbox
-dispatcher. External `ActorRef<Protocol>.method(...)` calls enqueue typed
-requests; they do not concurrently invoke the mutable actor object. Protocol
-methods return `Future<T>` through the reference projection.
+External code holds `ActorRef<ConcreteActor>` and enqueues admitted messages
+with `send(message)`. Guest code cannot call `receive` directly, obtain a raw
+mailbox, or synthesize arbitrary `ActorRef.method(...)` RPC calls. Replies, when
+needed, travel through explicit bounded response capabilities carried by the
+message contract.
 
-Public static actor functions remain rejected. Protocol methods are not
-first-class bound method objects; use an explicit closure when callback capture
-is intended.
+Public static actor functions remain rejected. Actor instance methods are not
+first-class bound method objects; use an explicit closure only for ordinary
+non-actor values when callback capture is intended.
 
 This preserves semantic isolation even though the backing address space is
 shared: mutable actor-owned state is reachable only while that actor holds its
