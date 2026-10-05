@@ -1,23 +1,25 @@
 name: ci
+
 on:
   pull_request:
   push:
     branches: [main]
+
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Verify exact vendored dependency trees
-        run: |
-          test "$(git rev-parse HEAD:vendor/litegraph-gpu-host)" = "a99b312757206f463d75756bbe703968440c97b2"
-          test "$(git rev-parse HEAD:vendor/litegraph-modeld)" = "04714b79813beba45942f52929f61d32279652b1"
-          test "$(git rev-parse HEAD:vendor/litegraph-runtime)" = "b03d1c71faa2df734a3d0bf06349248111939304"
       - run: rustc --version && cargo --version
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings

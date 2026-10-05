@@ -1,28 +1,28 @@
-# litegraph-node
+# litegraph-runtime
 
-Per-machine daemon and local authority for allocatable compute resources.
+Per-invocation execution runtime and capability boundary.
 
 LiteGraph is a heterogeneous compute actor platform: CPU code owns control, networking, actor supervision and ordinary OS capabilities; suitable numerical work may be dispatched to one or more GPUs. A machine is therefore not classified as simply "CPU" or "GPU"—CPU, RAM, accelerator devices and VRAM are independently schedulable resources.
 
 ## Responsibilities
 
-- CPU/RAM and accelerator discovery.
-- device/lane health and allocatable capacity.
-- local invocation supervision.
-- health/snapshot APIs and standalone workstation mode.
+- InvocationActor lifecycle, deadlines and cancellation.
+- request-local memory and output ownership.
+- guest-engine adapters and opaque host capabilities.
+- CPU host phases and accelerator dispatch through trusted clients.
 
 ## Explicit non-responsibilities
 
-- cluster-wide scheduling.
-- control-plane tenant CRUD.
-- compiler/toolchain responsibilities.
+- cluster placement policy.
+- raw GPU driver ownership.
+- resident model lifecycle.
 
 Keeping these boundaries explicit is important: moving policy into a lower-level component makes local execution harder to reason about and creates competing authorities.
 
 ## Place in the system
 
 ```text
-scheduler/router → node → runtime/modeld/gpu-host; node → scheduler telemetry
+router → node → runtime/InvocationActor → CPU host work and/or gpu-host/modeld → result
 ```
 
 Shared invariants across the platform:
