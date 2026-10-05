@@ -6,8 +6,8 @@
 
 define module testing
 
-  type TestBody = () -> TestOutcome;
-  type IntProperty = (int) -> TestOutcome;
+  type TestBody = () => TestOutcome;
+  type IntProperty = (int) => TestOutcome;
 
   define class TestOutcome as
     pub val bool passed;
