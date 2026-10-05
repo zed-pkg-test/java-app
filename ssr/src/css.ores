@@ -1,0 +1,49 @@
+// Native CSS generation.
+//
+// Selectors/property names/property values are intentionally marked trusted.
+// Correct CSS escaping/sanitization is a separate context-sensitive problem
+// from HTML escaping and should not be hidden behind a misleading helper.
+
+type Stylesheet = {css: string};
+
+define module css as
+
+  pub fnc empty(): Stylesheet {
+    return obj{css: ""};
+  }
+
+  pub fnc trusted_raw(string css): Stylesheet {
+    return obj{css: css};
+  }
+
+  pub fnc declaration_trusted(string property, string value): Stylesheet {
+    return obj{css: property + ":" + value + ";"};
+  }
+
+  pub fnc declarations(Array<Stylesheet> values): Stylesheet {
+    let string rendered = "";
+
+    for (val value of values) {
+      rendered = rendered + value.css;
+    }
+
+    return obj{css: rendered};
+  }
+
+  pub fnc rule_trusted(string selector, Stylesheet body): Stylesheet {
+    return obj{css: selector + "{" + body.css + "}"};
+  }
+
+  pub fnc media_trusted(string query, Stylesheet body): Stylesheet {
+    return obj{css: "@media " + query + "{" + body.css + "}"};
+  }
+
+  pub fnc join(Array<Stylesheet> values): Stylesheet {
+    return declarations(values);
+  }
+
+  pub fnc render(Stylesheet value): string {
+    return value.css;
+  }
+
+end
