@@ -101,6 +101,50 @@ final class GpuKeywordTest {
     }
 
     @Test
+    void gpuDispatchEnvelopeRejectsMalformedMapperMetadata() {
+        assertThrows(NullPointerException.class,
+                () -> new GpuRuntime.Invocation("x", GpuRuntime.CallableKind.FNC, null));
+        assertThrows(IllegalArgumentException.class,
+                () -> new GpuRuntime.Invocation("   ", GpuRuntime.CallableKind.FNC, java.util.List.of()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new GpuRuntime.Placement(null, null, "x".repeat(257)));
+        assertThrows(NullPointerException.class,
+                () -> GpuRuntime.DispatchContext.actor(null, "PRIVATE", GpuRuntime.Placement.any()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new GpuRuntime.DispatchContext(
+                        GpuRuntime.ExecutionClass.HOST,
+                        java.util.UUID.randomUUID(),
+                        null,
+                        GpuRuntime.Placement.any()));
+    }
+
+    @Test
+    void gpuActorCapabilityAdmissionComposesActorAndGpuPolicies() {
+        String privateGpu = """
+                pub gpu isoactor fnc crunch(int x) => int {
+                  return x;
+                }
+                """;
+        assertThrows(SecurityException.class,
+                () -> OresCompiler.validateForIsolate(privateGpu, IsolatePolicy.strictFaas()));
+        assertDoesNotThrow(() -> OresCompiler.validateForIsolate(
+                privateGpu,
+                IsolatePolicy.strictFaas().withCapabilities(IsolatePolicy.Capability.GPU)));
+
+        String sharedGpu = """
+                pub gpu actor fnc crunch(int x) => int {
+                  return x;
+                }
+                """;
+        IsolatePolicy gpuOnly = IsolatePolicy.strictFaas().withCapabilities(IsolatePolicy.Capability.GPU);
+        assertThrows(SecurityException.class,
+                () -> OresCompiler.validateForIsolate(sharedGpu, gpuOnly));
+        assertDoesNotThrow(() -> OresCompiler.validateForIsolate(
+                sharedGpu,
+                gpuOnly.withCapabilities(IsolatePolicy.Capability.SHARED_MEMORY)));
+    }
+
+    @Test
     void gpuModifierIsRestrictedToNamedTopLevelOrModuleCallables() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 gpu define class Bad
