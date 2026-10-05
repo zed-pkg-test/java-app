@@ -1,0 +1,53 @@
+import module markup from '../src/markup';
+import module html from '../src/html';
+import module css from '../src/css';
+import module htmx from '../src/htmx';
+import module response from '../src/response';
+
+pub routine main(): void {
+  val nested = html.div(
+    html.attrs_join([
+      html.id_trusted("app"),
+      html.class_trusted("card")
+    ]),
+    html.span(
+      html.attrs_empty(),
+      markup.trusted_raw("hello")
+    )
+  );
+  stdio.println(markup.render(nested));
+
+  val sheet = css.rule_trusted(
+    "body",
+    css.declarations([
+      css.declaration_trusted("margin", "0"),
+      css.declaration_trusted("color", "#222")
+    ])
+  );
+  stdio.println(css.render(sheet));
+
+  val button = html.button(
+    html.attrs_join([
+      htmx.post_trusted("/counter"),
+      htmx.target_trusted("#counter"),
+      htmx.outer_html()
+    ]),
+    markup.trusted_raw("Increment")
+  );
+  stdio.println(markup.render(button));
+
+  stdio.println(markup.render(
+    html.input(html.bool_attr_trusted("disabled", true))
+  ));
+  stdio.println(markup.render(
+    html.input(html.bool_attr_trusted("disabled", false))
+  ));
+
+  val missing = response.not_found(
+    html.p(html.attrs_empty(), markup.trusted_raw("missing"))
+  );
+  stdio.println(missing.status);
+  stdio.println(missing.content_type);
+  stdio.println(missing.body);
+  return;
+}
