@@ -78,7 +78,7 @@ final class TupleFixedArraySpreadTest {
                   type Scalar = int | string | bool;
 
                   fnc use(): void {
-                    val FixedArray[Scalar, 3] values = [5, "hi", true];
+                    let FixedArray[Scalar, 3] values = [5, "hi", true];
                     val Scalar first = values[0];
                     values[0] = "changed";
                     val Scalar dynamic = values[1];
@@ -112,7 +112,7 @@ final class TupleFixedArraySpreadTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app as
                   fnc good(): void {
-                    val FixedArray[int, 3] values = [1, 2, 3];
+                    let FixedArray[int, 3] values = [1, 2, 3];
                     values[0] = 9;
                     return;
                   }
