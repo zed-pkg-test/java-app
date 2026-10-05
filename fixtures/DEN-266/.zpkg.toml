@@ -1,0 +1,16 @@
+[package]
+org = "oresoftware"
+name = "ores-middleware-registry-probe"
+version = "0.0.0"
+description = "DEN-266 credential-free registry visibility probe"
+license = "MIT"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/ORESoftware/ores-middleware"
+
+[dependencies]
+"ores-rate-limit/ores-rl-lib-core" = "^0.1.0"
+
+[install]
+dir = ".vendor/.zed"
