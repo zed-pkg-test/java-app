@@ -35,7 +35,7 @@ module_member   = actor_decl
                 | binding_decl ;
 
 visibility      = [ "pub" | "private" ] ;
-callable_modifier = "async" | "nlex" | "pure" | "trap" ;
+callable_modifier = "async" | "generator" | "nlex" | "pure" | "trap" ;
 method_modifier   = "abstract" | "async" ;
 function_expr_modifier = "nlex" | "pure" | "trap" ;
 
@@ -129,6 +129,7 @@ statement       = local_callable_binding
                 | binding_decl
                 | destructure_stmt
                 | return_stmt
+                | yield_stmt
                 | block_stmt
                 | break_stmt
                 | continue_stmt
@@ -142,6 +143,7 @@ statement       = local_callable_binding
                 | expression stmt_terminator ;
 
 return_stmt     = "return" [ expression ] stmt_terminator ;
+yield_stmt      = "yield" expression stmt_terminator ;
 defer_stmt      = "defer" expression stmt_terminator ;
 block_stmt      = "block" block ;
 break_stmt      = "break" stmt_terminator ;
@@ -176,10 +178,13 @@ switch_default  = "default" "->" block ;
 
 try_stmt        = "try" block "catch" "(" IDENT ")" block [ "finally" block ] ;
 
-for_stmt        = "for" "(" for_of_head ")" loop_body
-                | "for" "(" c_for_head ")" loop_body
-                | "for" for_of_head loop_body
-                | "for" c_for_head loop_body ;
+for_stmt        = for_of_stmt | c_for_stmt ;
+for_of_stmt     = "for" [ "await" ]
+                  ( "(" for_of_head ")" | for_of_head )
+                  loop_body ;
+c_for_stmt      = "for"
+                  ( "(" c_for_head ")" | c_for_head )
+                  loop_body ;
 
 c_for_head      = [ for_init ] ";" [ expression ] ";" [ for_update ] ;
 for_init        = binding_kind [ type_ref ] IDENT "=" expression
@@ -371,9 +376,16 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - nlex is an inherited lexical capture barrier; pure is a transitive
      no-external-write effect ceiling; trap is a dynamic invocation boundary
      and is not inherited by a returned/escaped function expression.
-   - pure/trap are currently synchronous non-actor contracts. async or actor
-     combinations are rejected until their suspension/supervision ABI is
-     explicitly implemented.
+   - generator is valid only on top-level/module fnc/routine declarations.
+     The declared return type is the yielded element type; calls produce
+     Iterator<T>, or AsyncIterator<T> when async is also present.
+   - yield is valid only inside generator callables. A generator completes with
+     bare return; return-with-value is rejected.
+   - for await is valid only with for-of iterator syntax; conventional C-style
+     for headers cannot be asynchronous.
+   - pure/trap are currently synchronous, non-generator, non-actor contracts.
+     async, generator, or actor combinations are rejected until their
+     suspension/yield/supervision ABI is explicitly implemented.
    - "->" is executable syntax for function expressions and is also accepted
      as the return separator on ordinary named callable declarations. A named
      callable declaration is always declaration syntax; it is never written as
