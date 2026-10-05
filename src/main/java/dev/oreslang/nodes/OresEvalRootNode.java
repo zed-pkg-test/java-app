@@ -5,6 +5,7 @@ import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.RootNode;
 import dev.oreslang.OresLanguage;
 import dev.oreslang.ast.Ast;
+import dev.oreslang.ast.CallableSelector;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.OresContext;
 import dev.oreslang.runtime.CapabilityChecker;
@@ -689,16 +690,14 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof ModuleFacade namespace) return namespace.owner().moduleMember(namespace.module(), name);
             if (receiver instanceof ClassFacade klass) {
                 List<Ast.MethodDecl> functions = klass.owner().findStaticFunctionsByName(klass.klass(), name, new LinkedHashSet<>());
-                if (functions.size() == 1) {
-                    Ast.MethodDecl fn = functions.getFirst();
-                    return (Invokable) args -> klass.owner().callStaticFunction(klass.klass(), fn, args);
+                if (!functions.isEmpty()) {
+                    return new StaticFunctionValue(klass.owner(), klass.klass(), name);
                 }
-                if (functions.size() > 1) throw new IllegalArgumentException("overloaded static function " + klass.klass().name() + "." + name + " must be called so arity can select it");
                 throw new IllegalArgumentException("unknown static member " + klass.klass().name() + "." + name);
             }
             if (receiver instanceof OresObject object) {
                 if (object.fields.containsKey(name)) return object.fields.get(name);
-                return new BoundMethod(object.owner, object, name);
+                return new BoundMethod(object, name);
             }
             if (receiver instanceof Map<?, ?> map) {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
@@ -817,13 +816,15 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object invokeMethod(OresObject receiver, String name, List<Object> args) {
-            Ast.MethodDecl method = findMethod(receiver.klass, name, args.size(), new LinkedHashSet<>());
+            CallableSelector selector = CallableSelector.instance(name, args.size());
+            Ast.MethodDecl method = findMethod(receiver.klass, selector, new LinkedHashSet<>());
             if (method == null) throw new IllegalArgumentException("no method " + receiver.klass.name() + "." + name + " with arity " + args.size());
             return callMethod(receiver, method, args);
         }
 
         private Object invokeStaticFunction(Ast.ClassDecl klass, String name, List<Object> args) {
-            Ast.MethodDecl fn = findStaticFunction(klass, name, args.size(), new LinkedHashSet<>());
+            CallableSelector selector = CallableSelector.staticFunction(name, args.size());
+            Ast.MethodDecl fn = findStaticFunction(klass, selector, new LinkedHashSet<>());
             if (fn == null) throw new IllegalArgumentException("no static function " + klass.name() + "." + name + " with arity " + args.size());
             return callStaticFunction(klass, fn, args);
         }
@@ -843,24 +844,48 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         /**
-         * Go-style method value: one shared method definition per class plus a
-         * tiny (receiver, method-name) pair only when a method is extracted as
-         * a first-class callback. Direct receiver.method(...) calls allocate no
-         * bound-method object.
+         * Go-style method value: method code remains shared in the class method
+         * table.  Extraction materializes only the receiver identity plus the
+         * statically known method-name family; callback arity selects the same
+         * closed-world CallableSelector slot used by direct calls.
+         *
+         * <p>Direct receiver.method(...) calls bypass this object entirely, so
+         * ordinary method invocation has no bound-method allocation.  An AOT
+         * backend may lower a non-escaping value to a register/stack "fat
+         * pointer" (receiver + resolved slot) instead of heap allocating it.
          */
-        private static final class BoundMethod implements Invokable {
+        /**
+         * First-class static callable counterpart to BoundMethod.  No receiver
+         * is captured; only the owning class and shared static slot family are
+         * retained.  Invocation arity selects the closed-world static selector.
+         */
+        private static final class StaticFunctionValue implements Invokable {
             private final Evaluator owner;
+            private final Ast.ClassDecl klass;
+            private final String functionName;
+
+            private StaticFunctionValue(Evaluator owner, Ast.ClassDecl klass, String functionName) {
+                this.owner = owner;
+                this.klass = klass;
+                this.functionName = functionName;
+            }
+
+            @Override public Object call(List<Object> arguments) {
+                return owner.invokeStaticFunction(klass, functionName, arguments);
+            }
+        }
+
+        private static final class BoundMethod implements Invokable {
             private final OresObject receiver;
             private final String methodName;
 
-            private BoundMethod(Evaluator owner, OresObject receiver, String methodName) {
-                this.owner = owner;
+            private BoundMethod(OresObject receiver, String methodName) {
                 this.receiver = receiver;
                 this.methodName = methodName;
             }
 
             @Override public Object call(List<Object> arguments) {
-                return owner.invokeMethod(receiver, methodName, arguments);
+                return receiver.owner.invokeMethod(receiver, methodName, arguments);
             }
         }
 
@@ -996,10 +1021,16 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
-        private Ast.MethodDecl findMethod(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
+        private Ast.MethodDecl findMethod(
+                Ast.ClassDecl klass,
+                CallableSelector selector,
+                Set<Ast.ClassDecl> seen) {
+            if (selector.kind() != CallableSelector.Kind.INSTANCE) {
+                throw new IllegalArgumentException("instance dispatch requires an INSTANCE selector");
+            }
             if (!seen.add(klass)) throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
             for (Ast.MethodDecl method : klass.methods()) {
-                if (!method.isStatic() && method.name().equals(name) && method.parameters().size() == arity) {
+                if (selector.matches(method)) {
                     seen.remove(klass);
                     return method;
                 }
@@ -1008,7 +1039,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
                 Ast.ClassDecl parent = findClass(parentRef.name());
                 if (parent == null) continue;
-                Ast.MethodDecl candidate = findMethod(parent, name, arity, seen);
+                Ast.MethodDecl candidate = findMethod(parent, selector, seen);
                 if (candidate != null) {
                     seen.remove(klass);
                     return candidate;
@@ -1018,10 +1049,16 @@ public final class OresEvalRootNode extends RootNode {
             return null;
         }
 
-        private Ast.MethodDecl findStaticFunction(Ast.ClassDecl klass, String name, int arity, Set<Ast.ClassDecl> seen) {
+        private Ast.MethodDecl findStaticFunction(
+                Ast.ClassDecl klass,
+                CallableSelector selector,
+                Set<Ast.ClassDecl> seen) {
+            if (selector.kind() != CallableSelector.Kind.STATIC) {
+                throw new IllegalArgumentException("static dispatch requires a STATIC selector");
+            }
             if (!seen.add(klass)) throw new IllegalArgumentException("inheritance cycle involving " + klass.name());
             for (Ast.MethodDecl fn : klass.methods()) {
-                if (fn.isStatic() && fn.name().equals(name) && fn.parameters().size() == arity) {
+                if (selector.matches(fn)) {
                     seen.remove(klass);
                     return fn;
                 }
@@ -1030,7 +1067,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
                 Ast.ClassDecl parent = findClass(parentRef.name());
                 if (parent == null) continue;
-                Ast.MethodDecl candidate = findStaticFunction(parent, name, arity, seen);
+                Ast.MethodDecl candidate = findStaticFunction(parent, selector, seen);
                 if (candidate != null) {
                     seen.remove(klass);
                     return candidate;
@@ -1060,7 +1097,10 @@ public final class OresEvalRootNode extends RootNode {
             if (value instanceof List<?> list) return list;
             if (value instanceof Object[] array) return List.of(array);
             if (value instanceof OresObject object) {
-                Ast.MethodDecl iterator = findMethod(object.klass, "Symbol.iterator", 0, new LinkedHashSet<>());
+                Ast.MethodDecl iterator = findMethod(
+                        object.klass,
+                        CallableSelector.instance("Symbol.iterator", 0),
+                        new LinkedHashSet<>());
                 if (iterator == null) throw new IllegalArgumentException("value has no [Symbol.iterator]()");
                 Object produced = callMethod(object, iterator, List.of());
                 return iterableValues(produced);
