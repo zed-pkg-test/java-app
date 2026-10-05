@@ -54,7 +54,7 @@ public final class IncrementalCompiler {
         ImportGraph.validateLinkedImports(parsed);
         Map<String, Set<String>> dependencies =
                 ImportGraph.resolveDependencies(parsed, normalized.keySet());
-        List<List<String>> initializationGroups = ImportGraph.initializationGroups(dependencies);
+        List<List<String>> linkBarrierGroups = ImportGraph.initializationGroups(dependencies);
 
         LinkedHashSet<String> dirty = new LinkedHashSet<>();
         LinkedHashSet<String> abiChanged = new LinkedHashSet<>();
@@ -114,7 +114,7 @@ public final class IncrementalCompiler {
                 Map.copyOf(next),
                 Set.copyOf(rebuilt),
                 Set.copyOf(reused),
-                initializationGroups);
+                linkBarrierGroups);
     }
 
     public synchronized void clear() {
@@ -151,13 +151,6 @@ public final class IncrementalCompiler {
         if (decl instanceof Ast.ClassDecl klass) {
             abi.append(klass.actorKind()).append(" class ").append(klass.name());
             appendGenerics(abi, klass.genericParameters());
-            if (!klass.actorProtocolTypes().isEmpty()) {
-                abi.append(" actor-protocol<");
-                for (Ast.TypeRef protocolType : klass.actorProtocolTypes()) {
-                    abi.append(typeRef(protocolType)).append(',');
-                }
-                abi.append('>');
-            }
             abi.append(" extends ");
             for (Ast.TypeRef parent : klass.parents()) abi.append(typeRef(parent)).append(',');
             abi.append(" implements ");
@@ -170,8 +163,13 @@ public final class IncrementalCompiler {
                         .append(' ').append(field.name()).append('\n');
             }
             for (Ast.MethodDecl method : klass.methods()) {
-                if (method.visibility() != Ast.Visibility.PUBLIC) continue;
-                abi.append(method.isStatic() ? " static-fnc " : " method ")
+                boolean actorConstructor = klass.actorKind() != Ast.ActorKind.NONE
+                        && !method.isStatic()
+                        && method.name().equals("constructor");
+                if (method.visibility() != Ast.Visibility.PUBLIC && !actorConstructor) continue;
+                abi.append(actorConstructor
+                                ? " actor-constructor "
+                                : (method.isStatic() ? " static-fnc " : " method "))
                         .append(method.name());
                 appendGenerics(abi, method.genericParameters());
                 appendParams(abi, method.parameters());
@@ -338,9 +336,12 @@ public final class IncrementalCompiler {
         public boolean reused(String unitId) { return reusedUnits.contains(normalizeUnitId(unitId)); }
 
         /**
-         * Flattens the dependency-first SCC plan. Units in the same inner list
-         * form one load barrier: all of them must be linked before the first
-         * init hook in that group executes.
+         * Flattens the dependency-first SCC/link plan. Units in the same inner
+         * list form one inert load barrier: all peers are linked before an
+         * explicitly selected application entry is invoked. No init hook runs.
+         *
+         * The record component retains its historical initializationGroups name
+         * for source compatibility; it is link-planning metadata only.
          */
         public List<String> initializationOrder() {
             return initializationGroups.stream().flatMap(List::stream).toList();

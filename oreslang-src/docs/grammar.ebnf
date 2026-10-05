@@ -80,7 +80,7 @@ actor_method_decl
                   method_head method_return_spec block ;
 (* Semantic rule: one or more public actor instance methods form the typed
    source-level protocol and lower to one compiler/runtime-owned mailbox
-   dispatcher. Private methods are direct self helpers within an actor turn.
+   dispatcher. Private methods are direct self helpers inside an actor turn.
    Public protocol methods are monomorphic at method level and cannot accept
    mut parameters. Actor classes do not declare static functions. *)
 
@@ -292,12 +292,14 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      UntrustedActor are compiler-intrinsic bases, not ordinary library classes.
    - Actor fields are private mailbox-owned state. One or more public instance
      methods form the typed actor protocol; private methods are direct self
-     helpers. OresVM owns one hidden mailbox dispatcher and external
+     helpers. OresVM owns one hidden mailbox dispatcher and
      ActorRef<Protocol>.method(...) calls enqueue typed request/reply messages,
      producing Future<T> for a logical method result T.
    - Compiler-intrinsic Actor/IsoActor/UntrustedActor bases define execution
-     domains only and do not accept protocol type arguments. Actor protocol
-     shape comes from public methods and/or implemented interfaces.
+     domains only and do not accept protocol type arguments. Protocol shape
+     comes from public methods and/or implemented interfaces.
+   - ActorRef<Protocol> interfaces may contain multiple monomorphic protocol
+     methods and may be used as hot-load/abstraction boundaries.
    - Actor constructors are runtime-only, non-public, non-static, non-generic,
      non-suspending, and return void.
    - Actor isolation is an ownership/effect rule rather than @Pure or nlex:

@@ -20,7 +20,8 @@ A persistent actor is a class with an `ActorKind`:
 - `isoactor` / `extends IsoActor` -> PRIVATE
 - `untrusted actor` / `extends UntrustedActor` -> UNTRUSTED
 
-Example:
+The intrinsic bases define execution/isolation domain only. They do not carry a
+second `Actor<Message, Reply, Error>` protocol.
 
 ```ores
 define actor Counter as
@@ -30,27 +31,27 @@ define actor Counter as
     self.value = initial;
   }
 
+  private normalized(delta: int): int {
+    return delta;
+  }
+
   pub add(delta: int): void {
-    self.value = self.value + delta;
+    self.value = self.value + self.normalized(delta);
     return;
   }
 
   pub current(): int {
     return self.value;
   }
-
-  private normalized(delta: int): int {
-    return delta;
-  }
 end
 ```
 
 Public instance methods form the typed source protocol. Private methods are
-ordinary direct `self` calls inside the actor turn.
+direct `self` calls inside the active actor turn.
 
-There is still exactly **one runtime mailbox**. The compiler lowers the public
-method set into a hidden tagged message/dispatcher ABI. A source method named
-`receive` has no special privilege.
+There is still exactly one runtime mailbox. The compiler lowers the complete
+public method set into one hidden tagged request/reply dispatcher. A source
+method named `receive` has no special privilege.
 
 Conceptually:
 
@@ -58,17 +59,14 @@ Conceptually:
 Counter.add(int): void
 Counter.current(): int
 
-        lowers to
+      lowers to
 
 hidden CounterProtocol =
     Add(int, Reply<void>)
   | Current(Reply<int>)
 ```
 
-The exact hidden representation is compiler/runtime-private and may change as
-long as the protocol ABI digest remains stable.
-
-## 2. ActorRef is typed RPC-over-mailbox, not a raw inbox
+## 2. ActorRef is typed protocol authority
 
 External code receives `ActorRef<Counter>` or an interface-narrowed
 `ActorRef<CounterAPI>`.
@@ -90,59 +88,34 @@ Counter.current(): int
 ActorRef<Counter>.current(): Future<int>
 ```
 
-`ActorRef.send`, `ActorRef.receive`, and a public mailbox object are not
-source-language protocol surfaces for actor classes. The runtime may use raw
-mailbox primitives internally, but guest code dispatches only declared typed
-protocol methods.
+There is no ambient raw source-level `send`/`receive` operation for actor
+classes. If the actor declares a public method named `send` or `receive`, it
+is an ordinary typed protocol endpoint. The mutable mailbox itself remains
+runtime-private, while `id`, `is_alive`, and `mailbox` are reserved
+ActorRef control-member names.
 
-Protocol methods are not first-class bound callback objects. This is invalid:
+Protocol methods are not first-class bound callback objects. Use an explicit
+closure when callback behavior is desired so capture/lifetime/suspension remain
+visible to the compiler.
 
-```ores
-val callback = counter.add;
-```
+## 3. Inheritance and protocol interfaces
 
-Use an explicit closure when a callback is desired:
+Actor inheritance preserves execution/isolation domain and protocol visibility.
+A child may inherit its entire public protocol and may add endpoints, but it
+cannot narrow an inherited public endpoint to private.
 
-```ores
-val callback = |int x| -> {
-  await counter.add(x);
-};
-```
-
-That makes capture, lifetime, suspension, and ownership visible to the
-compiler.
-
-## 3. Protocol inheritance and interfaces
-
-Actor inheritance preserves the execution/isolation domain. A child may inherit
-its entire public protocol from an actor parent.
-
-A child may add public endpoints, but it may not shadow an inherited public
-endpoint with a private method of the same name/arity; protocol visibility is
-monotone.
-
-For hot loading and abstraction, an actor may implement an interface:
+For abstraction and hot loading, an actor may implement a multi-method
+interface:
 
 ```ores
 define interface CounterAPI
   fnc add(delta: int): void;
   fnc current(): int;
 end
-
-define actor Counter implements CounterAPI as
-  // ...
-end
 ```
 
-Then callers may narrow:
-
-```ores
-val ActorRef<CounterAPI> counter = spawn Counter(0);
-```
-
-Hot-loaded implementation code may remain opaque as long as it satisfies the
-declared interface/ABI, mailbox schemas, lifecycle/capability manifest, and
-sandbox policy.
+`ActorRef<Counter>` may narrow to a compatible `ActorRef<CounterAPI>`. The
+interface is an ABI boundary, not a way to expose the mutable actor object.
 
 ## 4. Boundary rules
 
@@ -383,26 +356,27 @@ pinned to their birth generation until drained/terminated.
 
 Compiler/type system:
 
-- actor classes are persistent; actor fnc/routine callables are one-shot;
+- actor classes are persistent; actor fnc/routine callables remain one-shot;
 - at least one effective public actor protocol endpoint exists;
-- inherited protocol endpoints count;
-- public endpoint visibility cannot narrow in children;
-- actor classes may implement protocol interfaces;
+- inherited endpoints count and cannot be narrowed to private;
+- actors may implement multi-method protocol interfaces;
 - `ActorRef<Concrete>` may narrow to a compatible `ActorRef<Interface>`;
 - direct ActorRef protocol calls return `Future<T>`;
-- protocol methods are not first-class bound values;
-- raw `send`/`receive`/mailbox access is not a source actor-class API;
-- boundary sendability is checked for every endpoint and constructor input;
+- public protocol methods are monomorphic at method level and non-reifiable;
+- undeclared send/receive calls fail as unknown protocol methods; mailbox access remains runtime-private;
+- constructor and every protocol parameter/return pass boundary sendability;
 - actor effect restrictions propagate through helper call graphs;
 - imported effect-unknown calls fail closed in actor context.
 
 Runtime:
 
-- one mailbox and one execution lease per actor;
-- typed protocol calls use runtime-private request/reply metadata;
-- only user arguments/replies pass transport validation;
-- reply completion authority remains runtime-owned;
-- raw messages cannot enter a typed source protocol dispatcher;
+- one mailbox and one execution lease exist per actor;
+- typed actor protocol calls use runtime-private request/reply metadata;
+- only user arguments/replies pass transport validation and memory accounting;
+- suspended protocol calls retain their request envelope until final continuation settlement;
+- stop/failure settles pending protocol Futures and releases reservations exactly once;
+- raw mailbox messages cannot enter a typed source-protocol dispatcher;
+- await/timer/next-tick continuations resume only through the owning scheduler;
 - queue/memory/fuel/lifetime limits are enforced before admission;
 - PRIVATE/UNTRUSTED actor memory is reclaimable at actor termination;
 - group/generation/quota reservations release exactly once;

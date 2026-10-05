@@ -86,6 +86,50 @@ public final class OwnershipChecker {
     }
 
     private void checkClass(Ast.ClassDecl klass) {
+        if (klass.actorKind() != Ast.ActorKind.NONE) {
+            for (Ast.FieldDecl field : klass.fields()) {
+                Ast.TypeRef declared = ownershipFieldType(field);
+                if (declared.isBorrow()) {
+                    throw error(
+                            "actor field '" + klass.name() + "." + field.name()
+                                    + "' cannot persist a borrow across mailbox turns");
+                }
+                if (containsMutexGuardType(declared)) {
+                    throw error(
+                            "actor field '" + klass.name() + "." + field.name()
+                                    + "' cannot persist MutexGuard state across mailbox turns");
+                }
+
+                if (field.initializer() != null) {
+                    Scope initializerScope = new Scope(null);
+                    initializerScope.define("self", new VarState(
+                            Ast.TypeRef.borrowed(Ast.TypeRef.simple(klass.name()), true),
+                            false,
+                            ValueKind.MUT_BORROW,
+                            Origin.PARAM));
+                    ValueInfo initialized = checkExpr(
+                            field.initializer(),
+                            initializerScope,
+                            true);
+                    Ast.TypeRef stored = field.type() == null
+                            ? initialized.type
+                            : field.type();
+                    if (stored.isBorrow() || initialized.type.isBorrow()) {
+                        throw error(
+                                "actor field '" + klass.name() + "." + field.name()
+                                        + "' cannot persist a borrow across mailbox turns");
+                    }
+                    if (containsMutexGuardType(stored)
+                            || containsMutexGuardType(initialized.type)) {
+                        throw error(
+                                "actor field '" + klass.name() + "." + field.name()
+                                        + "' cannot persist MutexGuard state across mailbox turns");
+                    }
+                    initializerScope.close();
+                }
+            }
+        }
+
         for (Ast.MethodDecl method : klass.methods()) {
             Scope scope = new Scope(null);
             if (!method.isStatic()) {
@@ -283,11 +327,18 @@ public final class OwnershipChecker {
         }
 
         ValueKind storedKind = binding.declaredType() == null ? value.kind : kindOfType(storedType);
+        Origin origin = Origin.LOCAL;
+        if (binding.initializer() instanceof Ast.NameExpr sourceName) {
+            VarState sourceState = scope.lookup(sourceName.name());
+            if (sourceState != null && sourceState.origin == Origin.ACTOR_INPUT) {
+                origin = Origin.ACTOR_INPUT;
+            }
+        }
         VarState state = new VarState(
                 storedType,
                 binding.kind() == Ast.BindingKind.LET,
                 storedKind,
-                Origin.LOCAL);
+                origin);
         state.borrowSource = value.borrowSource;
         scope.define(binding.name(), state);
     }
@@ -675,42 +726,35 @@ public final class OwnershipChecker {
             if (concreteReceiver != null
                     && concreteReceiver.name().equals("ActorRef")
                     && concreteReceiver.arguments().size() == 1) {
-                Ast.TypeRef protocol = concreteReceiver.arguments().getFirst();
-                Ast.ClassDecl actorClass = findClass(protocol.name());
-                if (actorClass != null && actorClass.actorKind() != Ast.ActorKind.NONE) {
-                    ResolvedMethod actorTarget = findMethodTarget(
-                            actorClass,
-                            protocol,
-                            member.member(),
-                            call.arguments().size(),
-                            new LinkedHashSet<>());
-                    if (actorTarget != null
-                            && actorTarget.method().visibility() == Ast.Visibility.PUBLIC
-                            && !actorTarget.method().name().equals("constructor")) {
-                        Ast.MethodDecl method = actorTarget.method();
-                        Map<String, Ast.TypeRef> ownerBindings = genericBindings(
-                                actorTarget.owner().genericParameters(),
-                                actorTarget.ownerType().arguments());
-                        CallSignature signature = specializeCall(
-                                actorTarget.owner().genericParameters(),
-                                List.of(),
-                                method.parameters(),
-                                method.returnType(),
-                                call,
-                                scope,
-                                ownerBindings);
-                        checkArguments(
-                                call.arguments(),
-                                signature.parameters(),
-                                scope,
-                                "actor protocol method " + actorTarget.owner().name() + "." + method.name());
-                        Ast.TypeRef future = new Ast.TypeRef(
-                                "Future",
-                                List.of(signature.result()),
-                                false);
-                        return new ValueInfo(future, ValueKind.MOVE_ONLY, null);
+                if (member.member().equals("is_alive")) {
+                    if (!call.arguments().isEmpty()) {
+                        throw error("ActorRef.is_alive expects no arguments");
                     }
+                    return new ValueInfo(
+                            Ast.TypeRef.simple("bool"),
+                            ValueKind.COPY,
+                            null);
                 }
+                if (member.member().equals("receive") || member.member().equals("mailbox")) {
+                    throw error(
+                            "actor receive/mailbox state is runtime-private; use ActorRef.send(message)");
+                }
+                if (!member.member().equals("send")) {
+                    throw error(
+                            "unknown ActorRef behavioral operation '" + member.member()
+                                    + "'; persistent actors expose send(message)");
+                }
+                if (call.arguments().size() != 1) {
+                    throw error("ActorRef.send expects exactly one message");
+                }
+                ValueInfo argument = checkExpr(call.arguments().getFirst(), scope, true);
+                if (containsMutexGuardType(argument.type)) {
+                    throw error("ActorRef.send cannot transport a guard-bearing value");
+                }
+                return new ValueInfo(
+                        Ast.TypeRef.simple("void"),
+                        ValueKind.COPY,
+                        null);
             }
             Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
             ResolvedMethod target = klass == null ? null
@@ -807,6 +851,17 @@ public final class OwnershipChecker {
         for (int i = 0; i < arguments.size(); i++) {
             Ast.Expr arg = arguments.get(i);
             Ast.Param param = params.get(i);
+
+            if (param.mutable() && arg instanceof Ast.NameExpr name) {
+                VarState source = requireState(scope, name.name());
+                requireUsable(source, name.name(), false);
+                if (source.origin == Origin.ACTOR_INPUT) {
+                    throw error(callable + " argument " + (i + 1)
+                            + " cannot upgrade actor-boundary input '"
+                            + name.name() + "' to mutable helper authority");
+                }
+            }
+
             if (param.structural() && !param.type().isBorrow()) {
                 ValueInfo argument = checkExpr(arg, scope, false);
                 if (containsMutexGuardType(argument.type)

@@ -413,7 +413,7 @@ final class ParserTest {
                           }
 
                           private prepare(): void {
-                            val ready = Futures.completed(1);
+                            val ready = Futures.all([]);
                             await ready;
                             return;
                           }
