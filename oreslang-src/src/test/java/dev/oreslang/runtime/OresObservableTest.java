@@ -121,13 +121,25 @@ final class OresObservableTest {
     }
 
     @Test
-    void publicObservableSurfaceDoesNotExposeGuestCallbackSubscribe() {
+    void publicObservableCallbacksAreSchedulerBound() {
         assertFalse(
                 java.util.Arrays.stream(OresObservable.class.getMethods())
                         .flatMap(method -> java.util.Arrays.stream(method.getParameterTypes()))
-                        .anyMatch(type -> java.util.function.Consumer.class.isAssignableFrom(type)
-                                || java.util.function.Function.class.isAssignableFrom(type)),
-                "initial rx-ores surface must not run guest callbacks on producer threads");
+                        .anyMatch(java.util.function.Consumer.class::isAssignableFrom),
+                "rx-ores must not expose push-style Consumer callbacks");
+
+        java.util.Arrays.stream(OresObservable.class.getMethods())
+                .filter(method -> java.util.Arrays.stream(method.getParameterTypes())
+                        .anyMatch(type -> java.util.function.Function.class.isAssignableFrom(type)
+                                || java.util.function.Predicate.class.isAssignableFrom(type)))
+                .forEach(method -> {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    assertTrue(
+                            parameters.length >= 2
+                                    && parameters[0] == OresScheduler.class,
+                            () -> "guest transform callback must be explicitly scheduler-bound: "
+                                    + method);
+                });
     }
     @Test
     void foreignProducerRxCompletionResumesOnlyOnOwningScheduler() throws Exception {
@@ -191,6 +203,108 @@ final class OresObservableTest {
 
         assertTrue(subscription.cancel());
         assertEquals(1, cleanupCalls.get());
+    }
+
+    @Test
+    void schedulerBoundMapNeverRunsOnForeignProducerThread() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source = new OresFuture<>();
+            AtomicReference<Thread> producerThread = new AtomicReference<>();
+            AtomicReference<Thread> mapperThread = new AtomicReference<>();
+            AtomicReference<OresScheduler> mapperScheduler = new AtomicReference<>();
+
+            OresSubscription<Integer> subscription =
+                    OresObservable.fromFuture(source)
+                            .map(scheduler, value -> {
+                                mapperThread.set(Thread.currentThread());
+                                mapperScheduler.set(OresScheduler.current());
+                                return value + 1;
+                            })
+                            .subscribe();
+
+            OresFuture<OresNotification<Integer>> pull = subscription.next();
+
+            Thread producer = Thread.ofPlatform().start(() -> {
+                producerThread.set(Thread.currentThread());
+                source.completeFromRuntime(41);
+            });
+            producer.join();
+
+            assertEquals(42, pull.get(5, TimeUnit.SECONDS).value());
+            assertSame(scheduler, mapperScheduler.get());
+            assertNotSame(producerThread.get(), mapperThread.get(),
+                    "rx map callback must execute on the bound scheduler, not producer thread");
+        }
+    }
+
+    @Test
+    void filterYieldsBetweenRejectedImmediateItems() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            java.util.ArrayList<Long> dispatches = new java.util.ArrayList<>();
+
+            OresSubscription<Integer> subscription =
+                    OresObservable.fromValues(List.of(1, 2, 3, 4))
+                            .filter(scheduler, value -> {
+                                dispatches.add(OresScheduler.currentDispatchId());
+                                assertSame(scheduler, OresScheduler.current());
+                                return value == 4;
+                            })
+                            .subscribe();
+
+            assertEquals(4, subscription.next().get(5, TimeUnit.SECONDS).value());
+            assertEquals(4, dispatches.size());
+            assertEquals(4, new java.util.HashSet<>(dispatches).size(),
+                    "each rejected immediate item must return through a later scheduler turn");
+        }
+    }
+
+    @Test
+    void cancellingMappedPullDetachesSharedUpstreamWithoutCancellingProducer() {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> source = new OresFuture<>();
+            OresSubscription<Integer> subscription =
+                    OresObservable.fromFuture(source)
+                            .map(scheduler, value -> value + 1)
+                            .subscribe();
+
+            OresFuture<OresNotification<Integer>> pull = subscription.next();
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (source.pendingRuntimeWaiterCount() == 0
+                    && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(1, source.pendingRuntimeWaiterCount());
+
+            assertTrue(pull.cancel(true));
+
+            deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (source.pendingRuntimeWaiterCount() != 0
+                    && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+
+            assertEquals(0, source.pendingRuntimeWaiterCount());
+            assertFalse(source.isCancelled(),
+                    "operator cancellation must detach a shared source Future, not cancel it");
+            assertTrue(subscription.isTerminated());
+        }
+    }
+
+    @Test
+    void mapRejectsNullReactiveValues() {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresSubscription<String> subscription =
+                    OresObservable.fromValues(List.of("x"))
+                            .<String>map(scheduler, ignored -> null)
+                            .subscribe();
+
+            CompletionException failure =
+                    assertThrows(CompletionException.class, () -> subscription.next().join());
+            assertInstanceOf(IllegalArgumentException.class, failure.getCause());
+            assertTrue(failure.getCause().getMessage().contains("Option<T>"));
+            assertTrue(subscription.isTerminated());
+        }
     }
 
 }
