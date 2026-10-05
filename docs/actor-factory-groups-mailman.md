@@ -88,8 +88,11 @@ Counter.current(): int
 ActorRef<Counter>.current(): Future<int>
 ```
 
-Raw `send`, `receive`, and mailbox access are runtime-private actor-class
-operations. Guest code invokes declared typed protocol methods only.
+There is no ambient raw source-level `send`/`receive` operation for actor
+classes. If the actor declares a public method named `send` or `receive`, it
+is an ordinary typed protocol endpoint. The mutable mailbox itself remains
+runtime-private, while `id`, `is_alive`, and `mailbox` are reserved
+ActorRef control-member names.
 
 Protocol methods are not first-class bound callback objects. Use an explicit
 closure when callback behavior is desired so capture/lifetime/suspension remain
@@ -360,7 +363,7 @@ Compiler/type system:
 - `ActorRef<Concrete>` may narrow to a compatible `ActorRef<Interface>`;
 - direct ActorRef protocol calls return `Future<T>`;
 - public protocol methods are monomorphic at method level and non-reifiable;
-- raw send/receive/mailbox access fails closed for actor classes;
+- undeclared send/receive calls fail as unknown protocol methods; mailbox access remains runtime-private;
 - constructor and every protocol parameter/return pass boundary sendability;
 - actor effect restrictions propagate through helper call graphs;
 - imported effect-unknown calls fail closed in actor context.
