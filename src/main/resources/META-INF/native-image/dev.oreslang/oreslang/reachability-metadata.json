@@ -6,7 +6,9 @@
       "methods": [
         {
           "name": "<init>",
-          "parameterTypes": ["java.lang.String"]
+          "parameterTypes": [
+            "java.lang.String"
+          ]
         }
       ]
     },
@@ -16,7 +18,21 @@
       "methods": [
         {
           "name": "nativeCarrierLoop",
-          "parameterTypes": ["int"]
+          "parameterTypes": [
+            "int"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "dev.oreslang.runtime.NativeTimerService",
+      "jniAccessible": true,
+      "methods": [
+        {
+          "name": "nativeFire",
+          "parameterTypes": [
+            "long"
+          ]
         }
       ]
     }

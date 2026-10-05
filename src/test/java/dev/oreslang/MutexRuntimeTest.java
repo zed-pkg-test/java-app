@@ -3,6 +3,7 @@ package dev.oreslang;
 import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
+import dev.oreslang.runtime.OresFuture;
 import org.junit.jupiter.api.Test;
 
 import java.util.AbstractList;
@@ -224,7 +225,7 @@ final class MutexRuntimeTest {
 
         assertTrue(mutex.tryLock().isEmpty());
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
         CountDownLatch queued = new CountDownLatch(1);
         Thread requester = Thread.ofPlatform().start(() -> {
             waitingRef.set(mutex.lockAsync());
@@ -452,30 +453,24 @@ final class MutexRuntimeTest {
 
 
 @Test
-    void guardFutureCannotBeForgedOrTimeoutCompletedByCallers() throws Exception {
+    void guardFutureIsOresOwnedAndCannotExposeCompletableFutureMutationSurface() throws Exception {
         var mutex = OresMutex.shared(new int[]{0});
         var guard = mutex.lock();
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
         Thread requester = Thread.ofPlatform().start(() -> waitingRef.set(mutex.lockAsync()));
         requester.join();
 
         var waiting = waitingRef.get();
         assertInstanceOf(OresMutex.GuardFuture.class, waiting);
+        assertInstanceOf(OresFuture.class, waiting);
+        assertFalse(java.util.concurrent.CompletableFuture.class.isAssignableFrom(waiting.getClass()));
         assertFalse(waiting.isDone());
 
-        assertThrows(UnsupportedOperationException.class, () -> waiting.complete(null));
-        assertThrows(UnsupportedOperationException.class,
-                () -> waiting.completeExceptionally(new RuntimeException("forged")));
-        assertThrows(UnsupportedOperationException.class,
-                () -> waiting.completeAsync(() -> null));
-        assertThrows(UnsupportedOperationException.class,
-                () -> waiting.orTimeout(1, TimeUnit.MILLISECONDS));
-        assertThrows(UnsupportedOperationException.class,
-                () -> waiting.completeOnTimeout(null, 1, TimeUnit.MILLISECONDS));
-        assertThrows(UnsupportedOperationException.class, () -> waiting.obtrudeValue(null));
-        assertThrows(UnsupportedOperationException.class,
-                () -> waiting.obtrudeException(new RuntimeException("forged")));
+        assertThrows(NoSuchMethodException.class,
+                () -> waiting.getClass().getMethod("complete", Object.class));
+        assertThrows(NoSuchMethodException.class,
+                () -> waiting.getClass().getMethod("obtrudeValue", Object.class));
 
         assertTrue(waiting.cancel(true));
         guard.release();
@@ -489,8 +484,8 @@ final class MutexRuntimeTest {
         var mutex = OresMutex.shared(new int[]{0});
         var guard = mutex.lock();
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> firstRef = new AtomicReference<>();
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> secondRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> firstRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> secondRef = new AtomicReference<>();
 
         Thread firstRequester = Thread.ofPlatform().start(() -> firstRef.set(mutex.lockAsync()));
         Thread secondRequester = Thread.ofPlatform().start(() -> secondRef.set(mutex.lockAsync()));
@@ -518,8 +513,8 @@ final class MutexRuntimeTest {
         var mutex = OresMutex.shared(new int[]{0});
         var guard = mutex.lock();
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> firstRef = new AtomicReference<>();
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> secondRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> firstRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> secondRef = new AtomicReference<>();
         Thread firstRequester = Thread.ofPlatform().start(() -> firstRef.set(mutex.lockAsync()));
         Thread secondRequester = Thread.ofPlatform().start(() -> secondRef.set(mutex.lockAsync()));
         firstRequester.join();
@@ -624,7 +619,7 @@ final class MutexRuntimeTest {
         });
         assertTrue(blockingStarted.await(1, TimeUnit.SECONDS));
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> asyncRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> asyncRef = new AtomicReference<>();
         Thread asyncRequester = Thread.ofPlatform().start(() -> asyncRef.set(mutex.lockAsync()));
         asyncRequester.join();
         var async = asyncRef.get();
@@ -1054,7 +1049,7 @@ final class MutexRuntimeTest {
         var mutex = OresMutex.shared(new int[]{0});
         var guard = mutex.lock();
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
         Thread requester = Thread.ofPlatform().start(
                 () -> waitingRef.set(mutex.lockAsyncFor(Duration.ofMillis(25))));
         requester.join();
@@ -1075,7 +1070,7 @@ final class MutexRuntimeTest {
         var mutex = OresMutex.shared(new int[]{0});
         var guard = mutex.lock();
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> waitingRef = new AtomicReference<>();
         Thread requester = Thread.ofPlatform().start(
                 () -> waitingRef.set(mutex.lockAsyncFor(Duration.ofSeconds(2))));
         requester.join();
@@ -1095,7 +1090,7 @@ final class MutexRuntimeTest {
         var mutex = OresMutex.shared(new int[]{0});
         var guard = mutex.lock();
 
-        AtomicReference<java.util.concurrent.CompletableFuture<OresMutex.Guard<int[]>>> zeroRef = new AtomicReference<>();
+        AtomicReference<OresFuture<OresMutex.Guard<int[]>>> zeroRef = new AtomicReference<>();
         Thread requester = Thread.ofPlatform().start(
                 () -> zeroRef.set(mutex.lockAsyncFor(Duration.ZERO)));
         requester.join();

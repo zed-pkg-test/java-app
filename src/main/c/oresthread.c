@@ -387,3 +387,237 @@ static uint64_t pthread_cpu_time_nanos(pthread_t pthread) {
     return 0;
 #endif
 }
+
+
+/* ------------------------------------------------------------------------- */
+/* Process-owned native timer service.                                       */
+/* ------------------------------------------------------------------------- */
+
+typedef struct ores_timer_entry {
+    uint64_t id;
+    uint64_t deadline_nanos;
+    struct ores_timer_entry *next;
+} ores_timer_entry;
+
+typedef struct {
+    JavaVM *jvm;
+    jobject service;
+    jmethodID fire;
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    ores_timer_entry *head;
+} ores_timer_service;
+
+static uint64_t monotonic_nanos(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void realtime_after_nanos(uint64_t delay_nanos, struct timespec *out) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        now.tv_sec = 0;
+        now.tv_nsec = 0;
+    }
+
+    uint64_t sec = delay_nanos / 1000000000ULL;
+    uint64_t nsec = delay_nanos % 1000000000ULL;
+    uint64_t total_nsec = (uint64_t)now.tv_nsec + nsec;
+
+    out->tv_sec = now.tv_sec + (time_t)sec + (time_t)(total_nsec / 1000000000ULL);
+    out->tv_nsec = (long)(total_nsec % 1000000000ULL);
+}
+
+static void *timer_service_main(void *raw) {
+    ores_timer_service *service = (ores_timer_service *)raw;
+    JNIEnv *env = NULL;
+    JavaVMAttachArgs attach;
+    memset(&attach, 0, sizeof(attach));
+    attach.version = JNI_VERSION_1_8;
+    attach.name = "ores-native-timer";
+    attach.group = NULL;
+
+    jint status = (*service->jvm)->AttachCurrentThreadAsDaemon(
+            service->jvm, (void **)&env, &attach);
+    if (status != JNI_OK || env == NULL) return NULL;
+
+    for (;;) {
+        pthread_mutex_lock(&service->mutex);
+        while (service->head == NULL) {
+            pthread_cond_wait(&service->condition, &service->mutex);
+        }
+
+        uint64_t now = monotonic_nanos();
+        ores_timer_entry *entry = service->head;
+        if (entry->deadline_nanos > now) {
+            uint64_t remaining = entry->deadline_nanos - now;
+            struct timespec wake;
+            realtime_after_nanos(remaining, &wake);
+            (void)pthread_cond_timedwait(
+                    &service->condition,
+                    &service->mutex,
+                    &wake);
+            pthread_mutex_unlock(&service->mutex);
+            continue;
+        }
+
+        service->head = entry->next;
+        pthread_mutex_unlock(&service->mutex);
+
+        (*env)->CallVoidMethod(
+                env,
+                service->service,
+                service->fire,
+                (jlong)entry->id);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+        }
+        free(entry);
+    }
+
+    return NULL;
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_oreslang_runtime_NativeTimerService_nativeCreate(
+        JNIEnv *env,
+        jclass cls,
+        jobject service_object) {
+    (void)cls;
+    if (service_object == NULL) {
+        throw_illegal_state(env, "native timer service cannot be null");
+        return 0;
+    }
+
+    ores_timer_service *service =
+            (ores_timer_service *)calloc(1, sizeof(*service));
+    if (service == NULL) {
+        throw_illegal_state(env, "failed to allocate native timer service");
+        return 0;
+    }
+
+    if ((*env)->GetJavaVM(env, &service->jvm) != JNI_OK || service->jvm == NULL) {
+        free(service);
+        throw_illegal_state(env, "JNI GetJavaVM failed for native timer service");
+        return 0;
+    }
+
+    service->service = (*env)->NewGlobalRef(env, service_object);
+    if (service->service == NULL) {
+        free(service);
+        throw_illegal_state(env, "failed to root native timer service");
+        return 0;
+    }
+
+    jclass service_class = (*env)->GetObjectClass(env, service_object);
+    if (service_class == NULL) {
+        (*env)->DeleteGlobalRef(env, service->service);
+        free(service);
+        return 0;
+    }
+    service->fire = (*env)->GetMethodID(env, service_class, "nativeFire", "(J)V");
+    (*env)->DeleteLocalRef(env, service_class);
+    if (service->fire == NULL) {
+        (*env)->DeleteGlobalRef(env, service->service);
+        free(service);
+        return 0;
+    }
+
+    if (pthread_mutex_init(&service->mutex, NULL) != 0) {
+        (*env)->DeleteGlobalRef(env, service->service);
+        free(service);
+        throw_illegal_state(env, "pthread_mutex_init failed for native timer service");
+        return 0;
+    }
+    if (pthread_cond_init(&service->condition, NULL) != 0) {
+        pthread_mutex_destroy(&service->mutex);
+        (*env)->DeleteGlobalRef(env, service->service);
+        free(service);
+        throw_illegal_state(env, "pthread_cond_init failed for native timer service");
+        return 0;
+    }
+
+    if (pthread_create(&service->thread, NULL, timer_service_main, service) != 0) {
+        pthread_cond_destroy(&service->condition);
+        pthread_mutex_destroy(&service->mutex);
+        (*env)->DeleteGlobalRef(env, service->service);
+        free(service);
+        throw_illegal_state(env, "pthread_create failed for native timer service");
+        return 0;
+    }
+    pthread_detach(service->thread);
+    return (jlong)(intptr_t)service;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_oreslang_runtime_NativeTimerService_nativeSchedule(
+        JNIEnv *env,
+        jclass cls,
+        jlong handle,
+        jlong id,
+        jlong delay_nanos) {
+    (void)env;
+    (void)cls;
+    ores_timer_service *service = (ores_timer_service *)(intptr_t)handle;
+    if (service == NULL || id <= 0 || delay_nanos < 0) return JNI_FALSE;
+
+    ores_timer_entry *entry =
+            (ores_timer_entry *)calloc(1, sizeof(*entry));
+    if (entry == NULL) return JNI_FALSE;
+
+    uint64_t now = monotonic_nanos();
+    uint64_t delay = (uint64_t)delay_nanos;
+    entry->id = (uint64_t)id;
+    entry->deadline_nanos =
+            UINT64_MAX - now < delay ? UINT64_MAX : now + delay;
+
+    pthread_mutex_lock(&service->mutex);
+    ores_timer_entry **cursor = &service->head;
+    while (*cursor != NULL
+            && (*cursor)->deadline_nanos <= entry->deadline_nanos) {
+        cursor = &(*cursor)->next;
+    }
+    int became_head = cursor == &service->head;
+    entry->next = *cursor;
+    *cursor = entry;
+    if (became_head) pthread_cond_signal(&service->condition);
+    pthread_mutex_unlock(&service->mutex);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_oreslang_runtime_NativeTimerService_nativeCancel(
+        JNIEnv *env,
+        jclass cls,
+        jlong handle,
+        jlong id) {
+    (void)env;
+    (void)cls;
+    ores_timer_service *service = (ores_timer_service *)(intptr_t)handle;
+    if (service == NULL || id <= 0) return JNI_FALSE;
+
+    pthread_mutex_lock(&service->mutex);
+    ores_timer_entry **cursor = &service->head;
+    ores_timer_entry *removed = NULL;
+    int removed_head = 0;
+    while (*cursor != NULL) {
+        if ((*cursor)->id == (uint64_t)id) {
+            removed = *cursor;
+            removed_head = cursor == &service->head;
+            *cursor = removed->next;
+            break;
+        }
+        cursor = &(*cursor)->next;
+    }
+    if (removed_head) pthread_cond_signal(&service->condition);
+    pthread_mutex_unlock(&service->mutex);
+
+    if (removed != NULL) {
+        free(removed);
+        return JNI_TRUE;
+    }
+    return JNI_FALSE;
+}

@@ -19,7 +19,7 @@ import java.util.function.BiConsumer;
  * are host adapters only; they may settle an OresFuture, but they do not define
  * Oreslang continuation scheduling or expose a callback scheduler to guest code.</p>
  */
-public final class OresFuture<T> implements Future<T> {
+public class OresFuture<T> implements Future<T> {
     private static final Object PENDING = new Object();
 
     private record Success<T>(T value) { }
@@ -116,6 +116,28 @@ public final class OresFuture<T> implements Future<T> {
     @Override
     public boolean isDone() {
         return state.get() != PENDING;
+    }
+
+    /**
+     * Uninterruptible-style convenience matching the language/runtime await
+     * boundary: checked completion failures are rethrown as their original
+     * runtime/error cause rather than wrapped in CompletionException.
+     */
+    public T join() {
+        try {
+            return get();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            CancellationException cancelled =
+                    new CancellationException("OresFuture join interrupted");
+            cancelled.initCause(interrupted);
+            throw cancelled;
+        } catch (ExecutionException failed) {
+            Throwable cause = failed.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            if (cause instanceof Error error) throw error;
+            throw new RuntimeException(cause);
+        }
     }
 
     @Override

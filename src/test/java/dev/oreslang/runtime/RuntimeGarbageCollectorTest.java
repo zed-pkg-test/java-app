@@ -185,4 +185,25 @@ final class RuntimeGarbageCollectorTest {
             assertTrue(error.getMessage().contains("actor.gc() requires execution inside an actor"));
         }
     }
+    @Test
+    void periodicSweepUsesNativeTimerAndStopsAfterClose() throws Exception {
+        AtomicInteger gcRequests = new AtomicInteger();
+        RuntimeGarbageCollector gc = new RuntimeGarbageCollector(
+                gcRequests::incrementAndGet,
+                Duration.ofMillis(15),
+                Duration.ofMillis(1),
+                16);
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (gcRequests.get() == 0 && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertTrue(gcRequests.get() > 0, "native periodic timer must trigger process GC sweeps");
+
+        gc.close();
+        int afterClose = gcRequests.get();
+        Thread.sleep(75);
+        assertEquals(afterClose, gcRequests.get(), "closing the collector must cancel its native timer ticket");
+    }
+
 }

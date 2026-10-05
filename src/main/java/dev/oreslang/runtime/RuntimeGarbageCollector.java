@@ -7,10 +7,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -26,13 +22,6 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
     private static final int DEFAULT_MAX_TRACKED_PER_ACTOR = 4_096;
     private static final int DEFAULT_MAX_ACTOR_SWEEP_ENTRIES = 256;
     private static final Object PROCESS_DOMAIN = new Object();
-    private static final ScheduledExecutorService SWEEP_TIMER =
-            Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread thread = new Thread(r, "ores-gc-timer");
-                thread.setDaemon(true);
-                return thread;
-            });
-
     public record CollectionReport(
             String scope,
             long collection,
@@ -116,7 +105,7 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
     private final int maxTracked;
     private final int maxTrackedPerActor;
     private final int maxActorSweepEntries;
-    private final ScheduledFuture<?> periodicSweep;
+    private final NativeTimerService.Ticket periodicSweep;
 
     public RuntimeGarbageCollector() {
         this(
@@ -170,11 +159,10 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
         this.maxTrackedPerActor = maxTrackedPerActor;
         this.maxActorSweepEntries = maxActorSweepEntries;
         long periodNanos = period.toNanos();
-        this.periodicSweep = SWEEP_TIMER.scheduleWithFixedDelay(
+        this.periodicSweep = NativeTimerService.process().scheduleWithFixedDelay(
                 this::safePeriodicSweep,
                 periodNanos,
-                periodNanos,
-                TimeUnit.NANOSECONDS);
+                periodNanos);
     }
 
     private static Duration requirePositive(Duration value, String name) {
@@ -397,7 +385,7 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
         synchronized (lifecycleLock) {
             if (!closed.compareAndSet(false, true)) return;
         }
-        periodicSweep.cancel(false);
+        periodicSweep.cancel();
         for (TrackedCleanup entry : tracked) {
             try {
                 if (entry.tryClean()) removeTracked(entry);
