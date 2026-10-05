@@ -38,7 +38,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -390,16 +389,6 @@ public final class ActorRuntime implements AutoCloseable {
          */
         public int controlParallelism() {
             return sharedParallelism;
-        }
-
-        /**
-         * Ordinary/root Oreslang code gets two logical scheduler lanes by
-         * default while the remaining CONTROL carriers stay available for
-         * supervisors and ActorMailman work. Explicit tiny test configs still
-         * retain at least one root lane.
-         */
-        public int rootParallelism() {
-            return Math.max(1, Math.min(2, controlParallelism() - 1));
         }
 
         public int maxControlParallelism() {
@@ -1268,10 +1257,10 @@ public final class ActorRuntime implements AutoCloseable {
      */
     static final class DispatcherGroup {
         private final DispatcherConfig config;
-        private final ThreadPoolExecutor controlDispatcher;
-        private final ThreadPoolExecutor privateDispatcher;
-        private final ThreadPoolExecutor sharedDispatcher;
-        private final ThreadPoolExecutor untrustedDispatcher;
+        private final NativeCarrierExecutor controlDispatcher;
+        private final NativeCarrierExecutor privateDispatcher;
+        private final NativeCarrierExecutor sharedDispatcher;
+        private final NativeCarrierExecutor untrustedDispatcher;
         private final ScheduledThreadPoolExecutor untrustedWatchdog;
         private final ScheduledThreadPoolExecutor messageWatchdog;
         private final ActorTimerWheel actorTimerWheel;
@@ -1300,7 +1289,7 @@ public final class ActorRuntime implements AutoCloseable {
             this.config = Objects.requireNonNull(config);
             this.maxActorMemoryBytes = configuredProcessActorMemoryLimit();
             int controlParallelism = config.controlParallelism();
-            int rootPermits = config.rootParallelism();
+            int rootPermits = Math.max(1, controlParallelism - 1);
             int readyQueueCapacity;
             try {
                 readyQueueCapacity = Math.addExact(config.maxActors(), rootPermits);
@@ -1567,10 +1556,10 @@ public final class ActorRuntime implements AutoCloseable {
     private volatile Consumer<Object> actorExitHook = ignored -> { };
     private volatile BiConsumer<ActorGroupId, Throwable> actorGroupFailureHook =
             (ignoredGroup, ignoredFailure) -> { };
-    private final ThreadPoolExecutor controlDispatcher;
-    private final ThreadPoolExecutor privateDispatcher;
-    private final ThreadPoolExecutor sharedDispatcher;
-    private final ThreadPoolExecutor untrustedDispatcher;
+    private final NativeCarrierExecutor controlDispatcher;
+    private final NativeCarrierExecutor privateDispatcher;
+    private final NativeCarrierExecutor sharedDispatcher;
+    private final NativeCarrierExecutor untrustedDispatcher;
     private final ScheduledThreadPoolExecutor untrustedWatchdog;
     private final ScheduledThreadPoolExecutor messageWatchdog;
     private final ActorTimerWheel actorTimerWheel;
@@ -1738,7 +1727,7 @@ public final class ActorRuntime implements AutoCloseable {
         this.sharedRejectedTurns = dispatcherGroup.sharedRejectedTurns;
         this.untrustedRejectedTurns = dispatcherGroup.untrustedRejectedTurns;
 
-        int rootParallelism = dispatcherConfig.rootParallelism();
+        int rootParallelism = Math.max(1, dispatcherConfig.controlParallelism() - 1);
         this.rootScheduler = OresScheduler.runtimeOwned(
                 "ores-root-" + Integer.toHexString(System.identityHashCode(this)),
                 rootParallelism,
@@ -2019,11 +2008,11 @@ public final class ActorRuntime implements AutoCloseable {
      */
     public DispatcherStats dispatcherStats(ActorKind kind) {
         Objects.requireNonNull(kind, "kind");
-        ThreadPoolExecutor executor = dispatcherFor(kind);
+        NativeCarrierExecutor executor = dispatcherFor(kind);
         return new DispatcherStats(
                 dispatcherConfig.parallelismFor(kind),
                 executor.getActiveCount(),
-                executor.getQueue().size(),
+                executor.getQueueSize(),
                 executor.getCompletedTaskCount(),
                 compensationCounter(kind).get(),
                 overrunCounter(kind).get(),
@@ -2036,7 +2025,7 @@ public final class ActorRuntime implements AutoCloseable {
         return new DispatcherStats(
                 dispatcherConfig.controlParallelism(),
                 controlDispatcher.getActiveCount(),
-                controlDispatcher.getQueue().size(),
+                controlDispatcher.getQueueSize(),
                 controlDispatcher.getCompletedTaskCount(),
                 controlCompensatingThreads.get(),
                 controlOverrunTurns.get(),
@@ -2952,12 +2941,11 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Internal two-phase actor spawn ticket used by compiler/runtime lowering.
+     * Two-phase source-level actor spawn handle.
      *
-     * <p>Ordinary source-level {@code spawn Foo(...)} projects this ticket to
-     * {@link ActorId} immediately. Direct {@code await spawn Foo(...)} keeps the
-     * ticket hidden until readiness succeeds, then exposes the started-actor
-     * control surface (identity/liveness/completion/result) to source code.</p>
+     * Creation returns after identity reservation and mailbox admission. The
+     * readiness future completes only after behavior initialization has
+     * succeeded; the result future tracks the one-shot actor callable itself.
      */
     public final class ActorSpawn<M, R> implements Awaitable<ActorRef<M>> {
         private final ActorRef<M> ref;
@@ -2978,7 +2966,6 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         public ActorId id() { return ref.id(); }
-        public boolean isAlive() { return ref.isAlive(); }
 
         @Override
         public OresFuture<ActorRef<M>> getAwaited() { return ready(); }
@@ -5551,7 +5538,7 @@ public final class ActorRuntime implements AutoCloseable {
         untrustedActorCount.set(0);
     }
 
-    private ThreadPoolExecutor dispatcherFor(ActorKind kind) {
+    private NativeCarrierExecutor dispatcherFor(ActorKind kind) {
         return switch (kind) {
             case PRIVATE -> privateDispatcher;
             case SHARED -> sharedDispatcher;
@@ -5596,7 +5583,7 @@ public final class ActorRuntime implements AutoCloseable {
             int current = controlDispatcher.getCorePoolSize();
             int maximum = dispatcherConfig.maxControlParallelism();
             if (current >= maximum) return;
-            int queued = controlDispatcher.getQueue().size();
+            int queued = controlDispatcher.getQueueSize();
             if (queued <= current) return;
             controlDispatcher.setCorePoolSize(current + 1);
             controlDispatcher.prestartCoreThread();
@@ -5605,7 +5592,7 @@ public final class ActorRuntime implements AutoCloseable {
 
     private void relaxControlDispatcherAfterQuantum() {
         synchronized (controlDispatcher) {
-            if (!controlDispatcher.getQueue().isEmpty()) return;
+            if (!controlDispatcher.isQueueEmpty()) return;
             int floor = dispatcherConfig.controlParallelism()
                     + controlCompensatingThreads.get();
             int current = controlDispatcher.getCorePoolSize();
@@ -5654,12 +5641,12 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private void scaleDispatcherForDemand(ActorKind kind) {
-        ThreadPoolExecutor executor = dispatcherFor(kind);
+        NativeCarrierExecutor executor = dispatcherFor(kind);
         synchronized (executor) {
             int current = executor.getCorePoolSize();
             int maximum = dispatcherConfig.maxParallelismFor(kind);
             if (current >= maximum) return;
-            int queued = executor.getQueue().size();
+            int queued = executor.getQueueSize();
             // Do not spend the only watchdog headroom merely because one peer
             // is queued behind one busy carrier. Grow elastically only after
             // queued demand exceeds the currently provisioned carrier count;
@@ -5677,9 +5664,9 @@ public final class ActorRuntime implements AutoCloseable {
      * carrier cannot be retired out from under its replacement.
      */
     private void relaxDispatcherAfterQuantum(ActorKind kind) {
-        ThreadPoolExecutor executor = dispatcherFor(kind);
+        NativeCarrierExecutor executor = dispatcherFor(kind);
         synchronized (executor) {
-            if (!executor.getQueue().isEmpty()) return;
+            if (!executor.isQueueEmpty()) return;
             int floor = dispatcherConfig.parallelismFor(kind) + compensationCounter(kind).get();
             int current = executor.getCorePoolSize();
             if (current > floor) executor.setCorePoolSize(current - 1);
@@ -5695,7 +5682,7 @@ public final class ActorRuntime implements AutoCloseable {
             if (current >= limit) return false;
             if (!counter.compareAndSet(current, current + 1)) continue;
 
-            ThreadPoolExecutor executor = dispatcherFor(kind);
+            NativeCarrierExecutor executor = dispatcherFor(kind);
             synchronized (executor) {
                 int base = dispatcherConfig.parallelismFor(kind);
                 int currentCore = Math.max(base, executor.getCorePoolSize());
@@ -5718,7 +5705,7 @@ public final class ActorRuntime implements AutoCloseable {
             counter.incrementAndGet();
             throw new IllegalStateException("dispatcher compensation accounting underflow for " + kind);
         }
-        ThreadPoolExecutor executor = dispatcherFor(kind);
+        NativeCarrierExecutor executor = dispatcherFor(kind);
         synchronized (executor) {
             int base = dispatcherConfig.parallelismFor(kind);
             int target = Math.max(base, base + remaining);
@@ -5734,7 +5721,7 @@ public final class ActorRuntime implements AutoCloseable {
         return executor;
     }
 
-    private static ThreadPoolExecutor newDispatcher(
+    private static NativeCarrierExecutor newDispatcher(
             int parallelism,
             int readyQueueCapacity,
             int maxCompensatingThreads,
@@ -5745,15 +5732,11 @@ public final class ActorRuntime implements AutoCloseable {
         } catch (ArithmeticException overflow) {
             maxThreads = Integer.MAX_VALUE;
         }
-        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+        return new NativeCarrierExecutor(
                 parallelism,
                 maxThreads,
-                50L,
-                TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(readyQueueCapacity, true),
-                namedFactory(threadPrefix),
-                new ThreadPoolExecutor.AbortPolicy());
-        return executor;
+                readyQueueCapacity,
+                threadPrefix);
     }
 
     private static ThreadFactory namedFactory(String prefix) {
