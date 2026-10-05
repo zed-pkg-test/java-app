@@ -3,6 +3,7 @@ package dev.oreslang;
 import dev.oreslang.compiler.BuildOptions;
 import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.compiler.TreeShaker;
+import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
 import org.junit.jupiter.api.Test;
 
@@ -102,6 +103,32 @@ final class TreeShakerTest {
 
         assertTrue(result.retained("DebugBackend.run"));
         assertTrue(result.removed("ReleaseBackend.run"));
+    }
+
+    @Test
+    void foldedConditionalPreservesItsLexicalScope() {
+        TreeShaker.Result result = OresCompiler.compileForBuild("""
+                pub const bool enabled = true;
+
+                pub routine main(): void {
+                  if enabled {
+                    val hidden = 1;
+                    stdio.stdout.write(hidden);
+                  }
+                  return;
+                }
+                """, BuildOptions.executable(Map.of("enabled", "true")));
+
+        Ast.FunctionDecl main = result.program().modules().stream()
+                .flatMap(module -> module.declarations().stream())
+                .filter(Ast.FunctionDecl.class::isInstance)
+                .map(Ast.FunctionDecl.class::cast)
+                .filter(function -> function.name().equals("main"))
+                .findFirst()
+                .orElseThrow();
+
+        assertInstanceOf(Ast.BlockStmt.class, main.body().getFirst(),
+                "constant folding must not flatten an if arm into its parent lexical scope");
     }
 
     @Test

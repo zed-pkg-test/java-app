@@ -1293,8 +1293,14 @@ public final class Parser {
         // 'actor' remains reserved, but in expression position it names the
         // actor-local runtime namespace (actor.gc and future local primitives).
         if (match(ACTOR)) return new Ast.NameExpr("actor");
-        if ((isReservedCallableName(peek().type())
-                || isContextualStatementCallableName(peek().type()))
+        // loop/block are contextual statement keywords: parseStatement only
+        // consumes them when followed by '{'. In every expression position they
+        // remain valid references to same-named callables, including first-class
+        // function values (not only direct calls).
+        if (isContextualStatementCallableName(peek().type())) {
+            return new Ast.NameExpr(advance().lexeme());
+        }
+        if (isReservedCallableName(peek().type())
                 && reservedCallableNameFollowedByInvocation(current)) {
             return new Ast.NameExpr(advance().lexeme());
         }

@@ -114,6 +114,119 @@ final class BlockLoopControlFlowTest {
     }
 
     @Test
+    void nestedLoopControlTargetsTheNearestLoop() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  let outer = 0;
+                  loop {
+                    outer = outer + 1;
+                    let inner = 0;
+                    loop {
+                      inner = inner + 1;
+                      if inner == 1 {
+                        continue;
+                      }
+                      break;
+                    }
+                    stdio.stdout.write(outer);
+                    if outer == 2 {
+                      break;
+                    }
+                  }
+                }
+                """);
+
+        assertEquals("12", output);
+    }
+
+    @Test
+    void conventionalForContinueStillRunsTheUpdateExpression() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  let seen = 0;
+                  for (let i = 0; i < 3; i = i + 1) {
+                    if i < 2 {
+                      continue;
+                    }
+                    seen = i;
+                  }
+                  stdio.stdout.write(seen);
+                }
+                """);
+
+        assertEquals("2", output);
+    }
+
+    @Test
+    void loopControlRunsFinallyAndIsNotCaughtAsAGuestException() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  loop {
+                    try {
+                      break;
+                    } catch (err) {
+                      stdio.stdout.write("caught");
+                    } finally {
+                      stdio.stdout.write("finally");
+                    }
+                  }
+                  stdio.stdout.write("after");
+                }
+                """);
+
+        assertEquals("finallyafter", output);
+    }
+
+    @Test
+    void deferRunsWhenBreakContinueAndReturnUnwindScopes() throws Exception {
+        String output = run("""
+                fnc finish(): void {
+                  defer stdio.stdout.write("r");
+                  loop {
+                    return;
+                  }
+                }
+
+                pub routine main(): void {
+                  let i = 0;
+                  loop {
+                    i = i + 1;
+                    defer stdio.stdout.write(i);
+                    if i == 1 {
+                      continue;
+                    }
+                    break;
+                  }
+                  finish();
+                }
+                """);
+
+        assertEquals("12r", output);
+    }
+
+    @Test
+    void loopAndBlockRemainUsableAsCallableNamesAndFirstClassReferences() throws Exception {
+        String output = run("""
+                fnc loop(): int {
+                  return 3;
+                }
+
+                fnc block(): int {
+                  return 4;
+                }
+
+                pub routine main(): void {
+                  val loop_ref = loop;
+                  val block_ref = block;
+                  stdio.stdout.write(loop_ref());
+                  stdio.stdout.write(block_ref());
+                }
+                """);
+
+        assertEquals("34", output);
+    }
+
+    @Test
     void ifSupportsBraceAndThenFiForms() throws Exception {
         String braces = run("""
                 pub routine main(): void {

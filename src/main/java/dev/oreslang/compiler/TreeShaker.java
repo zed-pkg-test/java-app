@@ -608,13 +608,24 @@ public final class TreeShaker {
                             branch.body(), module, new LinkedHashMap<>(locals));
                     if (known instanceof Boolean value) {
                         if (!value) continue;
-                        if (branches.isEmpty()) return body;
+                        if (branches.isEmpty()) {
+                            // A selected if/elseif body is still a lexical scope.
+                            // Never flatten it into the parent statement list:
+                            // doing so would leak bindings and change defer/lifetime timing.
+                            return List.of(new Ast.BlockStmt(body));
+                        }
                         elseBody = body;
                         break;
                     }
                     branches.add(new Ast.IfBranch(condition, body));
                 }
-                if (branches.isEmpty()) return elseBody;
+                if (branches.isEmpty()) {
+                    // The else arm has the same lexical-scope semantics as any
+                    // other conditional body, even when the condition folds.
+                    return elseBody.isEmpty()
+                            ? List.of()
+                            : List.of(new Ast.BlockStmt(elseBody));
+                }
                 return List.of(new Ast.IfStmt(branches, elseBody));
             }
             if (statement instanceof Ast.TryStmt tried) {
