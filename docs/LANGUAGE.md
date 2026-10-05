@@ -591,7 +591,7 @@ fnc useCallbacks(Worker worker): void {
 }
 ```
 
-This rule keeps ordinary routine/method calls as direct code-symbol dispatch. The runtime does not manufacture an implicit `(receiver, method)` bound-method object; a closure exists only when source code explicitly asks for one.
+This rule keeps ordinary routine/method calls as direct code-symbol dispatch. The runtime does not manufacture an implicit `(receiver, method)` bound-method object; a closure exists only when source code explicitly asks for one. Because a `routine` cannot escape as a callback value, the compiler is also free to inline, specialize, and devirtualize routine calls more aggressively; that optimization freedom is a consequence of direct-only semantics, not a separate recursion or TCO rule.
 
 Lambdas may recurse when their binding supplies an explicit function type so the closure's own signature is available while its body is checked:
 
