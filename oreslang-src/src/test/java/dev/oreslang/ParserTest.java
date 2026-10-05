@@ -728,6 +728,51 @@ final class ParserTest {
     }
 
     @Test
+    void actorRefSendUsesEffectiveInheritedReceiveContract() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                shared actor Parent {
+                  let int total = 0;
+
+                  pub receive(value: int): void {
+                    self.total = self.total + value;
+                    return;
+                  }
+                }
+
+                shared actor Child extends Parent {
+                  private current(): int {
+                    return self.total;
+                  }
+                }
+
+                fnc exercise() -> void {
+                  val child = spawn Child();
+                  child.send(7);
+                  return;
+                }
+                """)));
+
+        IllegalArgumentException wrongMessage = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        shared actor Parent {
+                          pub receive(value: int): void { return; }
+                        }
+
+                        shared actor Child extends Parent {
+                        }
+
+                        fnc bad() -> void {
+                          val child = spawn Child();
+                          child.send("wrong");
+                          return;
+                        }
+                        """)));
+        assertTrue(wrongMessage.getMessage().contains("ActorRef.send"),
+                wrongMessage.getMessage());
+    }
+
+    @Test
     void actorInheritanceMustPreserveIsolationKind() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 shared actor Parent {

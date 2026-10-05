@@ -1077,21 +1077,29 @@ public final class TypeChecker {
                                     "ActorRef.send expects exactly one message");
                         }
 
-                        Ast.MethodDecl receive = actorClass.methods().stream()
-                                .filter(method -> !method.isStatic()
-                                        && method.visibility() == Ast.Visibility.PUBLIC
-                                        && method.name().equals("receive"))
-                                .findFirst()
-                                .orElseThrow(() -> new IllegalArgumentException(
-                                        "actor class '" + actorClass.name()
-                                                + "' has no public receive(message) contract"));
+                        ResolvedMethod receiveTarget = findMethodTarget(
+                                actorClass,
+                                actorType,
+                                "receive",
+                                1,
+                                new LinkedHashSet<>());
+                        if (receiveTarget == null
+                                || receiveTarget.method().isStatic()
+                                || receiveTarget.method().visibility() != Ast.Visibility.PUBLIC) {
+                            throw new IllegalArgumentException(
+                                    "actor class '" + actorClass.name()
+                                            + "' has no effective public receive(message) contract");
+                        }
+                        Ast.MethodDecl receive = receiveTarget.method();
                         Map<String, Type> bindings =
-                                classGenericBindings(actorClass, actorType);
+                                classGenericBindings(
+                                        receiveTarget.owner(),
+                                        receiveTarget.ownerType());
                         Type expectedMessage = substituteGenerics(
                                 resolveParam(
                                         receive.parameters().getFirst(),
-                                        new HashSet<>(actorClass.genericParameters()),
-                                        actorType),
+                                        new HashSet<>(receiveTarget.owner().genericParameters()),
+                                        receiveTarget.ownerType()),
                                 bindings);
                         Ast.Expr argument = call.arguments().getFirst();
                         validateLambdaArgument(
@@ -1961,20 +1969,28 @@ public final class TypeChecker {
                         throw new IllegalArgumentException(
                                 "ActorRef.send requires a concrete actor class");
                     }
-                    Ast.MethodDecl receive = actorClass.methods().stream()
-                            .filter(method -> !method.isStatic()
-                                    && method.visibility() == Ast.Visibility.PUBLIC
-                                    && method.name().equals("receive"))
-                            .findFirst()
-                            .orElseThrow(() -> new IllegalArgumentException(
-                                    "actor class '" + actorClass.name()
-                                            + "' has no public receive(message) contract"));
+                    ResolvedMethod receiveTarget = findMethodTarget(
+                            actorClass,
+                            actorType,
+                            "receive",
+                            1,
+                            new LinkedHashSet<>());
+                    if (receiveTarget == null
+                            || receiveTarget.method().isStatic()
+                            || receiveTarget.method().visibility() != Ast.Visibility.PUBLIC) {
+                        throw new IllegalArgumentException(
+                                "actor class '" + actorClass.name()
+                                        + "' has no effective public receive(message) contract");
+                    }
+                    Ast.MethodDecl receive = receiveTarget.method();
                     Type message = substituteGenerics(
                             resolveParam(
                                     receive.parameters().getFirst(),
-                                    new HashSet<>(actorClass.genericParameters()),
-                                    actorType),
-                            classGenericBindings(actorClass, actorType));
+                                    new HashSet<>(receiveTarget.owner().genericParameters()),
+                                    receiveTarget.ownerType()),
+                            classGenericBindings(
+                                    receiveTarget.owner(),
+                                    receiveTarget.ownerType()));
                     yield new Function(List.of(message), Primitive.VOID);
                 }
                 case "receive", "mailbox" -> throw new IllegalArgumentException(
