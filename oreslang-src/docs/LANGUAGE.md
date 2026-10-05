@@ -448,10 +448,13 @@ inline. Even an already-settled Future still crosses this scheduler boundary.
 
 The linked multi-file launcher currently fails closed on `async main`. A
 launcher-owned Graal Context must remain alive for the complete logical lifetime
-of main, including every suspended continuation. Until structured Context/CPS
-lifecycle lowering owns that lifetime end-to-end, use a synchronous launcher
-entrypoint that starts/awaits supported work explicitly rather than allowing
-the launcher to close a Context underneath a still-running async main.
+of main, including every suspended continuation. The recursive evaluator also
+fails closed if a synchronous main reaches source `await` while running on
+ROOT_TASK. Until structured Context/CPS lifecycle lowering owns that lifetime
+end-to-end, a linked-program main must remain synchronous and non-suspending;
+embedders that need to drive asynchronous work must keep the Context/runtime
+lifecycle open from the host side rather than letting main launch work that can
+outlive its Context.
 
 For actor code, `await` is a **suspension point, never a carrier-thread
 blocking point**. Compiler backends must lower an incomplete actor await to a
