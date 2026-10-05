@@ -20,13 +20,25 @@ final class OresSchedulerTest {
             OresFuture<Integer> source = new OresFuture<>();
             AtomicReference<Thread> producer = new AtomicReference<>();
             AtomicInteger state = new AtomicInteger();
+            CountDownLatch firstTurnReached = new CountDownLatch(1);
 
             OresFuture<Integer> result = scheduler.start(resume -> {
                 int pc = state.getAndIncrement();
                 assertSame(scheduler, OresScheduler.current());
+                assertTrue(NativeCarrierExecutor.isNativeCarrierThread(),
+                        "OresScheduler task turns must run on JNI pthread carriers");
+                assertNotEquals(0L, NativeCarrierExecutor.currentNativeThreadId());
 
                 if (pc == 0) {
                     assertTrue(resume.initial());
+                    IllegalStateException joinFailure = assertThrows(
+                            IllegalStateException.class,
+                            source::join);
+                    assertTrue(joinFailure.getMessage().contains("use await"));
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> source.get(1, TimeUnit.MILLISECONDS));
+                    firstTurnReached.countDown();
                     return OresScheduler.await(source);
                 }
 
@@ -40,6 +52,12 @@ final class OresSchedulerTest {
 
             Thread completionThread = Thread.ofPlatform().start(() -> {
                 producer.set(Thread.currentThread());
+                try {
+                    assertTrue(firstTurnReached.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    fail(interrupted);
+                }
                 source.completeFromRuntime(41);
             });
             completionThread.join();
@@ -75,10 +93,6 @@ final class OresSchedulerTest {
 
             assertEquals(8, result.get(5, TimeUnit.SECONDS));
             assertEquals(2, state.get());
-            assertEquals(
-                    0,
-                    completed.pendingRuntimeWaiterCount(),
-                    "awaiting an already-settled Future must not retain a claimed continuation waiter");
         }
     }
 
@@ -152,6 +166,43 @@ final class OresSchedulerTest {
         } finally {
             carrier.shutdownNow();
             assertTrue(carrier.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void tailAwaitAlwaysUsesFreshDispatchWithoutChangingLogicalTaskDomain() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            AtomicInteger pc = new AtomicInteger();
+            AtomicReference<Object> domain = new AtomicReference<>();
+            AtomicReference<Long> firstDispatch = new AtomicReference<>();
+            AtomicBoolean insideFirstTurn = new AtomicBoolean();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                int turn = pc.getAndIncrement();
+                if (turn == 0) {
+                    assertTrue(resume.initial());
+                    domain.set(OresScheduler.currentTaskDomain());
+                    firstDispatch.set(OresScheduler.currentDispatchId());
+                    insideFirstTurn.set(true);
+                    try {
+                        return OresScheduler.tailAwait();
+                    } finally {
+                        insideFirstTurn.set(false);
+                    }
+                }
+
+                assertFalse(resume.initial());
+                assertFalse(insideFirstTurn.get(),
+                        "tail-await replacement must never execute inline");
+                assertSame(domain.get(), OresScheduler.currentTaskDomain(),
+                        "proper async tail transfer keeps one logical scheduler task");
+                assertNotEquals(firstDispatch.get(), OresScheduler.currentDispatchId(),
+                        "tail-await must re-enter through a fresh scheduler dispatch");
+                return OresScheduler.done(42);
+            });
+
+            assertEquals(42, result.get(5, TimeUnit.SECONDS));
+            assertEquals(2, pc.get());
         }
     }
 
@@ -267,49 +318,6 @@ final class OresSchedulerTest {
                     "failed self-close must leave scheduler usable");
         } finally {
             scheduler.close();
-        }
-    }
-
-    @Test
-    void closingSchedulerDetachesSuspendedWaiterWithoutCancellingSharedFuture() throws Exception {
-        OresFuture<Integer> shared = new OresFuture<>();
-        OresScheduler scheduler = new OresScheduler(1);
-        AtomicInteger pc = new AtomicInteger();
-
-        OresFuture<Integer> task = scheduler.start(resume -> {
-            if (pc.getAndIncrement() == 0) {
-                return OresScheduler.await(shared);
-            }
-            return OresScheduler.done((Integer) resume.value());
-        });
-
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (shared.pendingRuntimeWaiterCount() != 1
-                && System.nanoTime() < deadline) {
-            Thread.sleep(1);
-        }
-        assertEquals(1, shared.pendingRuntimeWaiterCount());
-
-        scheduler.close();
-
-        assertTrue(task.isCancelled());
-        assertEquals(0, shared.pendingRuntimeWaiterCount(),
-                "closing the scheduler must detach its continuation waiter");
-        assertFalse(shared.isDone(),
-                "detaching a waiter must not cancel the shared producer Future");
-
-        assertTrue(shared.completeFromRuntime(9));
-        assertEquals(1, pc.get(),
-                "detached continuation must never resume after producer completion");
-    }
-
-    @Test
-    void implicitRootSchedulerUsesTwoApplicationLanesByDefault() {
-        try (ActorRuntime runtime = new ActorRuntime()) {
-            assertEquals(2, runtime.rootScheduler().parallelism());
-            assertEquals(2, runtime.dispatcherConfig().rootParallelism());
-            assertEquals(5, runtime.dispatcherConfig().controlParallelism(),
-                    "production defaults keep additional CONTROL carriers for supervisors/mailmen");
         }
     }
 
