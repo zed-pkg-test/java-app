@@ -43,7 +43,7 @@ final class PrivateVisibilityTest {
                     return 7;
                   }
 
-                  pub bump_and_read(Vault other): int {
+                  pub bump_and_read(Vault mut other): int {
                     other.secret = other.secret + 1;
                     return other.reveal();
                   }
@@ -282,8 +282,8 @@ final class PrivateVisibilityTest {
                 }
                 """);
 
-        PolyglotException iteratorFailure = assertThrows(
-                PolyglotException.class,
+        IllegalArgumentException iteratorFailure = assertThrows(
+                IllegalArgumentException.class,
                 () -> runLinked(iteratorMain));
         assertTrue(iteratorFailure.getMessage().contains("private method"));
         assertTrue(iteratorFailure.getMessage().contains("Symbol.iterator"));
