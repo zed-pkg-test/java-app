@@ -444,7 +444,20 @@ The exception does not turn the keywords back into general identifiers. For exam
 
 ## Async / await
 
-`async` and `await` are reserved and parsed. `await` unwraps future-like runtime values. The scheduler is intentionally separate from the language surface so actor isolation does not depend on a specific OS-thread implementation.
+Oreslang follows the useful parts of the C# Task-based Asynchronous Pattern while keeping ownership/isolation stricter than a shared managed heap:
+
+- an `async fnc` or `async routine` is typed as returning `Future<T>`, where `T` is the declared source return type;
+- calling an async callable returns the future immediately; `await` unwraps its result and propagates cancellation and the original failure rather than leaking a host-specific wrapper exception;
+- `async main` is allowed and is awaited exactly once at the process boundary;
+- async task arguments and results cross an owned-data boundary. Move-only arguments are consumed by the async call under Oreslang's normal affine rules; the reference interpreter then detaches supported data graphs before execution/completion so no hidden caller/task mutable alias is introduced. Copy-like scalars retain their ordinary copy semantics;
+- futures, mutex/guard capabilities, functions/closures, unresolved generic values, actor instances, and host capabilities cannot cross that detached task boundary;
+- generic async callables are temporarily rejected until Oreslang has an explicit task-safe/sendable generic bound;
+- async instance methods are temporarily rejected until receiver move/borrow semantics are explicit. Use an async top-level/module callable or async static class function instead;
+- an async actor callable is also rejected for now. Actor `await` needs compiler continuation lowering that suspends a mailbox turn and later resumes it; an actor dispatcher carrier must never park on an incomplete future.
+
+The initial interpreter backend uses host-owned virtual threads for ordinary async tasks. That is an implementation detail, not a language promise. The compiler is free to replace it with C#-style continuation/state-machine lowering. Guest source receives no raw thread handle and does not gain `THREAD_CREATE` authority merely by using `async`.
+
+This preserves the central async rule: **I/O/task latency should compose through futures and continuations; CPU-bound work that intentionally monopolizes a carrier must be explicit rather than hidden inside `async`.**
 
 ## Actors
 

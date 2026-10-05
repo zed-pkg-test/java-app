@@ -13,11 +13,13 @@ import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.ActorRuntime;
+import dev.oreslang.runtime.AsyncRuntime;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -132,6 +134,7 @@ public final class OresEvalRootNode extends RootNode {
             FUNCTION_BODY,
             METHOD,
             STATIC_FUNCTION,
+            STATIC_FUNCTION_BODY,
             INVOKABLE
         }
 
@@ -320,7 +323,11 @@ public final class OresEvalRootNode extends RootNode {
             Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
             if (main == null) main = findFunction("main");
             if (main == null) return null;
-            return callFunction(main, List.of(arguments));
+            Object result = callFunction(main, List.of(arguments));
+            if (result instanceof CompletionStage<?> stage) {
+                return AsyncRuntime.await(stage);
+            }
+            return result;
         }
 
         private Object invokePublic(String name, Object[] arguments) {
@@ -362,6 +369,9 @@ public final class OresEvalRootNode extends RootNode {
                 case STATIC_FUNCTION -> callStaticFunctionRaw(
                         (Ast.MethodDecl) invocation.target(),
                         invocation.arguments());
+                case STATIC_FUNCTION_BODY -> callStaticFunctionBodyRaw(
+                        (Ast.MethodDecl) invocation.target(),
+                        invocation.arguments());
                 case INVOKABLE -> ((Invokable) invocation.target()).call(invocation.arguments());
             };
         }
@@ -380,6 +390,10 @@ public final class OresEvalRootNode extends RootNode {
 
         private Invocation staticFunctionInvocation(Ast.MethodDecl fn, List<?> args) {
             return new Invocation(this, InvocationKind.STATIC_FUNCTION, null, fn, objectArguments(args));
+        }
+
+        private Invocation staticFunctionBodyInvocation(Ast.MethodDecl fn, List<?> args) {
+            return new Invocation(this, InvocationKind.STATIC_FUNCTION_BODY, null, fn, objectArguments(args));
         }
 
         private Invocation invokableInvocation(Invokable callable, List<?> args) {
@@ -406,7 +420,18 @@ public final class OresEvalRootNode extends RootNode {
             }
             List<Object> normalized = normalizeFunctionArguments(fn, args);
             if (fn.actorKind() == Ast.ActorKind.NONE) {
-                return callFunctionBodyRaw(fn, normalized);
+                if (!fn.async()) return callFunctionBodyRaw(fn, normalized);
+
+                List<?> detached = detachAsyncArguments(normalized);
+                return context.asyncRuntime().submit(() ->
+                        detachAsyncValue(
+                                invoke(functionBodyInvocation(fn, detached)),
+                                new IdentityHashMap<>()));
+            }
+
+            if (fn.async()) {
+                throw new IllegalStateException(
+                        "async actor callables require mailbox continuation lowering and are not executed synchronously");
             }
 
             if (ActorRuntime.inActorExecution()) {
@@ -444,6 +469,101 @@ public final class OresEvalRootNode extends RootNode {
             return objectArguments(args);
         }
 
+        private List<?> detachAsyncArguments(List<?> args) {
+            ArrayList<Object> detached = new ArrayList<>(args.size());
+            for (Object arg : args) {
+                detached.add(detachAsyncValue(arg, new IdentityHashMap<>()));
+            }
+            return List.copyOf(detached);
+        }
+
+        private Object detachAsyncValue(
+                Object value,
+                IdentityHashMap<Object, Boolean> visiting) {
+            if (value == null
+                    || value instanceof String
+                    || value instanceof Boolean
+                    || value instanceof Character
+                    || value instanceof Byte
+                    || value instanceof Short
+                    || value instanceof Integer
+                    || value instanceof Long
+                    || value instanceof Float
+                    || value instanceof Double
+                    || value instanceof java.math.BigInteger
+                    || value instanceof java.math.BigDecimal
+                    || value instanceof Enum<?>
+                    || value instanceof java.util.UUID
+                    || value instanceof Complex
+                    || value instanceof OptionUnwrapError) {
+                return value;
+            }
+
+            if (visiting.put(value, Boolean.TRUE) != null) {
+                throw new IllegalArgumentException(
+                        "cyclic mutable values cannot cross an async task boundary");
+            }
+            try {
+                if (value instanceof OresObject object) {
+                    LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
+                    for (Map.Entry<String, Object> entry : object.fields.entrySet()) {
+                        fields.put(entry.getKey(), detachAsyncValue(entry.getValue(), visiting));
+                    }
+                    return new OresObject(object.owner, object.klass, fields);
+                }
+                if (value instanceof DynamicStructValue dynamic) {
+                    LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
+                    for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
+                        fields.put(entry.getKey(), detachAsyncValue(entry.getValue(), visiting));
+                    }
+                    return new DynamicStructValue(fields);
+                }
+                if (value instanceof OptionValue option) {
+                    return option.present()
+                            ? new OptionValue(true, detachAsyncValue(option.value(), visiting))
+                            : option;
+                }
+                if (value instanceof ResultValue result) {
+                    return new ResultValue(result.ok(), detachAsyncValue(result.value(), visiting));
+                }
+                if (value instanceof List<?> list) {
+                    ArrayList<Object> copy = new ArrayList<>(list.size());
+                    for (Object item : list) copy.add(detachAsyncValue(item, visiting));
+                    return copy;
+                }
+                if (value instanceof Map<?, ?> map) {
+                    LinkedHashMap<Object, Object> copy = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> entry : map.entrySet()) {
+                        copy.put(
+                                detachAsyncValue(entry.getKey(), visiting),
+                                detachAsyncValue(entry.getValue(), visiting));
+                    }
+                    return copy;
+                }
+                if (value instanceof Set<?> set) {
+                    LinkedHashSet<Object> copy = new LinkedHashSet<>();
+                    for (Object item : set) copy.add(detachAsyncValue(item, visiting));
+                    return copy;
+                }
+                if (value.getClass().isArray()) {
+                    int length = java.lang.reflect.Array.getLength(value);
+                    ArrayList<Object> copy = new ArrayList<>(length);
+                    for (int i = 0; i < length; i++) {
+                        copy.add(detachAsyncValue(
+                                java.lang.reflect.Array.get(value, i),
+                                visiting));
+                    }
+                    return copy;
+                }
+
+                throw new IllegalArgumentException(
+                        "value of type " + value.getClass().getName()
+                                + " cannot cross an async task boundary; use owned data");
+            } finally {
+                visiting.remove(value);
+            }
+        }
+
         private Object callFunctionBodyRaw(Ast.FunctionDecl fn, List<?> args) {
             Env env = new Env(null, fn.nonLexical());
             for (int i = 0; i < fn.parameters().size(); i++) {
@@ -470,6 +590,10 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callMethodRaw(OresObject receiver, Ast.MethodDecl method, List<?> args) {
+            if (method.async()) {
+                throw new IllegalStateException(
+                        "async instance methods are not admitted until receiver ownership can be moved into the task");
+            }
             if (args.size() != method.parameters().size()) throw new IllegalArgumentException("method " + method.name() + " arity mismatch");
             Env env = new Env(null);
             if (!method.isStatic()) env.define("self", receiver, Ast.BindingKind.VAL);
@@ -1027,12 +1151,7 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.AwaitExpr awaited) {
                 Object value = eval(awaited.expression(), env);
                 if (value instanceof CompletionStage<?> stage) {
-                    var future = stage.toCompletableFuture();
-                    if (ActorRuntime.inActorExecution() && !future.isDone()) {
-                        throw new IllegalStateException(
-                                "await would block an actor dispatcher carrier; actor continuation lowering must suspend/resume the mailbox turn");
-                    }
-                    return future.join();
+                    return AsyncRuntime.await(stage);
                 }
                 return value;
             }
@@ -1072,8 +1191,15 @@ public final class OresEvalRootNode extends RootNode {
                         Ast.Param param = lambda.parameters().get(i);
                         local.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
                     }
-                    if (lambda.expressionBody() != null) return eval(lambda.expressionBody(), local);
                     try {
+                        if (lambda.expressionBody() != null) {
+                            // An expression-bodied lambda's sole expression is
+                            // inherently in tail position. Route it through the
+                            // same tail-return lowering as an explicit
+                            // `return expr;` in a block-bodied lambda.
+                            returnFrom(lambda.expressionBody(), local, false);
+                            throw new AssertionError("lambda expression return did not transfer control");
+                        }
                         executeBlock(lambda.blockBody(), local);
                         return null;
                     } catch (TailCallSignal signal) {
@@ -1381,6 +1507,16 @@ public final class OresEvalRootNode extends RootNode {
         private Object callStaticFunctionRaw(Ast.MethodDecl fn, List<?> args) {
             if (!fn.isStatic()) throw new IllegalArgumentException("not a static class function: " + fn.name());
             if (args.size() != fn.parameters().size()) throw new IllegalArgumentException("static function " + fn.name() + " arity mismatch");
+            if (!fn.async()) return callStaticFunctionBodyRaw(fn, args);
+
+            List<?> detached = detachAsyncArguments(args);
+            return context.asyncRuntime().submit(() ->
+                    detachAsyncValue(
+                            invoke(staticFunctionBodyInvocation(fn, detached)),
+                            new IdentityHashMap<>()));
+        }
+
+        private Object callStaticFunctionBodyRaw(Ast.MethodDecl fn, List<?> args) {
             Env env = new Env(null);
             for (int i = 0; i < fn.parameters().size(); i++) {
                 Ast.Param param = fn.parameters().get(i);

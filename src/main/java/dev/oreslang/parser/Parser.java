@@ -1622,8 +1622,13 @@ public final class Parser {
     }
 
     private void consumeStatementTerminator(String message) {
-        if (match(SEMICOLON) || isSafeStatementBoundary()) return;
+        if (match(SEMICOLON) || isSafeStatementBoundary() || isImplicitNewlineTerminator()) return;
         throw error(peek(), message);
+    }
+
+    private boolean isImplicitNewlineTerminator() {
+        if (current == 0 || check(EOF)) return false;
+        return previous().line() < peek().line();
     }
 
     private boolean isSafeStatementBoundary() {
