@@ -31,25 +31,15 @@ Observable<T>
 A `next()` call admits at most one item. This gives us real backpressure before
 we add a larger demand protocol.
 
-There may be only one outstanding `next()` per subscription. The demand slot
-is not released until the **exposed pull Future itself** reaches a terminal
-state; source completion alone is not enough to admit another pull.
+There may be only one outstanding `next()` per subscription.
 
-A pull settles with exactly one of:
+A pull settles with either:
 
 - `NEXT(value)`;
-- `COMPLETE`;
-- a failed Future for the stream error path; or
-- a cancelled Future for structured cancellation.
+- `COMPLETE`; or
+- a failed Future for the stream error path.
 
-Errors are not encoded as ordinary values, and cancellation is not demoted into
-an ordinary failure. Cancellation identity comes from Future state, not merely
-from seeing a `CancellationException`: a domain failure whose error happens to
-be a `CancellationException` is still a failure unless that Future was
-actually cancelled.
-
-`NEXT(null)` is invalid. Oreslang absence is represented with `Option<T>`,
-not a null reactive payload.
+Errors are not encoded as ordinary values.
 
 ## Scheduler invariant
 
@@ -67,33 +57,32 @@ producer
   -> execute rx-ores guest operator
 ```
 
-This is the same invariant already used by actor `await`.
+This is the same invariant already used by actor `await`. On the native carrier backend, the resumed
+observer/operator turn runs on its owning Ores pthread scheduler carrier; the
+producer thread merely settles the OresFuture.
 
-## Scheduler-bound transform callbacks
+## Why callback-style subscribe is not in the first patch
 
-Push-style `subscribe(Consumer<T>)` is still intentionally absent. A producer
-thread must never run guest observer code directly.
+The familiar surface eventually wants forms such as:
 
-Scheduler-bound transform callbacks are now safe because every transform is
-executed as an `OresScheduler` task turn:
+```ores
+val doubled = values.map(|int value| -> int {
+  return value * 2;
+});
 
-```text
-upstream next() Future settles
-  -> operator task becomes runnable
-  -> owning OresScheduler dispatches task
-  -> map/filter guest transform executes
-  -> operator Future settles after the turn unwinds
+val sub = doubled.subscribe(|int value| -> void {
+  consume(value);
+});
 ```
 
-The native runtime therefore exposes scheduler-bound `map` and `filter`
-operators. Their callback surface always includes an explicit
-`OresScheduler`; there is no unscheduled public `Function`/`Predicate`
-variant.
+But exposing that before scheduler-bound guest callbacks exist would be wrong:
+a Future completion callback could accidentally execute guest code on an I/O or
+JNI completion thread.
 
-`filter` is deliberately implemented as a resumable pull state machine. A
-rejected item awaits another upstream pull, even when that source is already
-complete/immediate, so a long run of rejected cold values cannot recurse inline
-or execute on the producer stack.
+So the first runtime API deliberately exposes no public Java
+`Consumer`/`Function` observer surface. Native higher-order operators come
+after the compiler/runtime can bind the operator lambda to an Ores task or actor
+continuation.
 
 ## Core library, explicit linking, and executable size
 
@@ -147,7 +136,7 @@ Using the current callable direction, the target shape is approximately:
 ```ores
 pub interface Subscription<T> {
   fnc next(): Future<Notification<T>>;
-  fnc cancel(): bool;
+  fnc cancel(): void;
 }
 
 pub interface Observable<T> {
@@ -174,12 +163,10 @@ library does not freeze stale syntax from an older stack.
 
 ## Future / Observable bridge
 
-The native bridge/operators currently include:
+The first native bridge includes:
 
 - `Observable.fromValues(...)`: cold replayable finite source;
 - `Observable.fromFuture(...)`: adapt one shared `OresFuture<T>`;
-- scheduler-bound `map(scheduler, mapper)`;
-- scheduler-bound `filter(scheduler, predicate)`;
 - `take(n)`: bounded upstream consumption;
 - `first()`: adapt the first stream item back into `OresFuture<T>`.
 
@@ -192,8 +179,8 @@ Per-subscription owned producers will be added with a deferred-source primitive.
 
 The next layers should add, in roughly this order:
 
-1. source-level `std/rx` facade over the scheduler-bound runtime operators;
-2. `scan`, `take_while`;
+1. scheduler-bound guest operator execution;
+2. `map`, `filter`, `scan`, `take_while`;
 3. `flat_map` / `switch_map` with structured child cancellation;
 4. `merge`, `concat`, `zip`, `combine_latest`;
 5. timer operators such as `delay`, `debounce`, `throttle`;
@@ -228,17 +215,6 @@ downstream subscription cancel
   -> release buffers/resources
   -> stop future production
 ```
-
-The subscription substrate owns the terminal transition and runs its runtime
-cleanup hook at most once across explicit cancellation, natural completion,
-source failure, invalid source output, pull cancellation, and completion/cancel
-races. Calling `cancel()` after the subscription is already terminal returns
-`false` because no new cancellation transition occurred.
-
-Cancelling a derived/shared pull detaches its runtime waiter so it does not keep
-continuation state alive. It must not cancel a shared producer unless that
-operator/source explicitly owns the producer and requests cancellation
-propagation.
 
 As with ordinary Ores Futures, cancellation is a request to underlying host work,
 not proof that an uncooperative host call has stopped.
