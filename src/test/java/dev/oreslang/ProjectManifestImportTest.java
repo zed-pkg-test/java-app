@@ -266,6 +266,81 @@ final class ProjectManifestImportTest {
     }
 
     @Test
+    void genericFncsCannotBeReifiedThroughCrossFileImports() throws Exception {
+        Path app = temp.resolve("generic-fnc-import-contract");
+        Files.createDirectories(app);
+        Path child = app.resolve("child.ores");
+        Path namedMain = app.resolve("named-main.ores");
+        Path wildcardMain = app.resolve("wildcard-main.ores");
+        Path classMain = app.resolve("class-main.ores");
+
+        Files.writeString(child, """
+                pub fnc identity<T>(T value): T {
+                  return value;
+                }
+
+                define class GenericTools as
+                  pub static fnc identity<T>(T value): T {
+                    return value;
+                  }
+                end
+                """);
+
+        Files.writeString(namedMain, """
+                import fnc identity from "./child.ores";
+                pub routine main(): void { return; }
+                """);
+
+        IllegalArgumentException namedFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> LinkedProgramRunner.validate(namedMain));
+        assertTrue(namedFailure.getMessage().contains("does not match an exported declaration"));
+
+        Files.writeString(wildcardMain, """
+                import * as external from "./child.ores";
+
+                pub routine main(): void {
+                  val callback = external.identity;
+                  return;
+                }
+                """);
+
+        PolyglotException wildcardFailure = assertThrows(
+                PolyglotException.class,
+                () -> LinkedProgramRunner.run(
+                        wildcardMain,
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        Map.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+        assertTrue(wildcardFailure.getMessage().contains("polymorphic function values are not supported yet"));
+
+        Files.writeString(classMain, """
+                import class GenericTools from "./child.ores";
+
+                pub routine main(): void {
+                  val callback = GenericTools.identity;
+                  return;
+                }
+                """);
+
+        PolyglotException classFailure = assertThrows(
+                PolyglotException.class,
+                () -> LinkedProgramRunner.run(
+                        classMain,
+                        IsolatePolicy.developer(),
+                        ExecutionProfile.serverJit(),
+                        Set.of(),
+                        Map.of(),
+                        new ByteArrayOutputStream(),
+                        new ByteArrayOutputStream()));
+        assertTrue(classFailure.getMessage().contains("generic static fnc"));
+        assertTrue(classFailure.getMessage().contains("polymorphic function values are not supported yet"));
+    }
+
+    @Test
     void oreslangPathResolvesBareImportsWithoutAManifest() throws Exception {
         Path app = temp.resolve("app");
         Path shared = temp.resolve("shared-root");

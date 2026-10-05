@@ -253,7 +253,9 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - fnc declarations are reifiable first-class callable values; routine
      declarations are direct-call-only and cannot be stored, returned, or
      passed as callbacks without an explicit wrapping lambda. Reified module
-     aliases preserve this distinction.
+     aliases preserve this distinction. `import fnc` accepts only public,
+     non-actor, non-generic fnc declarations because generic fnc values require
+     direct-call specialization until polymorphic function values exist.
    - Fnc<...>-valued fields are callable data and remain reifiable. A class or
      interface field name may not collide with an instance-method name across
      inheritance; module callables/classes/bindings likewise share one runtime
