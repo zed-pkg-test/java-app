@@ -254,6 +254,56 @@ final class CallableSemanticsTest {
     }
 
     @Test
+    void moduleAliasesKeepFncsFirstClassAndRoutinesDirectOnlyAtRuntime() throws Exception {
+        String output = run("""
+                define module service
+                  pub fnc transform(int value): int {
+                    return value + 1;
+                  }
+
+                  pub routine direct_only(int value): int {
+                    return value + 2;
+                  }
+                end
+
+                pub routine main(): void {
+                  val alias = service;
+                  val Fnc<int, int> callback = alias.transform;
+                  stdio.stdout.write(callback(4));
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(alias.direct_only(4));
+                  return;
+                }
+                """);
+
+        assertEquals("5:6", output);
+    }
+
+    @Test
+    void functionValuedFieldsRemainFirstClassWithoutBecomingMethods() throws Exception {
+        String output = run("""
+                fnc increment(int value): int {
+                  return value + 1;
+                }
+
+                define class Box as
+                  pub val Fnc<int, int> callback;
+                end
+
+                pub routine main(): void {
+                  val box = new Box(increment);
+                  stdio.stdout.write(box.callback(4));
+                  stdio.stdout.write(":");
+                  val Fnc<int, int> callback = box.callback;
+                  stdio.stdout.write(callback(9));
+                  return;
+                }
+                """);
+
+        assertEquals("5:10", output);
+    }
+
+    @Test
     void localCallableBindingShadowsTopLevelDeclarationForDirectCalls() throws Exception {
         String output = run("""
                 fnc value(): int {
