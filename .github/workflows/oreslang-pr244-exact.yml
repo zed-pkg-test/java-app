@@ -1,0 +1,48 @@
+name: Oreslang PR244 exact-tree validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "_ci/oreslang-pr244/**"
+      - ".github/workflows/oreslang-pr244-exact.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: _ci/oreslang-pr244
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prove exact private-source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:_ci/oreslang-pr244)" = "4cab4c54e57899229a38385e4f7c708dbba2c9cb"
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Verify exact Oreslang candidate
+        run: mvn -B -ntp -Dores.runtime.carriers=native verify
+      - name: Run representative examples
+        run: |
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/modules-namespaces-callables.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/async-await.ores" | tee /tmp/oreslang-async-await.out
+          grep -F "144" /tmp/oreslang-async-await.out
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/callables.ores" | tee /tmp/oreslang-callables.out
+          grep -F "120:9:13" /tmp/oreslang-callables.out
