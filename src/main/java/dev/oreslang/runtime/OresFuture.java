@@ -118,6 +118,20 @@ public class OresFuture<T> implements Future<T> {
         return state.get() != PENDING;
     }
 
+    /** Read-only runtime observation; does not expose completion authority. */
+    public boolean failed() {
+        return state.get() instanceof Failure;
+    }
+
+    /** Nonblocking read for runtime cleanup/inspection paths. */
+    @SuppressWarnings("unchecked")
+    public T valueNowOr(T fallback) {
+        Object snapshot = state.get();
+        return snapshot instanceof Success<?> success
+                ? (T) success.value()
+                : fallback;
+    }
+
     /**
      * Uninterruptible-style convenience matching the language/runtime await
      * boundary: checked completion failures are rethrown as their original
