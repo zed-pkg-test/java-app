@@ -1,0 +1,4 @@
+source_repo=ores-truffle-oreslang/oreslang-source.java
+source_commit=0016dd21feb7ef0fbc82d2d3992e14253919676f
+source_tree=9a14958d04f7d80109e1a80dcb8c118d5dcf4e98
+note=all source blobs besides this provenance file are mirrored byte-for-byte by Git blob SHA
