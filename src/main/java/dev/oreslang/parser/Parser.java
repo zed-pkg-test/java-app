@@ -1329,8 +1329,11 @@ public final class Parser {
         List<Ast.Param> params = parseParametersUntil(RPAREN);
         consume(RPAREN, "expected ')' after lambda parameters");
         consume(ARROW, "expected '->' after lambda parameters");
-        if (check(LBRACE)) return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
-        return new Ast.LambdaExpr(params, parseExpression(), List.of(), nonLexical);
+        if (!check(LBRACE)) {
+            throw error(peek(),
+                    "parenthesized lambdas require a block body; use '|args| -> expr' for an expression body");
+        }
+        return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
     }
 
     private Ast.LambdaExpr parsePipeLambda(boolean nonLexical) {

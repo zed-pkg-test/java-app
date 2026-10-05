@@ -1337,7 +1337,8 @@ public final class TypeChecker {
                 lambdaEnv.define(param.name(), type, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
             if (lambda.expressionBody() != null) {
-                throw new IllegalArgumentException("expression-body lambdas are not supported; lambdas require braces and explicit return");
+                Type result = typeOf(lambda.expressionBody(), lambdaEnv, generics, self);
+                return new Function(parameters, result);
             }
             checkBlock(lambda.blockBody(), lambdaEnv, generics, Unknown.INSTANCE, self);
             return new Function(parameters, Unknown.INSTANCE);
@@ -1443,9 +1444,6 @@ public final class TypeChecker {
     }
 
     private void validateLambdaAgainstExpected(Ast.LambdaExpr lambda, Function expected, Env parent, Set<String> generics, Type self) {
-        if (lambda.expressionBody() != null) {
-            throw new IllegalArgumentException("lambdas always require a block body and explicit return for non-void results");
-        }
         if (lambda.parameters().size() != expected.parameters().size()) {
             throw new IllegalArgumentException("lambda arity " + lambda.parameters().size() + " does not match expected function arity " + expected.parameters().size());
         }
@@ -1458,6 +1456,12 @@ public final class TypeChecker {
             requireAssignable(expectedParam, declared, "lambda parameter " + param.name());
             requireAssignable(declared, expectedParam, "lambda parameter " + param.name());
             lambdaEnv.define(param.name(), declared, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+        }
+        if (lambda.expressionBody() != null) {
+            Type actual = typeOfAgainstExpected(
+                    lambda.expressionBody(), expected.result(), lambdaEnv, generics, self);
+            requireAssignable(actual, expected.result(), "expression-bodied lambda result");
+            return;
         }
         checkBlock(lambda.blockBody(), lambdaEnv, generics, expected.result(), self);
         if (expected.result() != Primitive.VOID && !definitelyReturns(lambda.blockBody())) {

@@ -878,7 +878,11 @@ public final class OwnershipChecker {
         }
 
         for (Ast.Param param : lambda.parameters()) closure.define(param.name(), stateForParam(param));
-        for (Ast.Stmt stmt : lambda.blockBody()) checkStatement(stmt, closure, Ast.TypeRef.inferred());
+        if (lambda.expressionBody() != null) {
+            checkExpr(lambda.expressionBody(), closure, true);
+        } else {
+            for (Ast.Stmt stmt : lambda.blockBody()) checkStatement(stmt, closure, Ast.TypeRef.inferred());
+        }
         closure.close();
         return new ValueInfo(Ast.TypeRef.simple("Fnc"), ValueKind.MOVE_ONLY, null);
     }
@@ -887,7 +891,11 @@ public final class OwnershipChecker {
         CaptureSet captures = new CaptureSet();
         Set<String> locals = new HashSet<>();
         for (Ast.Param param : lambda.parameters()) locals.add(param.name());
-        scanStatements(lambda.blockBody(), locals, outer, recursiveBinding, captures);
+        if (lambda.expressionBody() != null) {
+            scanExpr(lambda.expressionBody(), locals, outer, recursiveBinding, captures, false);
+        } else {
+            scanStatements(lambda.blockBody(), locals, outer, recursiveBinding, captures);
+        }
         return captures;
     }
 
