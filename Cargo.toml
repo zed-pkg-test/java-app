@@ -1,14 +1,12 @@
-[package]
-name = "litegraph-node"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+[workspace]
+members = ["source"]
+resolver = "2"
 
-[dependencies]
-async-trait = "0.1"
-axum = "0.8"
+[patch."https://github.com/litegraph/litegraph-gpu-host"]
 litegraph-gpu-host = { path = "vendor/litegraph-gpu-host" }
+
+[patch."https://github.com/litegraph/litegraph-modeld"]
 litegraph-modeld = { path = "vendor/litegraph-modeld" }
+
+[patch."https://github.com/litegraph/litegraph-runtime"]
 litegraph-runtime = { path = "vendor/litegraph-runtime" }
-serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
