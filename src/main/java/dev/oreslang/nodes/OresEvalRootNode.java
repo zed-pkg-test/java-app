@@ -668,12 +668,22 @@ public final class OresEvalRootNode extends RootNode {
                 if (receiver instanceof OresObject object) {
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, methodCall.member(), args.size(), new LinkedHashSet<>());
-                    if (method == null) {
-                        throw new IllegalArgumentException(
-                                "no method " + object.klass.name() + "." + methodCall.member()
-                                        + " with arity " + args.size());
+                    if (method != null) {
+                        return object.owner.methodInvocation(object, method, args);
                     }
-                    return object.owner.methodInvocation(object, method, args);
+
+                    Object fieldValue = object.fields.get(methodCall.member());
+                    if (fieldValue instanceof Invokable invokable) {
+                        return object.owner.invokableInvocation(invokable, args);
+                    }
+                    if (object.fields.containsKey(methodCall.member())) {
+                        throw new IllegalArgumentException(
+                                "field " + object.klass.name() + "." + methodCall.member()
+                                        + " is not callable");
+                    }
+                    throw new IllegalArgumentException(
+                            "no method or callable field " + object.klass.name() + "."
+                                    + methodCall.member() + " with arity " + args.size());
                 }
 
                 if (receiver instanceof ClassFacade klass) {
@@ -1399,9 +1409,17 @@ public final class OresEvalRootNode extends RootNode {
             Ast.ClassDecl klass = findClass(name);
             if (klass != null) return new ClassFacade(this, klass);
             Ast.FunctionDecl fn = findFunction(name);
-            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC
-                    && fn.kind() == Ast.CallableKind.FNC
-                    && fn.actorKind() == Ast.ActorKind.NONE) {
+            if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC) {
+                if (fn.kind() == Ast.CallableKind.ROUTINE) {
+                    throw new IllegalArgumentException(
+                            "routine '" + name
+                                    + "' is direct-call-only and cannot be extracted through a wildcard import namespace");
+                }
+                if (fn.actorKind() != Ast.ActorKind.NONE) {
+                    throw new IllegalArgumentException(
+                            "actor callable '" + name
+                                    + "' is scheduler-dispatched and cannot be extracted as a first-class callable value");
+                }
                 return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
             }
             for (Ast.ModuleDecl candidate : program.modules()) {
