@@ -397,7 +397,7 @@ public final class OresScheduler implements AutoCloseable {
                 new AtomicReference<>(Resume.initialResume());
         private final AtomicReference<TerminalOutcome<T>> terminalOutcome =
                 new AtomicReference<>();
-        private final AtomicReference<OresFuture.RuntimeWaiterRegistration>
+        private final AtomicReference<OresFuture.RuntimeWaiterRegistration<?>>
                 activeAwaitRegistration = new AtomicReference<>();
         private final OresFuture<T> completion;
 
@@ -516,10 +516,10 @@ public final class OresScheduler implements AutoCloseable {
                 // target, avoiding a new captured lambda for every await. The
                 // detachable registration remains per suspension so scheduler
                 // close/task cancellation can sever retention safely.
-                OresFuture.RuntimeWaiterRegistration registration =
+                OresFuture.RuntimeWaiterRegistration<?> registration =
                         awaited.whenCompleteRuntimeCancellable(this);
 
-                OresFuture.RuntimeWaiterRegistration previous =
+                OresFuture.RuntimeWaiterRegistration<?> previous =
                         activeAwaitRegistration.getAndSet(registration);
                 if (previous != null) previous.detach();
 
@@ -577,7 +577,7 @@ public final class OresScheduler implements AutoCloseable {
         }
 
         private void detachActiveAwaitRegistration() {
-            OresFuture.RuntimeWaiterRegistration registration =
+            OresFuture.RuntimeWaiterRegistration<?> registration =
                     activeAwaitRegistration.getAndSet(null);
             if (registration != null) registration.detach();
         }

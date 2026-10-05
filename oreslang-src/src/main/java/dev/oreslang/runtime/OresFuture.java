@@ -62,36 +62,33 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     private record Failure(Throwable failure) { }
     private record Cancelled(CancellationException failure) { }
 
-    private static final class Waiter<T> {
-        private final BiConsumer<? super T, ? super Throwable> callback;
-        private final AtomicBoolean claimed = new AtomicBoolean();
-
-        private Waiter(BiConsumer<? super T, ? super Throwable> callback) {
-            this.callback = callback;
-        }
-    }
-
     /**
-     * Runtime-only detachable completion registration.
+     * Runtime-only detachable completion waiter.
+     *
+     * <p>The waiter is also its own registration handle. Keeping the callback,
+     * exactly-once claim bit, owner, and detach operation in one object avoids
+     * allocating a second registration wrapper and captured removal lambda for
+     * every genuinely suspending await.</p>
      *
      * <p>Detaching never changes the Future's producer/cancellation state. It
      * only prevents this runtime continuation waiter from retaining or being
      * invoked after its owning scheduler/task has been cancelled.</p>
      */
-    static final class RuntimeWaiterRegistration {
-        private final AtomicBoolean claimed;
-        private final Runnable remove;
+    static final class RuntimeWaiterRegistration<T> {
+        private final OresFuture<T> owner;
+        private final BiConsumer<? super T, ? super Throwable> callback;
+        private final AtomicBoolean claimed = new AtomicBoolean();
 
         private RuntimeWaiterRegistration(
-                AtomicBoolean claimed,
-                Runnable remove) {
-            this.claimed = claimed;
-            this.remove = remove;
+                OresFuture<T> owner,
+                BiConsumer<? super T, ? super Throwable> callback) {
+            this.owner = Objects.requireNonNull(owner, "owner");
+            this.callback = Objects.requireNonNull(callback, "callback");
         }
 
         boolean detach() {
             if (!claimed.compareAndSet(false, true)) return false;
-            remove.run();
+            owner.waiters.remove(this);
             return true;
         }
     }
@@ -99,7 +96,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     private final AtomicReference<Runnable> cancelHook;
     private final AtomicBoolean cancelHookRun = new AtomicBoolean();
     private final AtomicReference<Object> state = new AtomicReference<>(PENDING);
-    private final ConcurrentLinkedQueue<Waiter<T>> waiters = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<RuntimeWaiterRegistration<T>> waiters = new ConcurrentLinkedQueue<>();
 
     public OresFuture() {
         this(() -> { });
@@ -307,11 +304,11 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
             }
         });
 
-        AtomicReference<RuntimeWaiterRegistration> taskWaiter =
+        AtomicReference<RuntimeWaiterRegistration<U>> taskWaiter =
                 new AtomicReference<>();
 
         Runnable detach = () -> {
-            RuntimeWaiterRegistration registration =
+            RuntimeWaiterRegistration<U> registration =
                     taskWaiter.getAndSet(null);
             if (registration != null) registration.detach();
         };
@@ -330,7 +327,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
             // cancellation deliberately never cancels it.
         });
 
-        RuntimeWaiterRegistration registration =
+        RuntimeWaiterRegistration<U> registration =
                 task.whenCompleteRuntimeCancellable((value, failure) -> {
                     try {
                         if (exposed.isDone()) return;
@@ -384,14 +381,11 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         whenCompleteRuntimeCancellable(callback);
     }
 
-    RuntimeWaiterRegistration whenCompleteRuntimeCancellable(
+    RuntimeWaiterRegistration<T> whenCompleteRuntimeCancellable(
             BiConsumer<? super T, ? super Throwable> callback) {
         Objects.requireNonNull(callback, "callback");
-        Waiter<T> waiter = new Waiter<>(callback);
-        RuntimeWaiterRegistration registration =
-                new RuntimeWaiterRegistration(
-                        waiter.claimed,
-                        () -> waiters.remove(waiter));
+        RuntimeWaiterRegistration<T> waiter =
+                new RuntimeWaiterRegistration<>(this, callback);
         waiters.add(waiter);
 
         Object observed = state.get();
@@ -404,7 +398,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
             waiters.remove(waiter);
             notifyWaiter(waiter, observed);
         }
-        return registration;
+        return waiter;
     }
 
     int pendingRuntimeWaiterCount() {
@@ -542,7 +536,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     private boolean settle(Object terminal) {
         if (!state.compareAndSet(PENDING, terminal)) return false;
 
-        Waiter<T> waiter;
+        RuntimeWaiterRegistration<T> waiter;
         while ((waiter = waiters.poll()) != null) {
             notifyWaiter(waiter, terminal);
         }
@@ -550,7 +544,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     @SuppressWarnings("unchecked")
-    private void notifyWaiter(Waiter<T> waiter, Object terminal) {
+    private void notifyWaiter(RuntimeWaiterRegistration<T> waiter, Object terminal) {
         if (!waiter.claimed.compareAndSet(false, true)) return;
         try {
             if (terminal instanceof Success<?> success) {
