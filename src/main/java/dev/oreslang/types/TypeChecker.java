@@ -1077,15 +1077,18 @@ public final class TypeChecker {
             boolean dynamicKeys = false;
             Type dynamicValue = null;
             for (Ast.ObjectField field : object.fields()) {
-                Type valueType = widenCollectionElement(typeOf(field.value(), env, generics, self));
-                dynamicValue = dynamicValue == null ? valueType : collectionElementJoin(dynamicValue, valueType);
+                Type preciseValueType = typeOf(field.value(), env, generics, self);
+                Type widenedValueType = widenCollectionElement(preciseValueType);
+                dynamicValue = dynamicValue == null
+                        ? widenedValueType
+                        : collectionElementJoin(dynamicValue, widenedValueType);
                 if (field.isDynamic()) {
                     dynamicKeys = true;
                     requireAssignable(
                             typeOf(field.dynamicName(), env, generics, self),
                             Primitive.STRING,
                             "dynamic obj key");
-                } else if (members.putIfAbsent(field.name(), valueType) != null) {
+                } else if (members.putIfAbsent(field.name(), preciseValueType) != null) {
                     throw new IllegalArgumentException("duplicate obj field '" + field.name() + "'");
                 }
             }
