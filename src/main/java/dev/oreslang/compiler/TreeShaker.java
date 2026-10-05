@@ -171,7 +171,6 @@ public final class TreeShaker {
             Ast.FunctionDecl function = target.function();
             if (call.typeArgumentsPresent()
                     || !function.genericParameters().isEmpty()
-                    || function.kind() != Ast.CallableKind.FNC
                     || function.actorKind() != Ast.ActorKind.NONE
                     || function.async()
                     || function.parameters().size() != arguments.size()
