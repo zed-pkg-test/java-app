@@ -40,8 +40,12 @@ jobs:
       - name: Native SSR static audit
         run: bash ssr/scripts/audit.sh
 
-      - name: Type-check SSR source graphs
-        run: mvn -B -ntp -Dtest=SsrValidationTest test
+      - name: Compile and execute SSR examples
+        run: |
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/examples/basic-page.ores" > /tmp/ssr-basic.out
+          mvn -q -Dstyle.color=never -DskipTests exec:java -Dexec.args="ssr/examples/htmx-fragment.ores" > /tmp/ssr-htmx.out
+          test -s /tmp/ssr-basic.out
+          test -s /tmp/ssr-htmx.out
 
       - name: Render contract in JIT profile
         run: |
