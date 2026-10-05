@@ -39,8 +39,7 @@ A pull settles with either:
 - `COMPLETE`; or
 - a failed Future for the stream error path.
 
-Errors are not encoded as ordinary values. `NEXT(null)` is invalid: Oreslang
-absence is represented with `Option<T>`, not a null reactive payload.
+Errors are not encoded as ordinary values.
 
 ## Scheduler invariant
 
@@ -60,31 +59,28 @@ producer
 
 This is the same invariant already used by actor `await`.
 
-## Scheduler-bound transform callbacks
+## Why callback-style subscribe is not in the first patch
 
-Push-style `subscribe(Consumer<T>)` is still intentionally absent. A producer
-thread must never run guest observer code directly.
+The familiar surface eventually wants forms such as:
 
-Scheduler-bound transform callbacks are now safe because every transform is
-executed as an `OresScheduler` task turn:
+```ores
+val doubled = values.map(|int value| -> int {
+  return value * 2;
+});
 
-```text
-upstream next() Future settles
-  -> operator task becomes runnable
-  -> owning OresScheduler dispatches task
-  -> map/filter guest transform executes
-  -> operator Future settles after the turn unwinds
+val sub = doubled.subscribe(|int value| -> void {
+  consume(value);
+});
 ```
 
-The native runtime therefore exposes scheduler-bound `map` and `filter`
-operators. Their callback surface always includes an explicit
-`OresScheduler`; there is no unscheduled public `Function`/`Predicate`
-variant.
+But exposing that before scheduler-bound guest callbacks exist would be wrong:
+a Future completion callback could accidentally execute guest code on an I/O or
+JNI completion thread.
 
-`filter` is deliberately implemented as a resumable pull state machine. A
-rejected item awaits another upstream pull, even when that source is already
-complete/immediate, so a long run of rejected cold values cannot recurse inline
-or execute on the producer stack.
+So the first runtime API deliberately exposes no public Java
+`Consumer`/`Function` observer surface. Native higher-order operators come
+after the compiler/runtime can bind the operator lambda to an Ores task or actor
+continuation.
 
 ## Core library, explicit linking, and executable size
 
@@ -165,12 +161,10 @@ library does not freeze stale syntax from an older stack.
 
 ## Future / Observable bridge
 
-The native bridge/operators currently include:
+The first native bridge includes:
 
 - `Observable.fromValues(...)`: cold replayable finite source;
 - `Observable.fromFuture(...)`: adapt one shared `OresFuture<T>`;
-- scheduler-bound `map(scheduler, mapper)`;
-- scheduler-bound `filter(scheduler, predicate)`;
 - `take(n)`: bounded upstream consumption;
 - `first()`: adapt the first stream item back into `OresFuture<T>`.
 
@@ -183,8 +177,8 @@ Per-subscription owned producers will be added with a deferred-source primitive.
 
 The next layers should add, in roughly this order:
 
-1. source-level `std/rx` facade over the scheduler-bound runtime operators;
-2. `scan`, `take_while`;
+1. scheduler-bound guest operator execution;
+2. `map`, `filter`, `scan`, `take_while`;
 3. `flat_map` / `switch_map` with structured child cancellation;
 4. `merge`, `concat`, `zip`, `combine_latest`;
 5. timer operators such as `delay`, `debounce`, `throttle`;
