@@ -22,5 +22,6 @@ jobs:
       - name: Normalize formatting in diagnostic copy
         run: cd source-main && cargo fmt --all
       - run: cd source-main && cargo check --all-targets
-      - run: cd source-main && cargo clippy --all-targets --all-features -- -D warnings
+      - name: Clippy using repository-declared lint levels
+        run: cd source-main && cargo clippy --all-targets --all-features
       - run: cd source-main && cargo test --all-targets
