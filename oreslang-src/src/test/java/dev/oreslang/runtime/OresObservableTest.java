@@ -106,6 +106,50 @@ final class OresObservableTest {
     }
 
     @Test
+    void sharedFutureCancellationRemainsCancellationForPulledDemand() {
+        OresFuture<Integer> source = new OresFuture<>();
+        OresSubscription<Integer> subscription =
+                OresObservable.fromFuture(source).subscribe();
+
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+        assertTrue(source.cancel(true));
+
+        assertTrue(pull.isCancelled(),
+                "upstream cancellation must remain cancellation");
+        assertThrows(CancellationException.class, pull::join);
+        assertTrue(subscription.isTerminated());
+        assertFalse(subscription.isCancelled(),
+                "the producer cancelled; the subscriber did not explicitly cancel itself");
+    }
+
+    @Test
+    void firstPreservesUpstreamCancellation() {
+        OresFuture<Integer> source = new OresFuture<>();
+        OresFuture<Integer> first = OresObservable.fromFuture(source).first();
+
+        assertTrue(source.cancel(true));
+
+        assertTrue(first.isCancelled());
+        assertThrows(CancellationException.class, first::join);
+    }
+
+    @Test
+    void cancellationExceptionFailureIsNotMisclassifiedAsCancellation() {
+        OresFuture<Integer> source =
+                OresFuture.failed(new CancellationException("domain failure"));
+        OresFuture<OresNotification<Integer>> pull =
+                OresObservable.fromFuture(source).subscribe().next();
+
+        assertFalse(source.isCancelled());
+        assertFalse(pull.isCancelled(),
+                "cancellation identity comes from Future state, not exception class");
+
+        CompletionException failure =
+                assertThrows(CompletionException.class, pull::join);
+        assertInstanceOf(CancellationException.class, failure.getCause());
+    }
+
+    @Test
     void sourceFailureIsTerminal() {
         OresFuture<Integer> source =
                 OresFuture.failed(new IllegalStateException("boom"));
@@ -118,6 +162,8 @@ final class OresObservableTest {
 
         assertTrue(subscription.isTerminated());
         assertTrue(subscription.next().join().isComplete());
+        assertFalse(subscription.cancel(),
+                "cancellation after terminal failure must not reopen teardown");
     }
 
     @Test
@@ -201,8 +247,147 @@ final class OresObservableTest {
         assertInstanceOf(IllegalStateException.class, failure.getCause());
         assertEquals(1, cleanupCalls.get());
 
-        assertTrue(subscription.cancel());
+        assertFalse(subscription.cancel(),
+                "terminal subscription cancellation must report no state transition");
         assertEquals(1, cleanupCalls.get());
+    }
+
+    @Test
+    void subscriptionRuntimeCleanupRunsExactlyOnceAcrossCancellationCascade() {
+        AtomicInteger cleanupCalls = new AtomicInteger();
+        OresFuture<OresNotification<Integer>> source = new OresFuture<>();
+
+        OresSubscription<Integer> subscription = new OresSubscription<>() {
+            @Override
+            protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                return source;
+            }
+
+            @Override
+            protected void cancelFromRuntime() {
+                cleanupCalls.incrementAndGet();
+            }
+        };
+
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+        assertTrue(subscription.cancel());
+        assertThrows(CancellationException.class, pull::join);
+        assertFalse(subscription.cancel());
+        assertEquals(1, cleanupCalls.get());
+    }
+
+    @Test
+    void synchronousSourceFailureStillRunsRuntimeCleanupExactlyOnce() {
+        AtomicInteger cleanupCalls = new AtomicInteger();
+
+        OresSubscription<Integer> subscription = new OresSubscription<>() {
+            @Override
+            protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                throw new IllegalStateException("source construction failed");
+            }
+
+            @Override
+            protected void cancelFromRuntime() {
+                cleanupCalls.incrementAndGet();
+            }
+        };
+
+        CompletionException failure =
+                assertThrows(CompletionException.class, () -> subscription.next().join());
+        assertInstanceOf(IllegalStateException.class, failure.getCause());
+        assertTrue(subscription.isTerminated());
+        assertFalse(subscription.cancel());
+        assertEquals(1, cleanupCalls.get());
+    }
+
+    @Test
+    void naturalCompletionRunsRuntimeCleanupExactlyOnce() {
+        AtomicInteger cleanupCalls = new AtomicInteger();
+
+        OresSubscription<Integer> subscription = new OresSubscription<>() {
+            @Override
+            protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                return OresFuture.completed(OresNotification.complete());
+            }
+
+            @Override
+            protected void cancelFromRuntime() {
+                cleanupCalls.incrementAndGet();
+            }
+        };
+
+        assertTrue(subscription.next().join().isComplete());
+        assertTrue(subscription.isTerminated());
+        assertFalse(subscription.isCancelled());
+        assertFalse(subscription.cancel());
+        assertEquals(1, cleanupCalls.get());
+    }
+
+    @Test
+    void cancellationAndProducerCompletionRaceStillTearsDownOnce() throws Exception {
+        for (int attempt = 0; attempt < 200; attempt++) {
+            AtomicInteger cleanupCalls = new AtomicInteger();
+            OresFuture<OresNotification<Integer>> source = new OresFuture<>();
+
+            OresSubscription<Integer> subscription = new OresSubscription<>() {
+                @Override
+                protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                    return source;
+                }
+
+                @Override
+                protected void cancelFromRuntime() {
+                    cleanupCalls.incrementAndGet();
+                }
+            };
+
+            OresFuture<OresNotification<Integer>> pull = subscription.next();
+            java.util.concurrent.CountDownLatch start =
+                    new java.util.concurrent.CountDownLatch(1);
+
+            Thread producer = Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                source.completeFromRuntime(OresNotification.next(7));
+            });
+            Thread canceller = Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                subscription.cancel();
+            });
+
+            start.countDown();
+            producer.join();
+            canceller.join();
+
+            assertTrue(subscription.isTerminated());
+            assertEquals(1, cleanupCalls.get(),
+                    "producer/cancel race must not duplicate runtime cleanup");
+
+            if (!pull.isCancelled()) {
+                assertEquals(7, pull.join().value());
+            }
+        }
+    }
+
+    @Test
+    void observableRejectsNullRuntimeSubscription() {
+        OresObservable<Integer> broken = new OresObservable<>() {
+            @Override
+            protected OresSubscription<Integer> subscribeFromRuntime() {
+                return null;
+            }
+        };
+
+        assertThrows(NullPointerException.class, broken::subscribe);
     }
 
     @Test
