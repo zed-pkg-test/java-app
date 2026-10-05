@@ -2960,7 +2960,9 @@ public final class ActorRuntime implements AutoCloseable {
      * Internal two-phase actor spawn ticket used by compiler/runtime lowering.
      *
      * <p>Ordinary source-level {@code spawn Foo(...)} projects this ticket to
-     * {@link ActorId} immediately. Direct {@code await spawn Foo(...)} keeps the
+     * the actor ID's stable string representation immediately. The strong
+     * {@link ActorId} capability remains runtime-internal. Direct
+     * {@code await spawn Foo(...)} keeps the
      * ticket hidden until readiness succeeds, then exposes the started-actor
      * control surface (identity/liveness/completion/result) to source code.</p>
      */
