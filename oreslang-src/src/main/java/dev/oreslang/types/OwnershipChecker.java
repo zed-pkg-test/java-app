@@ -383,11 +383,13 @@ public final class OwnershipChecker {
             }
             checkExpr(member.receiver(), scope, false);
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
-            if (concreteReceiver != null && concreteReceiver.name().equals("ActorSpawn")) {
+            if (concreteReceiver != null && concreteReceiver.name().equals("StartedActor")) {
                 return switch (member.member()) {
                     case "id" -> new ValueInfo(Ast.TypeRef.simple("ActorId"), ValueKind.COPY, null);
-                    case "ready", "done", "result" ->
+                    case "done", "result" ->
                             new ValueInfo(Ast.TypeRef.simple("Future"), ValueKind.MOVE_ONLY, null);
+                    case "is_alive" ->
+                            new ValueInfo(Ast.TypeRef.simple("Fnc"), ValueKind.MOVE_ONLY, null);
                     default -> new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
                 };
             }
@@ -437,25 +439,27 @@ public final class OwnershipChecker {
             return new ValueInfo(constructedType, ValueKind.MOVE_ONLY, null);
         }
         if (expr instanceof Ast.SpawnExpr spawned) {
-            for (Ast.Expr argument : spawned.call().arguments()) {
-                ValueInfo info = checkExpr(argument, scope, true);
-                if (containsMutexGuardType(info.type)) {
-                    throw error("MutexGuard cannot cross an actor spawn boundary");
-                }
-            }
-            return new ValueInfo(Ast.TypeRef.simple("ActorSpawn"), ValueKind.MOVE_ONLY, null);
+            checkSpawnArguments(spawned, scope);
+            return new ValueInfo(Ast.TypeRef.simple("ActorId"), ValueKind.COPY, null);
         }
         if (expr instanceof Ast.AwaitExpr awaited) {
             if (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard()) {
                 throw error("cannot await while holding a lock guard; release the guard before suspension");
             }
+            if (awaited.expression() instanceof Ast.SpawnExpr spawned) {
+                checkSpawnArguments(spawned, scope);
+                return new ValueInfo(
+                        new Ast.TypeRef(
+                                "StartedActor",
+                                List.of(Ast.TypeRef.inferred()),
+                                false),
+                        ValueKind.MOVE_ONLY,
+                        null);
+            }
             ValueInfo awaitedValue = checkExpr(awaited.expression(), scope, consuming);
             if (awaitedValue.type.name().equals("Future") && awaitedValue.type.arguments().size() == 1) {
                 Ast.TypeRef result = awaitedValue.type.arguments().getFirst();
                 return new ValueInfo(result, kindOfType(result), null);
-            }
-            if (awaitedValue.type.name().equals("ActorSpawn")) {
-                return new ValueInfo(Ast.TypeRef.simple("ActorRef"), ValueKind.MOVE_ONLY, null);
             }
             return awaitedValue;
         }
@@ -484,6 +488,15 @@ public final class OwnershipChecker {
         }
         if (expr instanceof Ast.LambdaExpr lambda) return checkLambda(lambda, scope, null);
         return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
+    }
+
+    private void checkSpawnArguments(Ast.SpawnExpr spawned, Scope scope) {
+        for (Ast.Expr argument : spawned.call().arguments()) {
+            ValueInfo info = checkExpr(argument, scope, true);
+            if (containsMutexGuardType(info.type)) {
+                throw error("MutexGuard cannot cross an actor spawn boundary");
+            }
+        }
     }
 
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
