@@ -214,7 +214,9 @@ public final class Parser {
             List<Ast.Param> params = parseDeclaredPipeParameters();
             consume(PIPE, "expected closing '|' in lambda-style callable declaration");
             consume(ARROW, "lambda-style callable declarations use the slim arrow '->'");
-            Ast.TypeRef returnType = parseTypeRef();
+            Ast.TypeRef returnType = check(LBRACE)
+                    ? Ast.TypeRef.simple("void")
+                    : parseTypeRef();
             List<Ast.Stmt> body = parseBlock();
             return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.nonLexical, actorKind,
                     generics, params, returnType, annotations, body);
