@@ -14,7 +14,7 @@ public final class Ast {
         public Program(List<ModuleDecl> modules) { this(null, List.of(), modules); }
     }
 
-    public enum ImportKind { MODULE, CLASS, FUNCTION, ALL }
+    public enum ImportKind { MODULE, ACTOR, CLASS, FUNCTION, INTERFACE, TRAIT, STRUCT, TYPE, TYPES, ALL }
 
     public record ImportDecl(
             ImportKind kind,
@@ -123,6 +123,7 @@ public final class Ast {
             CallableKind kind,
             Visibility visibility,
             boolean async,
+            boolean generator,
             boolean nonLexical,
             ActorKind actorKind,
             List<String> genericParameters,
@@ -136,19 +137,34 @@ public final class Ast {
             annotations = List.copyOf(annotations);
             body = List.copyOf(body);
         }
+
+        /** Compatibility constructor for non-generator callables. */
+        public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
+                            boolean nonLexical, ActorKind actorKind, List<String> genericParameters,
+                            List<Param> parameters, TypeRef returnType, List<Annotation> annotations,
+                            List<Stmt> body) {
+            this(name, kind, visibility, async, false, nonLexical, actorKind,
+                    genericParameters, parameters, returnType, annotations, body);
+        }
+
         public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
                             ActorKind actorKind, List<String> genericParameters, List<Param> parameters,
                             TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, false, actorKind, genericParameters, parameters, returnType, annotations, body);
+            this(name, kind, visibility, async, false, false, actorKind,
+                    genericParameters, parameters, returnType, annotations, body);
         }
+
         public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
                             List<String> genericParameters, List<Param> parameters, TypeRef returnType,
                             List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, false, ActorKind.NONE, genericParameters, parameters, returnType, annotations, body);
+            this(name, kind, visibility, async, false, false, ActorKind.NONE,
+                    genericParameters, parameters, returnType, annotations, body);
         }
+
         public FunctionDecl(String name, Visibility visibility, boolean async, List<String> genericParameters,
                             List<Param> parameters, TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, CallableKind.FNC, visibility, async, false, ActorKind.NONE, genericParameters, parameters, returnType, annotations, body);
+            this(name, CallableKind.FNC, visibility, async, false, false, ActorKind.NONE,
+                    genericParameters, parameters, returnType, annotations, body);
         }
     }
 
@@ -250,8 +266,9 @@ public final class Ast {
 
     public enum BindingKind { CONST, VAL, LET }
 
-    public sealed interface Stmt permits BindingStmt, DestructureStmt, ReturnStmt, ExprStmt, DeferStmt,
-            BlockStmt, BreakStmt, ContinueStmt, IfStmt, TryStmt, ForOfStmt, ForOfDestructureStmt, ForStmt, LoopStmt { }
+    public sealed interface Stmt permits BindingStmt, DestructureStmt, ReturnStmt, YieldStmt, ExprStmt, DeferStmt,
+            BlockStmt, BreakStmt, ContinueStmt, IfStmt, MatchStmt, SwitchStmt, TryStmt,
+            ForOfStmt, ForOfDestructureStmt, ForStmt, LoopStmt { }
 
     public record BindingStmt(BindingKind kind, TypeRef declaredType, String name, Expr initializer) implements Stmt { }
     public record DestructureBinding(BindingKind kind, String name) {
@@ -280,6 +297,11 @@ public final class Ast {
     }
 
     public record ReturnStmt(Expr value) implements Stmt { }
+    public record YieldStmt(Expr value) implements Stmt {
+        public YieldStmt {
+            if (value == null) throw new IllegalArgumentException("yield requires a value");
+        }
+    }
     public record ExprStmt(Expr expression) implements Stmt { }
     public record DeferStmt(Expr expression) implements Stmt { }
 
@@ -300,6 +322,47 @@ public final class Ast {
         }
     }
 
+    /**
+     * Oreslang patterns are language-level values for static analysis and native lowering.
+     * They deliberately do not encode JVM Class/instanceof semantics.
+     */
+    public sealed interface Pattern permits WildcardPattern, LiteralPattern, BindingPattern,
+            TypePattern, ConstructorPattern { }
+
+    public record WildcardPattern() implements Pattern { }
+    public record LiteralPattern(Object value) implements Pattern { }
+    public record BindingPattern(String name) implements Pattern { }
+    public record TypePattern(TypeRef type, String binding) implements Pattern { }
+    public record ConstructorPattern(String constructor, List<Pattern> arguments) implements Pattern {
+        public ConstructorPattern { arguments = List.copyOf(arguments); }
+    }
+
+    public record MatchArm(Pattern pattern, Expr guard, List<Stmt> body) {
+        public MatchArm { body = List.copyOf(body); }
+    }
+
+    /**
+     * ordered=false is the normal proof-checked form: arm predicates must be disjoint.
+     * ordered=true ("match first") is an explicit priority/first-match escape hatch.
+     */
+    public record MatchStmt(Expr subject, boolean ordered, List<MatchArm> arms) implements Stmt {
+        public MatchStmt { arms = List.copyOf(arms); }
+    }
+
+    public record SwitchCase(List<Expr> constants, List<Stmt> body) {
+        public SwitchCase {
+            constants = List.copyOf(constants);
+            body = List.copyOf(body);
+        }
+    }
+
+    public record SwitchStmt(Expr subject, List<SwitchCase> cases, List<Stmt> defaultBody) implements Stmt {
+        public SwitchStmt {
+            cases = List.copyOf(cases);
+            defaultBody = List.copyOf(defaultBody);
+        }
+    }
+
     public record TryStmt(List<Stmt> body, String errorName, List<Stmt> catchBody, List<Stmt> finallyBody) implements Stmt {
         public TryStmt {
             body = List.copyOf(body);
@@ -308,13 +371,22 @@ public final class Ast {
         }
     }
 
-    public record ForOfStmt(BindingKind bindingKind, String bindingName, Expr iterable, List<Stmt> body) implements Stmt {
+    public record ForOfStmt(
+            BindingKind bindingKind,
+            String bindingName,
+            Expr iterable,
+            boolean asyncIteration,
+            List<Stmt> body) implements Stmt {
         public ForOfStmt { body = List.copyOf(body); }
+        public ForOfStmt(BindingKind bindingKind, String bindingName, Expr iterable, List<Stmt> body) {
+            this(bindingKind, bindingName, iterable, false, body);
+        }
     }
 
     public record ForOfDestructureStmt(
             List<DestructureBinding> bindings,
             Expr iterable,
+            boolean asyncIteration,
             List<Stmt> body) implements Stmt {
         public ForOfDestructureStmt {
             bindings = List.copyOf(bindings);
@@ -322,6 +394,9 @@ public final class Ast {
             if (bindings.isEmpty()) {
                 throw new IllegalArgumentException("for-of destructure pattern cannot be empty");
             }
+        }
+        public ForOfDestructureStmt(List<DestructureBinding> bindings, Expr iterable, List<Stmt> body) {
+            this(bindings, iterable, false, body);
         }
     }
 
@@ -334,6 +409,7 @@ public final class Ast {
     }
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
+            TypeTestExpr, PatternTestExpr, CastExpr,
             CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
     public record LiteralExpr(Object value) implements Expr { }
@@ -343,6 +419,17 @@ public final class Ast {
     public record UnaryExpr(String operator, Expr operand) implements Expr { }
     public record AssignExpr(Expr target, Expr value) implements Expr { }
     public record ConditionalExpr(Expr condition, Expr whenTrue, Expr whenFalse) implements Expr { }
+
+    /** "value is Type [binding]" -- a nominal/refinement test, not general pattern matching. */
+    public record TypeTestExpr(Expr value, TypeRef targetType, String binding) implements Expr { }
+
+    /** "value matches Pattern" -- full pattern predicate, with bindings scoped by the enclosing condition. */
+    public record PatternTestExpr(Expr value, Pattern pattern) implements Expr { }
+
+    public enum CastMode { CHECKED, OPTIONAL }
+
+    /** "value as Type" or "value as? Type". */
+    public record CastExpr(Expr value, TypeRef targetType, CastMode mode) implements Expr { }
 
     public record CallExpr(
             Expr callee,
