@@ -14,6 +14,8 @@ import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.AsyncRuntime;
+import dev.oreslang.runtime.ChannelRuntime;
+import dev.oreslang.runtime.OresFuture;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -27,6 +29,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Executable Truffle root. Parsing and static checks happen before this node is created. */
 public final class OresEvalRootNode extends RootNode {
@@ -129,6 +132,8 @@ public final class OresEvalRootNode extends RootNode {
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousInterfaces = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
+        private final IdentityHashMap<Ast.SelectStmt, AtomicLong> staticSelectCursors =
+                new IdentityHashMap<>();
         private StartupPhase startupPhase = StartupPhase.CREATED;
         private static final int TAIL_SAFEPOINT_INTERVAL = 64;
 
@@ -814,6 +819,13 @@ public final class OresEvalRootNode extends RootNode {
                         inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
                 return;
             }
+            if (stmt instanceof Ast.SelectStmt selected) {
+                executeSelectStatement(
+                        selected,
+                        env,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                return;
+            }
             if (stmt instanceof Ast.TryStmt tried) {
                 // A call under catch/finally is not a proper tail call: the
                 // caller still owns exception/cleanup semantics after the call.
@@ -917,6 +929,248 @@ public final class OresEvalRootNode extends RootNode {
                     }
                 }
             }
+        }
+
+        private void executeSelectStatement(
+                Ast.SelectStmt selected,
+                Env env,
+                boolean tailBarrier) {
+            ChannelRuntime.SelectSet set = buildStaticSelectSet(selected, env);
+            ChannelRuntime.SelectPolicy policy = runtimeSelectPolicy(selected.policy());
+
+            if (selected.mode() == Ast.WaitMode.IMMEDIATE) {
+                java.util.Optional<ChannelRuntime.SelectResult> result =
+                        set.trySelect(policy);
+                if (result.isPresent()) {
+                    executeSelectedArm(
+                            selected,
+                            result.get(),
+                            env,
+                            tailBarrier,
+                            false);
+                }
+                return;
+            }
+
+            OresFuture<ChannelRuntime.SelectResult> future =
+                    set.selectAsync(policy);
+
+            if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                if (!ActorRuntime.inActorExecution()) {
+                    future.cancel(false);
+                    throw new IllegalStateException(
+                            "static nb select branches require an actor execution context; "
+                                    + "use 'nb select from cases' when you only need a Future");
+                }
+
+                ActorRuntime.ContinuationTarget target =
+                        context.actors().captureCurrentContinuationTarget();
+                Env captured = env.snapshot();
+                context.actors().enqueueOnCompletion(
+                        future,
+                        target,
+                        (result, failure) -> {
+                            if (failure != null) throw propagateAsyncFailure(failure);
+                            executeSelectedArm(
+                                    selected,
+                                    result,
+                                    captured,
+                                    true,
+                                    true);
+                        });
+                return;
+            }
+
+            ChannelRuntime.SelectResult result =
+                    (ChannelRuntime.SelectResult)
+                            awaitBlockingChannelFuture(future, "select");
+            executeSelectedArm(selected, result, env, tailBarrier, false);
+        }
+
+        private ChannelRuntime.SelectSet buildStaticSelectSet(
+                Ast.SelectStmt selected,
+                Env env) {
+            ArrayList<ChannelRuntime.SelectCase> cases =
+                    new ArrayList<>(selected.arms().size());
+            for (Ast.SelectArm arm : selected.arms()) {
+                switch (arm.operation()) {
+                    case DEFAULT -> cases.add(ChannelRuntime.defaultCase());
+                    case READ -> cases.add(ChannelRuntime.read(
+                            requireChannel(eval(arm.channel(), env), "readch select case")));
+                    case WRITE -> cases.add(ChannelRuntime.write(
+                            requireChannel(eval(arm.channel(), env), "writech select case"),
+                            eval(arm.value(), env)));
+                }
+            }
+            return new ChannelRuntime.SelectSet(
+                    cases,
+                    staticSelectTicket(selected));
+        }
+
+        private long staticSelectTicket(Ast.SelectStmt selected) {
+            synchronized (staticSelectCursors) {
+                return staticSelectCursors
+                        .computeIfAbsent(selected, ignored -> new AtomicLong())
+                        .getAndIncrement();
+            }
+        }
+
+        private void executeSelectedArm(
+                Ast.SelectStmt selected,
+                ChannelRuntime.SelectResult result,
+                Env parent,
+                boolean tailBarrier,
+                boolean detached) {
+            if (result.index() < 0 || result.index() >= selected.arms().size()) {
+                throw new IllegalStateException(
+                        "select result index is outside its source arm set: "
+                                + result.index());
+            }
+
+            Ast.SelectArm arm = selected.arms().get(result.index());
+            Env armEnv = new Env(parent);
+            if (arm.operation() == Ast.ChannelOperation.READ
+                    && arm.bindingName() != null) {
+                armEnv.define(
+                        arm.bindingName(),
+                        result.value(),
+                        arm.bindingKind());
+            }
+
+            if (!detached) {
+                executeBlock(arm.body(), armEnv, tailBarrier);
+                return;
+            }
+
+            try {
+                executeBlock(arm.body(), armEnv, true);
+            } catch (ReturnSignal returned) {
+                if (returned.value != null) {
+                    throw new IllegalStateException(
+                            "nb select continuation cannot return a value");
+                }
+                // return; exits only this detached arm.
+            } catch (BreakSignal | ContinueSignal escapedLoopControl) {
+                throw new IllegalStateException(
+                        "nb select continuation cannot break/continue an enclosing loop",
+                        escapedLoopControl);
+            }
+        }
+
+        private Object evalChannelOperation(
+                Ast.ChannelOpExpr operation,
+                Env env) {
+            ChannelRuntime.Channel<Object> channel = requireChannel(
+                    eval(operation.channel(), env),
+                    operation.operation() == Ast.ChannelOperation.READ
+                            ? "readch"
+                            : "writech");
+
+            if (operation.operation() == Ast.ChannelOperation.READ) {
+                return switch (operation.mode()) {
+                    case IMMEDIATE -> {
+                        java.util.Optional<Object> value = channel.tryRead();
+                        yield value.isPresent()
+                                ? new OptionValue(true, value.get())
+                                : new OptionValue(false, null);
+                    }
+                    case NONBLOCKING -> context.actors()
+                            .ownCurrentActorFuture(channel.readAsync());
+                    case BLOCKING -> awaitBlockingChannelFuture(
+                            channel.readAsync(),
+                            "readch");
+                };
+            }
+
+            Object value = eval(operation.value(), env);
+            return switch (operation.mode()) {
+                case IMMEDIATE -> channel.tryWrite(value);
+                case NONBLOCKING -> context.actors()
+                        .ownCurrentActorFuture(channel.writeAsync(value));
+                case BLOCKING -> {
+                    awaitBlockingChannelFuture(
+                            channel.writeAsync(value),
+                            "writech");
+                    yield null;
+                }
+            };
+        }
+
+        private Object awaitBlockingChannelFuture(
+                OresFuture<?> future,
+                String operation) {
+            if (future.isDone()) return future.join();
+            if (ActorRuntime.inActorExecution()) {
+                // This registration belongs only to this attempted blocking
+                // operation. Remove it before failing closed so no waiter leaks.
+                future.cancel(false);
+                throw new IllegalStateException(
+                        operation
+                                + " would suspend this actor, but the current interpreter has not yet "
+                                + "lowered this call stack to the OresScheduler resumable-task ABI; "
+                                + "the runtime refuses to park an actor carrier. Use nb "
+                                + operation
+                                + " or a ready/immediate case until continuation lowering is active.");
+            }
+            // Transitional root/embedder path. Actor carriers never reach here.
+            return future.join();
+        }
+
+        @SuppressWarnings("unchecked")
+        private ChannelRuntime.Channel<Object> requireChannel(
+                Object value,
+                String where) {
+            if (!(value instanceof ChannelRuntime.Channel<?> channel)) {
+                throw new IllegalArgumentException(
+                        where + " requires Channel<T>; got " + value);
+            }
+            return (ChannelRuntime.Channel<Object>) channel;
+        }
+
+        private ChannelRuntime.SelectSet asSelectSet(Object value) {
+            if (value instanceof ChannelRuntime.SelectSet set) return set;
+
+            ArrayList<ChannelRuntime.SelectCase> cases = new ArrayList<>();
+            if (value instanceof List<?> list) {
+                for (Object item : list) cases.add(requireSelectCase(item));
+                return new ChannelRuntime.SelectSet(cases);
+            }
+            if (value instanceof Map<?, ?> map) {
+                for (Object item : map.values()) cases.add(requireSelectCase(item));
+                return new ChannelRuntime.SelectSet(cases);
+            }
+            if (value instanceof DynamicStructValue dynamic) {
+                for (Object item : dynamic.fields.values()) {
+                    cases.add(requireSelectCase(item));
+                }
+                return new ChannelRuntime.SelectSet(cases);
+            }
+            throw new IllegalArgumentException(
+                    "dynamic select requires SelectSet or list/map of SelectCase values");
+        }
+
+        private ChannelRuntime.SelectCase requireSelectCase(Object value) {
+            if (value instanceof ChannelRuntime.SelectCase selectCase) {
+                return selectCase;
+            }
+            throw new IllegalArgumentException(
+                    "dynamic select collection contains non-SelectCase value: "
+                            + value);
+        }
+
+        private ChannelRuntime.SelectPolicy runtimeSelectPolicy(
+                Ast.SelectPolicy policy) {
+            return switch (policy) {
+                case FAIR -> ChannelRuntime.SelectPolicy.FAIR;
+                case PRIORITY -> ChannelRuntime.SelectPolicy.PRIORITY;
+                case RANDOM -> ChannelRuntime.SelectPolicy.RANDOM;
+            };
+        }
+
+        private RuntimeException propagateAsyncFailure(Throwable failure) {
+            if (failure instanceof RuntimeException runtime) return runtime;
+            if (failure instanceof Error error) throw error;
+            return new RuntimeException(failure);
         }
 
         private void returnFrom(Ast.Expr value, Env env, boolean tailBarrier) {
@@ -1079,6 +1333,9 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("actor")) return new ActorFacade(context);
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
+                if (name.name().equals("Channel")) return new ChannelFactory();
+                if (name.name().equals("SelectCase")) return new SelectCaseFactory();
+                if (name.name().equals("SelectSet")) return new SelectSetFactory(this);
                 if (name.name().equals("print")) return (Invokable) args -> {
                     context.requireCapability(IsolatePolicy.Capability.STDOUT, "print");
                     requireOne(args, "print"); context.output().print(display(args.getFirst())); context.output().flush(); return null;
@@ -1309,10 +1566,40 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.AwaitExpr awaited) {
                 Object value = eval(awaited.expression(), env);
+                if (value instanceof OresFuture<?> future) {
+                    if (future.isDone()) return future.join();
+                    if (ActorRuntime.inActorExecution()) {
+                        throw new IllegalStateException(
+                                "pending await inside an actor requires resumable actor continuation lowering; "
+                                        + "the runtime will not park an actor carrier");
+                    }
+                    return future.join();
+                }
                 if (value instanceof CompletionStage<?> stage) {
                     return AsyncRuntime.await(stage);
                 }
                 return value;
+            }
+            if (expr instanceof Ast.ChannelOpExpr channelOp) {
+                return evalChannelOperation(channelOp, env);
+            }
+            if (expr instanceof Ast.DynamicSelectExpr selected) {
+                ChannelRuntime.SelectSet set = asSelectSet(eval(selected.cases(), env));
+                ChannelRuntime.SelectPolicy policy = runtimeSelectPolicy(selected.policy());
+                if (selected.mode() == Ast.WaitMode.IMMEDIATE) {
+                    java.util.Optional<ChannelRuntime.SelectResult> result =
+                            set.trySelect(policy);
+                    return result.isPresent()
+                            ? new OptionValue(true, result.get())
+                            : new OptionValue(false, null);
+                }
+
+                OresFuture<ChannelRuntime.SelectResult> future =
+                        set.selectAsync(policy);
+                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                    return context.actors().ownCurrentActorFuture(future);
+                }
+                return awaitBlockingChannelFuture(future, "dynamic select");
             }
             if (expr instanceof Ast.ListExpr list) {
                 ArrayList<Object> result = new ArrayList<>(list.elements().size());
@@ -1412,6 +1699,45 @@ public final class OresEvalRootNode extends RootNode {
                 return switch (name) {
                     case "gc" -> (Invokable) actor::gc;
                     default -> throw new IllegalArgumentException("unknown actor member " + name);
+                };
+            }
+            if (receiver instanceof ChannelFactory factory) {
+                if (!name.equals("new")) {
+                    throw new IllegalArgumentException("unknown Channel factory member " + name);
+                }
+                return (Invokable) factory::create;
+            }
+            if (receiver instanceof SelectCaseFactory factory) {
+                return switch (name) {
+                    case "read" -> (Invokable) factory::read;
+                    case "write" -> (Invokable) factory::write;
+                    case "default" -> (Invokable) factory::defaultCase;
+                    default -> throw new IllegalArgumentException(
+                            "unknown SelectCase factory member " + name);
+                };
+            }
+            if (receiver instanceof SelectSetFactory factory) {
+                if (!name.equals("new")) {
+                    throw new IllegalArgumentException("unknown SelectSet factory member " + name);
+                }
+                return (Invokable) factory::create;
+            }
+            if (receiver instanceof SelectResultValue selected) {
+                return switch (name) {
+                    case "index" -> (long) selected.index();
+                    case "operation" -> selected.operation();
+                    case "value" -> selected.value();
+                    default -> throw new IllegalArgumentException(
+                            "unknown SelectResult member " + name);
+                };
+            }
+            if (receiver instanceof ChannelRuntime.SelectResult selected) {
+                return switch (name) {
+                    case "index" -> (long) selected.index();
+                    case "operation" -> selected.operation().name().toLowerCase(java.util.Locale.ROOT);
+                    case "value" -> selected.value();
+                    default -> throw new IllegalArgumentException(
+                            "unknown SelectResult member " + name);
                 };
             }
             if (receiver instanceof MutexFactory factory) {
@@ -2757,6 +3083,61 @@ public final class OresEvalRootNode extends RootNode {
     private record HostObjectFacade(Object value) {
         @Override public String toString() { return String.valueOf(value); }
     }
+    private static final class ChannelFactory {
+        private Object create(List<Object> args) {
+            requireOne(args, "Channel.new<T>");
+            if (!(args.getFirst() instanceof Number number)) {
+                throw new IllegalArgumentException("Channel.new<T> capacity must be an integer");
+            }
+            int capacity = Math.toIntExact(number.longValue());
+            return new ChannelRuntime.Channel<>(capacity);
+        }
+    }
+
+    private static final class SelectCaseFactory {
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private Object read(List<Object> args) {
+            requireOne(args, "SelectCase.read");
+            if (!(args.getFirst() instanceof ChannelRuntime.Channel<?> channel)) {
+                throw new IllegalArgumentException("SelectCase.read expects Channel<T>");
+            }
+            return ChannelRuntime.read((ChannelRuntime.Channel) channel);
+        }
+
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private Object write(List<Object> args) {
+            requireTwo(args, "SelectCase.write");
+            if (!(args.getFirst() instanceof ChannelRuntime.Channel<?> channel)) {
+                throw new IllegalArgumentException("SelectCase.write expects Channel<T> as first argument");
+            }
+            return ChannelRuntime.write(
+                    (ChannelRuntime.Channel) channel,
+                    args.get(1));
+        }
+
+        private Object defaultCase(List<Object> args) {
+            requireZero(args, "SelectCase.default");
+            return ChannelRuntime.defaultCase();
+        }
+    }
+
+    private record SelectSetFactory(Evaluator owner) {
+        private Object create(List<Object> args) {
+            requireOne(args, "SelectSet.new");
+            return owner.asSelectSet(args.getFirst());
+        }
+    }
+
+    private record SelectResultValue(
+            int index,
+            String operation,
+            Object value) implements OresMutex.SharedState {
+        @Override
+        public Iterable<?> sharedStateChildren() {
+            return value == null ? List.of() : List.of(value);
+        }
+    }
+
     private record MutexFactory(boolean shared, OresContext context) {
         private Object create(List<Object> args) {
             requireOne(args, shared ? "SharedMutex.new" : "Mutex.new");
@@ -2875,6 +3256,7 @@ public final class OresEvalRootNode extends RootNode {
     }
     private static void requireZero(List<Object> args,String name){if(!args.isEmpty())throw new IllegalArgumentException(name+" expects no arguments");}
     private static void requireOne(List<Object> args,String name){if(args.size()!=1)throw new IllegalArgumentException(name+" expects one argument");}
+    private static void requireTwo(List<Object> args,String name){if(args.size()!=2)throw new IllegalArgumentException(name+" expects two arguments");}
     private static String requireStringArg(List<Object> args,String name){
         requireOne(args,name);
         if(!(args.getFirst() instanceof String message)) throw new IllegalArgumentException(name+" expects a String message");
