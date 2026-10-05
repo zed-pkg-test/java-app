@@ -1,0 +1,73 @@
+name: verifier-core
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verifier-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+      - name: Reject plaintext secrets and private key material
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .env
+          test ! -d env/dec
+          ! find . -type f \( -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \) -print -quit | grep -q .
+      - name: Require committed dependency lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s Cargo.lock
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+      - name: Rustfmt check
+        run: cargo fmt --all -- --check
+      - run: cargo check --all-targets --all-features --locked
+      - name: Clippy strict
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --all-targets --all-features --locked
+      - name: Install pinned cargo-audit
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0
+        with:
+          tool: cargo-audit@0.22.2
+      - name: RustSec audit
+        run: cargo audit
+
+  edge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify runtime and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          node --check edge/worker.mjs
+          node --check edge/worker.test.mjs
+      - name: Exercise public-edge admission invariants
+        run: node --test edge/worker.test.mjs
