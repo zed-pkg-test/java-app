@@ -1,0 +1,46 @@
+name: ores-forms-web-exact-carrier
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.88.0
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          persist-credentials: false
+
+      - name: Verify exact source and private dependency trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:source-exact)" = "44da18d75be4e6b20e169f416d893f576ca2367f"
+          test "$(git rev-parse HEAD:vendor/forms-core)" = "912f858c21aff2d6029f6feba49d46ff5e254ab1"
+          test "$(git rev-parse HEAD:vendor/next-loggers)" = "386d7d499a6c1c31076ca54a0c1df9eef1978722"
+          diff -ru --exclude=Cargo.toml source-exact source
+          grep -F 'next-loggers = { package = "oresoftware-next-loggers", path = "../vendor/next-loggers" }' source/Cargo.toml
+          grep -F 'ores-forms-lib-core = { path = "../vendor/forms-core" }' source/Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.88.0
+          components: rustfmt,clippy
+
+      - name: Formatting
+        run: cd source && cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cd source && cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cd source && cargo test --all-targets

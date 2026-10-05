@@ -1,0 +1,44 @@
+[package]
+name = "oresoftware-next-loggers"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Rust implementation of the next-loggers/v1 structured logging contract"
+license = "MIT"
+repository = "https://github.com/ores-otel/ores.otel.log"
+homepage = "https://github.com/ores-otel/ores.otel.log"
+documentation = "https://docs.rs/oresoftware-next-loggers"
+readme = "README.md"
+keywords = ["logging", "opentelemetry", "observability", "supabase"]
+categories = ["development-tools::debugging"]
+include = ["src/**", "tests/**", "README.md", "LICENSE"]
+
+[lib]
+name = "next_loggers"
+path = "src/lib.rs"
+
+[features]
+# Opt in explicitly: ordinary SDK consumers do not build OS resource samplers or
+# the container launcher unless they need those effects.
+apm = ["dep:libc"]
+launcher = ["dep:libc"]
+
+[[bin]]
+name = "ores-launcher"
+path = "src/bin/ores-launcher.rs"
+required-features = ["launcher"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# Exact-pin the audited version used by current zed-interfaces consumers. This
+# keeps the Rust logging SDK composable with dependency-graph tooling while
+# preserving a deterministic graph for the supported Rust 1.88+ toolchain.
+serde_json = "=1.0.151"
+# Exact-pin the audited release so fresh consumers cannot resolve a vulnerable
+# 0.3.x version while the supported resolver/toolchain remains deterministic.
+time = { version = "=0.3.54", features = ["formatting"] }
+
+[target.'cfg(unix)'.dependencies]
+# Reuse the workspace's existing locked libc for the explicitly selected
+# launcher/APM OS effect boundaries; no new version resolution.
+libc = { version = "=0.2.189", optional = true }
