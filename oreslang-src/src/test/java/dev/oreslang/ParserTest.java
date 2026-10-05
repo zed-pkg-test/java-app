@@ -476,4 +476,53 @@ final class ParserTest {
         assertTrue(failure.getMessage().contains("expected 'as' after class header"));
     }
 
+
+    @Test
+    void parsesCanonicalUnparenthesizedForOfDoDone() {
+        Ast.Program program = Parser.parse("""
+                define module app
+                  fnc visit(List<int> values) => int {
+                    let int total = 0;
+                    for value of values do
+                      total = total + value;
+                    done
+                    for const value of values {
+                      total = total + value;
+                    }
+                    return total;
+                  }
+                end
+                """);
+
+        Ast.FunctionDecl visit =
+                (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
+        assertInstanceOf(Ast.ForOfStmt.class, visit.body().get(1));
+        Ast.ForOfStmt first = (Ast.ForOfStmt) visit.body().get(1);
+        assertEquals(Ast.BindingKind.VAL, first.bindingKind());
+        assertEquals("value", first.bindingName());
+
+        assertInstanceOf(Ast.ForOfStmt.class, visit.body().get(2));
+        Ast.ForOfStmt second = (Ast.ForOfStmt) visit.body().get(2);
+        assertEquals(Ast.BindingKind.CONST, second.bindingKind());
+        assertEquals("value", second.bindingName());
+    }
+
+    @Test
+    void canonicalForOfRequiresExplicitLoopBodyDelimiter() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        define module app
+                          fnc visit(List<int> values) => void {
+                            for value of values
+                              stdio.println(value);
+                            done
+                            return;
+                          }
+                        end
+                        """));
+
+        assertTrue(failure.getMessage().contains("loop body must use"));
+    }
+
 }

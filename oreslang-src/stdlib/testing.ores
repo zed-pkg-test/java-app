@@ -6,8 +6,8 @@
 
 define module testing
 
-  type TestBody = () => TestOutcome;
-  type IntProperty = (int) => TestOutcome;
+  type TestBody = () -> TestOutcome;
+  type IntProperty = (int) -> TestOutcome;
 
   define class TestOutcome as
     pub val bool passed;
@@ -189,35 +189,33 @@ define module testing
 
       if !selected(full_name, options.only); do
         filtered_count = filtered_count + 1;
-        continue;
-      fi
-
-      total = total + 1;
-
-      if test_case.skipped; do
-        skipped_count = skipped_count + 1;
-        emit_status("SKIP", full_name, test_case.skip_reason, options.machine);
-        continue;
-      fi
-
-      let TestOutcome outcome = test_case.body();
-      if outcome.passed; do
-        passed_count = passed_count + 1;
-        emit_status("PASS", full_name, "", options.machine);
       else
-        failed_count = failed_count + 1;
-        emit_status("FAIL", full_name, outcome.message, options.machine);
+        total = total + 1;
 
-        if options.fail_fast; do
-          let RunSummary early = new RunSummary(
-            total,
-            passed_count,
-            failed_count,
-            skipped_count,
-            filtered_count
-          );
-          emit_summary(&early, options.machine);
-          return early;
+        if test_case.skipped; do
+          skipped_count = skipped_count + 1;
+          emit_status("SKIP", full_name, test_case.skip_reason, options.machine);
+        else
+          let TestOutcome outcome = test_case.body();
+          if outcome.passed; do
+            passed_count = passed_count + 1;
+            emit_status("PASS", full_name, "", options.machine);
+          else
+            failed_count = failed_count + 1;
+            emit_status("FAIL", full_name, outcome.message, options.machine);
+
+            if options.fail_fast; do
+              let RunSummary early = new RunSummary(
+                total,
+                passed_count,
+                failed_count,
+                skipped_count,
+                filtered_count
+              );
+              emit_summary(&early, options.machine);
+              return early;
+            fi
+          fi
         fi
       fi
     done
