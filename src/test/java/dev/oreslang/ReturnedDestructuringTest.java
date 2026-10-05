@@ -625,6 +625,57 @@ final class ReturnedDestructuringTest {
     }
 
     @Test
+    void restOnlyPatternsPreserveCompleteStaticShape() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc values(): Array<int> {
+                  return [1, 2, 3];
+                }
+
+                fnc row(): {v: int, active: bool} {
+                  return obj{v: 5, active: true};
+                }
+
+                fnc acceptsAllInts(Array<int> values): void {
+                  stdio.println(values[0]);
+                  return;
+                }
+
+                fnc acceptsWholeRow({v: int, active: bool} value): void {
+                  stdio.println(value.v);
+                  stdio.println(value.active);
+                  return;
+                }
+
+                pub fnc main(): void {
+                  const [...all] = values();
+                  const {...whole} = row();
+                  acceptsAllInts(all);
+                  acceptsWholeRow(whole);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void restDiscardIsRejectedInSequenceAndObjectPatterns() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc values(): Array<int> { return [1, 2, 3]; }
+                pub fnc main(): void {
+                  const [..._] = values();
+                  return;
+                }
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc row(): {v: int} { return obj{v: 1}; }
+                pub fnc main(): void {
+                  const {..._} = row();
+                  return;
+                }
+                """));
+    }
+
+    @Test
     void restDestructuringExecutesWithoutRuntimeTypeDiscovery() throws Exception {
         String program = """
                 type Row = {v: int, label: string, ok: bool};
