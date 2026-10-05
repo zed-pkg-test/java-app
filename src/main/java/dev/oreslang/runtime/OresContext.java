@@ -215,6 +215,7 @@ public final class OresContext implements AutoCloseable {
                 "language", "oreslang",
                 "execution_mode", executionProfile.mode().name(),
                 "platform", executionProfile.platform().name(),
+                "actor_carrier_backend", actors.carrierBackend().name().toLowerCase(java.util.Locale.ROOT),
                 "scheduler_safepoints", schedulerSafepoints.get());
     }
 
