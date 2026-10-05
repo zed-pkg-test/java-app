@@ -145,6 +145,8 @@ public abstract class OresObservable<T> {
             @Override
             protected OresSubscription<R> subscribeFromRuntime() {
                 OresSubscription<T> inner = upstream.subscribe();
+                AtomicReference<OresFuture<?>> activeUpstreamPull =
+                        new AtomicReference<>();
 
                 return new OresSubscription<>() {
                     @Override
@@ -162,7 +164,9 @@ public abstract class OresObservable<T> {
                                                         "rx map task resumed before its first await");
                                             }
                                             awaiting = true;
-                                            return OresScheduler.await(inner.next());
+                                            OresFuture<OresNotification<T>> pull = inner.next();
+                                            activeUpstreamPull.set(pull);
+                                            return OresScheduler.await(pull);
                                         }
 
                                         if (resume.initial()) {
@@ -191,7 +195,10 @@ public abstract class OresObservable<T> {
                                     }
                                 });
 
-                        return bindOperatorCancellation(task, inner);
+                        return bindOperatorCancellation(
+                                task,
+                                inner,
+                                activeUpstreamPull);
                     }
 
                     @Override
@@ -222,6 +229,8 @@ public abstract class OresObservable<T> {
             @Override
             protected OresSubscription<T> subscribeFromRuntime() {
                 OresSubscription<T> inner = upstream.subscribe();
+                AtomicReference<OresFuture<?>> activeUpstreamPull =
+                        new AtomicReference<>();
 
                 return new OresSubscription<>() {
                     @Override
@@ -239,7 +248,9 @@ public abstract class OresObservable<T> {
                                                         "rx filter task resumed before its first await");
                                             }
                                             awaiting = true;
-                                            return OresScheduler.await(inner.next());
+                                            OresFuture<OresNotification<T>> pull = inner.next();
+                                            activeUpstreamPull.set(pull);
+                                            return OresScheduler.await(pull);
                                         }
 
                                         if (resume.initial()) {
@@ -264,11 +275,16 @@ public abstract class OresObservable<T> {
                                             return OresScheduler.done(notification);
                                         }
 
-                                        return OresScheduler.await(inner.next());
+                                        OresFuture<OresNotification<T>> pull = inner.next();
+                                        activeUpstreamPull.set(pull);
+                                        return OresScheduler.await(pull);
                                     }
                                 });
 
-                        return bindOperatorCancellation(task, inner);
+                        return bindOperatorCancellation(
+                                task,
+                                inner,
+                                activeUpstreamPull);
                     }
 
                     @Override
@@ -381,9 +397,11 @@ public abstract class OresObservable<T> {
      */
     private static <T> OresFuture<T> bindOperatorCancellation(
             OresFuture<T> task,
-            OresSubscription<?> upstream) {
+            OresSubscription<?> upstream,
+            AtomicReference<OresFuture<?>> activeUpstreamPull) {
         Objects.requireNonNull(task, "task");
         Objects.requireNonNull(upstream, "upstream");
+        Objects.requireNonNull(activeUpstreamPull, "activeUpstreamPull");
 
         AtomicReference<OresFuture.RuntimeWaiterRegistration> waiter =
                 new AtomicReference<>();
@@ -394,8 +412,13 @@ public abstract class OresObservable<T> {
             if (registration != null) registration.detach();
         };
 
-        OresFuture<T> exposed = new OresFuture<>(() -> {
+        Runnable release = () -> {
             detach.run();
+            activeUpstreamPull.set(null);
+        };
+
+        OresFuture<T> exposed = new OresFuture<>(() -> {
+            release.run();
             task.cancel(true);
             upstream.cancel();
         });
@@ -406,19 +429,23 @@ public abstract class OresObservable<T> {
                         if (exposed.isDone()) return;
                         if (failure == null) {
                             exposed.completeFromRuntime(value);
-                        } else if (task.isCancelled()) {
-                            exposed.cancel(true);
                         } else {
-                            exposed.failFromRuntime(OresFuture.unwrap(failure));
+                            OresFuture<?> awaited = activeUpstreamPull.get();
+                            if (task.isCancelled()
+                                    || (awaited != null && awaited.isCancelled())) {
+                                exposed.cancel(true);
+                            } else {
+                                exposed.failFromRuntime(OresFuture.unwrap(failure));
+                            }
                         }
                     } finally {
-                        detach.run();
+                        release.run();
                     }
                 });
 
         waiter.set(registration);
         if (exposed.isDone()) {
-            detach.run();
+            release.run();
         }
         return exposed;
     }
