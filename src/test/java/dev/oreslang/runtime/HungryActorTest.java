@@ -29,10 +29,12 @@ final class HungryActorTest {
                     }
                 })) {
             assertFalse(actor.isVirtualCarrier(), "HungryActor must reserve a platform/OS carrier");
-            assertTrue(actor.isAlive(), "dedicated thread starts with actor lifetime");
+            assertTrue(actor.isAlive(), "dedicated pthread starts with actor lifetime");
 
             actor.send("one");
             assertTrue(started.await(2, TimeUnit.SECONDS));
+            assertTrue(actor.isNativeCarrier(), "HungryActor must execute on the JNI pthread backend");
+            assertNotEquals(0L, actor.nativeThreadId());
             actor.send("two");
 
             assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));

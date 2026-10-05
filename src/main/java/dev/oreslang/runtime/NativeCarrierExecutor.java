@@ -204,21 +204,44 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
 
     @Override
     public List<Runnable> shutdownNow() {
-        if (CURRENT_EXECUTOR.get() == this) {
+        if (isCurrentCarrierThread()) {
             throw new IllegalStateException(
-                    "native carrier executor cannot be synchronously shut down from one of its own carriers");
+                    "native carrier executor cannot synchronously interrupt itself; use requestShutdownFromCarrier()");
         }
+        return beginShutdown(true);
+    }
+
+    /**
+     * Cooperative one-way shutdown for code currently executing on one of this
+     * executor's own native carriers. No Java interrupt is injected into the
+     * active turn; once that turn unwinds, the carrier observes the shutdown
+     * flag and exits through the native reaper path.
+     */
+    void requestShutdownFromCarrier() {
+        if (!isCurrentCarrierThread()) {
+            throw new IllegalStateException(
+                    "requestShutdownFromCarrier must run on this executor's native carrier");
+        }
+        beginShutdown(false);
+    }
+
+    boolean isCurrentCarrierThread() {
+        return CURRENT_EXECUTOR.get() == this;
+    }
+
+    private List<Runnable> beginShutdown(boolean interruptActiveCarriers) {
         if (!shutdown.compareAndSet(false, true)) return List.of();
         ArrayList<Runnable> abandoned = new ArrayList<>();
         queue.drainTo(abandoned);
 
-        // Match ThreadPoolExecutor.shutdownNow(): signal any active carrier
-        // before the native side joins pthreads. This is cooperative (Java
-        // interruption), not unsafe pthread cancellation; uncooperative actor
-        // containment remains the runtime watchdog's responsibility.
-        for (int slot = 0; slot < carrierThreads.length(); slot++) {
-            Thread carrier = carrierThreads.get(slot);
-            if (carrier != null) carrier.interrupt();
+        if (interruptActiveCarriers) {
+            // Match ThreadPoolExecutor.shutdownNow(): signal any active carrier
+            // before native retirement. This is cooperative Java interruption,
+            // never unsafe pthread_cancel().
+            for (int slot = 0; slot < carrierThreads.length(); slot++) {
+                Thread carrier = carrierThreads.get(slot);
+                if (carrier != null) carrier.interrupt();
+            }
         }
 
         synchronized (nativeLifecycleLock) {
