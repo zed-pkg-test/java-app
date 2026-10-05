@@ -1045,12 +1045,17 @@ public final class Parser {
         Ast.BindingKind currentKind = inheritedKind == null ? Ast.BindingKind.VAL : inheritedKind;
         do {
             if (isBindingKind(peek().type())) currentKind = parseBindingKind();
+            boolean rest = match(ELLIPSIS);
             if (isDiscardToken(peek())) {
+                if (rest) throw error(peek(), "rest destructure binding cannot be a discard");
                 advance();
                 bindings.add(Ast.DestructureBinding.discard());
             } else {
                 String name = consume(IDENT, "expected binding name in for-of destructure pattern").lexeme();
-                bindings.add(new Ast.DestructureBinding(currentKind, name));
+                bindings.add(new Ast.DestructureBinding(currentKind, name, rest));
+            }
+            if (rest && check(COMMA)) {
+                throw error(peek(), "rest destructure binding must be the final binding");
             }
         } while (match(COMMA));
 
@@ -1107,8 +1112,10 @@ public final class Parser {
         Ast.BindingKind currentKind = inheritedKind;
         do {
             if (isBindingKind(peek().type())) currentKind = parseBindingKind();
+            boolean rest = match(ELLIPSIS);
 
             if (isDiscardToken(peek())) {
+                if (rest) throw error(peek(), "rest destructure binding cannot be a discard");
                 if (kind == Ast.DestructureKind.OBJECT) {
                     throw error(peek(), "bare '_' discard is only valid in sequence destructuring");
                 }
@@ -1121,7 +1128,10 @@ public final class Parser {
                 throw error(peek(), "destructure binding kind must be declared before the first binding");
             }
             String name = consume(IDENT, "expected binding name in destructure").lexeme();
-            bindings.add(new Ast.DestructureBinding(currentKind, name));
+            bindings.add(new Ast.DestructureBinding(currentKind, name, rest));
+            if (rest && check(COMMA)) {
+                throw error(peek(), "rest destructure binding must be the final binding");
+            }
         } while (match(COMMA));
 
         consume(close, kind == Ast.DestructureKind.SEQUENCE ? "expected ']'" : "expected '}'");
