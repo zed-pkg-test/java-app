@@ -56,9 +56,9 @@ final class AsyncRuntimeTest {
 
     @Test
     void awaitPropagatesOriginalRuntimeFailure() {
-        OresFuture<Integer> future = new CompletableFuture<>();
+        OresFuture<Integer> future = new OresFuture<>();
         IllegalStateException original = new IllegalStateException("boom");
-        future.completeExceptionally(original);
+        future.failFromRuntime(original);
 
         IllegalStateException observed =
                 assertThrows(IllegalStateException.class, () -> AsyncRuntime.await(future));
