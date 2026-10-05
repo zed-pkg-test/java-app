@@ -261,6 +261,91 @@ public final class OwnershipChecker {
             checkBlock(attempted.finallyBody(), scope, returnType);
             return;
         }
+        if (stmt instanceof Ast.SelectStmt selected) {
+            if (selected.mode() != Ast.WaitMode.IMMEDIATE
+                    && (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard())) {
+                throw error("cannot suspend or arm nb select while holding a MutexGuard");
+            }
+
+            // Case operands are evaluated once when the selection is armed.
+            // Channel references are borrowed for the registration lifetime;
+            // write payloads are transport-validated/frozen rather than
+            // implicitly moved out of the current actor.
+            List<Ast.TypeRef> elementTypes = new ArrayList<>(selected.arms().size());
+            for (Ast.SelectArm arm : selected.arms()) {
+                if (arm.operation() == Ast.ChannelOperation.DEFAULT) {
+                    elementTypes.add(Ast.TypeRef.inferred());
+                    continue;
+                }
+                ValueInfo channel = checkExpr(arm.channel(), scope, false);
+                Ast.TypeRef element = channelElementType(channel.type);
+                elementTypes.add(element);
+                if (arm.operation() == Ast.ChannelOperation.WRITE) {
+                    ValueInfo payload = checkExpr(arm.value(), scope, false);
+                    if (containsMutexGuardType(payload.type)) {
+                        throw error("writech cannot transport MutexGuard");
+                    }
+                }
+            }
+
+            Map<VarState, StateSnapshot> base = stateSnapshot(scope);
+            List<Map<VarState, StateSnapshot>> exits = new ArrayList<>();
+            boolean hasDefault = false;
+
+            for (int i = 0; i < selected.arms().size(); i++) {
+                Ast.SelectArm arm = selected.arms().get(i);
+                restoreState(base);
+                Scope armScope = new Scope(scope);
+                if (arm.operation() == Ast.ChannelOperation.DEFAULT) {
+                    hasDefault = true;
+                } else if (arm.operation() == Ast.ChannelOperation.READ
+                        && arm.bindingName() != null) {
+                    Ast.TypeRef element = elementTypes.get(i);
+                    armScope.define(
+                            arm.bindingName(),
+                            new VarState(
+                                    element,
+                                    arm.bindingKind() == Ast.BindingKind.LET,
+                                    kindOfType(element),
+                                    Origin.LOCAL));
+                }
+
+                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                    int previousLoopDepth = loopDepth;
+                    loopDepth = 0;
+                    try {
+                        checkBlock(
+                                arm.body(),
+                                armScope,
+                                Ast.TypeRef.simple("void"));
+                    } finally {
+                        loopDepth = previousLoopDepth;
+                    }
+                } else {
+                    checkBlock(arm.body(), armScope, returnType);
+                }
+                armScope.close();
+                Map<VarState, StateSnapshot> exit = stateSnapshot(scope);
+
+                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                    rejectDeferredSelectMoves(base, exit);
+                } else {
+                    exits.add(exit);
+                }
+            }
+
+            if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                // The current turn continues immediately; deferred arms must
+                // therefore not consume outer move-only state.
+                restoreState(base);
+            } else {
+                if (selected.mode() == Ast.WaitMode.IMMEDIATE && !hasDefault) {
+                    exits.add(base);
+                }
+                mergeBranchState(base, exits);
+            }
+            return;
+        }
         if (stmt instanceof Ast.ForOfDestructureStmt loop) {
             ValueInfo iterable = checkExpr(loop.iterable(), scope, false);
             Ast.TypeRef elementType = iterableElementType(iterable.type);
@@ -539,6 +624,49 @@ public final class OwnershipChecker {
                 return new ValueInfo(result, kindOfType(result), null);
             }
             return awaitedValue;
+        }
+        if (expr instanceof Ast.ChannelOpExpr channelOp) {
+            if (channelOp.mode() != Ast.WaitMode.IMMEDIATE
+                    && (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard())) {
+                throw error("cannot suspend or register a channel waiter while holding a MutexGuard");
+            }
+            ValueInfo channel = checkExpr(channelOp.channel(), scope, false);
+            Ast.TypeRef element = channelElementType(channel.type);
+
+            if (channelOp.operation() == Ast.ChannelOperation.WRITE) {
+                ValueInfo payload = checkExpr(channelOp.value(), scope, false);
+                if (containsMutexGuardType(payload.type)) {
+                    throw error("writech cannot transport MutexGuard");
+                }
+                Ast.TypeRef result = switch (channelOp.mode()) {
+                    case BLOCKING -> Ast.TypeRef.simple("void");
+                    case NONBLOCKING -> new Ast.TypeRef(
+                            "Future", List.of(Ast.TypeRef.simple("void")), false);
+                    case IMMEDIATE -> Ast.TypeRef.simple("bool");
+                };
+                return new ValueInfo(result, kindOfType(result), null);
+            }
+
+            Ast.TypeRef result = switch (channelOp.mode()) {
+                case BLOCKING -> element;
+                case NONBLOCKING -> new Ast.TypeRef("Future", List.of(element), false);
+                case IMMEDIATE -> new Ast.TypeRef("Option", List.of(element), false);
+            };
+            return new ValueInfo(result, kindOfType(result), null);
+        }
+        if (expr instanceof Ast.DynamicSelectExpr selected) {
+            if (selected.mode() != Ast.WaitMode.IMMEDIATE
+                    && (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard())) {
+                throw error("cannot suspend or register dynamic select while holding a MutexGuard");
+            }
+            checkExpr(selected.cases(), scope, false);
+            Ast.TypeRef selectedResult = Ast.TypeRef.simple("SelectResult");
+            Ast.TypeRef result = switch (selected.mode()) {
+                case BLOCKING -> selectedResult;
+                case NONBLOCKING -> new Ast.TypeRef("Future", List.of(selectedResult), false);
+                case IMMEDIATE -> new Ast.TypeRef("Option", List.of(selectedResult), false);
+            };
+            return new ValueInfo(result, kindOfType(result), null);
         }
         if (expr instanceof Ast.ListExpr list) {
             Ast.TypeRef elementType = null;
@@ -1607,6 +1735,31 @@ public final class OwnershipChecker {
             current = current.aliasSource != null ? current.aliasSource : current.borrowSource;
         }
         return false;
+    }
+
+    private Ast.TypeRef channelElementType(Ast.TypeRef type) {
+        if (type == null) return Ast.TypeRef.inferred();
+        Ast.TypeRef concrete = type.isBorrow() ? type.borrowedTarget() : type;
+        if (concrete.name().equals("Channel") && concrete.arguments().size() == 1) {
+            return concrete.arguments().getFirst();
+        }
+        return Ast.TypeRef.inferred();
+    }
+
+    private void rejectDeferredSelectMoves(
+            Map<VarState, StateSnapshot> base,
+            Map<VarState, StateSnapshot> exit) {
+        for (Map.Entry<VarState, StateSnapshot> entry : base.entrySet()) {
+            StateSnapshot after = exit.get(entry.getKey());
+            if (after == null) continue;
+            if (!entry.getValue().moved()
+                    && after.moved()
+                    && entry.getKey().kind != ValueKind.COPY) {
+                throw error("nb select arm cannot move outer value '"
+                        + entry.getKey().debugName
+                        + "' because the current actor turn continues before that arm runs");
+            }
+        }
     }
 
     private Ast.TypeRef collectionElementType(Ast.TypeRef type) {
