@@ -259,4 +259,52 @@ final class AsyncSchedulerLanguageTest {
         assertTrue(receive.getMessage().contains("cannot transport OresScheduler"));
     }
 
+    @Test
+    void schedulerTaskMutableCaptureMovesOwnershipOutOfParent() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          let counter = 0;
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(async || -> {
+                            counter = counter + 1;
+                            return;
+                          });
+                          counter = counter + 1;
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                failure.getMessage().contains("moved")
+                        || failure.getMessage().contains("capture"),
+                () -> "unexpected ownership error: " + failure.getMessage());
+    }
+
+    @Test
+    void schedulerTaskCannotCaptureLockGuardAcrossPoolBoundary() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => void {
+                          val mutex = Mutex.new(1);
+                          val guard = mutex.lock();
+                          val scheduler = new OresScheduler(2);
+                          val work = scheduler.start(async || -> {
+                            guard.release();
+                            return;
+                          });
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                failure.getMessage().contains("guard")
+                        || failure.getMessage().contains("capture"),
+                () -> "unexpected guard-capture error: " + failure.getMessage());
+    }
+
 }
