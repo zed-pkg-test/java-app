@@ -1,11 +1,12 @@
 # Futures, await, blocking I/O, and scheduler suspension
 
-Status: runtime Future/suspension ABI and stackless async source lowering are
-implemented on top of the OresVM four-domain scheduler. `await` projects through
-the built-in `Awaitable<T>` contract and always re-enters through a fresh
-scheduler dispatch. The recursive evaluator remains a host/root compatibility
-fallback and fails closed inside actor turns rather than blocking or
-inline-resuming a carrier.
+Status: runtime Future/suspension ABI, stackless async source lowering, proper
+async tail transfer, and logical async traces are implemented on top of the
+OresVM four-domain scheduler. `await` projects through the built-in
+`Awaitable<T>` contract and always re-enters through a fresh scheduler
+dispatch. The recursive evaluator remains a host/root compatibility fallback
+and fails closed inside actor turns rather than blocking or inline-resuming a
+carrier.
 
 ## Rule: ordinary execution does not implicitly yield
 
@@ -42,6 +43,11 @@ Calling an async operation is not itself a scheduling boundary.
 
 `Future<T>` is represented by the runtime-owned `OresFuture<T>`.
 
+Host/embedder `get()` / `join()` observation is allowed only off Ores
+carriers. If a Future is still pending, those blocking bridges fail closed when
+called from an actor/root/user-scheduler carrier; Ores code must suspend with
+`await` instead.
+
 It deliberately does **not** implement Java `CompletionStage` and does not
 inherit `thenApply`, `thenAccept`, `thenRun`, or other APIs whose callback
 may execute according to a producer's completion policy.
@@ -60,6 +66,45 @@ Host `CompletionStage` values are compatibility inputs only. They are
 immediately normalized into an OresFuture before they participate in Oreslang
 suspension.
 
+## Native ownership floor
+
+Oreslang runtime semantics are **native-first**. The JVM/Truffle implementation
+is a host for the compiler/interpreter and a JNI bridge; Java concurrency and
+I/O classes are not the semantic authority for Oreslang primitives.
+
+The current branch already runs guest scheduler turns on bounded JNI-created
+pthreads. Its remaining Java-side Future bookkeeping (`AtomicReference`,
+waiter queues, and host blocking observation) is transitional interpreter
+plumbing, not the target runtime contract. Do not expand that plumbing into new
+language semantics.
+
+The target boundary is:
+
+- `Future<T>` owns an opaque native runtime handle. Settlement/cancellation
+  arbitration and host-blocking wakeup live in the native kernel; OresScheduler
+  remains the only authority that resumes guest continuations.
+- `Future.all`, `Future.race`, async methods, actor suspension, rx-ores and
+  timers compose Ores Futures directly. They must not lower to
+  `CompletableFuture` or Java executor semantics.
+- `CompletionStage`, `java.util.concurrent.Future`, Java virtual threads and
+  other host facilities are explicit **interop adapters only**. They may settle
+  an Ores Future but never define its scheduling/cancellation semantics or run
+  guest continuations inline.
+- Absence/failure of the required native scheduler/runtime library is fail
+  closed for native-required execution. Do not silently substitute
+  `Executors`, `ThreadPoolExecutor`, or a Java thread-per-task implementation.
+- `Thread`, `File`, sockets/networking, and core collection storage continue to
+  terminate in Ores-owned native code. Higher-level protocol and policy logic
+  belongs in `.ores` standard-library code rather than Java.
+- JNI is a transport boundary, not an ownership boundary. Interpreter-era
+  `jobject` payload handles may be used while Truffle values are Java objects,
+  but new native APIs must use opaque/generation-safe handles and must not make
+  JVM object identity the durable Oreslang value model. The AOT/native value ABI
+  should replace those bridge-only references over time.
+
+In short: Java interop is supported; Java implementation details are not the
+Oreslang runtime specification.
+
 ## Awaitable<T>
 
 `await` is defined in terms of one language-level projection:
@@ -75,33 +120,9 @@ declarations; the language-design notation may spell this callable return with
 `->` once that syntax migration lands.)
 
 The runtime equivalent is `Awaitable<T>.getAwaited() -> OresFuture<T>`.
-`Future<T>` implements `Awaitable<T>` by returning itself.
-
-Actor startup uses the same runtime protocol without exposing the internal
-two-phase ticket as an ordinary source value:
-
-```ores
-val id = spawn Worker();              // ActorId immediately; does not wait for READY
-val started = await spawn Worker();   // scheduler yield + wait for READY
-```
-
-The runtime internally creates an `ActorSpawn<R>` ticket whose readiness Future
-implements the await projection. Plain `spawn` immediately projects that ticket
-to its copyable `ActorId`. Only the direct syntactic form `await spawn ...`
-retains the hidden ticket across the scheduling boundary; after READY it exposes
-a compiler-managed `StartedActor<R>` control value with identity/liveness and
-completion/result Futures.
-
-An `ActorId` is deliberately **not** Awaitable:
-
-```ores
-val id = spawn Worker();
-val bad = await id; // compile error: ActorId does not implement Awaitable<T>
-```
-
-This prevents a plain identity token from silently retaining startup Future or
-result authority. If startup synchronization or the one-shot actor result is
-needed, request it at creation with `await spawn`.
+`Future<T>` implements `Awaitable<T>` by returning itself. The two-phase
+`ActorSpawn` control handle implements `Awaitable<ActorRef>` by returning its
+readiness Future.
 
 User classes may implement the same contract:
 
@@ -126,36 +147,6 @@ val nope = await 123; // compile error: await requires Awaitable<T>
 
 Dynamically imported/hot-loaded values whose static type is unresolved are
 checked again at runtime before suspension.
-
-## Actor spawn readiness and completion
-
-For a non-void one-shot actor callable:
-
-```ores
-val started = await spawn compute(41);
-
-val id = started.id;
-val alive = started.is_alive();
-val answer = await started.result;
-```
-
-For a void actor callable, use `started.done` when completion matters:
-
-```ores
-val started = await spawn background_job();
-await started.done;
-```
-
-By contrast, fire-and-forget startup intentionally keeps only identity:
-
-```ores
-val id = spawn background_job();
-```
-
-The source type `StartedActor<R>` is compiler-managed and cannot be written as
-a user declaration/parameter type or transported across actor boundaries. It is
-the narrow post-READY control projection of the runtime ticket, not an
-application mailbox and not general VM authority.
 
 ## Callback-only API adaptation
 
@@ -252,7 +243,8 @@ OresVM CONTROL domain. Root async turns use bounded admission and the same
 reserved root lanes as legacy root work so they cannot consume every CONTROL
 carrier and starve supervisor/ActorMailman work.
 
-User-created `OresScheduler(n)` values own `n` carrier threads and a bounded
+User-created `OresScheduler(n)` values own `n` bounded native pthread carriers
+(on the current Linux/macOS JNI backend) and a bounded
 ready queue. They are constructed with ordinary Oreslang `new` syntax and are
 owned by the current Ores context:
 
@@ -268,11 +260,9 @@ val response = await work;
 io.close();
 ```
 
-`scheduler.start(...)` accepts an inline zero-argument lambda. A synchronous
-`|| -> { ... }` body is ordinary CPU/non-suspending work and is submitted as a
-scheduler task; an `async || -> { ... }` body may use `await` and its captured
-continuation remains scheduler-affine until completion. Both forms return an
-`OresFuture<T>` for the lambda's logical result `T`. The context also closes any remaining user
+`scheduler.start(async || -> { ... })` currently accepts an inline async
+zero-argument lambda and creates a task whose continuations remain
+scheduler-affine until completion. The context also closes any remaining user
 schedulers during teardown, so forgotten scheduler handles cannot leak carrier
 threads. A scheduler cannot close itself from one of its own task turns; close
 is initiated from an outside/root task so teardown cannot self-cancel the turn
@@ -379,6 +369,79 @@ A suspended actor remains logically inside the same mailbox turn:
 - resumption may occur on a different carrier;
 - the actor's generation lease remains valid across suspension.
 
+## Proper async tail transfer
+
+Oreslang treats a verified tail-position async call as a state-machine transfer,
+not as a chain of pending Futures.
+
+```ores
+async fnc walk(int n) => int {
+  if n == 0 do
+    return 0;
+  fi
+  return await walk(n - 1);
+}
+```
+
+The compiler/evaluator may lower the final statement to `TAIL_AWAIT` when:
+
+- the source form is a true `return await <Oreslang async call>`;
+- caller and callee logical return types are identical;
+- no caller result conversion/post-processing remains;
+- no active `defer`, `catch`, or `finally` scope must run afterward;
+- the transfer stays in an ordinary task execution domain;
+- loop/control scopes with separately-owned lexical state are not fused unless
+  their cleanup has been modeled explicitly.
+
+A tail transfer replaces the active `AsyncPlan` frame in the existing
+`OresScheduler` task. It does **not** allocate a child scheduler task/Future.
+
+`TAIL_AWAIT` is still an await boundary. The current turn transitions through
+`WAITING`, releases its execution lease, fully unwinds the guest stack, and
+the replacement frame becomes runnable only through a fresh scheduler dispatch.
+The same physical carrier may be selected again, but inline recursive execution
+is forbidden.
+
+Lexical cleanup remains mandatory: scope-owned mutex/RW-lock guards are released
+as on an ordinary return. Pending defer/error-handling cleanup disables fusion
+or fails closed rather than being skipped.
+
+Actor boundaries are intentionally not fused. An actor keeps its mailbox turn,
+execution lease, scheduler domain, supervision/resource accounting, and
+isolation boundary.
+
+## Logical async stack traces
+
+Physical carrier stacks are not the Oreslang call stack. Every async task keeps
+bounded guest-language causal metadata containing:
+
+- current Oreslang symbol;
+- source id plus line/column;
+- `await` boundaries;
+- tail-await transfers;
+- actor-message/runtime boundaries;
+- a non-authoritative hot-load generation id.
+
+The opaque generation-binding capability is never included in diagnostics.
+
+Repeated identical tail transfers are run-length compressed:
+
+```text
+at walk (walk.ores:2:11 @gen=19)
+--- tail-await walk -> walk repeated 100000 times (walk.ores:6:10 @gen=19) ---
+```
+
+Non-repeating history is capped and older events are explicitly elided. Keeping
+one diagnostic frame per optimized tail call would recreate the eliminated
+stack on the heap, so bounded history is part of the constant-space semantic
+contract.
+
+Failures keep their original exception/error and attach the logical Oreslang
+trace as structured diagnostic data with synthetic guest frames. Awaiting parent
+tasks can add their own causal trace without replacing the child's provenance.
+This metadata is independent of physical carrier identity and is preserved
+across JIT, AOT-interpreted, and hybrid execution.
+
 ## Safepoint is not suspension
 
 A compiler/runtime safepoint checks control state such as cancellation, deadline,
@@ -422,6 +485,13 @@ When a host API is genuinely blocking, OresVM owns two implementation paths.
 
 Trusted Java blocking interop uses bounded admission plus Java virtual threads.
 
+A plain host `java.util.concurrent.Future<T>` (including a `FutureTask`
+returned by a virtual-thread executor) is normalized into `OresFuture<T>` by
+observing `Future.get()` on that bounded virtual-thread bridge. The Ores
+pthread carrier never blocks on the host Future. `CompletionStage` keeps its
+nonblocking completion adapter, and cancellation is propagated back across the
+bridge.
+
 Virtual threads are an implementation substrate only:
 
 - Actor != Java virtual thread.
@@ -441,6 +511,18 @@ Therefore saturation cannot make an actor carrier execute the blocking call.
 Cancellation is a request, not proof that host work stopped. Admission for a
 running uncooperative Java blocking call remains charged until its worker
 actually exits.
+
+## Native carrier domains
+
+CONTROL/root turns, SHARED actors, ISOACTOR/private actors, UNTRUSTED actors,
+and user-created OresSchedulers execute guest turns on bounded JNI-created
+pthread carriers. A pthread attaches to the JVM once and multiplexes many
+logical Ores tasks/actors over its lifetime. Future completion only enqueues a
+continuation; it never grants an I/O/JNI/virtual-thread producer permission to
+execute guest code.
+
+Watchdogs, timer drivers, reactors, and blocking-interop workers remain service
+threads and are deliberately not guest scheduler authorities.
 
 ## Four scheduler domains
 
@@ -511,15 +593,17 @@ Await points hold the Future plus a continuation; scheduler tasks resume that
 plan only through their owning scheduler. Actor callables use the corresponding
 stackless actor plan runner and `ActorContext.suspendOn(...)` ABI.
 
+The lowering must never:
+
+- block a scheduler/actor carrier;
+- use `join()` from actor code;
+- inline-resume an already-completed Future;
+- allow a producer/completion thread to execute guest code;
+- tail-fuse across an actor boundary;
+- tail-elide a frame whose `defer`, `catch`, `finally`, lexical guard, or
+  other control-scope cleanup still has work.
+
 The recursive reference evaluator remains only as a host/root compatibility
-path. It cannot preserve an arbitrary Java call stack across an actor `await`
-and therefore still fails closed inside actor turns instead of:
-
-- blocking the carrier;
-- using `join()` from actor code;
-- inline-resuming an already-completed Future;
-- allowing a producer thread to execute guest code.
-
-This split is intentional: all actor/async guest execution uses the heap-safe
-continuation path, while host embedding compatibility remains explicit and
-non-authoritative for scheduling.
+path. All actor/async guest execution uses heap-safe continuations. Interpreter,
+JIT, AOT-interpreted, and hybrid execution must preserve the same guest-level
+scheduling, tail-transfer, and logical-trace semantics.
