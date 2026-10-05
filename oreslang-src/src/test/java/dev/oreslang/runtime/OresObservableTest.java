@@ -309,4 +309,131 @@ final class OresObservableTest {
                                 || java.util.function.Function.class.isAssignableFrom(type)),
                 "initial rx-ores surface must not run guest callbacks on producer threads");
     }
+
+    @Test
+    void fromValuesSnapshotsInputAndRejectsNulls() {
+        java.util.ArrayList<Integer> source = new java.util.ArrayList<>(List.of(1, 2));
+        OresObservable<Integer> observable = OresObservable.fromValues(source);
+
+        source.set(0, 99);
+        source.add(3);
+
+        OresSubscription<Integer> subscription = observable.subscribe();
+        assertEquals(1, subscription.next().join().value());
+        assertEquals(2, subscription.next().join().value());
+        assertTrue(subscription.next().join().isComplete());
+
+        java.util.ArrayList<Integer> withNull = new java.util.ArrayList<>();
+        withNull.add(1);
+        withNull.add(null);
+        assertThrows(NullPointerException.class, () -> OresObservable.fromValues(withNull));
+        assertThrows(NullPointerException.class, () -> OresObservable.just(null));
+    }
+
+    @Test
+    void fromIterableIsLazyColdAndObtainsFreshIteratorPerSubscription() {
+        AtomicInteger iterators = new AtomicInteger();
+        AtomicInteger nextCalls = new AtomicInteger();
+
+        Iterable<Integer> source = () -> {
+            iterators.incrementAndGet();
+            return new java.util.Iterator<>() {
+                private int value = 1;
+
+                @Override
+                public boolean hasNext() {
+                    return value <= 3;
+                }
+
+                @Override
+                public Integer next() {
+                    nextCalls.incrementAndGet();
+                    return value++;
+                }
+            };
+        };
+
+        OresObservable<Integer> observable = OresObservable.fromIterable(source);
+        assertEquals(0, iterators.get(), "source must remain lazy until demand");
+
+        OresSubscription<Integer> first = observable.subscribe();
+        OresSubscription<Integer> second = observable.subscribe();
+        assertEquals(0, iterators.get(), "subscribe alone must not pull the iterable");
+
+        assertEquals(1, first.next().join().value());
+        assertEquals(1, iterators.get());
+        assertEquals(1, nextCalls.get());
+
+        assertEquals(1, second.next().join().value());
+        assertEquals(2, iterators.get(), "each cold subscription owns a fresh iterator");
+        assertEquals(2, nextCalls.get());
+
+        assertEquals(2, first.next().join().value());
+        assertEquals(3, first.next().join().value());
+        assertTrue(first.next().join().isComplete());
+        assertEquals(4, nextCalls.get(),
+                "completion demand must not consume another source element");
+    }
+
+    @Test
+    void fromIterableTurnsIteratorFailuresAndNullValuesIntoTerminalPullFailures() {
+        Iterable<Integer> throwing = () -> new java.util.Iterator<>() {
+            @Override
+            public boolean hasNext() {
+                throw new IllegalStateException("iterator failed");
+            }
+
+            @Override
+            public Integer next() {
+                throw new AssertionError("next must not run");
+            }
+        };
+
+        OresSubscription<Integer> failed = OresObservable.fromIterable(throwing).subscribe();
+        CompletionException iteratorFailure =
+                assertThrows(CompletionException.class, () -> failed.next().join());
+        assertInstanceOf(IllegalStateException.class, iteratorFailure.getCause());
+        assertTrue(failed.isTerminated());
+        assertTrue(failed.next().join().isComplete());
+
+        Iterable<Integer> nullValue = () -> java.util.Collections.singletonList((Integer) null).iterator();
+        OresSubscription<Integer> nullSubscription =
+                OresObservable.fromIterable(nullValue).subscribe();
+        CompletionException nullFailure =
+                assertThrows(CompletionException.class, () -> nullSubscription.next().join());
+        assertInstanceOf(NullPointerException.class, nullFailure.getCause());
+        assertTrue(nullSubscription.isTerminated());
+
+        Iterable<Integer> nullIterator = () -> null;
+        OresSubscription<Integer> nullIteratorSubscription =
+                OresObservable.fromIterable(nullIterator).subscribe();
+        CompletionException nullIteratorFailure =
+                assertThrows(CompletionException.class, () -> nullIteratorSubscription.next().join());
+        assertInstanceOf(NullPointerException.class, nullIteratorFailure.getCause());
+        assertTrue(nullIteratorSubscription.isTerminated());
+    }
+
+    @Test
+    void iterableBridgeComposesWithTakeAndFirstWithoutEagerlyDraining() {
+        AtomicInteger consumed = new AtomicInteger();
+        Iterable<Integer> source = () -> new java.util.Iterator<>() {
+            private int value = 10;
+
+            @Override
+            public boolean hasNext() {
+                return value < 20;
+            }
+
+            @Override
+            public Integer next() {
+                consumed.incrementAndGet();
+                return value++;
+            }
+        };
+
+        assertEquals(10, OresObservable.fromIterable(source).take(1).first().join());
+        assertEquals(1, consumed.get(),
+                "take(1).first() must consume exactly one iterable value");
+    }
+
 }
