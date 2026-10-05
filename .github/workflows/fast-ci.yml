@@ -37,8 +37,8 @@ jobs:
           test "$(git hash-object ssr/src/response.ores)" = "052d4363699c2f99e3032c258aef77507047e76e"
           test "$(git hash-object ssr/examples/basic-page.ores)" = "20d99f0787a28666504cee81607be1636a365a41"
           test "$(git hash-object ssr/examples/htmx-fragment.ores)" = "edf8178a5bd45a811b3a54a5d12653bdcf2573c8"
-          test "$(git hash-object ssr/tests/render-contract.ores)" = "7fd537a772a11fe29450d9cd366601271611d56b"
-          test "$(git hash-object ssr/tests/render-contract.expected)" = "d918a1a66fa2fa4314c995501d97a23322511c3e"
+          test "$(git hash-object ssr/tests/render-contract.ores)" = "1460303979d3df5cf8c904fae6c93c839efe2faa"
+          test "$(git hash-object ssr/tests/render-contract.expected)" = "472a7a94cc254a94a8297e08250efdecd4e90ccc"
 
       - name: Full compiler regression suite
         run: mvn -B -ntp verify
