@@ -78,9 +78,11 @@ Matching precedence is **static > parameter > wildcard**, with bounded
 backtracking. A static branch that exists but dead-ends does not incorrectly
 hide a valid parameter route.
 
-Repeated capture names are rejected. Parameter/wildcard names that disagree at
-the same trie position are rejected, avoiding route-order-dependent capture
-semantics.
+Repeated capture names inside one pattern are rejected. Different routes may
+use different capture names on a shared dynamic trie edge when their suffixes
+diverge. Registrations that resolve to the same complete route shape must agree
+on the canonical template and capture layout, so capture semantics remain
+deterministic without unnecessarily coupling sibling routes.
 
 ### Why no string-template parser yet?
 
@@ -101,8 +103,11 @@ contract without changing the compiled router or match semantics.
 - OPTIONS is synthesized by default when no explicit OPTIONS/`*` target exists.
 - A matched path with an unsupported method returns method-not-allowed rather
   than searching for a less-specific path.
-- `allow_count` / `allow_method_at` expose the Allow set, including
+- `allow_count` / `allow_method_at` expose the finite Allow set, including
   synthesized HEAD and OPTIONS.
+- An endpoint with an explicit `any(...)` / `*` target has no finite Allow
+  enumeration: `allow_count` returns 0 and `allow_method_at` returns None.
+  The internal `*` sentinel is never emitted as an HTTP method.
 - Unknown paths are distinct from method-not-allowed.
 - Trailing/repeated slash semantics are strict because empty segments are
   preserved by the adapter contract.
@@ -111,7 +116,14 @@ contract without changing the compiled router or match semantics.
 
 - No regex engine in the core matcher, so route matching has no regex-ReDoS
   surface.
-- Request path length and total matcher steps are bounded.
+- Request path length and total matcher work are bounded. The work budget
+  includes trie-node visits, static fan-out comparisons, and method-target
+  comparisons; configured limits also have hard safety ceilings (512 path
+  segments and 65,536 matcher steps).
+- Each endpoint is capped at 64 method targets to keep method dispatch and
+  Allow synthesis bounded.
+- Foreign/out-of-range Decision values are rejected by capture/Allow helpers
+  rather than indexing another router's endpoint table.
 - Wildcards are terminal and captures are views over the existing RequestPath;
   matching does not allocate parameter maps.
 - The built routing table is detached from RouterBuilder mutations.
@@ -132,8 +144,16 @@ ORESLANG_COMPILER=/path/to/oreslang-compiler bash scripts/test.sh
 ```
 
 The suite covers precedence/backtracking, captures, wildcard behavior, 404/405,
-Allow synthesis, HEAD/OPTIONS semantics, metadata, strict slash behavior,
-builder snapshot isolation, duplicate/conflicting routes, and routing limits.
+finite Allow synthesis, HEAD/OPTIONS semantics, metadata validation, strict
+slash behavior, builder snapshot isolation, same-shape conflicts, safe
+divergent capture names, foreign Decision rejection, static-fanout budgeting,
+and routing limits.
+
+A parser-independent style/safety audit runs before the compiler tests:
+
+```bash
+bash scripts/audit.sh
+```
 
 The pinned compiler revision is the native-collections feature stack plus the mandatory module-`as` parser integration,
 so this library intentionally tracks that exact SHA rather than silently

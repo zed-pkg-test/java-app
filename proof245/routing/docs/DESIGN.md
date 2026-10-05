@@ -44,8 +44,14 @@ backtracks to the next less-specific branch. This avoids insertion-order bugs
 while retaining conventional specificity.
 
 The search is bounded by max_match_steps and path length is bounded by
-max_segments. A limit failure is a separate Decision state so an adapter can
-map it to its chosen HTTP policy without confusing it with a genuine 404.
+max_segments. The work budget counts trie-node visits, every static-child
+comparison in high-fanout nodes, and method-target comparisons. This prevents a
+wide root node from bypassing the budget through an uncounted linear scan.
+Configuration itself is bounded by hard ceilings of 512 path segments and
+65,536 matcher steps, and each endpoint is capped at 64 method targets.
+
+A limit failure is a separate Decision state so an adapter can map it to its
+chosen HTTP policy without confusing it with a genuine 404.
 
 Wildcards are terminal. They can match zero or more remaining path segments.
 
@@ -75,8 +81,11 @@ the original RequestPath with a start offset and count. A parameter capture has
 count 1; a wildcard capture spans the remainder.
 
 Capture names are part of the registered PathPattern. Duplicate capture names
-inside one pattern are rejected. Two routes that occupy the same trie shape
-must use the same parameter/wildcard name at each dynamic edge.
+inside one pattern are rejected. Sibling routes may use different names on a
+shared dynamic edge when they diverge later, because the matcher reads captures
+from the final endpoint pattern rather than the trie edge. Two registrations
+that occupy the same complete route shape must agree on both canonical template
+and segment/capture layout.
 
 ## Handlers and middleware
 
@@ -112,5 +121,7 @@ That keeps the first implementation deterministic and dependency-free.
 
 Once Oreslang has a stable hash/index primitive, high-fanout nodes can gain a
 hashed index or radix-compressed static edges without changing the public API.
+Until then, every linear static-edge comparison consumes matcher budget, so
+adversarial fan-out degrades to a limit Decision rather than unbounded work.
 The path representation also leaves room for a future compile-time
 string-template parser and generated route tables.

@@ -154,5 +154,79 @@ pub routine main() -> void {
   );
   stdio.println(limited_builder.get(users_edit, 201).is_err());
 
+  // Dynamic capture names may differ when routes diverge after a shared
+  // parameter edge; capture metadata belongs to the matched endpoint.
+  let divergent_builder = http_routing.builder();
+  val users_name_view = http_routing.path("/users/{name}/view", arr[
+    http_routing.literal("users"),
+    http_routing.param("name"),
+    http_routing.literal("view")
+  ]);
+  ok(divergent_builder.get(users_edit, 300));
+  ok(divergent_builder.get(users_name_view, 301));
+  val divergent_router = divergent_builder.build();
+  val divergent_match = divergent_router.resolve(
+    "GET",
+    http_routing.request_path(arr["users", "alice", "view"])
+  );
+  stdio.println(divergent_match.handler_id);
+  stdio.println(divergent_router.capture_one(divergent_match, "name").unwrap());
+  stdio.println(divergent_router.capture(divergent_match, "id").is_none());
+
+  // Internal catch-all dispatch is not a literal HTTP Allow method.
+  stdio.println(router.allow_count(any_match));
+  stdio.println(router.allow_method_at(any_match, 0).is_none());
+
+  // Canonical templates and optional metadata sentinels are validated.
+  val empty_template = http_routing.path("", arr[
+    http_routing.literal("empty")
+  ]);
+  stdio.println(router_builder.get(empty_template, 302).is_err());
+
+  val metadata_path = http_routing.path("/metadata", arr[
+    http_routing.literal("metadata")
+  ]);
+  stdio.println(router_builder.route("GET", metadata_path, 303, -2, -1, "").is_err());
+  stdio.println(router_builder.route("GET", metadata_path, 303, -1, -2, "").is_err());
+
+  // Decisions are safe to reject when accidentally used with another router.
+  let foreign_builder = http_routing.builder();
+  ok(foreign_builder.get(root, 304));
+  val foreign_router = foreign_builder.build();
+  stdio.println(foreign_router.capture(static_match, "id").is_none());
+  stdio.println(foreign_router.allow_count(static_match));
+  stdio.println(foreign_router.allow_method_at(static_match, 0).is_none());
+
+  // Matcher budgets include static fan-out comparisons, not just recursion.
+  let fanout_builder = http_routing.builder();
+  ok(fanout_builder.set_limits(2, 2));
+  ok(fanout_builder.get(http_routing.path("/fan-a", arr[http_routing.literal("fan-a")]), 400));
+  ok(fanout_builder.get(http_routing.path("/fan-b", arr[http_routing.literal("fan-b")]), 401));
+  ok(fanout_builder.get(http_routing.path("/fan-c", arr[http_routing.literal("fan-c")]), 402));
+  val fanout_router = fanout_builder.build();
+  stdio.println(
+    fanout_router.resolve(
+      "GET",
+      http_routing.request_path(arr["fan-miss"])
+    ).is_limit_exceeded()
+  );
+
+  // Configuration cannot raise recursive/CPU safety limits without bound.
+  let hard_limit_builder = http_routing.builder();
+  stdio.println(hard_limit_builder.set_limits(513, 32).is_err());
+  stdio.println(hard_limit_builder.set_limits(2, 65537).is_err());
+
+  // A tiny total budget also bounds ordinary path traversal.
+  let step_builder = http_routing.builder();
+  ok(step_builder.set_limits(4, 1));
+  ok(step_builder.get(users_new, 405));
+  val step_router = step_builder.build();
+  stdio.println(
+    step_router.resolve(
+      "GET",
+      http_routing.request_path(arr["users", "new"])
+    ).is_limit_exceeded()
+  );
+
   return;
 }
