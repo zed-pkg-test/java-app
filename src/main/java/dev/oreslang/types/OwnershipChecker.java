@@ -104,7 +104,7 @@ public final class OwnershipChecker {
             }
             boolean actorBoundary = klass.actorKind() != Ast.ActorKind.NONE
                     && !method.isStatic()
-                    && (method.name().equals("receive")
+                    && (method.visibility() == Ast.Visibility.PUBLIC
                         || method.name().equals("constructor"));
             for (Ast.Param param : method.parameters()) {
                 scope.define(
@@ -682,19 +682,6 @@ public final class OwnershipChecker {
             if (concreteReceiver != null
                     && concreteReceiver.name().equals("ActorRef")
                     && concreteReceiver.arguments().size() == 1) {
-                if (member.member().equals("send")) {
-                    for (Ast.Expr argumentExpr : call.arguments()) {
-                        ValueInfo argument = checkExpr(argumentExpr, scope, true);
-                        if (containsMutexGuardType(argument.type)) {
-                            throw error(
-                                    "ActorRef.send cannot transport a guard-bearing value");
-                        }
-                    }
-                    return new ValueInfo(
-                            Ast.TypeRef.simple("void"),
-                            ValueKind.COPY,
-                            null);
-                }
                 if (member.member().equals("is_alive")) {
                     for (Ast.Expr argumentExpr : call.arguments()) {
                         checkExpr(argumentExpr, scope, true);
@@ -704,9 +691,48 @@ public final class OwnershipChecker {
                             ValueKind.COPY,
                             null);
                 }
-                // TypeChecker rejects receive/mailbox and arbitrary actor
-                // application methods. OwnershipChecker deliberately does not
-                // synthesize a request/reply method contract here.
+                if (member.member().equals("mailbox")) {
+                    throw error(
+                            "ActorRef mailbox state is runtime-private; "
+                                    + "invoke a declared typed actor protocol method instead");
+                }
+
+                for (Ast.Expr argumentExpr : call.arguments()) {
+                    ValueInfo argument = checkExpr(argumentExpr, scope, true);
+                    if (containsMutexGuardType(argument.type)) {
+                        throw error(
+                                "actor protocol calls cannot transport a guard-bearing value");
+                    }
+                }
+
+                Ast.TypeRef result = Ast.TypeRef.inferred();
+                Ast.TypeRef protocol = concreteReceiver.arguments().getFirst();
+                Ast.ClassDecl actorClass = findClass(protocol.name());
+                if (actorClass != null && actorClass.actorKind() != Ast.ActorKind.NONE) {
+                    ResolvedMethod endpoint = findMethodTarget(
+                            actorClass,
+                            protocol,
+                            member.member(),
+                            call.arguments().size(),
+                            new LinkedHashSet<>());
+                    if (endpoint != null
+                            && endpoint.method().visibility() == Ast.Visibility.PUBLIC
+                            && !endpoint.method().isStatic()
+                            && !endpoint.method().name().equals("constructor")) {
+                        Map<String, Ast.TypeRef> bindings = genericBindings(
+                                endpoint.owner().genericParameters(),
+                                endpoint.ownerType().arguments());
+                        result = substituteType(
+                                endpoint.method().returnType(),
+                                bindings);
+                    }
+                }
+
+                Ast.TypeRef future = new Ast.TypeRef(
+                        "Future",
+                        List.of(result),
+                        false);
+                return new ValueInfo(future, ValueKind.MOVE_ONLY, null);
             }
             Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
             ResolvedMethod target = klass == null ? null
