@@ -6111,7 +6111,7 @@ public final class ActorRuntime implements AutoCloseable {
             schedule();
         }
 
-        private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {        private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {
+        private void suspendOn(OresFuture<?> awaited, ActorContinuation continuation) {
             Objects.requireNonNull(awaited, "awaited");
             Objects.requireNonNull(continuation, "continuation");
             if (currentActor.get() != this) {
@@ -6437,15 +6437,6 @@ public final class ActorRuntime implements AutoCloseable {
                             try {
                                 behavior.onMessage((M) envelope.value(), context);
                             } catch (ActorTurnSuspendedSignal suspended) {
-                                        throw suspended;
-                                    } catch (Throwable failure) {
-                                        protocol.reply().failFromRuntime(failure);
-                                        throw failure;
-                                    }
-                                } else {
-                                    behavior.onMessage((M) envelope.value(), context);
-                                }
-                            } catch (ActorTurnSuspendedSignal suspended) {
                                 // The live Oreslang frame is already captured in
                                 // the continuation registered by suspendOn().
                                 // Keep the envelope rooted/accounted until that
@@ -6506,7 +6497,7 @@ public final class ActorRuntime implements AutoCloseable {
             }
         }
 
-        private void closeSuspendedInboxEnvelope() {        private void closeSuspendedInboxEnvelope() {
+        private void closeSuspendedInboxEnvelope() {
             MessageEnvelope envelope = suspendedInboxEnvelope;
             suspendedInboxEnvelope = null;
             if (envelope != null) envelope.close();
