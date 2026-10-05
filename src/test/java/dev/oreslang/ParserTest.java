@@ -330,7 +330,7 @@ final class ParserTest {
     void actorInheritanceMustPreserveIsolationKind() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 shared actor Parent {
-                  let value = 1;
+                  pub let value = 1;
                 }
 
                 shared actor Child extends Parent {
