@@ -1,7 +1,11 @@
-/target
-Cargo.lock
-
-# Fleet-local scratch/worktrees and agent-policy link
-.ores/
-tmp/
-temp/
+/target/
+/.ores/
+/.env
+/.env.*
+!/env/enc/*.env.enc
+/env/dec/
+*.pem
+*.key
+*.p12
+*.pfx
+.DS_Store

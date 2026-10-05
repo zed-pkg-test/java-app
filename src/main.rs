@@ -1,448 +1,359 @@
-use async_trait::async_trait;
-use axum::{
-    body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
-};
-use litegraph_gpu_host::{BackendKind, DeviceDescriptor, GpuCommand, GpuHost, MockBackend};
-use litegraph_modeld::{BatchExecutor, ModelDaemon, ModelError, ModelManifest};
-use litegraph_node::{DeviceState, NodeState};
-use litegraph_runtime::{
-    GpuClient, GuestEngine, HostApi, InvocationRequest, InvocationResponse, InvocationRuntime,
-    RuntimeError,
-};
 use std::{
+    collections::HashMap,
     env,
+    error::Error,
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_DEADLINE_MS: u64 = 300_000;
+use axum::{
+    Json, Router,
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, MatchedPath, Path, State},
+    http::{HeaderMap, Request, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
+use flags2env::BundledFlags2Env;
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use tower_http::trace::TraceLayer;
 
-#[async_trait]
-trait InvocationService: Send + Sync {
-    async fn invoke(
-        &self,
-        function: &str,
-        request: InvocationRequest,
-    ) -> Result<InvocationResponse, RuntimeError>;
-    fn mode(&self) -> &'static str;
+const CLI_CONTRACT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/.cli-flags.toml");
+const PRIVATE_INGRESS_HEADERS: [&str; 3] = [
+    "x-ores-ingress-routing-key",
+    "x-ores-ingress-timestamp",
+    "x-ores-ingress-signature",
+];
+const MAX_PREVIOUS_INGRESS_HMAC_OVERLAP_SECONDS: i64 = 24 * 60 * 60;
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Clone)]
+struct IngressHmacKey {
+    key: Vec<u8>,
+    valid_until: Option<i64>,
+}
+
+impl IngressHmacKey {
+    fn active_at(&self, now: i64) -> bool {
+        self.valid_until.is_none_or(|valid_until| now <= valid_until)
+    }
 }
 
 #[derive(Clone)]
 struct AppState {
-    node: NodeState,
-    service: Option<Arc<dyn InvocationService>>,
-    node_token: Arc<str>,
+    ingress_hmac_keys: Arc<Vec<IngressHmacKey>>,
+    ingress_replay_window_seconds: u64,
+    pool: PgPool,
 }
 
-struct HostBatchExecutor {
-    host: Arc<GpuHost<MockBackend>>,
-    device_id: String,
+#[derive(Debug)]
+struct Config {
+    listen_addr: SocketAddr,
+    max_body_bytes: usize,
+    ingress_replay_window_seconds: u64,
+    database_url: String,
+    database_max_connections: u32,
+    database_acquire_timeout_seconds: u64,
+    ingress_hmac_keys: Vec<IngressHmacKey>,
 }
 
-#[async_trait]
-impl BatchExecutor for HostBatchExecutor {
-    async fn execute_batch(
-        &self,
-        model: &ModelManifest,
-        inputs: Vec<Vec<u8>>,
-    ) -> Vec<Result<Vec<u8>, ModelError>> {
-        let mut outputs = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let result = self
-                .host
-                .execute(
-                    &self.device_id,
-                    model.workspace_bytes,
-                    GpuCommand {
-                        executable: model.digest.clone(),
-                        output_capacity: input.len(),
-                        inputs: vec![input],
-                        deadline_unix_ms: None,
-                    },
-                )
-                .await
-                .map(|receipt| receipt.output)
-                .map_err(|error| ModelError::Execution(error.to_string()));
-            outputs.push(result);
+struct PrivateHopProof<'a> {
+    provider: &'a str,
+    routing_key: &'a str,
+    timestamp: i64,
+    encoded_signature: &'a str,
+    body: &'a [u8],
+}
+
+#[derive(Debug, Deserialize)]
+struct PubSubEnvelope {
+    message: PubSubMessage,
+    #[serde(default)]
+    subscription: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PubSubMessage {
+    data: String,
+    #[serde(rename = "messageId")]
+    message_id: String,
+    #[serde(rename = "publishTime", default)]
+    publish_time: Option<String>,
+    #[serde(default)]
+    attributes: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GmailNotice {
+    #[serde(rename = "emailAddress")]
+    email_address: String,
+    #[serde(rename = "historyId")]
+    history_id: String,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // flags-2-env admission must happen before the Tokio runtime creates worker
+    // threads. Secrets remain environment-only and are never CLI flags.
+    apply_flags()?;
+    let config = Config::from_env()?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async_main(config))
+}
+
+fn apply_flags() -> Result<(), Box<dyn Error>> {
+    let parser = BundledFlags2Env::new();
+    parser
+        .audit_config(Some(CLI_CONTRACT))
+        .map_err(|_| "reviewed flags contract audit failed")?;
+
+    let argv = env::args().collect::<Vec<_>>();
+    let parsed = parser
+        .parse_structured(&argv, Some(CLI_CONTRACT))
+        .map_err(|_| "flags parsing failed")?;
+
+    if !parsed.unknown_options.is_empty() || !parsed.errors.is_empty() || !parsed.extras.is_empty()
+    {
+        return Err(format!(
+            "invalid CLI arguments: unknown={}, errors={}, positionals={}",
+            parsed.unknown_options.len(),
+            parsed.errors.len(),
+            parsed.extras.len()
+        )
+        .into());
+    }
+
+    for (key, value) in parsed.provided_flags {
+        // SAFETY: this runs before the Tokio runtime or any worker threads exist.
+        unsafe { env::set_var(key, value) };
+    }
+    Ok(())
+}
+
+impl Config {
+    fn from_env() -> Result<Self, Box<dyn Error>> {
+        let listen_addr = read_env("ORES_ZEN_LISTEN_ADDR", "0.0.0.0:8080")?.parse()?;
+        let max_body_bytes = read_env("ORES_ZEN_MAX_BODY_BYTES", "1048576")?.parse::<usize>()?;
+        let ingress_replay_window_seconds =
+            read_env("ORES_ZEN_INGRESS_REPLAY_WINDOW_SECONDS", "90")?.parse::<u64>()?;
+        let database_max_connections =
+            read_env("ORES_ZEN_DATABASE_MAX_CONNECTIONS", "10")?.parse::<u32>()?;
+        let database_acquire_timeout_seconds =
+            read_env("ORES_ZEN_DATABASE_ACQUIRE_TIMEOUT_SECONDS", "5")?.parse::<u64>()?;
+
+        if !(16 * 1024..=16 * 1024 * 1024).contains(&max_body_bytes) {
+            return Err("ORES_ZEN_MAX_BODY_BYTES must be between 16384 and 16777216".into());
         }
-        outputs
-    }
-}
-
-struct ModelGpuClient {
-    daemon: Arc<ModelDaemon<HostBatchExecutor>>,
-    invocation_counter: AtomicU64,
-}
-
-#[async_trait]
-impl GpuClient for ModelGpuClient {
-    async fn open_model(&self, _tenant_id: &str, model: &str) -> Result<String, RuntimeError> {
-        if model != "default" {
-            return Err(RuntimeError::Accelerator("unknown model".into()));
+        if !(15..=300).contains(&ingress_replay_window_seconds) {
+            return Err("ORES_ZEN_INGRESS_REPLAY_WINDOW_SECONDS must be between 15 and 300".into());
         }
-        let key = "default:1".to_string();
-        self.daemon
-            .get(&key)
-            .await
-            .map_err(|error| RuntimeError::Accelerator(error.to_string()))?;
-        Ok(key)
-    }
-
-    async fn infer(
-        &self,
-        tenant_id: &str,
-        model_key: &str,
-        input: Vec<u8>,
-    ) -> Result<Vec<u8>, RuntimeError> {
-        let model = self
-            .daemon
-            .get(model_key)
-            .await
-            .map_err(|error| RuntimeError::Accelerator(error.to_string()))?;
-        let invocation_id = format!(
-            "node-{}",
-            self.invocation_counter.fetch_add(1, Ordering::Relaxed)
-        );
-        let batch_key = format!("bytes-{}", input.len());
-        model
-            .infer_batched(invocation_id, tenant_id, batch_key, input)
-            .await
-            .map_err(|error| RuntimeError::Accelerator(error.to_string()))
-    }
-}
-
-#[derive(Default)]
-struct NodeGuest;
-
-#[async_trait]
-impl<G: GpuClient> GuestEngine<G> for NodeGuest {
-    async fn execute(
-        &self,
-        request: &InvocationRequest,
-        host: &HostApi<G>,
-    ) -> Result<InvocationResponse, RuntimeError> {
-        let model = host.open_model("default").await?;
-        let payload = host.infer(model, request.payload.clone()).await?;
-        Ok(InvocationResponse { payload })
-    }
-}
-
-struct MockExecutionService {
-    runtime: InvocationRuntime<ModelGpuClient, NodeGuest>,
-}
-
-impl MockExecutionService {
-    async fn build(vram_bytes: u64) -> Result<(Self, String), String> {
-        let host = Arc::new(
-            GpuHost::new(MockBackend {
-                descriptors: vec![DeviceDescriptor {
-                    device_id: "mock0".into(),
-                    backend: BackendKind::Mock,
-                    total_vram_bytes: vram_bytes,
-                    lane_count: 8,
-                    supports_partitioning: false,
-                    healthy: true,
-                }],
-            })
-            .map_err(|error| error.to_string())?,
-        );
-        let executor = HostBatchExecutor {
-            host,
-            device_id: "mock0".into(),
-        };
-        let daemon = Arc::new(ModelDaemon::new(executor));
-        let digest = format!("sha256:{}", "0".repeat(64));
-        daemon
-            .load(ModelManifest {
-                name: "default".into(),
-                version: "1".into(),
-                digest: digest.clone(),
-                weight_bytes: 1024,
-                workspace_bytes: 1024,
-                max_batch: 32,
-                max_delay_us: 500,
-                max_input_bytes: DEFAULT_MAX_BODY_BYTES,
-                queue_capacity: 1024,
-                allow_cross_tenant_batching: false,
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let gpu = ModelGpuClient {
-            daemon,
-            invocation_counter: AtomicU64::new(1),
-        };
-        Ok((
-            Self {
-                runtime: InvocationRuntime::new(gpu, NodeGuest),
-            },
-            digest,
-        ))
-    }
-}
-
-#[async_trait]
-impl InvocationService for MockExecutionService {
-    async fn invoke(
-        &self,
-        function: &str,
-        request: InvocationRequest,
-    ) -> Result<InvocationResponse, RuntimeError> {
-        if function != "default" {
-            return Err(RuntimeError::Guest("unknown mock function".into()));
+        if !(1..=100).contains(&database_max_connections) {
+            return Err("ORES_ZEN_DATABASE_MAX_CONNECTIONS must be between 1 and 100".into());
         }
-        self.runtime.invoke(request).await
-    }
+        if !(1..=60).contains(&database_acquire_timeout_seconds) {
+            return Err(
+                "ORES_ZEN_DATABASE_ACQUIRE_TIMEOUT_SECONDS must be between 1 and 60".into(),
+            );
+        }
 
-    fn mode(&self) -> &'static str {
-        "runtime-stack/mock"
+        let database_url = required_secret("ORES_ZEN_DATABASE_URL")?;
+        let current_key = required_secret("ORES_ZEN_INGRESS_HMAC_KEY")?;
+        let previous_key = optional_env("ORES_ZEN_INGRESS_HMAC_PREVIOUS_KEY")?;
+        let previous_valid_until =
+            optional_env("ORES_ZEN_INGRESS_HMAC_PREVIOUS_VALID_UNTIL_UNIX")?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock is before the Unix epoch")?;
+        let now = i64::try_from(now.as_secs()).map_err(|_| "system clock exceeds i64 range")?;
+        let ingress_hmac_keys =
+            build_ingress_hmac_keys(current_key, previous_key, previous_valid_until, now)?;
+
+        Ok(Self {
+            listen_addr,
+            max_body_bytes,
+            ingress_replay_window_seconds,
+            database_url,
+            database_max_connections,
+            database_acquire_timeout_seconds,
+            ingress_hmac_keys,
+        })
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let node_id = env::var("LITEGRAPH_NODE_ID").unwrap_or_else(|_| "local-node".into());
-    let region = env::var("LITEGRAPH_REGION").unwrap_or_else(|_| "local".into());
-    let bind = env::var("LITEGRAPH_NODE_ADDR").unwrap_or_else(|_| "127.0.0.1:0".into());
-    let node_token: Arc<str> = env::var("LITEGRAPH_NODE_TOKEN")
-        .expect("LITEGRAPH_NODE_TOKEN must be configured")
-        .into();
-    if node_token.len() < 32 {
-        panic!("LITEGRAPH_NODE_TOKEN must be at least 32 bytes");
+fn build_ingress_hmac_keys(
+    current_key: String,
+    previous_key: Option<String>,
+    previous_valid_until: Option<String>,
+    now: i64,
+) -> Result<Vec<IngressHmacKey>, Box<dyn Error>> {
+    if current_key.len() < 32 {
+        return Err("ORES_ZEN_INGRESS_HMAC_KEY must contain at least 32 bytes of entropy".into());
     }
 
-    let node = NodeState::new(node_id, region).expect("valid node identity");
-    let backend = env::var("LITEGRAPH_EXECUTION_BACKEND").unwrap_or_else(|_| "disabled".into());
-    let service: Option<Arc<dyn InvocationService>> = match backend.as_str() {
-        "disabled" => None,
-        "mock" => {
-            let vram = env::var("LITEGRAPH_MOCK_GPU_VRAM_BYTES")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .filter(|value| *value >= 1024 * 1024)
-                .unwrap_or(24 * 1024 * 1024 * 1024);
-            let (service, digest) = MockExecutionService::build(vram)
-                .await
-                .expect("initialize explicit mock execution stack");
-            node.set_devices(vec![DeviceState {
-                device_id: "mock0".into(),
-                backend: "mock".into(),
-                architecture: "mock".into(),
-                supported_isolation: vec!["shared".into(), "sandbox".into()],
-                total_vram_bytes: vram,
-                free_vram_bytes: vram,
-                available_lanes: 8,
-                queue_depth: 0,
-                healthy: true,
-            }])
-            .await
-            .expect("valid mock device state");
-            node.mark_resident(digest)
-                .await
-                .expect("valid mock resident digest");
-            Some(Arc::new(service))
-        }
-        other => panic!("unsupported LITEGRAPH_EXECUTION_BACKEND={other:?}"),
+    let current = IngressHmacKey {
+        key: current_key.into_bytes(),
+        valid_until: None,
     };
 
-    let state = Arc::new(AppState {
-        node,
-        service,
-        node_token,
+    let previous = match (previous_key, previous_valid_until) {
+        (None, None) => None,
+        (Some(key), Some(valid_until)) => {
+            if key.len() < 32 {
+                return Err(
+                    "ORES_ZEN_INGRESS_HMAC_PREVIOUS_KEY must contain at least 32 bytes".into(),
+                );
+            }
+            if key.as_bytes() == current.key.as_slice() {
+                return Err(
+                    "ORES_ZEN_INGRESS_HMAC_PREVIOUS_KEY must differ from the current key".into(),
+                );
+            }
+            let valid_until = valid_until
+                .parse::<i64>()
+                .map_err(|_| "ORES_ZEN_INGRESS_HMAC_PREVIOUS_VALID_UNTIL_UNIX must be an integer")?;
+            if valid_until <= now {
+                return Err(
+                    "ORES_ZEN_INGRESS_HMAC_PREVIOUS_VALID_UNTIL_UNIX must be in the future".into(),
+                );
+            }
+            let overlap = valid_until
+                .checked_sub(now)
+                .ok_or("previous HMAC key expiry is before the current time")?;
+            if overlap > MAX_PREVIOUS_INGRESS_HMAC_OVERLAP_SECONDS {
+                return Err(format!(
+                    "ORES_ZEN_INGRESS_HMAC_PREVIOUS_VALID_UNTIL_UNIX may be at most {} seconds in the future",
+                    MAX_PREVIOUS_INGRESS_HMAC_OVERLAP_SECONDS
+                )
+                .into());
+            }
+            Some(IngressHmacKey {
+                key: key.into_bytes(),
+                valid_until: Some(valid_until),
+            })
+        }
+        (Some(_), None) => {
+            return Err(
+                "ORES_ZEN_INGRESS_HMAC_PREVIOUS_VALID_UNTIL_UNIX is required when ORES_ZEN_INGRESS_HMAC_PREVIOUS_KEY is set"
+                    .into(),
+            );
+        }
+        (None, Some(_)) => {
+            return Err(
+                "ORES_ZEN_INGRESS_HMAC_PREVIOUS_KEY is required when ORES_ZEN_INGRESS_HMAC_PREVIOUS_VALID_UNTIL_UNIX is set"
+                    .into(),
+            );
+        }
+    };
+
+    let mut keys = vec![current];
+    if let Some(previous) = previous {
+        keys.push(previous);
+    }
+    Ok(keys)
+}
+
+fn optional_env(key: &str) -> Result<Option<String>, Box<dyn Error>> {
+    match env::var(key) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(format!("{key} is not valid Unicode: {err}").into()),
+    }
+}
+
+fn read_env(key: &str, default: &str) -> Result<String, Box<dyn Error>> {
+    Ok(match env::var(key) {
+        Ok(value) if !value.trim().is_empty() => value,
+        Ok(_) => return Err(format!("{key} cannot be empty").into()),
+        Err(env::VarError::NotPresent) => default.to_string(),
+        Err(err) => return Err(format!("{key} is not valid Unicode: {err}").into()),
+    })
+}
+
+fn required_secret(key: &str) -> Result<String, Box<dyn Error>> {
+    match env::var(key) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(env::VarError::NotPresent) => {
+            Err(format!("required secret {key} is missing").into())
+        }
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(format!("required secret {key} is not valid Unicode").into())
+        }
+    }
+}
+
+async fn async_main(config: Config) -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ores_zen_api_server=info,tower_http=info".into()),
+        )
+        .init();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(config.database_max_connections)
+        .acquire_timeout(Duration::from_secs(config.database_acquire_timeout_seconds))
+        .connect(&config.database_url)
+        .await?;
+
+    // Refuse to accept provider callbacks until the durable ingress spool exists.
+    sqlx::query_scalar::<_, i32>("SELECT 1 FROM ingress_spool LIMIT 1")
+        .fetch_optional(&pool)
+        .await?;
+
+    let state = AppState {
+        ingress_hmac_keys: Arc::new(config.ingress_hmac_keys),
+        ingress_replay_window_seconds: config.ingress_replay_window_seconds,
+        pool,
+    };
+
+    let trace = TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+        let matched_path = request
+            .extensions()
+            .get::<MatchedPath>()
+            .map(MatchedPath::as_str)
+            .unwrap_or("unmatched");
+        tracing::info_span!(
+            "http_request",
+            method = %request.method(),
+            route = matched_path,
+        )
     });
-    let max_body = env::var("LITEGRAPH_NODE_MAX_BODY_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| (1..=1024 * 1024 * 1024).contains(value))
-        .unwrap_or(DEFAULT_MAX_BODY_BYTES);
 
     let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/v1/node", get(snapshot))
-        .route("/v1/node/drain", post(drain))
-        .route("/v1/node/resume", post(resume))
-        .route("/v1/invoke/{function}", post(invoke))
-        .layer(DefaultBodyLimit::max(max_body))
-        .with_state(state);
+        .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/readyz", get(readyz))
+        .route("/webhooks/gmail/pubsub", post(gmail_pubsub))
+        .route("/webhooks/zendesk/{integration_key}", post(zendesk_webhook))
+        .route("/webhooks/slack/events", post(slack_events))
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(config.max_body_bytes))
+        .layer(trace);
 
-    let listener = tokio::net::TcpListener::bind(&bind)
+    let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
+    tracing::info!(addr = %config.listen_addr, "ores-zen api server listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn readyz(State(state): State<AppState>) -> StatusCode {
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.pool)
         .await
-        .expect("bind litegraph-node");
-    let addr: SocketAddr = listener.local_addr().expect("local addr");
-    eprintln!("litegraph-node listening on {addr}; execution_backend={backend}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await
-        .expect("serve litegraph-node");
-}
-
-async fn snapshot(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<litegraph_node::NodeSnapshot>, StatusCode> {
-    authorize(&headers, &state.node_token)?;
-    Ok(Json(state.node.snapshot().await))
-}
-
-async fn drain(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<&'static str, StatusCode> {
-    authorize(&headers, &state.node_token)?;
-    state.node.drain();
-    Ok("draining")
-}
-
-async fn resume(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<&'static str, StatusCode> {
-    authorize(&headers, &state.node_token)?;
-    state.node.resume();
-    Ok("accepting")
-}
-
-async fn invoke(
-    Path(function): Path<String>,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if authorize(&headers, &state.node_token).is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !valid_function(&function) {
-        return (StatusCode::BAD_REQUEST, "invalid function id").into_response();
-    }
-    let Some(tenant_id) =
-        header_str(&headers, "x-litegraph-tenant-id").filter(|value| valid_id(value))
-    else {
-        return (StatusCode::BAD_REQUEST, "invalid tenant id").into_response();
-    };
-    let Some(invocation_id) =
-        header_str(&headers, "x-litegraph-invocation-id").filter(|value| valid_id(value))
-    else {
-        return (StatusCode::BAD_REQUEST, "invalid invocation id").into_response();
-    };
-    let deadline_ms = match header_str(&headers, "x-litegraph-deadline-ms") {
-        Some(value) => match value.parse::<u64>() {
-            Ok(value) if (1..=MAX_DEADLINE_MS).contains(&value) => value,
-            _ => return (StatusCode::BAD_REQUEST, "invalid deadline").into_response(),
-        },
-        None => 30_000,
-    };
-
-    let Some(service) = state.service.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "execution backend not configured",
-        )
-            .into_response();
-    };
-    let Some(_guard) = state.node.begin_invocation() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "node draining").into_response();
-    };
-
-    let result = service
-        .invoke(
-            &function,
-            InvocationRequest {
-                invocation_id: invocation_id.to_owned(),
-                tenant_id: tenant_id.to_owned(),
-                payload: body.to_vec(),
-                deadline_ms_from_now: Some(deadline_ms),
-            },
-        )
-        .await;
-
-    match result {
-        Ok(mut response) => {
-            let mut out_headers = HeaderMap::new();
-            out_headers.insert("x-litegraph-queue-depth", HeaderValue::from_static("0"));
-            out_headers.insert(
-                "x-litegraph-execution",
-                HeaderValue::from_static(service.mode()),
-            );
-            // InvocationResponse zeroizes any payload it still owns on Drop.
-            // Transfer the allocation once into the HTTP body instead of cloning
-            // tenant output and leaving an extra sensitive copy in memory.
-            let payload = std::mem::take(&mut response.payload);
-            (out_headers, Bytes::from(payload)).into_response()
-        }
-        Err(error) => runtime_error_response(error),
-    }
-}
-
-fn runtime_error_response(error: RuntimeError) -> Response {
-    let (status, public_message) = runtime_error_parts(&error);
-    eprintln!(
-        "litegraph-node invocation failed: class={}",
-        runtime_error_class(&error)
-    );
-    (status, public_message).into_response()
-}
-
-fn runtime_error_parts(error: &RuntimeError) -> (StatusCode, &'static str) {
-    match error {
-        RuntimeError::PayloadTooLarge { .. } => {
-            (StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
-        }
-        RuntimeError::AcceleratorInputTooLarge { .. } => {
-            (StatusCode::PAYLOAD_TOO_LARGE, "accelerator input too large")
-        }
-        RuntimeError::InvalidInvocation(_) => (StatusCode::BAD_REQUEST, "invalid invocation"),
-        RuntimeError::InvalidCapability(_) => (StatusCode::BAD_REQUEST, "invalid capability"),
-        RuntimeError::DeadlineExceeded => (StatusCode::GATEWAY_TIMEOUT, "deadline exceeded"),
-        RuntimeError::Cancelled => (StatusCode::REQUEST_TIMEOUT, "request cancelled"),
-        RuntimeError::Accelerator(_) => (StatusCode::BAD_GATEWAY, "accelerator execution failed"),
-        RuntimeError::ResponseTooLarge { .. } => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "response too large")
-        }
-        RuntimeError::CapabilityLimitExceeded => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "capability limit exceeded",
-        ),
-        RuntimeError::CapabilityMemoryExceeded => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "capability memory limit exceeded",
-        ),
-        RuntimeError::Guest(_) => (StatusCode::INTERNAL_SERVER_ERROR, "guest execution failed"),
-    }
-}
-
-fn runtime_error_class(error: &RuntimeError) -> &'static str {
-    match error {
-        RuntimeError::PayloadTooLarge { .. } => "payload_too_large",
-        RuntimeError::ResponseTooLarge { .. } => "response_too_large",
-        RuntimeError::AcceleratorInputTooLarge { .. } => "accelerator_input_too_large",
-        RuntimeError::CapabilityLimitExceeded => "capability_limit",
-        RuntimeError::CapabilityMemoryExceeded => "capability_memory",
-        RuntimeError::Cancelled => "cancelled",
-        RuntimeError::DeadlineExceeded => "deadline",
-        RuntimeError::InvalidInvocation(_) => "invalid_invocation",
-        RuntimeError::InvalidCapability(_) => "invalid_capability",
-        RuntimeError::Accelerator(_) => "accelerator",
-        RuntimeError::Guest(_) => "guest",
-    }
-}
-
-fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {
-    let value = header_str(headers, "authorization").ok_or(StatusCode::UNAUTHORIZED)?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    {
+        Ok(1) => StatusCode::NO_CONTENT,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 
@@ -450,28 +361,725 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
 }
 
-fn valid_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 256 && !value.bytes().any(|b| b.is_ascii_control())
+fn single_header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    Some(value)
 }
 
-fn valid_function(value: &str) -> bool {
-    valid_id(value)
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+fn canonical_private_headers_only(headers: &HeaderMap) -> bool {
+    headers.keys().all(|name| {
+        let name = name.as_str();
+        !name.starts_with("x-ores-") || PRIVATE_INGRESS_HEADERS.contains(&name)
+    })
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
+fn verify_private_hop(
+    proof: PrivateHopProof<'_>,
+    keys: &[IngressHmacKey],
+    replay_window_seconds: u64,
+    now: i64,
+) -> bool {
+    if now.abs_diff(proof.timestamp) > replay_window_seconds {
         return false;
     }
-    let mut difference = 0u8;
-    for (&a, &b) in left.iter().zip(right) {
-        difference |= a ^ b;
-    }
-    difference == 0
+
+    let signature = match URL_SAFE_NO_PAD.decode(proof.encoded_signature.as_bytes()) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let canonical = format!(
+        "v2\n{}\n{}\n{}\n{}",
+        proof.provider,
+        proof.routing_key,
+        proof.timestamp,
+        digest_hex(proof.body)
+    );
+
+    keys.iter().filter(|key| key.active_at(now)).any(|key| {
+        let Ok(mut mac) = HmacSha256::new_from_slice(&key.key) else {
+            return false;
+        };
+        mac.update(canonical.as_bytes());
+        mac.verify_slice(&signature).is_ok()
+    })
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+fn admitted(
+    provider: &str,
+    expected_routing_key: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    state: &AppState,
+) -> bool {
+    // The public verifier MUST authenticate the provider first, strip every
+    // caller-supplied x-ores-* header, derive the routing identity itself, and
+    // then mint this route-bound private assertion. The API independently
+    // requires a canonical, non-duplicated internal header set as defense in
+    // depth against header smuggling inside the private trust boundary.
+    if !canonical_private_headers_only(headers) || !valid_bounded(expected_routing_key, 320) {
+        return false;
+    }
+    let signed_routing_key = match single_header_str(headers, "x-ores-ingress-routing-key")
+        .filter(|value| valid_bounded(value, 320))
+    {
+        Some(value) if value == expected_routing_key => value,
+        _ => return false,
+    };
+    let timestamp = match single_header_str(headers, "x-ores-ingress-timestamp")
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        Some(value) => value,
+        None => return false,
+    };
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(value) => value.as_secs() as i64,
+        Err(_) => return false,
+    };
+    let encoded_signature = match single_header_str(headers, "x-ores-ingress-signature")
+        .and_then(|value| value.strip_prefix("v2="))
+    {
+        Some(value) => value,
+        None => return false,
+    };
+
+    verify_private_hop(
+        PrivateHopProof {
+            provider,
+            routing_key: signed_routing_key,
+            timestamp,
+            encoded_signature,
+            body,
+        },
+        state.ingress_hmac_keys.as_slice(),
+        state.ingress_replay_window_seconds,
+        now,
+    )
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn valid_bounded(value: &str, max_len: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
+}
+
+fn normalize_mailbox(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if valid_bounded(&value, 320) && value.contains('@') {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn valid_integration_key(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+async fn persist_ingress(
+    state: &AppState,
+    provider: &str,
+    routing_key: &str,
+    provider_event_id: &str,
+    payload_digest_sha256: &str,
+    payload: &Value,
+) -> Result<(), StatusCode> {
+    // One statement returns the stored digest whether this is a new insert or a
+    // retry. Reuse of the same provider event id with different bytes is treated
+    // as a collision/tampering condition rather than silently accepted.
+    let stored_digest = sqlx::query_scalar::<_, String>(
+        r#"
+        WITH inserted AS (
+          INSERT INTO ingress_spool (
+            provider,
+            routing_key,
+            provider_event_id,
+            payload_digest_sha256,
+            content_type,
+            payload
+          )
+          VALUES ($1, $2, $3, $4, 'application/json', $5)
+          ON CONFLICT (provider, routing_key, provider_event_id) DO NOTHING
+          RETURNING payload_digest_sha256
+        )
+        SELECT payload_digest_sha256 FROM inserted
+        UNION ALL
+        SELECT payload_digest_sha256
+          FROM ingress_spool
+         WHERE provider = $1
+           AND routing_key = $2
+           AND provider_event_id = $3
+        LIMIT 1
+        "#,
+    )
+    .bind(provider)
+    .bind(routing_key)
+    .bind(provider_event_id)
+    .bind(payload_digest_sha256)
+    .bind(payload)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    if stored_digest != payload_digest_sha256 {
+        tracing::error!(
+            provider,
+            "provider event id reused with a different payload digest"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(())
+}
+
+fn decode_gmail_notice(data: &str) -> Option<GmailNotice> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(data.as_bytes())
+        .or_else(|_| URL_SAFE.decode(data.as_bytes()))
+        .ok()?;
+    let notice: GmailNotice = serde_json::from_slice(&decoded).ok()?;
+    if normalize_mailbox(&notice.email_address).is_none()
+        || notice.history_id.is_empty()
+        || notice.history_id.len() > 32
+        || !notice.history_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(notice)
+}
+
+async fn gmail_pubsub(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    let envelope: PubSubEnvelope = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+    if !valid_bounded(&envelope.message.message_id, 256) {
+        return StatusCode::BAD_REQUEST;
+    }
+    let mut notice = match decode_gmail_notice(&envelope.message.data) {
+        Some(value) => value,
+        None => return StatusCode::BAD_REQUEST,
+    };
+    notice.email_address = match normalize_mailbox(&notice.email_address) {
+        Some(value) => value,
+        None => return StatusCode::BAD_REQUEST,
+    };
+
+    let routing_key = notice.email_address.clone();
+    if !admitted("gmail", &routing_key, &headers, &body, &state) {
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    let payload = json!({
+        "notice": notice,
+        "subscription": envelope.subscription,
+        "publish_time": envelope.message.publish_time,
+        "attributes": envelope.message.attributes,
+    });
+    let digest = digest_hex(&body);
+
+    match persist_ingress(
+        &state,
+        "gmail",
+        &routing_key,
+        &envelope.message.message_id,
+        &digest,
+        &payload,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT,
+        Err(code) => code,
+    }
+}
+
+async fn zendesk_webhook(
+    State(state): State<AppState>,
+    Path(integration_key): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    if !valid_integration_key(&integration_key) {
+        return StatusCode::NOT_FOUND;
+    }
+    if !admitted("zendesk", &integration_key, &headers, &body, &state) {
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+    let provider_event_id = header_str(&headers, "x-zendesk-webhook-id")
+        .filter(|value| valid_bounded(value, 256))
+        .map(str::to_owned)
+        .unwrap_or_else(|| digest_hex(&body));
+    let digest = digest_hex(&body);
+
+    match persist_ingress(
+        &state,
+        "zendesk",
+        &integration_key,
+        &provider_event_id,
+        &digest,
+        &payload,
+    )
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT,
+        Err(code) => code,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlackRoutingIdentity {
+    route_kind: &'static str,
+    route_key: String,
+}
+
+fn slack_routing_identities(payload: &Value) -> Vec<SlackRoutingIdentity> {
+    [
+        ("team_id", "slack_team"),
+        ("enterprise_id", "slack_enterprise"),
+    ]
+    .into_iter()
+    .filter_map(|(field, route_kind)| {
+        payload
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| valid_bounded(value, 128))
+            .map(|value| SlackRoutingIdentity {
+                route_kind,
+                route_key: value.to_owned(),
+            })
+    })
+    .collect()
+}
+
+async fn resolve_slack_route(
+    state: &AppState,
+    identities: &[SlackRoutingIdentity],
+    signed_routing_key: &str,
+) -> Result<Option<SlackRoutingIdentity>, StatusCode> {
+    let signed_matches = identities
+        .iter()
+        .filter(|identity| identity.route_key == signed_routing_key)
+        .count();
+    if signed_matches != 1 {
+        return Ok(None);
+    }
+
+    let mut resolved_owner: Option<(String, String)> = None;
+    let mut signed_identity: Option<SlackRoutingIdentity> = None;
+
+    for identity in identities {
+        let route = sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT tenant_id::text, integration_id::text
+              FROM integration_routes
+             WHERE provider = 'slack'
+               AND route_kind = $1
+               AND route_key = $2
+               AND enabled
+             LIMIT 1
+            "#,
+        )
+        .bind(identity.route_kind)
+        .bind(&identity.route_key)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+        let Some(owner) = route else {
+            continue;
+        };
+
+        if let Some(existing) = &resolved_owner {
+            if existing != &owner {
+                tracing::warn!(
+                    route_kind = identity.route_kind,
+                    "Slack payload identities resolve to different tenant/integration authorities"
+                );
+                return Ok(None);
+            }
+        } else {
+            resolved_owner = Some(owner);
+        }
+
+        if identity.route_key == signed_routing_key {
+            signed_identity = Some(identity.clone());
+        }
+    }
+
+    Ok(signed_identity)
+}
+
+async fn slack_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok": false}))).into_response();
+        }
+    };
+    let identities = slack_routing_identities(&payload);
+    if identities.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false}))).into_response();
+    }
+    let signed_routing_key = match single_header_str(&headers, "x-ores-ingress-routing-key")
+        .filter(|value| valid_bounded(value, 128))
+    {
+        Some(value) => value,
+        None => return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false}))).into_response(),
+    };
+    let routing_identity = match resolve_slack_route(&state, &identities, signed_routing_key).await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false}))).into_response();
+        }
+        Err(code) => return (code, Json(json!({"ok": false}))).into_response(),
+    };
+    let routing_key = routing_identity.route_key;
+    if !admitted("slack", &routing_key, &headers, &body, &state) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false}))).into_response();
+    }
+
+    if payload.get("type").and_then(Value::as_str) == Some("url_verification") {
+        let challenge = payload
+            .get("challenge")
+            .and_then(Value::as_str)
+            .filter(|value| valid_bounded(value, 512));
+        return match challenge {
+            Some(value) => (StatusCode::OK, Json(json!({"challenge": value}))).into_response(),
+            None => (StatusCode::BAD_REQUEST, Json(json!({"ok": false}))).into_response(),
+        };
+    }
+
+    let provider_event_id = match payload
+        .get("event_id")
+        .and_then(Value::as_str)
+        .filter(|value| valid_bounded(value, 256))
+    {
+        Some(value) => value.to_owned(),
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"ok": false}))).into_response(),
+    };
+    let digest = digest_hex(&body);
+
+    match persist_ingress(
+        &state,
+        "slack",
+        &routing_key,
+        &provider_event_id,
+        &digest,
+        &payload,
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
+        Err(code) => (code, Json(json!({"ok": false}))).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn sign(provider: &str, routing_key: &str, timestamp: i64, body: &[u8], key: &[u8]) -> String {
+        let canonical = format!(
+            "v2\n{provider}\n{routing_key}\n{timestamp}\n{}",
+            digest_hex(body)
+        );
+        let mut mac = HmacSha256::new_from_slice(key).expect("valid test key");
+        mac.update(canonical.as_bytes());
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn private_hop_signature_binds_provider_route_body_and_timestamp() {
+        let key = b"0123456789abcdef0123456789abcdef".to_vec();
+        let body = br#"{"event":"x"}"#;
+        let timestamp = 1_800_000_000_i64;
+        let routing_key = "tenant_123-zd";
+        let signature = sign("zendesk", routing_key, timestamp, body, &key);
+        let keys = vec![IngressHmacKey {
+            key,
+            valid_until: None,
+        }];
+
+        assert!(verify_private_hop(
+            PrivateHopProof {
+                provider: "zendesk",
+                routing_key,
+                timestamp,
+                encoded_signature: &signature,
+                body,
+            },
+            &keys,
+            90,
+            timestamp + 30,
+        ));
+        assert!(!verify_private_hop(
+            PrivateHopProof {
+                provider: "slack",
+                routing_key,
+                timestamp,
+                encoded_signature: &signature,
+                body,
+            },
+            &keys,
+            90,
+            timestamp + 30,
+        ));
+        assert!(!verify_private_hop(
+            PrivateHopProof {
+                provider: "zendesk",
+                routing_key: "tenant_456-zd",
+                timestamp,
+                encoded_signature: &signature,
+                body,
+            },
+            &keys,
+            90,
+            timestamp + 30,
+        ));
+        assert!(!verify_private_hop(
+            PrivateHopProof {
+                provider: "zendesk",
+                routing_key,
+                timestamp,
+                encoded_signature: &signature,
+                body: br#"{"event":"changed"}"#,
+            },
+            &keys,
+            90,
+            timestamp + 30,
+        ));
+        assert!(!verify_private_hop(
+            PrivateHopProof {
+                provider: "zendesk",
+                routing_key,
+                timestamp,
+                encoded_signature: &signature,
+                body,
+            },
+            &keys,
+            90,
+            timestamp + 91,
+        ));
+    }
+
+    #[test]
+    fn previous_private_hop_key_is_accepted_only_until_its_expiry() {
+        let current = b"current-current-current-current-01".to_vec();
+        let previous = b"previous-previous-previous-prev-01".to_vec();
+        let body = br#"{"event":"rotation"}"#;
+        let timestamp = 1_800_000_000_i64;
+        let routing_key = "tenant_123-zd";
+        let signature = sign("zendesk", routing_key, timestamp, body, &previous);
+        let keys = vec![
+            IngressHmacKey {
+                key: current,
+                valid_until: None,
+            },
+            IngressHmacKey {
+                key: previous,
+                valid_until: Some(timestamp + 60),
+            },
+        ];
+        let proof = PrivateHopProof {
+            provider: "zendesk",
+            routing_key,
+            timestamp,
+            encoded_signature: &signature,
+            body,
+        };
+
+        assert!(verify_private_hop(proof, &keys, 300, timestamp + 60));
+
+        let proof = PrivateHopProof {
+            provider: "zendesk",
+            routing_key,
+            timestamp,
+            encoded_signature: &signature,
+            body,
+        };
+        assert!(!verify_private_hop(proof, &keys, 300, timestamp + 61));
+    }
+
+    #[test]
+    fn private_hop_rotation_config_requires_a_complete_distinct_pair() {
+        let current = "c".repeat(32);
+        let previous = "p".repeat(32);
+
+        let now = 1_800_000_000_i64;
+        let keys = build_ingress_hmac_keys(
+            current.clone(),
+            Some(previous.clone()),
+            Some("1800000060".to_owned()),
+            now,
+        )
+        .expect("complete bounded rotation is valid");
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[1].valid_until, Some(1_800_000_060));
+
+        assert!(
+            build_ingress_hmac_keys(current.clone(), Some(previous.clone()), None, now).is_err()
+        );
+        assert!(
+            build_ingress_hmac_keys(current.clone(), None, Some("1800000060".to_owned()), now)
+                .is_err()
+        );
+        assert!(
+            build_ingress_hmac_keys(
+                current.clone(),
+                Some(current.clone()),
+                Some("1800000060".to_owned()),
+                now,
+            )
+            .is_err()
+        );
+        assert!(
+            build_ingress_hmac_keys(
+                current.clone(),
+                Some(previous.clone()),
+                Some("not-a-time".to_owned()),
+                now,
+            )
+            .is_err()
+        );
+        assert!(
+            build_ingress_hmac_keys(
+                current.clone(),
+                Some(previous.clone()),
+                Some(now.to_string()),
+                now,
+            )
+            .is_err()
+        );
+        assert!(
+            build_ingress_hmac_keys(
+                current,
+                Some(previous),
+                Some((now + MAX_PREVIOUS_INGRESS_HMAC_OVERLAP_SECONDS + 1).to_string()),
+                now,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_private_headers_reject_duplicates_and_unknown_extensions() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-ores-ingress-routing-key",
+            HeaderValue::from_static("tenant_123-zd"),
+        );
+        headers.insert(
+            "x-ores-ingress-timestamp",
+            HeaderValue::from_static("1800000000"),
+        );
+        headers.insert(
+            "x-ores-ingress-signature",
+            HeaderValue::from_static("v2=abc"),
+        );
+        assert!(canonical_private_headers_only(&headers));
+        assert_eq!(
+            single_header_str(&headers, "x-ores-ingress-signature"),
+            Some("v2=abc")
+        );
+
+        headers.append(
+            "x-ores-ingress-signature",
+            HeaderValue::from_static("v2=def"),
+        );
+        assert_eq!(
+            single_header_str(&headers, "x-ores-ingress-signature"),
+            None
+        );
+
+        headers.remove("x-ores-ingress-signature");
+        headers.insert("x-ores-debug", HeaderValue::from_static("1"));
+        assert!(!canonical_private_headers_only(&headers));
+    }
+
+    #[test]
+    fn slack_routing_uses_workspace_or_enterprise_not_app_id() {
+        let team = slack_routing_identities(&json!({"team_id": "T123", "api_app_id": "A123"}));
+        assert_eq!(
+            team,
+            vec![SlackRoutingIdentity {
+                route_kind: "slack_team",
+                route_key: "T123".to_string(),
+            }]
+        );
+
+        let enterprise =
+            slack_routing_identities(&json!({"enterprise_id": "E123", "api_app_id": "A123"}));
+        assert_eq!(
+            enterprise,
+            vec![SlackRoutingIdentity {
+                route_kind: "slack_enterprise",
+                route_key: "E123".to_string(),
+            }]
+        );
+
+        assert!(slack_routing_identities(&json!({"api_app_id": "A123"})).is_empty());
+    }
+
+    #[test]
+    fn slack_routing_preserves_both_authority_candidates_for_confusion_checks() {
+        assert_eq!(
+            slack_routing_identities(&json!({
+                "team_id": "T123",
+                "enterprise_id": "E123",
+                "api_app_id": "A123"
+            })),
+            vec![
+                SlackRoutingIdentity {
+                    route_kind: "slack_team",
+                    route_key: "T123".to_string(),
+                },
+                SlackRoutingIdentity {
+                    route_kind: "slack_enterprise",
+                    route_key: "E123".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn gmail_notice_uses_base64url_and_normalizes_mailbox() {
+        let data = URL_SAFE_NO_PAD
+            .encode(br#"{"emailAddress":"Support@Example.COM","historyId":"123456789"}"#);
+        let notice = decode_gmail_notice(&data).expect("valid gmail notice");
+        assert_eq!(
+            normalize_mailbox(&notice.email_address).as_deref(),
+            Some("support@example.com")
+        );
+        assert_eq!(notice.history_id, "123456789");
+    }
+
+    #[test]
+    fn integration_keys_are_bounded_and_path_safe() {
+        assert!(valid_integration_key("tenant_123-zd"));
+        assert!(!valid_integration_key("short"));
+        assert!(!valid_integration_key("../../secret"));
+        assert!(!valid_integration_key("contains space"));
+    }
 }
