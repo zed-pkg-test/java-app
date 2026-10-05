@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 
 /**
  * Scheduler affinity for ordinary Oreslang tasks.
@@ -382,7 +383,7 @@ public final class OresScheduler implements AutoCloseable {
         }
     }
 
-    private final class TaskRunner<T> {
+    private final class TaskRunner<T> implements BiConsumer<Object, Throwable> {
         private static final int NEW = 0;
         private static final int QUEUED = 1;
         private static final int RUNNING = 2;
@@ -494,40 +495,68 @@ public final class OresScheduler implements AutoCloseable {
             }
 
             try {
+                // Hot path: terminal Futures are immutable. Observe their
+                // already-published terminal state directly and enqueue the
+                // continuation for a fresh dispatch without allocating a
+                // waiter, queue node, registration, or capturing callback.
+                //
+                // This deliberately does NOT resume inline. executing is still
+                // true until afterCarrierTurn(), so deliverAwaitCompletion()
+                // can only make the task ready; the scheduler re-enters it
+                // through a later dispatch after the current stack unwinds.
+                Object terminal = awaited.runtimeTerminalStateOrNull();
+                if (terminal != null) {
+                    deliverAwaitCompletion(
+                            OresFuture.runtimeTerminalValue(terminal),
+                            OresFuture.runtimeTerminalFailure(terminal));
+                    return;
+                }
+
+                // Pending path: TaskRunner itself is the reusable callback
+                // target, avoiding a new captured lambda for every await. The
+                // detachable registration remains per suspension so scheduler
+                // close/task cancellation can sever retention safely.
                 OresFuture.RuntimeWaiterRegistration registration =
-                        awaited.whenCompleteRuntimeCancellable((value, failure) -> {
-                            if (phase.get() == TERMINAL) return;
-
-                            Resume resume = Resume.completed(
-                                    value,
-                                    failure == null ? null : OresFuture.unwrap(failure));
-                            if (!pendingResume.compareAndSet(null, resume)) {
-                                failTerminal(new IllegalStateException(
-                                        "await delivered more than one resume to the same task"));
-                                return;
-                            }
-
-                            if (phase.get() == TERMINAL) {
-                                pendingResume.compareAndSet(resume, null);
-                                return;
-                            }
-                            scheduleReadyResume();
-                        });
+                        awaited.whenCompleteRuntimeCancellable(this);
 
                 OresFuture.RuntimeWaiterRegistration previous =
                         activeAwaitRegistration.getAndSet(registration);
                 if (previous != null) previous.detach();
 
-                // A terminal/already-completed Future may have invoked the
-                // callback synchronously before the registration was published.
-                // In that case the waiter is already claimed; clear our strong
-                // reference immediately.
+                // Settlement may race between the terminal observation above
+                // and waiter publication. whenCompleteRuntimeCancellable()
+                // handles that race and may call accept(...) synchronously.
+                // If it did, clear the already-claimed registration now.
                 if (phase.get() != WAITING || pendingResume.get() != null) {
                     detachActiveAwaitRegistration();
                 }
             } catch (RuntimeException | Error registrationFailure) {
                 failTerminal(registrationFailure);
             }
+        }
+
+        @Override
+        public void accept(Object value, Throwable failure) {
+            deliverAwaitCompletion(value, failure);
+        }
+
+        private void deliverAwaitCompletion(Object value, Throwable failure) {
+            if (phase.get() == TERMINAL) return;
+
+            Resume resume = Resume.completed(
+                    value,
+                    failure == null ? null : OresFuture.unwrap(failure));
+            if (!pendingResume.compareAndSet(null, resume)) {
+                failTerminal(new IllegalStateException(
+                        "await delivered more than one resume to the same task"));
+                return;
+            }
+
+            if (phase.get() == TERMINAL) {
+                pendingResume.compareAndSet(resume, null);
+                return;
+            }
+            scheduleReadyResume();
         }
 
         /**

@@ -441,6 +441,40 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     /**
+     * Allocation-free runtime observation used by scheduler await fast paths.
+     *
+     * <p>A non-null value is the Future's immutable terminal state object. A
+     * null result means the Future was still pending at the observation point.
+     * Callers that observe pending must still register normally, because
+     * settlement may race immediately after this load.</p>
+     */
+    Object runtimeTerminalStateOrNull() {
+        Object observed = state.get();
+        return observed == PENDING ? null : observed;
+    }
+
+    /**
+     * Decode a terminal state previously returned by
+     * {@link #runtimeTerminalStateOrNull()} without allocating a wrapper.
+     */
+    static Object runtimeTerminalValue(Object terminal) {
+        if (terminal instanceof Success<?> success) return success.value();
+        if (terminal instanceof Failure || terminal instanceof Cancelled) return null;
+        throw new IllegalArgumentException("terminal Future state required");
+    }
+
+    /**
+     * Decode the failure/cancellation of a terminal state previously returned
+     * by {@link #runtimeTerminalStateOrNull()} without allocating a wrapper.
+     */
+    static Throwable runtimeTerminalFailure(Object terminal) {
+        if (terminal instanceof Success<?>) return null;
+        if (terminal instanceof Failure failed) return failed.failure();
+        if (terminal instanceof Cancelled cancelled) return cancelled.failure();
+        throw new IllegalArgumentException("terminal Future state required");
+    }
+
+    /**
      * Read-only compatibility observation used by runtime/tests. As with
      * CompletableFuture, cancellation is also an exceptional terminal state.
      */

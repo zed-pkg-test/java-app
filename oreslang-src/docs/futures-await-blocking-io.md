@@ -38,6 +38,68 @@ val bytes = await pending;
 
 Calling an async operation is not itself a scheduling boundary.
 
+## Compiler lowering and performance contract
+
+Conceptually, `await` is CPS-like syntax sugar, but Oreslang should not lower
+an async callable into a chain of heap-allocated callback closures. The target
+lowering is one resumable state-machine object/frame per logical async
+invocation:
+
+```text
+state = 0
+resume(value, failure):
+  switch state:
+    0: ... code before await A ...
+       state = 1
+       return await A
+    1: ... code after await A ...
+       state = 2
+       return await B
+    2: ... code after await B ...
+       return done(result)
+```
+
+Only locals live across a suspension point are spilled into the async frame.
+Dead temporaries stay ordinary turn-local values. The state id should be a
+small integer, and generated code should dispatch directly rather than build a
+nested tree of callbacks.
+
+The current Truffle evaluator's `AsyncPlan` trampoline is the semantic bridge
+for source execution. It is intentionally stackless, but its functional plan
+nodes/lambdas are not the desired final AOT/native hot-path representation.
+Compiler/AOT lowering should progressively replace those plan objects with the
+explicit state id + spilled-local frame above.
+
+Oreslang deliberately differs from C# and Kotlin on one important fast path:
+**source `await` always yields**. Even if the Future is already terminal, the
+continuation must not run on the current guest stack. The runtime still applies
+a cheap completed-Future optimization:
+
+1. observe the Future's immutable terminal state with one atomic load;
+2. do not allocate/register a waiter for that already-terminal Future;
+3. publish the value/failure into the task's pending resume slot;
+4. fully unwind the current guest turn;
+5. enqueue/re-enter the state machine through a fresh scheduler dispatch.
+
+So "already complete" is a **no-waiter fast path**, not an **inline continuation
+fast path**.
+
+For a genuinely pending Future, one detachable waiter is registered. The
+scheduler task itself is the reusable completion sink, so repeated awaits do
+not need a new captured callback object. Cancellation or scheduler shutdown
+detaches the waiter without cancelling a shared producer Future.
+
+Performance goals for generated async code:
+
+- zero continuation-closure allocation per `await`;
+- zero waiter allocation for already-terminal Futures;
+- one async frame per invocation only when suspension/lifetime requires it;
+- spill only locals live across suspension;
+- reuse one scheduler-task/completion sink across all suspension points;
+- never block an Ores carrier on Future completion;
+- never execute guest continuation code on producer/I/O/timer/JNI threads;
+- preserve the mandatory fresh-dispatch boundary even on the hot path.
+
 ## OresFuture is not CompletableFuture
 
 `Future<T>` is represented by the runtime-owned `OresFuture<T>`.

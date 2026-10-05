@@ -115,6 +115,40 @@ final class OresSchedulerTest {
     }
 
     @Test
+    void manyCompletedAwaitsStayStacklessAndRequireFreshDispatches() throws Exception {
+        final int awaits = 512;
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            AtomicInteger state = new AtomicInteger();
+            AtomicLong previousDispatch = new AtomicLong();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                long dispatch = OresScheduler.currentDispatchId();
+                assertNotEquals(0L, dispatch);
+                long prior = previousDispatch.getAndSet(dispatch);
+                if (prior != 0L) {
+                    assertNotEquals(
+                            prior,
+                            dispatch,
+                            "every await must re-enter through a fresh scheduler dispatch");
+                }
+
+                int step = state.getAndIncrement();
+                if (step < awaits) {
+                    OresFuture<Integer> completed = OresFuture.completed(step);
+                    assertEquals(0, completed.pendingRuntimeWaiterCount());
+                    return OresScheduler.await(completed);
+                }
+
+                assertEquals(awaits - 1, resume.value());
+                return OresScheduler.done(step);
+            });
+
+            assertEquals(awaits, result.get(10, TimeUnit.SECONDS));
+            assertEquals(awaits + 1, state.get());
+        }
+    }
+
+    @Test
     void runtimeOwnedCompletionPublishesOnlyAfterGuestTurnAdmissionExits() throws Exception {
         ExecutorService carrier = Executors.newSingleThreadExecutor();
         AtomicBoolean insideGuestTurn = new AtomicBoolean();
