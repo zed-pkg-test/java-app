@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.beamscale.desktop-daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BINARY@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BMSCL_DESKTOP_HOME</key>
+    <string>@STATE_DIR@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/daemon.err.log</string>
+</dict>
+</plist>

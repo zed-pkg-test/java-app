@@ -1,0 +1,7 @@
+{
+  "schema_version": "beamscale.desktop-runtime/v1",
+  "runtime_kind": "beamscale-single-beam",
+  "release_id": "otp-29.1.1-beamscale-2026.09",
+  "executable": "/opt/beamscale/releases/2026.09/bin/beamscale-local-runtime",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}

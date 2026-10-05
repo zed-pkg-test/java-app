@@ -1,0 +1,17 @@
+[Unit]
+Description=BeamScale Desktop Daemon
+
+[Service]
+Type=simple
+ExecStart="@BINARY@"
+Environment="BMSCL_DESKTOP_HOME=@STATE_DIR@"
+Restart=always
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

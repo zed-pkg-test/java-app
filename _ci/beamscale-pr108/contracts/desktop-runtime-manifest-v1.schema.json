@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://beamscale.dev/contracts/desktop-runtime-manifest-v1.schema.json",
+  "title": "BeamScale Desktop Runtime Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runtime_kind",
+    "release_id",
+    "executable",
+    "sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "beamscale.desktop-runtime/v1"
+    },
+    "runtime_kind": {
+      "const": "beamscale-single-beam"
+    },
+    "release_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "executable": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the exact pinned BeamScale single-BEAM runtime executable. The daemon additionally rejects symlinks/non-files and verifies sha256."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
