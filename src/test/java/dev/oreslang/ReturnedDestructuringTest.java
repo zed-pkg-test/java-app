@@ -394,16 +394,6 @@ final class ReturnedDestructuringTest {
                   return;
                 }
 
-                fnc acceptsFiniteTail([bool, string] values): void {
-                  stdio.println(values[0]);
-                  stdio.println(values[1]);
-                  return;
-                }
-
-                fnc acceptsEmptyTail([] values): void {
-                  return;
-                }
-
                 fnc single(): [int] {
                   return [99];
                 }
@@ -413,11 +403,11 @@ final class ReturnedDestructuringTest {
                   acceptsInts(rest);
 
                   [const first, const ...tail] = fixed();
-                  acceptsFiniteTail(tail);
-                  const [flag, label] = tail;
+                  val [bool, string] typedTail = tail;
+                  const [flag, label] = typedTail;
 
                   const [only, ...emptyTail] = single();
-                  acceptsEmptyTail(emptyTail);
+                  val [] typedEmptyTail = emptyTail;
                   stdio.println(only);
                   stdio.println(v);
                   stdio.println(first);
