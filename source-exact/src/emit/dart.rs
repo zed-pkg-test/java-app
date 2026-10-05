@@ -245,7 +245,7 @@ fn dart_check(ty: &OrmType, value: &str) -> Result<String> {
             }
             ScalarType::Int64 => return Err(unsupported_scalar("int64")),
             ScalarType::Float32 => return Err(unsupported_scalar("float32")),
-            ScalarType::Float64 => format!("{value} is num && ({value} as num).isFinite"),
+            ScalarType::Float64 => format!("{value} is num && {value}.isFinite"),
             ScalarType::Decimal => return Err(unsupported_scalar("decimal")),
             ScalarType::String => format!("{value} is String"),
             ScalarType::Uuid => return Err(unsupported_scalar("uuid")),
