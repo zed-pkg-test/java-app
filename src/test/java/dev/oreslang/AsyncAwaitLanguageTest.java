@@ -51,7 +51,7 @@ final class AsyncAwaitLanguageTest {
                     pub let int value = 1;
                   end
 
-                  async fnc change(Box box): int {
+                  async fnc change(Box mut box): int {
                     box.value = 99;
                     return box.value;
                   }
