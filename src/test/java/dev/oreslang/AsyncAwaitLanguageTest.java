@@ -109,4 +109,31 @@ final class AsyncAwaitLanguageTest {
                 () -> OresCompiler.parseAndTypeCheck(program));
     }
 
+    @Test
+    void asyncMoveBoundaryRejectsCallerUseAfterTransfer() {
+        String program = """
+                define module app
+                  define class Box as
+                    pub let int value = 1;
+                  end
+
+                  async fnc change(Box mut box): int {
+                    box.value = 99;
+                    return box.value;
+                  }
+
+                  pub fnc main(): void {
+                    let original = new Box();
+                    val changed = await change(original);
+                    stdio.println(original.value);
+                    stdio.println(changed);
+                    return;
+                  }
+                end
+                """;
+
+        assertThrows(IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck(program));
+    }
+
 }
