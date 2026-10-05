@@ -138,6 +138,7 @@ fn accept_headers_allow_json(headers: &HeaderMap) -> bool {
     return best_specificity.is_some() && best_quality > 0.0;
 }
 
+#[cfg(test)]
 fn accepts_json(value: &str) -> bool {
     let mut best_specificity = None;
     let mut best_quality = 0.0_f32;
