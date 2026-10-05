@@ -57,27 +57,29 @@ and deadlines. Arbitrary trusted native/JVM stacks are never asynchronously
 suspended at an unsafe instruction. A message that ignores safepoints is handled
 by the watchdog/fail-stop path rather than unsafe thread suspension.
 
-## Shared actors: typed protocol over one mailbox
+## Shared actors: one typed ingress over one mailbox
 
-Shared actors expose one or more typed public protocol methods while preserving
-one logical mailbox and one execution lease.
+Shared actors preserve one logical mailbox and one execution lease. A persistent
+actor may declare private actor-owned state and private helper methods, but its
+external behavioral surface is exactly one effective public
+`receive(Message): void`.
 
-A shared actor may declare:
-
-- private actor-owned state;
-- private helper methods;
-- one or more public monomorphic protocol methods.
-
-External interaction goes through `ActorRef<Protocol>.method(...)`. The compiler
-lowers those method calls to one runtime-private mailbox dispatcher; callers
-never gain a mutable object reference and raw send/receive/mailbox operations
-are not a source actor-class surface.
+External interaction goes through `ActorRef<ActorClass>.send(message)`. The
+runtime-owned receiver loop dequeues the message and invokes `receive`; source
+code cannot invoke `receive` directly and cannot expose additional public
+instance methods as an RPC-over-mailbox escape hatch.
 
 This preserves semantic isolation even though the backing address space is
 shared: mutable actor-owned state is reachable only while that actor holds its
 execution lease. Cross-actor shared mutation still requires explicit
 synchronized capabilities; ordinary actor state never becomes concurrently
 callable shared-object state.
+
+For hot-loaded persistent actors, the entry ABI is verified before generation
+allocation and hashed from actor identity, isolation domain, constructor
+boundary, `Actor<Message, Reply, Error>`, and `receive(Message): void`.
+Ordinary activation refuses actor ABI drift; existing actors remain pinned to
+their birth generation while it drains.
 
 ## Private / isoactors
 

@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -21,6 +23,39 @@ import java.util.concurrent.locks.ReentrantLock;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ActorRuntimeTest {
+    @Test
+    void asynchronousTurnExecutorCannotEscapeActorExecutionLease() throws Exception {
+        ExecutorService async = Executors.newSingleThreadExecutor();
+        try {
+            ActorRuntime.TurnExecutor invalidExecutor = turn -> async.execute(turn);
+            CountDownLatch guestRan = new CountDownLatch(1);
+
+            try (ActorRuntime runtime = new ActorRuntime(
+                    IsolatePolicy.developer(),
+                    new ActorRuntime.DispatcherConfig(2, 2, 1, 8, 1024),
+                    invalidExecutor)) {
+                var actor = runtime.<String>spawnShared(() ->
+                        (message, context) -> guestRan.countDown());
+
+                actor.send("go");
+
+                assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+                assertFalse(
+                        guestRan.await(100, TimeUnit.MILLISECONDS),
+                        "an asynchronous/thread-hopping TurnExecutor must never run actor code outside the lease");
+
+                Throwable failure = actor.failure().orElseThrow();
+                assertTrue(
+                        failure.getMessage().contains("TurnExecutor")
+                                || failure.getMessage().contains("synchronously"),
+                        failure.toString());
+            }
+        } finally {
+            async.shutdownNow();
+            assertTrue(async.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
+
     @Test
     void typedSourceProtocolDispatchUsesOneMailboxAndRuntimeOwnedReplyFutures() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {

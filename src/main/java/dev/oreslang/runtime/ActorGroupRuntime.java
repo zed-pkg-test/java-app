@@ -4,6 +4,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -22,13 +23,25 @@ final class ActorGroupRuntime<Out> {
     private final ActorGroupConfig.GroupPolicy policy;
     private final UUID capabilityNonce;
     private final ActorMailman<Out> mailman;
-    private final ArrayBlockingQueue<ActorMail<Out>> outbox;
+    private final ArrayBlockingQueue<OutboxEnvelope<Out>> outbox;
+
+    private record OutboxEnvelope<Out>(
+            ActorMail<Out> mail,
+            long reservedBytes) {
+        private OutboxEnvelope {
+            Objects.requireNonNull(mail, "mail");
+            if (reservedBytes < 0) {
+                throw new IllegalArgumentException("reservedBytes must be >= 0");
+            }
+        }
+    }
     private final Set<ActorRuntime.ActorId> actors =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final AtomicInteger actorCount = new AtomicInteger();
     private final AtomicLong nextSequence = new AtomicLong();
     private final Object outboxAdmissionLock = new Object();
     private final AtomicBoolean scheduled = new AtomicBoolean();
+    private final AtomicBoolean retryScheduled = new AtomicBoolean();
     private final AtomicBoolean stopped = new AtomicBoolean();
     private final AtomicReference<Thread> executionLease = new AtomicReference<>();
 
@@ -139,17 +152,26 @@ final class ActorGroupRuntime<Out> {
                     "actor " + sender.id() + " is not a member of actor group " + id);
         }
 
-        synchronized (outboxAdmissionLock) {
-            long sequence = nextSequence.getAndIncrement();
-            ActorMail<Out> mail = new ActorMail<>(
-                    sender.id(),
-                    id,
-                    sequence,
-                    (Out) output);
-            if (!outbox.offer(mail)) {
-                throw new IllegalStateException(
-                        "actor group outbox capacity exceeded for " + id
-                                + ": max=" + policy.outboxCapacity());
+        long reservedBytes = runtime.reserveActorGroupOutboxBytes(output);
+        boolean admitted = false;
+        try {
+            synchronized (outboxAdmissionLock) {
+                long sequence = nextSequence.getAndIncrement();
+                ActorMail<Out> mail = new ActorMail<>(
+                        sender.id(),
+                        id,
+                        sequence,
+                        (Out) output);
+                if (!outbox.offer(new OutboxEnvelope<>(mail, reservedBytes))) {
+                    throw new IllegalStateException(
+                            "actor group outbox capacity exceeded for " + id
+                                    + ": max=" + policy.outboxCapacity());
+                }
+                admitted = true;
+            }
+        } finally {
+            if (!admitted) {
+                runtime.releaseActorGroupOutboxBytes(reservedBytes);
             }
         }
         scheduleMailman();
@@ -160,10 +182,24 @@ final class ActorGroupRuntime<Out> {
         if (!scheduled.compareAndSet(false, true)) return;
         try {
             runtime.executeActorGroupMailman(this::runMailmanQuantum);
+        } catch (RejectedExecutionException saturated) {
+            scheduled.set(false);
+            scheduleMailmanRetry();
         } catch (RuntimeException failure) {
             scheduled.set(false);
             throw failure;
         }
+    }
+
+    private void scheduleMailmanRetry() {
+        if (stopped.get()) return;
+        if (!retryScheduled.compareAndSet(false, true)) return;
+        runtime.retryActorGroupMailman(() -> {
+            retryScheduled.set(false);
+            if (!stopped.get() && !outbox.isEmpty()) {
+                scheduleMailman();
+            }
+        });
     }
 
     private void runMailmanQuantum() {
@@ -189,13 +225,15 @@ final class ActorGroupRuntime<Out> {
             int handled = 0;
             while (!stopped.get() && handled < throughput) {
                 if (handled > 0 && System.nanoTime() - started >= maxNanos) break;
-                ActorMail<Out> mail = outbox.poll();
-                if (mail == null) break;
+                OutboxEnvelope<Out> envelope = outbox.poll();
+                if (envelope == null) break;
                 try {
-                    mailman.receiveMail(mail, context);
+                    mailman.receiveMail(envelope.mail(), context);
                 } catch (Exception failure) {
                     runtime.onActorGroupMailmanFailure(id, failure);
                     break;
+                } finally {
+                    runtime.releaseActorGroupOutboxBytes(envelope.reservedBytes());
                 }
                 handled++;
             }
@@ -211,7 +249,10 @@ final class ActorGroupRuntime<Out> {
 
     void stop() {
         if (!stopped.compareAndSet(false, true)) return;
-        outbox.clear();
+        OutboxEnvelope<Out> envelope;
+        while ((envelope = outbox.poll()) != null) {
+            runtime.releaseActorGroupOutboxBytes(envelope.reservedBytes());
+        }
     }
 
     int outboxSize() {

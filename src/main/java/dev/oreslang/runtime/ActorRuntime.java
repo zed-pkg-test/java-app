@@ -126,11 +126,70 @@ public final class ActorRuntime implements AutoCloseable {
 
     @FunctionalInterface
     public interface TurnExecutor {
+        /**
+         * Execute the supplied turn synchronously on the calling carrier.
+         *
+         * Returning before {@code turn} completes, or invoking it on a
+         * different thread, would invalidate the actor/mailman execution lease.
+         * ActorRuntime verifies this contract at every privileged turn boundary
+         * and fails closed before guest actor code can run asynchronously.
+         */
         void execute(Runnable turn);
 
         static TurnExecutor direct() {
             return Runnable::run;
         }
+    }
+
+    private static final int TURN_PENDING = 0;
+    private static final int TURN_RUNNING = 1;
+    private static final int TURN_FINISHED = 2;
+    private static final int TURN_REJECTED = 3;
+
+    /**
+     * Protect the execution-lease invariant from an incorrectly implemented
+     * host/Truffle TurnExecutor. The callback is authorized only while execute()
+     * is synchronously active on the same carrier thread. A delayed or
+     * thread-hopping callback becomes a no-op and the caller fails closed.
+     */
+    private void executeTurnSynchronously(String operation, Runnable turn) {
+        Objects.requireNonNull(operation, "operation");
+        Objects.requireNonNull(turn, "turn");
+
+        Thread expectedCarrier = Thread.currentThread();
+        AtomicInteger phase = new AtomicInteger(TURN_PENDING);
+        AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
+
+        turnExecutor.execute(() -> {
+            if (!phase.compareAndSet(TURN_PENDING, TURN_RUNNING)) return;
+            if (Thread.currentThread() != expectedCarrier) {
+                phase.set(TURN_REJECTED);
+                return;
+            }
+            try {
+                turn.run();
+            } catch (RuntimeException | Error failure) {
+                callbackFailure.set(failure);
+                throw failure;
+            } finally {
+                phase.compareAndSet(TURN_RUNNING, TURN_FINISHED);
+            }
+        });
+
+        if (phase.compareAndSet(TURN_PENDING, TURN_REJECTED)) {
+            throw new IllegalStateException(
+                    operation + " TurnExecutor returned before invoking the turn");
+        }
+
+        int observed = phase.get();
+        if (observed != TURN_FINISHED) {
+            throw new IllegalStateException(
+                    operation + " TurnExecutor must execute synchronously on the calling carrier");
+        }
+
+        Throwable swallowed = callbackFailure.get();
+        if (swallowed instanceof Error error) throw error;
+        if (swallowed instanceof RuntimeException runtime) throw runtime;
     }
 
     public static boolean isActorCarrierThread() {
@@ -1800,7 +1859,7 @@ public final class ActorRuntime implements AutoCloseable {
                 }
                 CURRENT_MAILMAN_RUNTIME.set(ActorRuntime.this);
                 try {
-                    turnExecutor.execute(turn);
+                    executeTurnSynchronously("actor-group mailman", turn);
                 } finally {
                     CURRENT_MAILMAN_RUNTIME.remove();
                     ACTOR_CARRIER.remove();
@@ -1810,6 +1869,22 @@ public final class ActorRuntime implements AutoCloseable {
         } catch (RejectedExecutionException rejected) {
             controlRejectedTurns.incrementAndGet();
             throw rejected;
+        }
+    }
+
+    void retryActorGroupMailman(Runnable retry) {
+        Objects.requireNonNull(retry, "retry");
+        if (closed.get()) return;
+        try {
+            messageWatchdog.schedule(
+                    () -> {
+                        if (!closed.get()) retry.run();
+                    },
+                    1L,
+                    TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) {
+            // Runtime teardown owns the watchdog. If it has stopped accepting
+            // work, group shutdown/close will drain the admitted outbox.
         }
     }
 
@@ -2072,17 +2147,19 @@ public final class ActorRuntime implements AutoCloseable {
             armRootDeadline();
             if (closed.get()) carrier.interrupt();
             try {
-                vm.rootScheduler().runBound(() -> turnExecutor.execute(() -> {
-                    try {
-                        schedulerSafepoint();
-                        completion.complete(task.get());
-                    } catch (Throwable failure) {
-                        completion.completeExceptionally(failure);
-                        if (failure instanceof VirtualMachineError fatal) throw fatal;
-                        if (failure instanceof ThreadDeath fatal) throw fatal;
-                        if (failure instanceof LinkageError fatal) throw fatal;
-                    }
-                }));
+                vm.rootScheduler().runBound(() -> executeTurnSynchronously(
+                        "root process turn",
+                        () -> {
+                            try {
+                                schedulerSafepoint();
+                                completion.complete(task.get());
+                            } catch (Throwable failure) {
+                                completion.completeExceptionally(failure);
+                                if (failure instanceof VirtualMachineError fatal) throw fatal;
+                                if (failure instanceof ThreadDeath fatal) throw fatal;
+                                if (failure instanceof LinkageError fatal) throw fatal;
+                            }
+                        }));
             } catch (Throwable failure) {
                 completion.completeExceptionally(failure);
                 if (failure instanceof VirtualMachineError fatal) throw fatal;
@@ -4092,6 +4169,26 @@ public final class ActorRuntime implements AutoCloseable {
         }
     }
 
+    long reserveActorGroupOutboxBytes(Object prepared) {
+        long bytes;
+        try {
+            bytes = estimateSharedInboxBytes(
+                    prepared,
+                    new IdentityHashMap<>(),
+                    0);
+        } catch (ArithmeticException overflow) {
+            throw new IllegalStateException(
+                    "actor group outbox memory accounting overflow",
+                    overflow);
+        }
+        reserveSharedRuntimeBytes(bytes, "actor group outbox");
+        return bytes;
+    }
+
+    void releaseActorGroupOutboxBytes(long bytes) {
+        releaseSharedRuntimeBytes(bytes);
+    }
+
     private void releaseSharedRuntimeBytes(long bytes) {
         if (bytes == 0) return;
         synchronized (memoryBudgetLock) {
@@ -5800,7 +5897,15 @@ public final class ActorRuntime implements AutoCloseable {
         private final AtomicBoolean stopped = new AtomicBoolean();
         private final AtomicInteger queuedMessages = new AtomicInteger();
         private final AtomicInteger queuedControlEvents = new AtomicInteger();
-        private final ConcurrentLinkedQueue<ContinuationEnvelope> readyContinuations =
+        /**
+         * Await resumes are deliberately isolated from ordinary actor-local
+         * events. While a logical mailbox turn is suspended, only an entry in
+         * awaitContinuations may resume it; a timer firing first must never be
+         * mistaken for the await completion.
+         */
+        private final ConcurrentLinkedQueue<ContinuationEnvelope> awaitContinuations =
+                new ConcurrentLinkedQueue<>();
+        private final ConcurrentLinkedQueue<ContinuationEnvelope> eventContinuations =
                 new ConcurrentLinkedQueue<>();
         private final ConcurrentLinkedQueue<ContinuationEnvelope> nextTickContinuations =
                 new ConcurrentLinkedQueue<>();
@@ -6253,7 +6358,7 @@ public final class ActorRuntime implements AutoCloseable {
             logicalTurnSuspended = true;
             try {
                 awaited.whenCompleteRuntime((value, failure) -> enqueueContinuation(
-                        readyContinuations,
+                        awaitContinuations,
                         new ContinuationEnvelope(
                                 continuation,
                                 value,
@@ -6290,7 +6395,7 @@ public final class ActorRuntime implements AutoCloseable {
                 ActorTimerWheel.Handle handle = holder.get();
                 if (handle != null) timers.remove(handle);
                 enqueueContinuation(
-                        readyContinuations,
+                        eventContinuations,
                         new ContinuationEnvelope(continuation, null, null),
                         "timer");
             });
@@ -6318,8 +6423,9 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private boolean hasRunnableWork() {
-            if (logicalTurnSuspended) return !readyContinuations.isEmpty();
-            return !readyContinuations.isEmpty()
+            if (logicalTurnSuspended) return !awaitContinuations.isEmpty();
+            return !awaitContinuations.isEmpty()
+                    || !eventContinuations.isEmpty()
                     || !nextTickContinuations.isEmpty()
                     || !inbox.isEmpty();
         }
@@ -6359,11 +6465,13 @@ public final class ActorRuntime implements AutoCloseable {
                 activeCarrier = carrier;
                 entryDeadline = armMessageDeadline("runtime context entry");
                 final long armedEntryDeadline = entryDeadline;
-                turnExecutor.execute(() -> {
-                    disarmMessageDeadline(armedEntryDeadline);
-                    throwIfControlStopped();
-                    runBatchEntered();
-                });
+                executeTurnSynchronously(
+                        "actor " + ref.id() + " turn",
+                        () -> {
+                            disarmMessageDeadline(armedEntryDeadline);
+                            throwIfControlStopped();
+                            runBatchEntered();
+                        });
             } catch (Throwable failure) {
                 fail(failure);
                 if (failure instanceof VirtualMachineError fatal) throw fatal;
@@ -6494,7 +6602,7 @@ public final class ActorRuntime implements AutoCloseable {
                 // resumes here under the actor lease, possibly on a different
                 // carrier from the one that observed await.
                 if (logicalTurnSuspended) {
-                    ContinuationEnvelope continuation = readyContinuations.poll();
+                    ContinuationEnvelope continuation = awaitContinuations.poll();
                     if (continuation == null) return;
                     releaseControlEvent();
                     logicalTurnSuspended = false;
@@ -6523,7 +6631,7 @@ public final class ActorRuntime implements AutoCloseable {
                 // Timer/reactor callbacks that are not resuming an await are
                 // ordinary actor-local events. Execute at most one per carrier
                 // quantum and never on the completion/timer thread itself.
-                ContinuationEnvelope readyEvent = readyContinuations.poll();
+                ContinuationEnvelope readyEvent = eventContinuations.poll();
                 if (readyEvent != null) {
                     releaseControlEvent();
                     beginMessageBudget();
@@ -6625,7 +6733,8 @@ public final class ActorRuntime implements AutoCloseable {
                     processed++;
 
                     if (!nextTickContinuations.isEmpty()
-                            || !readyContinuations.isEmpty()) {
+                            || !eventContinuations.isEmpty()
+                            || !awaitContinuations.isEmpty()) {
                         break;
                     }
 
@@ -6716,7 +6825,8 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void drainControlEvents() {
-            while (readyContinuations.poll() != null) releaseControlEvent();
+            while (awaitContinuations.poll() != null) releaseControlEvent();
+            while (eventContinuations.poll() != null) releaseControlEvent();
             while (nextTickContinuations.poll() != null) releaseControlEvent();
             logicalTurnSuspended = false;
         }

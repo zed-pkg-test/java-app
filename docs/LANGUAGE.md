@@ -486,66 +486,48 @@ domain markers:
 - `untrusted actor` / `UntrustedActor` is the adversarial sandbox domain and
   is the actor form that crosses into the subsequent/nested Graal isolate.
 
-These intrinsic bases define **execution/isolation domain only**. They do not
-take `<Message, Reply, Error>` protocol arguments. Protocol shape comes from
-the public methods and, when useful, implemented interfaces.
+These intrinsic bases define the execution/isolation domain and may optionally
+carry an explicit closed hot-load protocol `<Message, Reply, Error>`. When that
+triple is present, `Message` must exactly match the actor's mailbox ingress
+type. `Reply` and `Error` describe explicit response-capability/application
+message ABI; they do not synthesize RPC methods.
 
-### Typed protocol, one runtime-owned mailbox
+### One public receive, one runtime-owned mailbox
 
-Public actor methods are not separate concurrent entrypoints. The compiler
-lowers the complete public method set into one hidden mailbox message
-union/dispatcher. OresVM owns the permanent mailbox/event loop and holds at most
-one execution lease for that actor.
+A persistent actor exposes exactly one effective public instance method:
 
-Outside code holds an `ActorRef<Worker>`:
+```ores
+pub receive(message: Message): void
+```
+
+All other actor instance methods are private helpers. OresVM owns the permanent
+receiver loop and holds at most one execution lease for that actor; user code
+cannot call `receive` directly.
+
+Outside code holds an `ActorRef<Worker>` and enqueues messages through
+`send(message)`:
 
 ```ores
 val worker = spawn Worker(0);
-
-await worker.add(2);
-val value = await worker.current();
+worker.send(Job{...});
 ```
 
-Conceptually:
+The actor reference never exposes the mutable actor object or the runtime-owned
+receiver loop. `worker.receive(...)` is rejected, as are arbitrary public
+actor-method RPC entrypoints. Replies and failures travel through explicit
+message/response capabilities rather than a hidden method-name dispatcher.
 
-```text
-Worker.add(int): void
-ActorRef<Worker>.add(int): Future<void>
+The receive method is monomorphic at method level, uses implicit `self`, accepts
+exactly one non-`mut` message, returns `void`, and its boundary type must pass
+actor sendability checks. Actor state fields cannot be public.
 
-Worker.current(): int
-ActorRef<Worker>.current(): Future<int>
-```
+When an `ActorRef<Protocol>` interface form is supported, the interface must be
+receive-only: exactly one compatible `receive(Message): void` shape. A
+multi-method interface must never reopen arbitrary actor entrypoints.
 
-The actor reference does not expose the mutable actor object or a public
-mailbox handle. There is no ambient raw source-level `send`/`receive` API for
-actor classes. If an actor explicitly declares a public method named `send` or
-`receive`, that name is an ordinary typed protocol endpoint and dispatches
-through the same hidden mailbox as every other protocol method. `id`,
-`is_alive`, and `mailbox` are reserved ActorRef control-member names.
-
-Protocol methods are currently monomorphic at method level so the generated
-message ABI remains closed and AOT-safe. Generic actor classes remain allowed.
-Protocol parameters cannot be `mut`, and every parameter and return type must
-pass actor-boundary sendability checks.
-
-An actor may implement a multi-method interface and callers may narrow a
-concrete reference:
-
-```ores
-define interface WorkerAPI
-  fnc add(value: int): void;
-  fnc current(): int;
-end
-
-val ActorRef<WorkerAPI> worker = spawn Worker(0);
-```
-
-This is also the preferred hot-loading boundary: the implementation may remain
-opaque behind the declared interface/ABI.
-
-Actor inheritance preserves the execution domain and protocol visibility. A
-child may inherit its entire protocol or add endpoints, but it may not narrow an
-inherited public endpoint to private.
+Actor inheritance preserves the execution domain. An override may keep the
+effective public receive contract but may not narrow it to private or introduce
+additional public actor methods.
 
 Actor classes do not support static functions. Put reusable non-actor code in
 ordinary top-level/module `fnc` declarations with their own checked effects.
@@ -884,13 +866,24 @@ Actor cells may receive a policy stricter than their parent runtime. Their mailb
 
 1. source arrives as data;
 2. syntax/type/capability checks run;
-3. a fresh restricted guest context is created;
-4. the validated generation is staged and atomically becomes active without executing guest code;
-5. the supervisor explicitly starts the generation when its actor/request boundary is ready;
-6. the previous generation may remain alive while requests/actors drain;
-7. the supervisor explicitly retires it.
+3. if `export entry` names a persistent actor, the caller must supply an exact
+   `ActorEntryContract`; generic load APIs fail closed;
+4. actor name, isolation domain, constructor boundary, explicit
+   `Actor<Message, Reply, Error>` protocol, and `receive(Message): void` are
+   verified and hashed before any generation/context is allocated;
+5. a fresh restricted guest context is created and the validated generation is
+   staged without executing guest code;
+6. the supervisor explicitly starts the generation;
+7. activation atomically publishes it only if its actor ABI matches the
+   currently active generation for that code-unit id;
+8. the previous compatible generation may remain pinned while existing
+   requests/actors drain, then is retired.
 
-Each generation receives a monotonically increasing id and SHA-256 source digest.
+Each generation receives a process-monotonic id, SHA-256 source digest, explicit
+entry metadata, and (for persistent actors) a versioned SHA-256 ABI digest.
+Private implementation changes may alter the source digest without altering the
+actor ABI digest. Changing actor/non-actor role or changing actor ABI requires an
+explicit migration path and is rejected as an ordinary hot swap.
 
 This model does not require `dlopen`, `LoadLibrary`, JNI, or Truffle NFI. A production server may additionally map each context to a Graal polyglot/native isolate. On AOT-only targets the precompiled interpreter executes newly loaded Oreslang source; on JIT-capable targets the same source may warm into optimized machine code.
 

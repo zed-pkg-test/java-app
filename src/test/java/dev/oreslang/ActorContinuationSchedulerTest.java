@@ -178,6 +178,58 @@ final class ActorContinuationSchedulerTest {
     }
 
     @Test
+    void timerCannotMasqueradeAsAwaitResumeWhileTurnIsSuspended() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                singleCarrierConfig())) {
+            CompletableFuture<String> awaited = new CompletableFuture<>();
+            CountDownLatch suspended = new CountDownLatch(1);
+            CountDownLatch resumed = new CountDownLatch(1);
+            CountDownLatch timerRan = new CountDownLatch(1);
+            AtomicInteger sequence = new AtomicInteger();
+            AtomicInteger resumeOrder = new AtomicInteger();
+            AtomicInteger timerOrder = new AtomicInteger();
+
+            var actor = runtime.<String>spawnPrivate(() -> (message, context) -> {
+                context.setTimer(
+                        Duration.ofMillis(20),
+                        (value, failure, timerContext) -> {
+                            assertNull(failure);
+                            timerOrder.set(sequence.incrementAndGet());
+                            timerRan.countDown();
+                        });
+
+                suspended.countDown();
+                context.suspendOn(
+                        awaited,
+                        (value, failure, resumeContext) -> {
+                            assertNull(failure);
+                            assertEquals("ready", value);
+                            resumeOrder.set(sequence.incrementAndGet());
+                            resumed.countDown();
+                        });
+                fail("suspendOn must end the current carrier turn");
+            });
+
+            actor.send("go");
+            assertTrue(suspended.await(2, TimeUnit.SECONDS));
+
+            assertFalse(
+                    timerRan.await(100, TimeUnit.MILLISECONDS),
+                    "ordinary timer events must remain queued while an await owns the suspended logical turn");
+            assertFalse(resumed.await(25, TimeUnit.MILLISECONDS));
+
+            awaited.complete("ready");
+
+            assertTrue(resumed.await(2, TimeUnit.SECONDS));
+            assertTrue(timerRan.await(2, TimeUnit.SECONDS));
+            assertTrue(
+                    resumeOrder.get() < timerOrder.get(),
+                    "only the awaited completion may resume a suspended mailbox turn; timer work follows later");
+        }
+    }
+
+    @Test
     void nextTickRunsAfterCurrentMessageAndBeforeNextMailboxMessage() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime(
                 IsolatePolicy.developer(),

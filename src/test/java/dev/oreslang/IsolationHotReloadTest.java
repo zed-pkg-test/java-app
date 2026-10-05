@@ -1,6 +1,8 @@
 package dev.oreslang;
 
+import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
+import dev.oreslang.runtime.ActorEntryContract;
 import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.HotReloadManager;
@@ -13,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -226,6 +229,170 @@ final class IsolationHotReloadTest {
                   }
                 end
                 """)));
+    }
+
+
+    @Test
+    void persistentActorEntryIsAbiPinnedBeforeGenerationAllocation() {
+        IsolatePolicy policy = IsolatePolicy.developer();
+        String source = """
+                define class Worker extends Actor<int, String, String> as
+                  private helper(): int { return 1; }
+                  pub receive(message: int): void {
+                    val observed = self.helper();
+                    return;
+                  }
+                end
+                export entry Worker;
+                """;
+        ActorEntryContract contract = ActorEntryContract.of(
+                "Worker",
+                Ast.ActorKind.SHARED,
+                List.of(),
+                Ast.TypeRef.simple("int"),
+                Ast.TypeRef.simple("String"),
+                Ast.TypeRef.simple("String"));
+
+        try (HotReloadManager hot =
+                     new HotReloadManager(policy, ExecutionProfile.serverJit())) {
+            var generation = hot.loadActorEntry("worker.ores", source, contract);
+            assertFalse(generation.started(), "ABI admission must not execute guest code");
+            assertEquals("Worker", generation.entryExport().orElseThrow().name());
+            assertEquals(contract.abiDigest(), generation.actorEntryAbiDigest().orElseThrow());
+            assertEquals(1, hot.liveGenerations());
+        }
+    }
+
+    @Test
+    void genericHotLoadCannotBypassPersistentActorContract() {
+        IsolatePolicy policy = IsolatePolicy.developer();
+        String source = """
+                define class Worker extends Actor<int, String, String> as
+                  pub receive(message: int): void { return; }
+                end
+                export entry Worker;
+                """;
+
+        try (HotReloadManager hot =
+                     new HotReloadManager(policy, ExecutionProfile.serverJit())) {
+            IllegalArgumentException generic = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> hot.load("worker.ores", source));
+            assertTrue(generic.getMessage().contains("loadActorEntry"));
+
+            IllegalArgumentException explicit = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> hot.loadEntry("worker.ores", source));
+            assertTrue(explicit.getMessage().contains("loadActorEntry"));
+            assertEquals(0, hot.liveGenerations(),
+                    "rejected actor entry must not allocate a generation");
+        }
+    }
+
+    @Test
+    void activeActorGenerationRejectsAbiDriftButAllowsPrivateImplementationChange() {
+        IsolatePolicy policy = IsolatePolicy.developer();
+        ActorEntryContract intContract = ActorEntryContract.of(
+                "Worker",
+                Ast.ActorKind.SHARED,
+                List.of(),
+                Ast.TypeRef.simple("int"),
+                Ast.TypeRef.simple("String"),
+                Ast.TypeRef.simple("String"));
+        String v1 = """
+                define class Worker extends Actor<int, String, String> as
+                  private helper(): int { return 1; }
+                  pub receive(message: int): void { val x = self.helper(); return; }
+                end
+                export entry Worker;
+                """;
+        String v2 = """
+                define class Worker extends Actor<int, String, String> as
+                  private helper(): int { return 2; }
+                  pub receive(message: int): void { val x = self.helper(); return; }
+                end
+                export entry Worker;
+                """;
+
+        try (HotReloadManager hot =
+                     new HotReloadManager(policy, ExecutionProfile.serverJit())) {
+            var first = hot.loadActorEntry("worker.ores", v1, intContract);
+            first.start();
+            first.activate();
+
+            var compatible = hot.loadActorEntry("worker.ores", v2, intContract);
+            assertNotEquals(first.sha256(), compatible.sha256());
+            assertEquals(
+                    first.actorEntryAbiDigest().orElseThrow(),
+                    compatible.actorEntryAbiDigest().orElseThrow());
+            compatible.start();
+            compatible.activate();
+            assertSame(compatible, hot.active("worker.ores"));
+
+            ActorEntryContract stringContract = ActorEntryContract.of(
+                    "Worker",
+                    Ast.ActorKind.SHARED,
+                    List.of(),
+                    Ast.TypeRef.simple("String"),
+                    Ast.TypeRef.simple("String"),
+                    Ast.TypeRef.simple("String"));
+            String incompatibleSource = """
+                    define class Worker extends Actor<String, String, String> as
+                      pub receive(message: String): void { return; }
+                    end
+                    export entry Worker;
+                    """;
+            var incompatible =
+                    hot.loadActorEntry("worker.ores", incompatibleSource, stringContract);
+            incompatible.start();
+
+            IllegalStateException drift = assertThrows(
+                    IllegalStateException.class,
+                    incompatible::activate);
+            assertTrue(drift.getMessage().contains("ABI drift"));
+            assertSame(compatible, hot.active("worker.ores"),
+                    "failed activation must leave the old generation active");
+        }
+    }
+
+    @Test
+    void actorEntryIsolationMustMatchRuntimeExecutionDomain() {
+        IsolatePolicy policy = IsolatePolicy.developer();
+        String source = """
+                define class Worker extends IsoActor<int, String, String> as
+                  pub receive(message: int): void { return; }
+                end
+                export entry Worker;
+                """;
+        ActorEntryContract contract = ActorEntryContract.of(
+                "Worker",
+                Ast.ActorKind.PRIVATE,
+                List.of(),
+                Ast.TypeRef.simple("int"),
+                Ast.TypeRef.simple("String"),
+                Ast.TypeRef.simple("String"));
+
+        try (HotReloadManager wrong =
+                     new HotReloadManager(policy, ExecutionProfile.serverJit())) {
+            SecurityException failure = assertThrows(
+                    SecurityException.class,
+                    () -> wrong.loadActorEntry("worker.ores", source, contract));
+            assertTrue(failure.getMessage().contains("TRUSTED_ISOACTOR_JIT"));
+            assertEquals(0, wrong.liveGenerations());
+        }
+
+        try (HotReloadManager correct = new HotReloadManager(
+                policy,
+                policy,
+                ExecutionProfile.serverJit(),
+                HotReloadManager.ExecutionDomain.TRUSTED_ISOACTOR_JIT)) {
+            var generation = correct.loadActorEntry("worker.ores", source, contract);
+            assertEquals(
+                    HotReloadManager.ExecutionDomain.TRUSTED_ISOACTOR_JIT,
+                    generation.executionDomain());
+            assertFalse(generation.executionDomain().spawnedIsolate(),
+                    "trusted isoactors stay inside the primary Graal isolate");
+        }
     }
 
     private static String run(String program) throws Exception {

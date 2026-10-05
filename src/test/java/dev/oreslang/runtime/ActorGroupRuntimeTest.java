@@ -94,6 +94,56 @@ final class ActorGroupRuntimeTest {
     }
 
     @Test
+    void groupOutboxMemoryStaysChargedUntilMailmanFinishes() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CountDownLatch mailmanEntered = new CountDownLatch(1);
+            CountDownLatch releaseMailman = new CountDownLatch(1);
+            CountDownLatch delivered = new CountDownLatch(1);
+
+            ActorGroupRef<List<String>> group = runtime.defineActorGroup(
+                    ActorRuntime.ActorKind.SHARED,
+                    policy(ActorRuntime.ActorKind.SHARED, 1, 8),
+                    new ActorMailman<>() {
+                        @Override
+                        public void receiveMail(
+                                ActorMail<List<String>> mail,
+                                ActorGroupContext<List<String>> ignored) throws Exception {
+                            mailmanEntered.countDown();
+                            assertTrue(releaseMailman.await(2, TimeUnit.SECONDS));
+                            delivered.countDown();
+                        }
+                    });
+
+            ActorRuntime.ActorRef<String> actor = runtime.spawnInGroup(
+                    group,
+                    ActorRuntime.ActorKind.SHARED,
+                    IsolatePolicy.developer(),
+                    ignored -> (message, turn) ->
+                            turn.emit(List.of("x".repeat(16_384))));
+
+            actor.send("emit");
+            assertTrue(mailmanEntered.await(2, TimeUnit.SECONDS));
+
+            long charged = runtime.sharedMemoryBytes();
+            assertTrue(
+                    charged > 0L,
+                    "accepted actor-group mail must remain process-memory charged while the mailman owns it");
+
+            releaseMailman.countDown();
+            assertTrue(delivered.await(2, TimeUnit.SECONDS));
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+            while (runtime.sharedMemoryBytes() != 0L && System.nanoTime() < deadline) {
+                Thread.sleep(2);
+            }
+            assertEquals(
+                    0L,
+                    runtime.sharedMemoryBytes(),
+                    "group outbox reservation must be released after serialized mailman delivery");
+        }
+    }
+
+    @Test
     void groupCapacityIsReservedAndReleasedWithActorLifetime() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             ActorGroupRef<String> group = runtime.defineActorGroup(

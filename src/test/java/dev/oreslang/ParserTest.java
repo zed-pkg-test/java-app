@@ -266,8 +266,8 @@ final class ParserTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define actor Worker as
                   constructor() {
-                    val f = Futures.completed(1);
-                    await f;
+                    val pending = Futures.all([]);
+                    await pending;
                   }
 
                   pub receive(value: int): void { return; }
@@ -463,7 +463,7 @@ final class ParserTest {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define actor Worker as
                   constructor(box: Box mut) { }
-                  pub run(): void { return; }
+                  pub receive(message: int): void { return; }
                 end
                 """));
     }
