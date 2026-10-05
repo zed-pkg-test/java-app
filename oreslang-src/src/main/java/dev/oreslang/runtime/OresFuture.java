@@ -11,7 +11,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -71,34 +70,10 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         }
     }
 
-    /**
-     * Runtime-only detachable completion registration.
-     *
-     * <p>Detaching never changes the Future's producer/cancellation state. It
-     * only prevents this runtime continuation waiter from retaining or being
-     * invoked after its owning scheduler/task has been cancelled.</p>
-     */
-    static final class RuntimeWaiterRegistration {
-        private final AtomicBoolean claimed;
-        private final Runnable remove;
-
-        private RuntimeWaiterRegistration(
-                AtomicBoolean claimed,
-                Runnable remove) {
-            this.claimed = claimed;
-            this.remove = remove;
-        }
-
-        boolean detach() {
-            if (!claimed.compareAndSet(false, true)) return false;
-            remove.run();
-            return true;
-        }
-    }
-
-    private final AtomicReference<Runnable> cancelHook;
+    private final Runnable cancelHook;
     private final AtomicBoolean cancelHookRun = new AtomicBoolean();
-    private final AtomicReference<Object> state = new AtomicReference<>(PENDING);
+    private final NativeFutureState nativeState = new NativeFutureState();
+    private volatile Object state = PENDING;
     private final ConcurrentLinkedQueue<Waiter<T>> waiters = new ConcurrentLinkedQueue<>();
 
     public OresFuture() {
@@ -106,8 +81,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     OresFuture(Runnable cancelHook) {
-        this.cancelHook = new AtomicReference<>(
-                Objects.requireNonNull(cancelHook, "cancelHook"));
+        this.cancelHook = Objects.requireNonNull(cancelHook, "cancelHook");
     }
 
     public static <T> OresFuture<T> completed(T value) {
@@ -136,24 +110,17 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         AtomicBoolean callbackClaimed = new AtomicBoolean();
 
         Callback<T> completion = new Callback<>() {
-            private boolean claim(String operation) {
+            private void claim(String operation) {
                 if (!callbackClaimed.compareAndSet(false, true)) {
                     throw new AlreadySettledException(
                             "callback Future already settled; duplicate " + operation);
                 }
-
-                // Consumer cancellation may legitimately win before a foreign
-                // callback arrives. The first late producer callback is then a
-                // no-op rather than an exception escaping onto the producer's
-                // thread. Marking the callback claimed still diagnoses any
-                // subsequent duplicate callback invocation.
-                return !future.isCancelled();
             }
 
             @Override
             public void resolve(T value) {
-                if (!claim("resolve")) return;
-                if (!future.completeFromRuntime(value) && !future.isCancelled()) {
+                claim("resolve");
+                if (!future.completeFromRuntime(value)) {
                     throw new AlreadySettledException(
                             "callback Future was already settled before resolve");
                 }
@@ -162,8 +129,8 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
             @Override
             public void reject(Throwable failure) {
                 Objects.requireNonNull(failure, "failure");
-                if (!claim("reject")) return;
-                if (!future.failFromRuntime(failure) && !future.isCancelled()) {
+                claim("reject");
+                if (!future.failFromRuntime(failure)) {
                     throw new AlreadySettledException(
                             "callback Future was already settled before reject");
                 }
@@ -171,8 +138,8 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
 
             @Override
             public void cancel() {
-                if (!claim("cancel")) return;
-                if (!future.cancel(false) && !future.isCancelled()) {
+                claim("cancel");
+                if (!future.cancel(false)) {
                     throw new AlreadySettledException(
                             "callback Future was already settled before cancel");
                 }
@@ -298,16 +265,11 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     boolean completeFromRuntime(T value) {
-        boolean completed = settle(new Success<>(value));
-        if (completed) cancelHook.set(null);
-        return completed;
+        return settle(new Success<>(value));
     }
 
     boolean failFromRuntime(Throwable failure) {
-        boolean completed = settle(
-                new Failure(Objects.requireNonNull(failure, "failure")));
-        if (completed) cancelHook.set(null);
-        return completed;
+        return settle(new Failure(Objects.requireNonNull(failure, "failure")));
     }
 
     /**
@@ -318,34 +280,14 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
      * They must never execute Oreslang guest code directly.</p>
      */
     void whenCompleteRuntime(BiConsumer<? super T, ? super Throwable> callback) {
-        whenCompleteRuntimeCancellable(callback);
-    }
-
-    RuntimeWaiterRegistration whenCompleteRuntimeCancellable(
-            BiConsumer<? super T, ? super Throwable> callback) {
         Objects.requireNonNull(callback, "callback");
         Waiter<T> waiter = new Waiter<>(callback);
-        RuntimeWaiterRegistration registration =
-                new RuntimeWaiterRegistration(
-                        waiter.claimed,
-                        () -> waiters.remove(waiter));
         waiters.add(waiter);
 
-        Object observed = state.get();
-        if (observed != PENDING) {
-            // A registration racing with (or following) settlement must not
-            // leave an already-claimed callback strongly retained in the
-            // pending waiter queue. Removing before notification is race-safe:
-            // if settle() already polled it, remove is a no-op and the claimed
-            // bit still guarantees exactly-once callback delivery.
-            waiters.remove(waiter);
+        Object observed = state;
+        if (observed != PENDING && nativeState.isDone()) {
             notifyWaiter(waiter, observed);
         }
-        return registration;
-    }
-
-    int pendingRuntimeWaiterCount() {
-        return waiters.size();
     }
 
     @Override
@@ -354,10 +296,9 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
                 new CancellationException("OresFuture was cancelled");
         if (!settle(new Cancelled(cancelled))) return false;
 
-        Runnable hook = cancelHook.getAndSet(null);
-        if (hook != null && cancelHookRun.compareAndSet(false, true)) {
+        if (cancelHookRun.compareAndSet(false, true)) {
             try {
-                hook.run();
+                cancelHook.run();
             } catch (RuntimeException | Error ignored) {
                 // Cancellation state is already authoritative. A host
                 // cancellation hook cannot roll it back or poison waiter
@@ -369,12 +310,12 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
 
     @Override
     public boolean isCancelled() {
-        return state.get() instanceof Cancelled;
+        return nativeState.isCancelled();
     }
 
     @Override
     public boolean isDone() {
-        return state.get() != PENDING;
+        return nativeState.isDone();
     }
 
     /**
@@ -382,8 +323,9 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
      * CompletableFuture, cancellation is also an exceptional terminal state.
      */
     public boolean isCompletedExceptionally() {
-        Object observed = state.get();
-        return observed instanceof Failure || observed instanceof Cancelled;
+        Object observed = state;
+        return nativeState.isDone()
+                && (observed instanceof Failure || observed instanceof Cancelled);
     }
 
     @Override
@@ -409,9 +351,10 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
      * scheduler suspension ABI rather than calling join on a carrier.
      */
     public T join() {
-        Object observed = state.get();
+        Object observed = state;
         boolean interrupted = false;
-        if (observed == PENDING) {
+        if (observed == PENDING || !nativeState.isDone()) {
+            rejectBlockingOnOresCarrier("join");
             java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
             whenCompleteRuntime((value, failure) -> done.countDown());
             for (;;) {
@@ -422,7 +365,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
                     interrupted = true;
                 }
             }
-            observed = state.get();
+            observed = state;
         }
         if (interrupted) Thread.currentThread().interrupt();
         return reportJoin(observed);
@@ -443,13 +386,28 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     private boolean settle(Object terminal) {
-        if (!state.compareAndSet(PENDING, terminal)) return false;
+        int terminalState = terminalState(terminal);
+        if (!nativeState.tryBeginSettlement()) return false;
+
+        // Publish the interpreter payload before publishing the native terminal
+        // state. Runtime waiters check native completion before self-delivery,
+        // so no observer can treat this value as settled during the brief
+        // SETTLING phase.
+        state = terminal;
+        nativeState.publish(terminalState);
 
         Waiter<T> waiter;
         while ((waiter = waiters.poll()) != null) {
             notifyWaiter(waiter, terminal);
         }
         return true;
+    }
+
+    private static int terminalState(Object terminal) {
+        if (terminal instanceof Success<?>) return NativeFutureState.SUCCESS;
+        if (terminal instanceof Failure) return NativeFutureState.FAILURE;
+        if (terminal instanceof Cancelled) return NativeFutureState.CANCELLED;
+        throw new IllegalArgumentException("unknown OresFuture terminal state");
     }
 
     @SuppressWarnings("unchecked")
@@ -473,18 +431,30 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     }
 
     private Object awaitState(long timeout, TimeUnit unit) throws InterruptedException {
-        Object observed = state.get();
-        if (observed != PENDING) return observed;
+        Object observed = state;
+        if (observed != PENDING && nativeState.isDone()) return observed;
 
+        rejectBlockingOnOresCarrier("get");
         java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
         whenCompleteRuntime((value, failure) -> done.countDown());
 
         if (unit == null) {
             done.await();
         } else if (!done.await(timeout, unit)) {
-            return state.get() == PENDING ? PENDING : state.get();
+            Object after = state;
+            return nativeState.isDone() && after != PENDING ? after : PENDING;
         }
-        return state.get();
+        return state;
+    }
+
+    private static void rejectBlockingOnOresCarrier(String operation) {
+        if (NativeCarrierExecutor.isNativeCarrierThread()
+                || ActorRuntime.isActorCarrierThread()
+                || OresScheduler.isSchedulerCarrierThread()) {
+            throw new IllegalStateException(
+                    "OresFuture." + operation
+                            + "() cannot block an Ores carrier; use await/scheduler suspension");
+        }
     }
 
     @SuppressWarnings("unchecked")
