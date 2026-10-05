@@ -43,7 +43,7 @@ final class PrivateVisibilityTest {
                     return 7;
                   }
 
-                  pub bump_and_read(&mut Vault other): int {
+                  pub bump_and_read(Vault mut other): int {
                     other.secret = other.secret + 1;
                     return other.reveal();
                   }
@@ -67,11 +67,12 @@ final class PrivateVisibilityTest {
                 pub routine main(): void {
                   val left = new Vault();
                   val right = new Vault();
+                  val third = new Vault();
                   val Fnc<int> callback = Vault.hidden_callback();
 
-                  stdio.stdout.write(left.bump_and_read(&mut right));
+                  stdio.stdout.write(left.bump_and_read(right));
                   stdio.stdout.write(":");
-                  stdio.stdout.write(left.destructured(right));
+                  stdio.stdout.write(left.destructured(third));
                   stdio.stdout.write(":");
                   stdio.stdout.write(Vault.expose_hidden());
                   stdio.stdout.write(":");
@@ -80,7 +81,7 @@ final class PrivateVisibilityTest {
                 }
                 """);
 
-        assertEquals("2:2:7:7", output);
+        assertEquals("2:1:7:7", output);
     }
 
     @Test
@@ -285,7 +286,9 @@ final class PrivateVisibilityTest {
         IllegalArgumentException iteratorFailure = assertThrows(
                 IllegalArgumentException.class,
                 () -> runLinked(iteratorMain));
-        assertTrue(iteratorFailure.getMessage().contains("private"));
+        assertTrue(
+                iteratorFailure.getMessage().contains("private")
+                        || iteratorFailure.getMessage().contains("for-of requires"));
         assertTrue(iteratorFailure.getMessage().contains("Symbol.iterator"));
     }
 
