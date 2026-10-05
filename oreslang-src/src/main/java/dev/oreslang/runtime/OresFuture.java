@@ -171,18 +171,33 @@ public final class OresFuture<T> implements Future<T>, OresAwaitable<T> {
         CancellationException cancelled =
                 new CancellationException("OresFuture was cancelled");
         Runnable hook = cancelHook.get();
-        if (!settle(new Cancelled(cancelled))) return false;
+        Error fatal = null;
+        boolean won;
+
+        try {
+            won = settle(new Cancelled(cancelled));
+        } catch (VirtualMachineError | ThreadDeath | LinkageError waiterFatal) {
+            // settle() publishes the terminal state before waiter delivery.
+            // Cancellation cleanup must still run even when one runtime waiter
+            // reports a VM-fatal condition.
+            won = true;
+            fatal = waiterFatal;
+        }
+        if (!won) return false;
 
         if (hook != null && cancelHookRun.compareAndSet(false, true)) {
             try {
                 hook.run();
-            } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
-                throw fatal;
+            } catch (VirtualMachineError | ThreadDeath | LinkageError hookFatal) {
+                if (fatal == null) fatal = hookFatal;
+                else fatal.addSuppressed(hookFatal);
             } catch (RuntimeException | Error ignored) {
                 // Cancellation state is already authoritative. An ordinary
                 // host cancellation-hook failure cannot roll it back.
             }
         }
+
+        if (fatal != null) throw fatal;
         return true;
     }
 

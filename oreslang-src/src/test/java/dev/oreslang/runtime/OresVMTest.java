@@ -823,4 +823,29 @@ final class OresVMTest {
     }
 
 
+    @Test
+    void fatalWaiterDoesNotSkipCancellationCleanupOrOtherWaiters() {
+        AtomicInteger cancellations = new AtomicInteger();
+        AtomicInteger delivered = new AtomicInteger();
+        OresFuture<Integer> future =
+                new OresFuture<>(cancellations::incrementAndGet);
+
+        future.whenCompleteRuntime((value, failure) -> {
+            throw new LinkageError("fatal waiter");
+        });
+        future.whenCompleteRuntime((value, failure) -> delivered.incrementAndGet());
+
+        LinkageError fatal = assertThrows(
+                LinkageError.class,
+                () -> future.cancel(true));
+
+        assertEquals("fatal waiter", fatal.getMessage());
+        assertTrue(future.isCancelled());
+        assertEquals(1, cancellations.get(),
+                "producer cancellation cleanup must run despite fatal waiter delivery");
+        assertEquals(1, delivered.get(),
+                "settlement must drain remaining waiters before fatal rethrow");
+    }
+
+
 }
