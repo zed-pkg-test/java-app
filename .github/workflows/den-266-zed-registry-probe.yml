@@ -1,0 +1,49 @@
+name: DEN-266 Zed registry probe
+on:
+  pull_request:
+    paths:
+      - 'fixtures/DEN-266/**'
+      - '.github/workflows/den-266-zed-registry-probe.yml'
+permissions:
+  contents: read
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install checksum-verified Zed 0.3.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://github.com/zed-pkg/zed-cli/releases/download/v0.3.0/zed-x86_64-unknown-linux-gnu.tar.gz'
+          expected='f87576bc289e43ed647902527e7be70566445d2f1fd11249f067ab35547d4b8a'
+          mkdir -p "$RUNNER_TEMP/zed-dist"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors -o "$RUNNER_TEMP/zed.tar.gz" "$url"
+          printf '%s  %s\n' "$expected" "$RUNNER_TEMP/zed.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/zed.tar.gz" -C "$RUNNER_TEMP/zed-dist"
+          zed_bin="$(find "$RUNNER_TEMP/zed-dist" -type f -name zed -perm -u+x -print -quit)"
+          test -n "$zed_bin"
+          printf 'ZED_BIN=%s\n' "$zed_bin" >> "$GITHUB_ENV"
+      - name: Resolve immutable rate-limit package without credentials
+        working-directory: fixtures/DEN-266
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ZED_BIN" install --install-mode copy
+          test -s .zpkg.lock
+          "$ZED_BIN" validate --manifest .zpkg.toml --lock .zpkg.lock --require-lock --json | tee "$RUNNER_TEMP/validate.json"
+          grep -F 'ores-rate-limit/ores-rl-lib-core' .zpkg.lock
+          grep -F 'version = "0.1.0"' .zpkg.lock
+      - name: Upload resolver evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: den-266-zed-registry-probe-${{ github.run_id }}
+          path: |
+            fixtures/DEN-266/.zpkg.lock
+            ${{ runner.temp }}/validate.json
+          if-no-files-found: warn
+          retention-days: 7
