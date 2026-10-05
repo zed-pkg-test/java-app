@@ -1,0 +1,44 @@
+// Core SSR markup value.
+//
+// IMPORTANT: trusted_raw() is intentionally explicit.
+// Safe conversion from arbitrary dynamic strings is blocked on oreslang-source.java#246.
+
+type Markup = {html: string};
+
+define module markup as
+
+  pub fnc empty(): Markup {
+    return obj{html: ""};
+  }
+
+  pub fnc trusted_raw(string html): Markup {
+    return obj{html: html};
+  }
+
+  pub fnc concat(Markup left, Markup right): Markup {
+    return obj{html: left.html + right.html};
+  }
+
+  pub fnc join(Array<Markup> parts): Markup {
+    let string rendered = "";
+
+    for (val part of parts) {
+      rendered = rendered + part.html;
+    }
+
+    return obj{html: rendered};
+  }
+
+  pub fnc when(bool condition, Markup value): Markup {
+    if condition then
+      return value;
+    fi
+
+    return empty();
+  }
+
+  pub fnc render(Markup value): string {
+    return value.html;
+  }
+
+end
