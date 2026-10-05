@@ -164,4 +164,33 @@ final class OresObservableTest {
         }
     }
 
+    @Test
+    void runtimeCancellationCleanupRunsOnceAfterTerminalFailure() {
+        AtomicInteger cleanupCalls = new AtomicInteger();
+        OresFuture<OresNotification<Integer>> source = new OresFuture<>();
+
+        OresSubscription<Integer> subscription = new OresSubscription<>() {
+            @Override
+            protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                return source;
+            }
+
+            @Override
+            protected void cancelFromRuntime() {
+                cleanupCalls.incrementAndGet();
+            }
+        };
+
+        OresFuture<OresNotification<Integer>> pull = subscription.next();
+        source.failFromRuntime(new IllegalStateException("source-failed"));
+
+        CompletionException failure =
+                assertThrows(CompletionException.class, pull::join);
+        assertInstanceOf(IllegalStateException.class, failure.getCause());
+        assertEquals(1, cleanupCalls.get());
+
+        assertTrue(subscription.cancel());
+        assertEquals(1, cleanupCalls.get());
+    }
+
 }
