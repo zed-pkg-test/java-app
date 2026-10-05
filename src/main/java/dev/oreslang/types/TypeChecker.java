@@ -70,7 +70,8 @@ public final class TypeChecker {
         Set<String> exposed = new HashSet<>();
         Set<String> localNames = new HashSet<>(Set.of(
                 "stdio", "process", "actor", "print", "Some", "None", "Ok", "Err",
-                "Mutex", "SharedMutex", "Object", "List", "Option", "Result", "Future",
+                "Mutex", "SharedMutex", "Channel", "SelectCase", "SelectSet", "SelectResult",
+                "Object", "List", "Option", "Result", "Future",
                 "int", "uint", "float", "decimal", "complex", "bool", "String", "void",
                 "self", "null"));
 
@@ -671,6 +672,48 @@ public final class TypeChecker {
             checkBlock(attempted.finallyBody(), env, generics, expectedReturn, self);
             return;
         }
+        if (stmt instanceof Ast.SelectStmt selected) {
+            if (selected.mode() == Ast.WaitMode.NONBLOCKING
+                    && currentActorKind == Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException(
+                        "static 'nb select { ... }' requires an actor execution domain "
+                                + "because its selected branch executes later; "
+                                + "use 'nb select from cases' when only a Future<SelectResult> is needed");
+            }
+            for (Ast.SelectArm arm : selected.arms()) {
+                Env armEnv = new Env(env);
+                if (arm.operation() != Ast.ChannelOperation.DEFAULT) {
+                    Type element = channelElementType(
+                            typeOf(arm.channel(), env, generics, self),
+                            "select " + arm.operation().name().toLowerCase());
+                    if (arm.operation() == Ast.ChannelOperation.WRITE) {
+                        requireAssignable(
+                                typeOf(arm.value(), env, generics, self),
+                                element,
+                                "writech select value");
+                    } else if (arm.bindingName() != null) {
+                        armEnv.define(
+                                arm.bindingName(),
+                                element,
+                                arm.bindingKind());
+                    }
+                }
+                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                    // nb select arms run later as detached actor continuations.
+                    // return; exits the arm itself and loop control cannot cross
+                    // back into an already-continued enclosing loop.
+                    checkCallableBlock(
+                            arm.body(),
+                            armEnv,
+                            generics,
+                            Primitive.VOID,
+                            self);
+                } else {
+                    checkBlock(arm.body(), armEnv, generics, expectedReturn, self);
+                }
+            }
+            return;
+        }
         if (stmt instanceof Ast.ForOfDestructureStmt loop) {
             Type iterable = typeOf(loop.iterable(), env, generics, self);
             Type element = iterableElementType(iterable);
@@ -718,7 +761,11 @@ public final class TypeChecker {
             Env.Binding local = env.lookup(name.name());
             if (local != null) return local.type();
             if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("actor")) return new Named(name.name(), List.of());
-            if (name.name().equals("Mutex") || name.name().equals("SharedMutex")) return new Named("$" + name.name() + "Factory", List.of());
+            if (name.name().equals("Mutex") || name.name().equals("SharedMutex")
+                    || name.name().equals("Channel") || name.name().equals("SelectCase")
+                    || name.name().equals("SelectSet")) {
+                return new Named("$" + name.name() + "Factory", List.of());
+            }
             if (name.name().equals("print")) return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             if (name.name().equals("None")) return new Named("Option", List.of(Unknown.INSTANCE));
             Ast.ModuleDecl moduleNamespace = modules.get(name.name());
@@ -916,6 +963,86 @@ public final class TypeChecker {
                     return asyncResult(target.async(), result);
                 }
             }
+            if (call.callee() instanceof Ast.MemberExpr channelCall
+                    && channelCall.receiver() instanceof Ast.NameExpr factory
+                    && factory.name().equals("Channel")
+                    && channelCall.member().equals("new")) {
+                if (!call.typeArgumentsPresent() || call.typeArguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "Channel.new<T>(capacity) requires exactly one explicit element type");
+                }
+                if (call.arguments().size() != 1) {
+                    throw new IllegalArgumentException("Channel.new<T> expects exactly one capacity");
+                }
+                requireAssignable(
+                        typeOf(call.arguments().getFirst(), env, generics, self),
+                        Primitive.INT,
+                        "Channel.new capacity");
+                Type element = resolve(call.typeArguments().getFirst(), generics, self);
+                if (element == Primitive.VOID) {
+                    throw new IllegalArgumentException(
+                            "Channel<void> cannot carry a value; use an explicit signal/unit type");
+                }
+                return new Named("Channel", List.of(element));
+            }
+
+            if (call.callee() instanceof Ast.MemberExpr selectCaseCall
+                    && selectCaseCall.receiver() instanceof Ast.NameExpr factory
+                    && factory.name().equals("SelectCase")) {
+                if (call.typeArgumentsPresent()) {
+                    throw new IllegalArgumentException(
+                            "SelectCase constructors infer channel element types");
+                }
+                return switch (selectCaseCall.member()) {
+                    case "read" -> {
+                        if (call.arguments().size() != 1) {
+                            throw new IllegalArgumentException("SelectCase.read expects one Channel<T>");
+                        }
+                        channelElementType(
+                                typeOf(call.arguments().getFirst(), env, generics, self),
+                                "SelectCase.read");
+                        yield new Named("SelectCase", List.of());
+                    }
+                    case "write" -> {
+                        if (call.arguments().size() != 2) {
+                            throw new IllegalArgumentException(
+                                    "SelectCase.write expects Channel<T>, value");
+                        }
+                        Type element = channelElementType(
+                                typeOf(call.arguments().get(0), env, generics, self),
+                                "SelectCase.write");
+                        requireAssignable(
+                                typeOf(call.arguments().get(1), env, generics, self),
+                                element,
+                                "SelectCase.write value");
+                        yield new Named("SelectCase", List.of());
+                    }
+                    case "default" -> {
+                        if (!call.arguments().isEmpty()) {
+                            throw new IllegalArgumentException("SelectCase.default expects no arguments");
+                        }
+                        yield new Named("SelectCase", List.of());
+                    }
+                    default -> throw new IllegalArgumentException(
+                            "unknown SelectCase constructor '" + selectCaseCall.member() + "'");
+                };
+            }
+
+            if (call.callee() instanceof Ast.MemberExpr selectSetCall
+                    && selectSetCall.receiver() instanceof Ast.NameExpr factory
+                    && factory.name().equals("SelectSet")
+                    && selectSetCall.member().equals("new")) {
+                if (call.typeArgumentsPresent()) {
+                    throw new IllegalArgumentException("SelectSet.new does not accept type arguments");
+                }
+                if (call.arguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "SelectSet.new expects one list/map of SelectCase values");
+                }
+                typeOf(call.arguments().getFirst(), env, generics, self);
+                return new Named("SelectSet", List.of());
+            }
+
             if (call.callee() instanceof Ast.MemberExpr factoryCall
                     && factoryCall.receiver() instanceof Ast.NameExpr factory
                     && (factory.name().equals("Mutex") || factory.name().equals("SharedMutex"))
@@ -1252,6 +1379,19 @@ public final class TypeChecker {
             }
             Type mutexMember = builtinMutexMember(receiver, member.member());
             if (mutexMember != null) return mutexMember;
+
+            Type selectedReceiver = deref(receiver);
+            if (selectedReceiver instanceof Named selected
+                    && selected.name().equals("SelectResult")) {
+                return switch (member.member()) {
+                    case "index" -> Primitive.INT;
+                    case "operation" -> Primitive.STRING;
+                    case "value" -> Unknown.INSTANCE;
+                    default -> throw new IllegalArgumentException(
+                            "unknown SelectResult member '" + member.member() + "'");
+                };
+            }
+
             receiver = unwrapMutexGuard(receiver);
             if (receiver instanceof Named named && named.name().equals("stdio.stdout") && member.member().equals("write")) {
                 return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
@@ -1414,6 +1554,41 @@ public final class TypeChecker {
             throw new IllegalArgumentException(
                     "await requires Future<T>; got " + awaitedType);
         }
+        if (expr instanceof Ast.ChannelOpExpr channelOp) {
+            Type element = channelElementType(
+                    typeOf(channelOp.channel(), env, generics, self),
+                    channelOp.operation() == Ast.ChannelOperation.READ ? "readch" : "writech");
+
+            if (channelOp.operation() == Ast.ChannelOperation.WRITE) {
+                requireAssignable(
+                        typeOf(channelOp.value(), env, generics, self),
+                        element,
+                        "writech value");
+                return switch (channelOp.mode()) {
+                    case BLOCKING -> Primitive.VOID;
+                    case NONBLOCKING -> new Named("Future", List.of(Primitive.VOID));
+                    case IMMEDIATE -> Primitive.BOOL;
+                };
+            }
+
+            return switch (channelOp.mode()) {
+                case BLOCKING -> element;
+                case NONBLOCKING -> new Named("Future", List.of(element));
+                case IMMEDIATE -> new Named("Option", List.of(element));
+            };
+        }
+        if (expr instanceof Ast.DynamicSelectExpr selected) {
+            // Dynamic select accepts a SelectSet directly or a runtime
+            // list/map of SelectCase values. The exact case element type may
+            // remain Unknown until collection generic constraints are richer.
+            typeOf(selected.cases(), env, generics, self);
+            Type result = new Named("SelectResult", List.of());
+            return switch (selected.mode()) {
+                case BLOCKING -> result;
+                case NONBLOCKING -> new Named("Future", List.of(result));
+                case IMMEDIATE -> new Named("Option", List.of(result));
+            };
+        }
         if (expr instanceof Ast.ListExpr list) {
             if (list.elements().isEmpty()) return new ListType(Unknown.INSTANCE);
             Type element = widenCollectionElement(typeOf(list.elements().getFirst(), env, generics, self));
@@ -1473,6 +1648,18 @@ public final class TypeChecker {
             return new Function(parameters, Unknown.INSTANCE);
         }
         return Unknown.INSTANCE;
+    }
+
+    private Type channelElementType(Type channel, String where) {
+        channel = deref(channel);
+        if (channel == Unknown.INSTANCE) return Unknown.INSTANCE;
+        if (channel instanceof Named named
+                && named.name().equals("Channel")
+                && named.arguments().size() == 1) {
+            return named.arguments().getFirst();
+        }
+        throw new IllegalArgumentException(
+                where + " requires Channel<T>; got " + channel);
     }
 
     private Type typeOfAgainstExpected(Ast.Expr expr, Type expected, Env env, Set<String> generics, Type self) {
