@@ -34,7 +34,7 @@ import fnc * as funcs from "../xyz";
 import * as package from "./xyz";
 ```
 
-Wildcard imports always require a namespace alias. A single named module/class/function import may use `as` to choose its local binding; the original source name still controls export resolution. This avoids namespace pollution while supporting Kotlin-style disambiguation. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
+Wildcard imports always require a namespace alias. A single named module/class/function import may use `as` to choose its local binding; the original source name still controls export resolution. `import fnc` specifically imports a **reifiable non-generic, non-actor `fnc` value**. Generic `fnc<T>` declarations require direct-call specialization and therefore are not valid `import fnc` targets until Oreslang gains polymorphic function values. This avoids namespace pollution while supporting Kotlin-style disambiguation. Import paths are part of the AST/compiler contract; filesystem/package resolution is a host build/bundling concern so strict isolates do not gain ambient filesystem access merely by using `import`.
 
 Java host classes use an explicit `java:` URI and the same alias syntax:
 
