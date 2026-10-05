@@ -1,0 +1,385 @@
+import class TestCase, TestSuite, TestOptions, RunSummary, TestOutcome from '../vendor/oreslang/testing';
+import fnc fail, expect_true, expect_near_float, run_suite, require_success from '../vendor/oreslang/testing';
+
+import class EmbeddingBatch, TokenEmbeddingBatch from '../src/ml/embeddings';
+import fnc validate_embedding_batch, validate_token_embedding_batch, mean_pool_token_embeddings_into, normalize_embedding_rows_into, dot_similarity_into, cosine_similarity_into, squared_l2_distance_into, top_k_indices_into, top_k_dot_into from '../src/ml/embeddings';
+
+fnc test_embedding_validation(): TestOutcome {
+  val EmbeddingBatch invalid = new EmbeddingBatch(
+    2,
+    3,
+    arr[1.0, 2.0, 3.0],
+    false,
+    "test-model",
+    "v1"
+  );
+
+  val Result<bool, String> result = validate_embedding_batch(invalid);
+  return expect_true(
+    result.is_err(),
+    "embedding batch must reject invalid row-major storage"
+  );
+}
+
+fnc test_embedding_mean_pooling(): TestOutcome {
+  val TokenEmbeddingBatch tokens = new TokenEmbeddingBatch(
+    2,
+    3,
+    2,
+    arr[
+      1.0, 2.0,
+      3.0, 4.0,
+      100.0, 100.0,
+      3.0, 4.0,
+      0.0, 0.0,
+      0.0, 0.0
+    ],
+    arr[
+      true, true, false,
+      true, false, false
+    ],
+    "test-model",
+    "v1"
+  );
+
+  val Result<bool, String> valid = validate_token_embedding_batch(tokens);
+  if valid.is_err(); do
+    return fail("token embedding batch validation returned Err");
+  fi
+
+  val List<float> mean_output = arr[0.0, 0.0, 0.0, 0.0];
+  val Result<List<float>, String> mean_result =
+    mean_pool_token_embeddings_into(tokens, mean_output, false);
+  if mean_result.is_err(); do
+    return fail("mean pooling returned Err");
+  fi
+
+  val List<float> means = mean_result.unwrap();
+  val TestOutcome mean0 = expect_near_float(
+    means[0],
+    2.0,
+    0.000001,
+    "masked mean row 0 dimension 0"
+  );
+  if !mean0.passed; do
+    return mean0;
+  fi
+  val TestOutcome mean1 = expect_near_float(
+    means[1],
+    3.0,
+    0.000001,
+    "masked mean row 0 dimension 1"
+  );
+  if !mean1.passed; do
+    return mean1;
+  fi
+  val TestOutcome mean2 = expect_near_float(
+    means[2],
+    3.0,
+    0.000001,
+    "masked mean row 1 dimension 0"
+  );
+  if !mean2.passed; do
+    return mean2;
+  fi
+  val TestOutcome mean3 = expect_near_float(
+    means[3],
+    4.0,
+    0.000001,
+    "masked mean row 1 dimension 1"
+  );
+  if !mean3.passed; do
+    return mean3;
+  fi
+
+  val List<float> normalized_output = arr[0.0, 0.0, 0.0, 0.0];
+  val Result<List<float>, String> normalized_result =
+    mean_pool_token_embeddings_into(tokens, normalized_output, true);
+  if normalized_result.is_err(); do
+    return fail("normalized mean pooling returned Err");
+  fi
+
+  val List<float> normalized = normalized_result.unwrap();
+  val TestOutcome norm2 = expect_near_float(
+    normalized[2],
+    0.6,
+    0.000001,
+    "normalized pooled row 1 dimension 0"
+  );
+  if !norm2.passed; do
+    return norm2;
+  fi
+
+  return expect_near_float(
+    normalized[3],
+    0.8,
+    0.000001,
+    "normalized pooled row 1 dimension 1"
+  );
+}
+
+fnc test_embedding_row_normalization(): TestOutcome {
+  val EmbeddingBatch batch = new EmbeddingBatch(
+    2,
+    2,
+    arr[3.0, 4.0, 0.0, 2.0],
+    false,
+    "test-model",
+    "v1"
+  );
+  val List<float> output = arr[0.0, 0.0, 0.0, 0.0];
+
+  val Result<List<float>, String> result =
+    normalize_embedding_rows_into(batch, output);
+  if result.is_err(); do
+    return fail("embedding row normalization returned Err");
+  fi
+
+  val List<float> actual = result.unwrap();
+
+  val TestOutcome first = expect_near_float(
+    actual[0],
+    0.6,
+    0.000001,
+    "normalized row 0 dimension 0"
+  );
+  if !first.passed; do
+    return first;
+  fi
+
+  val TestOutcome second = expect_near_float(
+    actual[1],
+    0.8,
+    0.000001,
+    "normalized row 0 dimension 1"
+  );
+  if !second.passed; do
+    return second;
+  fi
+
+  val TestOutcome third = expect_near_float(
+    actual[2],
+    0.0,
+    0.000001,
+    "normalized row 1 dimension 0"
+  );
+  if !third.passed; do
+    return third;
+  fi
+
+  return expect_near_float(
+    actual[3],
+    1.0,
+    0.000001,
+    "normalized row 1 dimension 1"
+  );
+}
+
+fnc test_embedding_similarity_kernels(): TestOutcome {
+  val EmbeddingBatch queries = new EmbeddingBatch(
+    1,
+    2,
+    arr[1.0, 0.0],
+    true,
+    "test-model",
+    "v1"
+  );
+
+  val EmbeddingBatch corpus = new EmbeddingBatch(
+    3,
+    2,
+    arr[
+      1.0, 0.0,
+      0.0, 1.0,
+      0.0 - 1.0, 0.0
+    ],
+    true,
+    "test-model",
+    "v1"
+  );
+
+  val List<float> dot_output = arr[0.0, 0.0, 0.0];
+  val Result<List<float>, String> dot_result =
+    dot_similarity_into(queries, corpus, dot_output);
+  if dot_result.is_err(); do
+    return fail("embedding dot similarity returned Err");
+  fi
+
+  val List<float> dots = dot_result.unwrap();
+
+  val TestOutcome dot_best = expect_near_float(
+    dots[0],
+    1.0,
+    0.000001,
+    "dot similarity best row"
+  );
+  if !dot_best.passed; do
+    return dot_best;
+  fi
+
+  val TestOutcome dot_orthogonal = expect_near_float(
+    dots[1],
+    0.0,
+    0.000001,
+    "dot similarity orthogonal row"
+  );
+  if !dot_orthogonal.passed; do
+    return dot_orthogonal;
+  fi
+
+  val TestOutcome dot_opposite = expect_near_float(
+    dots[2],
+    0.0 - 1.0,
+    0.000001,
+    "dot similarity opposite row"
+  );
+  if !dot_opposite.passed; do
+    return dot_opposite;
+  fi
+
+  val List<float> cosine_output = arr[0.0, 0.0, 0.0];
+  val Result<List<float>, String> cosine_result =
+    cosine_similarity_into(queries, corpus, cosine_output);
+  if cosine_result.is_err(); do
+    return fail("embedding cosine similarity returned Err");
+  fi
+
+  val List<float> cosines = cosine_result.unwrap();
+  val TestOutcome cosine_best = expect_near_float(
+    cosines[0],
+    1.0,
+    0.000001,
+    "cosine similarity best row"
+  );
+  if !cosine_best.passed; do
+    return cosine_best;
+  fi
+
+  val List<float> l2_output = arr[0.0, 0.0, 0.0];
+  val Result<List<float>, String> l2_result =
+    squared_l2_distance_into(queries, corpus, l2_output);
+  if l2_result.is_err(); do
+    return fail("embedding squared L2 returned Err");
+  fi
+
+  val List<float> distances = l2_result.unwrap();
+  val TestOutcome l2_best = expect_near_float(
+    distances[0],
+    0.0,
+    0.000001,
+    "nearest row squared L2 must be zero"
+  );
+  if !l2_best.passed; do
+    return l2_best;
+  fi
+
+  return expect_near_float(
+    distances[2],
+    4.0,
+    0.000001,
+    "opposite unit vector squared L2 must be four"
+  );
+}
+
+fnc test_embedding_top_k(): TestOutcome {
+  val List<float> scores = arr[
+    0.1, 0.9, 0.4,
+    0.7, 0.2, 0.8
+  ];
+  val List<int> indices = arr[0, 0, 0, 0];
+
+  val Result<List<int>, String> result =
+    top_k_indices_into(scores, 2, 3, 2, indices);
+  if result.is_err(); do
+    return fail("top_k_indices_into returned Err");
+  fi
+
+  val List<int> actual = result.unwrap();
+
+  if actual[0] != 1; do
+    return fail("top-k row 0 rank 0 must be index 1");
+  fi
+  if actual[1] != 2; do
+    return fail("top-k row 0 rank 1 must be index 2");
+  fi
+  if actual[2] != 2; do
+    return fail("top-k row 1 rank 0 must be index 2");
+  fi
+  return expect_true(actual[3] == 0, "top-k row 1 rank 1 must be index 0");
+}
+
+fnc test_embedding_fused_dot_top_k(): TestOutcome {
+  val EmbeddingBatch queries = new EmbeddingBatch(
+    1,
+    2,
+    arr[1.0, 0.0],
+    true,
+    "test-model",
+    "v1"
+  );
+
+  val EmbeddingBatch corpus = new EmbeddingBatch(
+    3,
+    2,
+    arr[
+      1.0, 0.0,
+      0.0, 1.0,
+      0.0 - 1.0, 0.0
+    ],
+    true,
+    "test-model",
+    "v1"
+  );
+
+  val List<int> indices = arr[0, 0];
+  val List<float> scores = arr[0.0, 0.0];
+
+  val Result<bool, String> result =
+    top_k_dot_into(queries, corpus, 2, indices, scores);
+  if result.is_err(); do
+    return fail("top_k_dot_into returned Err");
+  fi
+
+  if indices[0] != 0; do
+    return fail("fused top-k best index must be zero");
+  fi
+  if indices[1] != 1; do
+    return fail("fused top-k second index must be one");
+  fi
+
+  val TestOutcome best_score = expect_near_float(
+    scores[0],
+    1.0,
+    0.000001,
+    "fused top-k best score"
+  );
+  if !best_score.passed; do
+    return best_score;
+  fi
+
+  return expect_near_float(
+    scores[1],
+    0.0,
+    0.000001,
+    "fused top-k second score"
+  );
+}
+
+pub routine main(): void {
+  val TestSuite suite = new TestSuite(
+    "embeddings",
+    arr[
+      new TestCase("embeddings/validation", test_embedding_validation, false, ""),
+      new TestCase("embeddings/mean-pooling", test_embedding_mean_pooling, false, ""),
+      new TestCase("embeddings/normalize-rows", test_embedding_row_normalization, false, ""),
+      new TestCase("embeddings/similarity", test_embedding_similarity_kernels, false, ""),
+      new TestCase("embeddings/top-k", test_embedding_top_k, false, ""),
+      new TestCase("embeddings/fused-dot-top-k", test_embedding_fused_dot_top_k, false, "")
+    ]
+  );
+
+  val TestOptions options = new TestOptions("", false, true);
+  val RunSummary summary = run_suite(suite, options);
+  require_success(summary);
+  return;
+}
