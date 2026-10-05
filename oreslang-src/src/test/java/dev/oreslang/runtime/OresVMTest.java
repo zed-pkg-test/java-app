@@ -926,8 +926,9 @@ final class OresVMTest {
                 0,
                 16);
 
-        OresVM vm = OresVM.dedicated(config);
-        ActorRuntime runtime = vm.newActorRuntime(IsolatePolicy.developer());
+        ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                config);
         CountDownLatch entered = new CountDownLatch(1);
 
         runtime.submitAsyncRootTask(() -> {
@@ -951,7 +952,7 @@ final class OresVMTest {
 
         assertThrows(
                 IllegalStateException.class,
-                () -> vm.submitJavaBlocking(() -> 1),
+                runtime::rootTaskDispatcherStats,
                 "successful close retry must still shut down the dedicated VM");
     }
 
