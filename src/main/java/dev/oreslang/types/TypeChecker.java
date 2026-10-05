@@ -1886,9 +1886,16 @@ public final class TypeChecker {
             throw new IllegalArgumentException(where + " is not actor-boundary sendable: " + type);
         }
 
-        if (named.name().equals("Mutex") || named.name().equals("MutexGuard") || named.name().equals("Future")) {
+        if (named.name().equals("Mutex")
+                || named.name().equals("MutexGuard")
+                || named.name().equals("Future")
+                || named.name().equals("Channel")
+                || named.name().equals("SelectCase")
+                || named.name().equals("SelectSet")
+                || named.name().equals("SelectResult")) {
             throw new IllegalArgumentException(
-                    where + " cannot use " + named.name() + " across an actor boundary");
+                    where + " cannot use " + named.name()
+                            + " across an actor boundary; actor communication uses ActorRef/mailbox transport");
         }
         if (named.name().equals("DynamicStruct")) {
             if (named.arguments().size() != 1) {
@@ -3075,6 +3082,15 @@ public final class TypeChecker {
                 rejectStaticClassGenericReferences(attempted.body(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(attempted.catchBody(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(attempted.finallyBody(), classGenerics, klass, method);
+            } else if (statement instanceof Ast.SelectStmt selected) {
+                for (Ast.SelectArm arm : selected.arms()) {
+                    rejectStaticClassGenericReferences(
+                            arm.channel(), classGenerics, klass, method);
+                    rejectStaticClassGenericReferences(
+                            arm.value(), classGenerics, klass, method);
+                    rejectStaticClassGenericReferences(
+                            arm.body(), classGenerics, klass, method);
+                }
             } else if (statement instanceof Ast.ForOfDestructureStmt loop) {
                 rejectStaticClassGenericReferences(loop.iterable(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(loop.body(), classGenerics, klass, method);
@@ -3139,6 +3155,14 @@ public final class TypeChecker {
             }
         } else if (expression instanceof Ast.AwaitExpr awaited) {
             rejectStaticClassGenericReferences(awaited.expression(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.ChannelOpExpr operation) {
+            rejectStaticClassGenericReferences(
+                    operation.channel(), classGenerics, klass, method);
+            rejectStaticClassGenericReferences(
+                    operation.value(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.DynamicSelectExpr selected) {
+            rejectStaticClassGenericReferences(
+                    selected.cases(), classGenerics, klass, method);
         } else if (expression instanceof Ast.ListExpr list) {
             for (Ast.Expr item : list.elements()) {
                 rejectStaticClassGenericReferences(item, classGenerics, klass, method);
