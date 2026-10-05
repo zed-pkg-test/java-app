@@ -82,6 +82,47 @@ final class CircularImportInitializationTest {
     }
 
     @Test
+    void explicitEntryImportResolvesAndExecutesWithoutDefaultExportSemantics()
+            throws Exception {
+        Path plugin = tempDir.resolve("plugin.ores");
+        Path app = tempDir.resolve("app.ores");
+
+        Files.writeString(plugin, """
+                pub fnc run() -> String {
+                  return "entry-ok";
+                }
+
+                export entry run;
+                """);
+
+        Files.writeString(app, """
+                import entry as Plugin from "./plugin.ores";
+
+                pub routine main() -> void {
+                  stdio.stdout.write(Plugin());
+                  return;
+                }
+                """);
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ByteArrayOutputStream error = new ByteArrayOutputStream();
+        LinkedProgramRunner.run(
+                app,
+                IsolatePolicy.developer(),
+                ExecutionProfile.serverJit(),
+                output,
+                error);
+
+        assertEquals("entry-ok", output.toString(StandardCharsets.UTF_8));
+        assertEquals("", error.toString(StandardCharsets.UTF_8));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                pub fnc run() -> void { return; }
+                export default run;
+                """));
+    }
+
+    @Test
     void initHookHasAClosedLifecycleSignature() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 fnc init() => void { return; }
