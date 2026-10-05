@@ -90,12 +90,10 @@ public final class TypeChecker {
                 if (localNames.contains(name)) {
                     throw new IllegalArgumentException("imported name '" + name + "' conflicts with a local or builtin name");
                 }
-                // Classes and actors are type-bearing declarations, but they also
-                // expose runtime namespaces: classes for construction/static members
-                // and actors for spawnable entry points. Interfaces/traits/struct/type
-                // selectors remain type-only.
+                // Imported classes expose a runtime namespace for construction/static
+                // members. Actor selectors remain type-only until the actor-class spawn
+                // namespace is implemented; interfaces/traits/struct/type are type-only too.
                 if (imported.kind() == Ast.ImportKind.CLASS
-                        || imported.kind() == Ast.ImportKind.ACTOR
                         || !ImportRules.isTypeOnlyKind(imported.kind())
                         || ImportRules.isJavaPath(imported.path())) {
                     importedValues.add(name);
