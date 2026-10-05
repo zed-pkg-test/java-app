@@ -2,6 +2,7 @@ package dev.oreslang.runtime;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -64,27 +65,68 @@ public abstract class OresObservable<T> {
     }
 
     /**
-     * Cold, replayable observable backed by an immutable subscription snapshot.
+     * Cold, replayable observable backed by an immutable construction-time
+     * snapshot.
+     *
+     * <p>This is the strongest finite-value bridge: later mutation of the host
+     * list cannot change any subscription. Null values are rejected because
+     * standalone null is not an Oreslang value.</p>
      */
     public static <T> OresObservable<T> fromValues(List<? extends T> values) {
         Objects.requireNonNull(values, "values");
         ArrayList<T> snapshot = new ArrayList<>(values.size());
-        snapshot.addAll(values);
-        List<T> immutable = Collections.unmodifiableList(snapshot);
+        for (T value : values) {
+            snapshot.add(Objects.requireNonNull(
+                    value,
+                    "rx-ores finite sources cannot contain null values"));
+        }
+        return fromIterable(Collections.unmodifiableList(snapshot));
+    }
+
+    /**
+     * Adapt any pull iterable into a cold rx-ores source.
+     *
+     * <p>Each subscription obtains its own fresh iterator and values are read
+     * lazily, one element per {@link OresSubscription#next()} demand. The
+     * iterable therefore defines the snapshot policy. This is the intended
+     * collection interop boundary: Oreslang List/ArrayList/Vector expose
+     * {@code Symbol.iterator}; their iterator implementation may return a
+     * stable collection snapshot without making rx-ores depend on a particular
+     * collection class.</p>
+     *
+     * <p>Iterator construction/iteration failures become failed pull Futures,
+     * not producer-thread guest callbacks. Null iterators and null elements are
+     * rejected and terminate that subscription.</p>
+     */
+    public static <T> OresObservable<T> fromIterable(Iterable<? extends T> values) {
+        Objects.requireNonNull(values, "values");
 
         return new OresObservable<>() {
             @Override
             protected OresSubscription<T> subscribeFromRuntime() {
                 return new OresSubscription<>() {
-                    private int index;
+                    private Iterator<? extends T> iterator;
+                    private boolean iteratorInitialized;
 
                     @Override
                     protected OresFuture<OresNotification<T>> nextFromRuntime() {
-                        if (index >= immutable.size()) {
-                            return OresFuture.completed(OresNotification.complete());
+                        try {
+                            if (!iteratorInitialized) {
+                                iterator = Objects.requireNonNull(
+                                        values.iterator(),
+                                        "rx-ores iterable returned null iterator");
+                                iteratorInitialized = true;
+                            }
+                            if (!iterator.hasNext()) {
+                                return OresFuture.completed(OresNotification.complete());
+                            }
+                            T value = Objects.requireNonNull(
+                                    iterator.next(),
+                                    "rx-ores iterable emitted null");
+                            return OresFuture.completed(OresNotification.next(value));
+                        } catch (Throwable failure) {
+                            return OresFuture.failed(failure);
                         }
-                        T value = immutable.get(index++);
-                        return OresFuture.completed(OresNotification.next(value));
                     }
                 };
             }
