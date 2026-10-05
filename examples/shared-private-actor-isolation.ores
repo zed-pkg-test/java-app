@@ -1,0 +1,76 @@
+import fnc {actor_label} from "./actor-isolation-support.ores";
+
+// SHARED actor:
+// - owns mutable state behind its serialized mailbox turn
+// - exposes exactly one public receive(message) ingress
+// - does not acquire writable external SharedMutex<T> state from actor code
+shared actor SharedCounter {
+  let int local_count = 0;
+
+  pub receive(int delta) => void {
+    if delta > 0; do
+      self.increment();
+    fi
+    return;
+  }
+
+  private increment() => void {
+    self.local_count = self.local_count + 1;
+    return;
+  }
+
+  private local_value() => int {
+    return self.local_count;
+  }
+
+  private actor_kind() => String {
+    return actor_label(true);
+  }
+}
+
+// PRIVATE / isolated actor:
+// - "isoactor" explicitly means private / isolated
+// - owns its mutable state exclusively
+// - receives a private actor memory slice at runtime
+// - exposes the same single public receive(message) mailbox shape
+isoactor PrivateCounter {
+  let int value = 10;
+
+  pub receive(int delta) => void {
+    if delta > 0; do
+      self.increment();
+    fi
+    return;
+  }
+
+  private increment() => void {
+    self.value = self.value + 1;
+    return;
+  }
+
+  private current() => int {
+    return self.value;
+  }
+
+  private actor_kind() => String {
+    return actor_label(false);
+  }
+}
+
+/*
+ * Intentionally ILLEGAL Oreslang:
+ *
+ * Actor code may not acquire writable external SharedMutex<T> state. Private
+ * actors additionally run without shared-memory authority. Keep writable state
+ * actor-owned and mailbox-confined; cross-actor state must use messages or an
+ * explicit read-only external-state capability.
+ *
+ * isoactor BrokenPrivateCounter {
+ *   let SharedMutex<int> shared_count = SharedMutex.new(0);
+ *
+ *   pub receive(int delta) => void {
+ *     val denied = self.shared_count.try_lock();
+ *     return;
+ *   }
+ * }
+ */
