@@ -26,6 +26,7 @@ jobs:
           cache: maven
       - name: Verify exact source subtree
         run: |
+          test "$(git rev-parse HEAD:oreslang-src)" = "1f43e0554c9f587db90a90c9f71e4ab9cd31dd76"
           printf 'source-tree: '
           git rev-parse HEAD:oreslang-src
           java --version
