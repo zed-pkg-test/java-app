@@ -193,7 +193,8 @@ public final class Parser {
             Ast.ActorKind actorKind) {
         if (modifiers.isStatic) throw error(previous(), "'static fnc' is only valid inside a class");
         if (modifiers.isAbstract) throw error(previous(), "top-level/module callables cannot be abstract");
-        String name = consume(IDENT, "expected callable name").lexeme();
+        Token nameToken = consume(IDENT, "expected callable name");
+        String name = nameToken.lexeme();
         List<String> generics = parseGenericParameters();
         consume(LPAREN, "expected '('");
         java.util.Set<String> structuralNames = structuralAnnotationNames(annotations);
@@ -202,8 +203,19 @@ public final class Parser {
         Ast.TypeRef returnType = parseReturnType(annotations);
         List<Ast.Stmt> body = parseBlock();
         boolean async = modifiers.async || actorKind != Ast.ActorKind.NONE;
-        return new Ast.FunctionDecl(name, kind, modifiers.visibility, async, modifiers.nonLexical, actorKind, generics, params,
-                returnType, annotations, body);
+        return new Ast.FunctionDecl(
+                name,
+                kind,
+                modifiers.visibility,
+                async,
+                modifiers.nonLexical,
+                actorKind,
+                generics,
+                params,
+                returnType,
+                annotations,
+                body,
+                new Ast.SourceSite(nameToken.line(), nameToken.column()));
     }
 
     private Ast.ClassDecl parseClass(boolean isAbstract) {
@@ -287,7 +299,8 @@ public final class Parser {
                         method.parameters(),
                         method.returnType(),
                         method.annotations(),
-                        method.body());
+                        method.body(),
+                        method.site());
             }
             if (actorKind == Ast.ActorKind.SHARED
                     && method.visibility() == Ast.Visibility.PUBLIC) {
@@ -399,6 +412,7 @@ public final class Parser {
     }
 
     private Ast.MethodDecl parseMethod(List<Ast.Annotation> annotations, Modifiers mods) {
+        Token methodStart = peek();
         String name = parseMethodName();
         List<String> generics = parseGenericParameters();
         consume(LPAREN, "expected '(' after method name");
@@ -423,8 +437,19 @@ public final class Parser {
             consumeStatementTerminator("abstract method should end with ';'");
             body = List.of();
         } else body = parseBlock();
-        return new Ast.MethodDecl(name, mods.visibility, mods.isStatic, mods.isAbstract, mods.async,
-                receiverType, generics, params, returnType, annotations, body);
+        return new Ast.MethodDecl(
+                name,
+                mods.visibility,
+                mods.isStatic,
+                mods.isAbstract,
+                mods.async,
+                receiverType,
+                generics,
+                params,
+                returnType,
+                annotations,
+                body,
+                new Ast.SourceSite(methodStart.line(), methodStart.column()));
     }
 
     private String parseMethodName() {
@@ -758,9 +783,12 @@ public final class Parser {
         if (check(LBRACKET) && looksLikeDestructure()) return parseDestructure(Ast.DestructureKind.SEQUENCE, null);
         if (check(LBRACE) && looksLikeDestructure()) return parseDestructure(Ast.DestructureKind.OBJECT, null);
         if (match(RETURN)) {
+            Token returnToken = previous();
             Ast.Expr value = check(SEMICOLON) || isSafeStatementBoundary() ? null : parseExpression();
             consumeStatementTerminator("return statement should end with ';'");
-            return new Ast.ReturnStmt(value);
+            return new Ast.ReturnStmt(
+                    value,
+                    new Ast.SourceSite(returnToken.line(), returnToken.column()));
         }
         if (match(DEFER)) {
             Ast.Expr expression = parseExpression();
@@ -1090,7 +1118,12 @@ public final class Parser {
             boolean mutable = match(MUT);
             return new Ast.UnaryExpr(mutable ? "&mut" : "&", parseUnary());
         }
-        if (match(AWAIT)) return new Ast.AwaitExpr(parseUnary());
+        if (match(AWAIT)) {
+            Token awaitToken = previous();
+            return new Ast.AwaitExpr(
+                    parseUnary(),
+                    new Ast.SourceSite(awaitToken.line(), awaitToken.column()));
+        }
         if (match(SPAWN)) {
             Token keyword = previous();
             Ast.Expr target = parseUnary();
