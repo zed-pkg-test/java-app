@@ -109,6 +109,12 @@ final class ParserTest {
                 }
                 """)));
 
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                pub fnc bad_implicit_void = || -> {
+                  return 1;
+                }
+                """)));
+
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 pub fnc bad() => void { return; }
                 """));
