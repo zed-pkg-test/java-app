@@ -736,13 +736,19 @@ done
 
 `break` exits the nearest enclosing `loop` or `for`. `continue` starts the next iteration of the nearest enclosing loop. `return` exits the enclosing callable, even when nested inside one or more loops. Loop control never crosses a function or lambda boundary.
 
-Oreslang also supports conventional imperative loops:
+Oreslang also supports conventional imperative loops. Parentheses are optional when the semicolon-delimited C-style header is unambiguous:
 
 ```ores
-for (let i = 0; i < 10; i = i + 1) {
+for (let i = 0; i < 10; i++) {
   work(i);
 }
+
+for int i = 0; i < 30; i++ do
+  work(i)
+done
 ```
+
+In the typed shorthand, `int i = 0` creates an implicit mutable `let i: int` scoped to the loop. `i++` and `i--` are accepted in the for-update clause and lower to increment/decrement assignment of that simple local binding; Oreslang does not currently expose them as general field/index postfix expressions.
 
 and iterator-style loops. The compact `of` form does not require parentheses, and both body styles are valid:
 

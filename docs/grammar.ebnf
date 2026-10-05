@@ -156,8 +156,15 @@ condition_and   = equality { "," equality } ;
 try_stmt        = "try" block "catch" "(" IDENT ")" block [ "finally" block ] ;
 
 for_stmt        = "for" "(" for_of_head ")" loop_body
-                | "for" "(" [ for_init ] ";" [ expression ] ";" [ expression ] ")" loop_body
-                | "for" for_of_head loop_body ;
+                | "for" "(" c_for_head ")" loop_body
+                | "for" for_of_head loop_body
+                | "for" c_for_head loop_body ;
+
+c_for_head      = [ for_init ] ";" [ expression ] ";" [ for_update ] ;
+for_init        = binding_kind [ type_ref ] IDENT "=" expression
+                | type_ref IDENT "=" expression
+                | expression ;
+for_update      = IDENT ( "++" | "--" ) | expression ;
 
 for_of_head     = [ binding_kind ] for_of_pattern "of" expression ;
 for_of_pattern  = IDENT
@@ -165,9 +172,6 @@ for_of_pattern  = IDENT
 for_of_destructure_item
                 = "_" | [ binding_kind ] IDENT ;
 loop_body       = block | "do" { statement } "done" ;
-for_init        = binding_kind [ type_ref ] IDENT "=" expression
-                | expression ;
-
 expression      = assignment ;
 assignment      = conditional [ "=" assignment ] ;
 conditional     = logic_or [ "?" assignment ":" conditional ] ;
@@ -260,6 +264,12 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    Semantic restrictions:
    - "block" followed by "{" is a standalone lexical scope. It has no implicit
      scheduling behavior and declarations inside it do not escape the scope.
+   - Unparenthesized C-style headers are distinguished by their semicolon
+     clauses: "for int i = 0; i < n; i++ do ... done". A typed initializer
+     without an explicit binding kind creates an implicit mutable let binding.
+     Postfix ++/-- are currently update-clause syntax and lower to +=/-= one
+     for that simple local binding; they are not general field/index postfix
+     expressions.
    - for-of sequence patterns default bindings to val. An outer binding kind
      (for example "for let [k, v] of entries") seeds the pattern; an explicit
      binding kind inside the pattern propagates to subsequent names exactly as

@@ -255,6 +255,32 @@ final class RoutineAndLoopTest {
     }
 
     @Test
+    void typedUnparenthesizedForHeadersSupportPostfixUpdates() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  for int i = 0; i < 3; i++ do
+                    stdio.stdout.write(i)
+                  done
+
+                  for int j = 3; j > 0; j-- {
+                    stdio.stdout.write(j)
+                  }
+
+                  for (let k = 0; k < 2; k++) {
+                    stdio.stdout.write(k)
+                  }
+
+                  for (int q = 0; q < 2; q++) do
+                    stdio.stdout.write(q)
+                  done
+                  return;
+                }
+                """);
+
+        assertEquals("0123210101", output);
+    }
+
+    @Test
     void customJavascriptStyleIteratorDrivesForOf() throws Exception {
         String output = run("""
                 define module collections
