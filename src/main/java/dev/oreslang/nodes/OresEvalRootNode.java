@@ -14,6 +14,7 @@ import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
 import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.AsyncRuntime;
+import dev.oreslang.runtime.GeneratorRuntime;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -116,6 +117,7 @@ public final class OresEvalRootNode extends RootNode {
         private final String codeUnitId;
         private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
         private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
+        private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> typeAliases = new HashMap<>();
         private final Map<String, Ast.ModuleDecl> modules = new HashMap<>();
         private final IdentityHashMap<Ast.MethodDecl, Ast.ClassDecl> methodOwners = new IdentityHashMap<>();
@@ -126,8 +128,10 @@ public final class OresEvalRootNode extends RootNode {
         private final Map<String, HostClassFacade> hostSymbols = new HashMap<>();
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
+        private final Set<String> ambiguousInterfaces = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
         private StartupPhase startupPhase = StartupPhase.CREATED;
+        private final ThreadLocal<GeneratorRuntime.Emitter<Object>> activeGeneratorEmitter = new ThreadLocal<>();
         private static final int TAIL_SAFEPOINT_INTERVAL = 64;
 
         private enum InvocationKind {
@@ -252,6 +256,8 @@ public final class OresEvalRootNode extends RootNode {
                     else if (decl instanceof Ast.ClassDecl klass) {
                         index(classes, ambiguousClasses, module.name(), klass.name(), klass);
                         for (Ast.MethodDecl method : klass.methods()) methodOwners.put(method, klass);
+                    } else if (decl instanceof Ast.InterfaceDecl iface) {
+                        index(interfaces, ambiguousInterfaces, module.name(), iface.name(), iface);
                     } else if (decl instanceof Ast.TypeAliasDecl alias) index(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias);
                 }
             }
@@ -274,6 +280,11 @@ public final class OresEvalRootNode extends RootNode {
         private Ast.ClassDecl findClass(String name) {
             if (ambiguousClasses.contains(name)) throw new IllegalArgumentException("ambiguous class " + name + "; qualify it with its module");
             return classes.get(name);
+        }
+
+        private Ast.InterfaceDecl findInterface(String name) {
+            if (ambiguousInterfaces.contains(name)) throw new IllegalArgumentException("ambiguous interface " + name + "; qualify it with its module");
+            return interfaces.get(name);
         }
 
         private Ast.TypeAliasDecl findTypeAlias(String name) {
@@ -422,6 +433,26 @@ public final class OresEvalRootNode extends RootNode {
                         "init is a lifecycle hook and cannot be invoked directly; startup runs it exactly once");
             }
             List<Object> normalized = normalizeFunctionArguments(fn, args);
+            if (fn.generator()) {
+                if (fn.actorKind() != Ast.ActorKind.NONE) {
+                    throw new IllegalStateException(
+                            "actor callables cannot expose generator activations across mailbox turns");
+                }
+
+                List<?> captured = fn.async()
+                        ? detachAsyncArguments(normalized)
+                        : List.copyOf(normalized);
+                GeneratorRuntime.Producer<Object> producer = emitter -> {
+                    GeneratorRuntime.Emitter<Object> boundaryEmitter = fn.async()
+                            ? value -> emitter.emit(detachAsyncValue(value, new IdentityHashMap<>()))
+                            : emitter;
+                    callGeneratorBodyRaw(fn, captured, boundaryEmitter);
+                };
+                return fn.async()
+                        ? GeneratorRuntime.asyncGenerator(context.asyncRuntime(), producer)
+                        : GeneratorRuntime.generator(context.asyncRuntime(), producer);
+            }
+
             if (fn.actorKind() == Ast.ActorKind.NONE) {
                 if (!fn.async()) return callFunctionBodyRaw(fn, normalized);
 
@@ -588,6 +619,37 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
+        private void callGeneratorBodyRaw(
+                Ast.FunctionDecl fn,
+                List<?> args,
+                GeneratorRuntime.Emitter<Object> emitter) {
+            Env env = new Env(null, fn.nonLexical());
+            for (int i = 0; i < fn.parameters().size(); i++) {
+                Ast.Param param = fn.parameters().get(i);
+                env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
+            }
+
+            GeneratorRuntime.Emitter<Object> previous = activeGeneratorEmitter.get();
+            activeGeneratorEmitter.set(emitter);
+            try {
+                executeBlock(fn.body(), env);
+            } catch (ReturnSignal signal) {
+                if (signal.value != null) {
+                    throw new IllegalStateException(
+                            "generator return cannot carry a value; use yield for sequence elements");
+                }
+            } catch (TailCallSignal signal) {
+                throw new IllegalStateException(
+                        "generator completion cannot be tail-call lowered; use a bare return to finish", signal);
+            } catch (BreakSignal | ContinueSignal signal) {
+                throw new IllegalStateException(
+                        "loop control cannot cross a generator function boundary", signal);
+            } finally {
+                if (previous == null) activeGeneratorEmitter.remove();
+                else activeGeneratorEmitter.set(previous);
+            }
+        }
+
         private Object callMethod(OresObject receiver, Ast.MethodDecl method, List<?> args) {
             return invoke(methodInvocation(receiver, method, args));
         }
@@ -690,6 +752,19 @@ public final class OresEvalRootNode extends RootNode {
                         env,
                         inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
             }
+            if (stmt instanceof Ast.YieldStmt yielded) {
+                if (env.hasLiveMutexGuards()) {
+                    throw new IllegalStateException("cannot yield while holding a live MutexGuard");
+                }
+                GeneratorRuntime.Emitter<Object> emitter = activeGeneratorEmitter.get();
+                if (emitter == null) {
+                    throw new IllegalStateException("yield executed outside a generator activation");
+                }
+                Object value = eval(yielded.value(), env);
+                context.schedulerSafepoint();
+                emitter.emit(value);
+                return;
+            }
             if (stmt instanceof Ast.ExprStmt expression) { eval(expression.expression(), env); return; }
             if (stmt instanceof Ast.DeferStmt defer) { deferred.push(defer.expression()); return; }
             if (stmt instanceof Ast.BlockStmt block) {
@@ -703,16 +778,104 @@ public final class OresEvalRootNode extends RootNode {
             if (stmt instanceof Ast.ContinueStmt) throw new ContinueSignal();
             if (stmt instanceof Ast.IfStmt ifStmt) {
                 for (Ast.IfBranch branch : ifStmt.branches()) {
-                    if (truth(eval(branch.condition(), env))) {
+                    ConditionResult condition = evalCondition(branch.condition(), env);
+                    if (condition.matched()) {
+                        Env branchEnv = new Env(env);
+                        condition.bindings().forEach((name, value) ->
+                                branchEnv.define(name, value, Ast.BindingKind.VAL));
                         executeBlock(
                                 branch.body(),
-                                env,
+                                branchEnv,
                                 inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
                         return;
                     }
                 }
                 executeBlock(
                         ifStmt.elseBody(),
+                        env,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                return;
+            }
+            if (stmt instanceof Ast.MatchStmt matched) {
+                Object subject = eval(matched.subject(), env);
+                Ast.MatchArm selected = null;
+                Map<String, Object> selectedBindings = Map.of();
+                Ast.MatchArm fallback = null;
+
+                for (Ast.MatchArm arm : matched.arms()) {
+                    boolean catchAll = arm.guard() == null
+                            && (arm.pattern() instanceof Ast.WildcardPattern
+                                || arm.pattern() instanceof Ast.BindingPattern);
+                    if (!matched.ordered() && catchAll) {
+                        fallback = arm;
+                        continue;
+                    }
+
+                    LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+                    if (!patternMatches(arm.pattern(), subject, bindings)) continue;
+                    Env armEnv = new Env(env);
+                    bindings.forEach((name, value) ->
+                            armEnv.define(name, value, Ast.BindingKind.VAL));
+                    if (arm.guard() != null && !truth(eval(arm.guard(), armEnv))) continue;
+
+                    if (matched.ordered()) {
+                        executeBlock(
+                                arm.body(),
+                                armEnv,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                        return;
+                    }
+                    if (selected != null) {
+                        throw new IllegalStateException(
+                                "exclusive match invariant violated at runtime: more than one explicit arm matched; "
+                                        + "the static pattern proof and runtime type metadata disagree");
+                    }
+                    selected = arm;
+                    selectedBindings = Map.copyOf(bindings);
+                }
+
+                if (selected == null && fallback != null) {
+                    LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+                    if (!patternMatches(fallback.pattern(), subject, bindings)) {
+                        throw new IllegalStateException("match fallback did not accept the unmatched subject");
+                    }
+                    selected = fallback;
+                    selectedBindings = Map.copyOf(bindings);
+                }
+
+                if (selected == null) {
+                    throw new IllegalStateException(
+                            "exhaustive match invariant violated at runtime: no arm matched");
+                }
+                Env selectedEnv = new Env(env);
+                selectedBindings.forEach((name, value) ->
+                        selectedEnv.define(name, value, Ast.BindingKind.VAL));
+                executeBlock(
+                        selected.body(),
+                        selectedEnv,
+                        inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                return;
+            }
+            if (stmt instanceof Ast.SwitchStmt switched) {
+                Object subject = eval(switched.subject(), env);
+                for (Ast.SwitchCase arm : switched.cases()) {
+                    boolean selected = false;
+                    for (Ast.Expr constant : arm.constants()) {
+                        if (Objects.equals(subject, eval(constant, env))) {
+                            selected = true;
+                            break;
+                        }
+                    }
+                    if (selected) {
+                        executeBlock(
+                                arm.body(),
+                                env,
+                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                        return;
+                    }
+                }
+                executeBlock(
+                        switched.defaultBody(),
                         env,
                         inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
                 return;
@@ -733,50 +896,64 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (stmt instanceof Ast.ForOfDestructureStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
-                for (Object item : iterableValues(iterable, env)) {
-                    context.schedulerSafepoint();
-                    List<?> items = asSequence(item);
-                    if (items.size() != loop.bindings().size()) {
-                        throw new IllegalArgumentException(
-                                "for-of destructure arity mismatch: value has " + items.size()
-                                        + " element(s), pattern has " + loop.bindings().size());
-                    }
-                    Env iteration = new Env(env);
-                    for (int i = 0; i < items.size(); i++) {
-                        Ast.DestructureBinding binding = loop.bindings().get(i);
-                        if (!binding.isDiscard()) {
-                            iteration.define(binding.name(), items.get(i), binding.kind());
+                Iterable<?> values = loop.asyncIteration()
+                        ? asyncIterableValues(iterable, env)
+                        : iterableValues(iterable, env);
+                try {
+                    for (Object item : values) {
+                        context.schedulerSafepoint();
+                        List<?> items = asSequence(item);
+                        if (items.size() != loop.bindings().size()) {
+                            throw new IllegalArgumentException(
+                                    "for-of destructure arity mismatch: value has " + items.size()
+                                            + " element(s), pattern has " + loop.bindings().size());
+                        }
+                        Env iteration = new Env(env);
+                        for (int i = 0; i < items.size(); i++) {
+                            Ast.DestructureBinding binding = loop.bindings().get(i);
+                            if (!binding.isDiscard()) {
+                                iteration.define(binding.name(), items.get(i), binding.kind());
+                            }
+                        }
+                        try {
+                            executeBlock(
+                                    loop.body(),
+                                    iteration,
+                                    inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                        } catch (ContinueSignal ignored) {
+                            continue;
+                        } catch (BreakSignal ignored) {
+                            break;
                         }
                     }
-                    try {
-                        executeBlock(
-                                loop.body(),
-                                iteration,
-                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
-                    } catch (ContinueSignal ignored) {
-                        continue;
-                    } catch (BreakSignal ignored) {
-                        break;
-                    }
+                } finally {
+                    closeIterable(values);
                 }
                 return;
             }
             if (stmt instanceof Ast.ForOfStmt loop) {
                 Object iterable = eval(loop.iterable(), env);
-                for (Object item : iterableValues(iterable, env)) {
-                    context.schedulerSafepoint();
-                    Env iteration = new Env(env);
-                    iteration.define(loop.bindingName(), item, loop.bindingKind());
-                    try {
-                        executeBlock(
-                                loop.body(),
-                                iteration,
-                                inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
-                    } catch (ContinueSignal ignored) {
-                        continue;
-                    } catch (BreakSignal ignored) {
-                        break;
+                Iterable<?> values = loop.asyncIteration()
+                        ? asyncIterableValues(iterable, env)
+                        : iterableValues(iterable, env);
+                try {
+                    for (Object item : values) {
+                        context.schedulerSafepoint();
+                        Env iteration = new Env(env);
+                        iteration.define(loop.bindingName(), item, loop.bindingKind());
+                        try {
+                            executeBlock(
+                                    loop.body(),
+                                    iteration,
+                                    inheritedTailBarrier || !deferred.isEmpty() || env.hasLiveMutexGuards());
+                        } catch (ContinueSignal ignored) {
+                            continue;
+                        } catch (BreakSignal ignored) {
+                            break;
+                        }
                     }
+                } finally {
+                    closeIterable(values);
                 }
                 return;
             }
@@ -1126,6 +1303,26 @@ public final class OresEvalRootNode extends RootNode {
                     return lb || rb;
                 }
                 return binary(binary.operator(), left, right);
+            }
+            if (expr instanceof Ast.TypeTestExpr test) {
+                Object value = eval(test.value(), env);
+                return oresTypeMatches(value, test.targetType());
+            }
+            if (expr instanceof Ast.PatternTestExpr test) {
+                Object value = eval(test.value(), env);
+                return patternMatches(test.pattern(), value, new LinkedHashMap<>());
+            }
+            if (expr instanceof Ast.CastExpr cast) {
+                Object value = eval(cast.value(), env);
+                boolean matches = oresTypeMatches(value, cast.targetType());
+                if (cast.mode() == Ast.CastMode.OPTIONAL) {
+                    return new OptionValue(matches, matches ? value : null);
+                }
+                if (!matches) {
+                    throw new OresCastError("cannot cast runtime type " + oresRuntimeTypeName(value)
+                            + " to " + cast.targetType().name());
+                }
+                return value;
             }
             if (expr instanceof Ast.CallExpr call) {
                 return invoke(prepareInvocation(call, env));
@@ -1685,9 +1882,15 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 case CLASS -> {
                     Ast.ClassDecl klass = findClass(name);
-                    if (klass == null) throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export class '" + name + "'");
+                    if (klass == null || klass.actorKind() != Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export ordinary class '" + name + "'");
+                    }
                     yield new ClassFacade(this, klass);
                 }
+                case ACTOR, INTERFACE, TRAIT, STRUCT, TYPE, TYPES ->
+                        throw new IllegalArgumentException(
+                                "import " + kind.name().toLowerCase()
+                                        + " is a type-only selector and cannot be evaluated as a runtime value");
                 case MODULE -> {
                     Ast.ModuleDecl module = modules.get(name);
                     if (module == null) throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export module '" + name + "'");
@@ -1947,11 +2150,17 @@ public final class OresEvalRootNode extends RootNode {
             return List.copyOf(result.values());
         }
 
-        private List<?> iterableValues(Object value, Env env) {
+        private Iterable<?> iterableValues(Object value, Env env) {
             if (value instanceof List<?> list) return list;
             if (value instanceof Object[] array) return List.of(array);
+            if (value instanceof GeneratorRuntime.Generator<?> generator) return generator;
+            if (value instanceof GeneratorRuntime.AsyncGenerator<?>) {
+                throw new IllegalArgumentException(
+                        "AsyncGenerator values require 'for await ... of ...'");
+            }
             if (value instanceof OresObject object) {
-                Ast.MethodDecl iterator = findMethod(object.klass, "Symbol.iterator", 0, new LinkedHashSet<>());
+                Ast.MethodDecl iterator =
+                        findMethod(object.klass, "Symbol.iterator", 0, new LinkedHashSet<>());
                 if (iterator == null) throw new IllegalArgumentException("value has no [Symbol.iterator]()");
                 object.owner.requireClassMemberVisible(
                         iterator.visibility(),
@@ -1962,7 +2171,252 @@ public final class OresEvalRootNode extends RootNode {
                 Object produced = callMethod(object, iterator, List.of());
                 return iterableValues(produced, env);
             }
-            throw new IllegalArgumentException("value is not iterable");
+            throw new IllegalArgumentException("value is not synchronously iterable");
+        }
+
+        private Iterable<?> asyncIterableValues(Object value, Env env) {
+            if (value instanceof OresObject object) {
+                Ast.MethodDecl iterator =
+                        findMethod(object.klass, "Symbol.asyncIterator", 0, new LinkedHashSet<>());
+                if (iterator == null) {
+                    throw new IllegalArgumentException("value has no [Symbol.asyncIterator]()");
+                }
+                object.owner.requireClassMemberVisible(
+                        iterator.visibility(),
+                        object.owner.declaringClass(iterator),
+                        env == null ? null : env.accessClass(),
+                        "method",
+                        iterator.name());
+                return asyncIterableValues(callMethod(object, iterator, List.of()), env);
+            }
+            if (!(value instanceof GeneratorRuntime.AsyncGenerator<?> generator)) {
+                throw new IllegalArgumentException(
+                        "value is not asynchronously iterable; expected AsyncGenerator or [Symbol.asyncIterator]()");
+            }
+
+            final class AsyncPullIterable implements Iterable<Object>, AutoCloseable {
+                @Override
+                public java.util.Iterator<Object> iterator() {
+                    return new java.util.Iterator<>() {
+                        private GeneratorRuntime.Step<?> buffered;
+
+                        @Override
+                        public boolean hasNext() {
+                            if (buffered == null) {
+                                buffered = AsyncRuntime.await(generator.nextStep());
+                            }
+                            return !buffered.done();
+                        }
+
+                        @Override
+                        public Object next() {
+                            if (!hasNext()) throw new java.util.NoSuchElementException();
+                            Object result = buffered.value();
+                            buffered = null;
+                            return result;
+                        }
+                    };
+                }
+
+                @Override
+                public void close() {
+                    generator.close();
+                }
+            }
+            return new AsyncPullIterable();
+        }
+
+        private void closeIterable(Iterable<?> iterable) {
+            if (!(iterable instanceof AutoCloseable closeable)) return;
+            try {
+                closeable.close();
+            } catch (RuntimeException | Error failure) {
+                throw failure;
+            } catch (Exception failure) {
+                throw new IllegalStateException("failed to close generator activation", failure);
+            }
+        }
+
+        private ConditionResult evalCondition(Ast.Expr condition, Env env) {
+            if (condition instanceof Ast.BinaryExpr binary && binary.operator().equals("&&")) {
+                ConditionResult left = evalCondition(binary.left(), env);
+                if (!left.matched()) return ConditionResult.noMatch();
+                Env rightEnv = new Env(env);
+                left.bindings().forEach((name, value) ->
+                        rightEnv.define(name, value, Ast.BindingKind.VAL));
+                ConditionResult right = evalCondition(binary.right(), rightEnv);
+                if (!right.matched()) return ConditionResult.noMatch();
+                LinkedHashMap<String, Object> merged = new LinkedHashMap<>(left.bindings());
+                for (Map.Entry<String, Object> entry : right.bindings().entrySet()) {
+                    Object previous = merged.putIfAbsent(entry.getKey(), entry.getValue());
+                    if (previous != null && previous != entry.getValue()) {
+                        throw new IllegalStateException("condition pattern binds '" + entry.getKey() + "' more than once");
+                    }
+                }
+                return new ConditionResult(true, Map.copyOf(merged));
+            }
+            if (condition instanceof Ast.TypeTestExpr test) {
+                Object value = eval(test.value(), env);
+                if (!oresTypeMatches(value, test.targetType())) return ConditionResult.noMatch();
+                if (test.binding() == null) return ConditionResult.match();
+                return new ConditionResult(true, Map.of(test.binding(), value));
+            }
+            if (condition instanceof Ast.PatternTestExpr test) {
+                Object value = eval(test.value(), env);
+                LinkedHashMap<String, Object> bindings = new LinkedHashMap<>();
+                return patternMatches(test.pattern(), value, bindings)
+                        ? new ConditionResult(true, Map.copyOf(bindings))
+                        : ConditionResult.noMatch();
+            }
+            return truth(eval(condition, env)) ? ConditionResult.match() : ConditionResult.noMatch();
+        }
+
+        private boolean patternMatches(Ast.Pattern pattern, Object value, Map<String, Object> bindings) {
+            if (pattern instanceof Ast.WildcardPattern) return true;
+            if (pattern instanceof Ast.BindingPattern binding) {
+                if (bindings.putIfAbsent(binding.name(), value) != null) {
+                    throw new IllegalStateException("pattern binds '" + binding.name() + "' more than once");
+                }
+                return true;
+            }
+            if (pattern instanceof Ast.LiteralPattern literal) {
+                return Objects.equals(literal.value(), value);
+            }
+            if (pattern instanceof Ast.TypePattern typed) {
+                if (!oresTypeMatches(value, typed.type())) return false;
+                if (typed.binding() != null && bindings.putIfAbsent(typed.binding(), value) != null) {
+                    throw new IllegalStateException("pattern binds '" + typed.binding() + "' more than once");
+                }
+                return true;
+            }
+            if (pattern instanceof Ast.ConstructorPattern constructor) {
+                String name = constructor.constructor();
+                if (name.equals("Some")) {
+                    if (!(value instanceof OptionValue option) || !option.present() || constructor.arguments().size() != 1) return false;
+                    return patternMatches(constructor.arguments().getFirst(), option.value(), bindings);
+                }
+                if (name.equals("None")) {
+                    return value instanceof OptionValue option && !option.present() && constructor.arguments().isEmpty();
+                }
+                if (name.equals("Ok")) {
+                    if (!(value instanceof ResultValue result) || !result.ok() || constructor.arguments().size() != 1) return false;
+                    return patternMatches(constructor.arguments().getFirst(), result.value(), bindings);
+                }
+                if (name.equals("Err")) {
+                    if (!(value instanceof ResultValue result) || result.ok() || constructor.arguments().size() != 1) return false;
+                    return patternMatches(constructor.arguments().getFirst(), result.value(), bindings);
+                }
+                return false;
+            }
+            return false;
+        }
+
+        /**
+         * Host-neutral Oreslang type relation. The Truffle bootstrap evaluator reads Oreslang
+         * metadata here; native lowering must use the same relation against native type tags
+         * (directly or through the narrow JNI bridge), never JVM Class.isInstance/instanceof.
+         */
+        private boolean oresTypeMatches(Object value, Ast.TypeRef target) {
+            if (target.isUnion()) {
+                for (Ast.TypeRef option : target.arguments()) {
+                    if (oresTypeMatches(value, option)) return true;
+                }
+                return false;
+            }
+            String name = target.name();
+            if (name.equals("int") || name.equals("i8") || name.equals("i16") || name.equals("i32")
+                    || name.equals("i64") || name.equals("u8") || name.equals("u16")
+                    || name.equals("u32") || name.equals("u64") || name.equals("uint")
+                    || name.equals("bigint")) return value instanceof Byte || value instanceof Short
+                            || value instanceof Integer || value instanceof Long;
+            if (name.equals("float") || name.equals("f32") || name.equals("f64")
+                    || name.equals("decimal")) return value instanceof Float || value instanceof Double;
+            if (name.equals("bool") || name.equals("Bool")) return value instanceof Boolean;
+            if (name.equals("string") || name.equals("String")) return value instanceof String;
+            if (name.equals("complex") || name.equals("complex64") || name.equals("complex128")) return value instanceof Complex;
+            if (name.equals("Option")) return value instanceof OptionValue;
+            if (name.equals("Result")) return value instanceof ResultValue;
+            if (name.equals("DynamicStruct")) return value instanceof DynamicStructValue;
+            if (name.equals("Array") || name.equals("List")) return value instanceof List<?>;
+            if (name.equals("Generator")) return value instanceof GeneratorRuntime.Generator<?>;
+            if (name.equals("AsyncGenerator")) return value instanceof GeneratorRuntime.AsyncGenerator<?>;
+
+            if (value instanceof OresObject object) {
+                Ast.ClassDecl targetClass = findClass(name);
+                if (targetClass != null) return classIsA(object.klass, targetClass, new LinkedHashSet<>());
+                Ast.InterfaceDecl targetInterface = findInterface(name);
+                if (targetInterface != null) {
+                    return classImplements(object.klass, targetInterface, new LinkedHashSet<>(), new LinkedHashSet<>());
+                }
+            }
+
+            Ast.TypeAliasDecl alias = findTypeAlias(name);
+            if (alias != null && alias.genericParameters().isEmpty()) {
+                return oresTypeMatches(value, alias.target());
+            }
+
+            // Java host objects are intentionally not part of Oreslang nominal type identity.
+            // Interop must cross an explicit capability/adapter boundary.
+            return false;
+        }
+
+        private String oresRuntimeTypeName(Object value) {
+            if (value instanceof OresObject object) return object.klass.name();
+            if (value instanceof OptionValue) return "Option";
+            if (value instanceof ResultValue) return "Result";
+            if (value instanceof DynamicStructValue) return "DynamicStruct";
+            if (value instanceof List<?>) return "List";
+            if (value instanceof String) return "string";
+            if (value instanceof Boolean) return "bool";
+            if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long) return "int";
+            if (value instanceof Float || value instanceof Double) return "float";
+            if (value instanceof Complex) return "complex";
+            if (value instanceof HostObjectFacade) return "<host-object>";
+            return "<unknown>";
+        }
+
+        private boolean classIsA(Ast.ClassDecl actual, Ast.ClassDecl target, Set<Ast.ClassDecl> seen) {
+            if (actual == target || actual.name().equals(target.name())) return true;
+            if (!seen.add(actual)) return false;
+            for (Ast.TypeRef parentRef : actual.parents()) {
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent != null && classIsA(parent, target, seen)) return true;
+            }
+            return false;
+        }
+
+        private boolean classImplements(
+                Ast.ClassDecl actual,
+                Ast.InterfaceDecl target,
+                Set<Ast.ClassDecl> seenClasses,
+                Set<Ast.InterfaceDecl> seenInterfaces) {
+            if (!seenClasses.add(actual)) return false;
+            for (Ast.TypeRef interfaceRef : actual.interfaces()) {
+                Ast.InterfaceDecl iface = findInterface(interfaceRef.name());
+                if (iface != null && (iface == target || iface.name().equals(target.name())
+                        || interfaceExtends(iface, target, seenInterfaces))) return true;
+            }
+            for (Ast.TypeRef parentRef : actual.parents()) {
+                Ast.ClassDecl parent = findClass(parentRef.name());
+                if (parent != null && classImplements(parent, target, seenClasses, seenInterfaces)) return true;
+            }
+            return false;
+        }
+
+        private boolean interfaceExtends(
+                Ast.InterfaceDecl actual, Ast.InterfaceDecl target, Set<Ast.InterfaceDecl> seen) {
+            if (actual == target || actual.name().equals(target.name())) return true;
+            if (!seen.add(actual)) return false;
+            for (Ast.TypeRef parentRef : actual.parents()) {
+                Ast.InterfaceDecl parent = findInterface(parentRef.name());
+                if (parent != null && interfaceExtends(parent, target, seen)) return true;
+            }
+            return false;
+        }
+
+        private record ConditionResult(boolean matched, Map<String, Object> bindings) {
+            private static ConditionResult match() { return new ConditionResult(true, Map.of()); }
+            private static ConditionResult noMatch() { return new ConditionResult(false, Map.of()); }
         }
 
         private Object binary(String op, Object left, Object right) {
@@ -2549,6 +3003,9 @@ public final class OresEvalRootNode extends RootNode {
     }
     private static final class OresPanic extends RuntimeException {
         private OresPanic(String message) { super(message, null, false, false); }
+    }
+    private static final class OresCastError extends RuntimeException {
+        private OresCastError(String message) { super(message, null, false, false); }
     }
     private record StdioFacade(OresContext context) {
         private Object print(List<Object> args){context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.print");requireOne(args,"stdio.print");context.output().print(String.valueOf(args.getFirst()));context.output().flush();return null;}
