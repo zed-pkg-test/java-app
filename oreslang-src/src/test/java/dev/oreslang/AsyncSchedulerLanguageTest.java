@@ -363,6 +363,33 @@ final class AsyncSchedulerLanguageTest {
     }
 
     @Test
+    void synchronousSchedulerTaskCannotAwait() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        async fnc bad() => void {
+                          val scheduler = new OresScheduler(1);
+                          val work = scheduler.start(|| -> {
+                            val ready = Future.from_callback<int>(|cb| -> {
+                              cb.resolve(1);
+                              return;
+                            });
+                            val value = await ready;
+                            return;
+                          });
+                          await work;
+                          scheduler.close();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(
+                failure.getMessage().contains("await is only legal")
+                        || failure.getMessage().contains("async"),
+                () -> "unexpected sync scheduler await error: " + failure.getMessage());
+    }
+
+    @Test
     void synchronousSchedulerTaskRunsOnCustomPoolAndReturnsFuture() throws Exception {
         String program = """
                 pub async routine main() => void {
@@ -390,6 +417,37 @@ final class AsyncSchedulerLanguageTest {
         }
 
         assertTrue(output.toString(StandardCharsets.UTF_8).contains("7"));
+    }
+
+    @Test
+    void schedulerStartPreservesInferredLambdaResultType() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc sync_work() => Future<int> {
+                  val scheduler = new OresScheduler(2);
+                  return scheduler.start(|| -> {
+                    return 7;
+                  });
+                }
+
+                fnc async_work() => Future<int> {
+                  val scheduler = new OresScheduler(2);
+                  return scheduler.start(async || -> {
+                    return 41;
+                  });
+                }
+                """)));
+
+        IllegalArgumentException mismatch = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad() => Future<string> {
+                          val scheduler = new OresScheduler(2);
+                          return scheduler.start(async || -> {
+                            return 41;
+                          });
+                        }
+                        """)));
+        assertTrue(mismatch.getMessage().contains("return"));
     }
 
 }
