@@ -520,10 +520,10 @@ public final class TypeChecker {
                 .toList();
 
         for (Ast.MethodDecl endpoint : publicInstance) {
-            if (isReservedActorRefMember(endpoint.name())) {
+            if (isReservedActorRefControlMember(endpoint.name())) {
                 throw new IllegalArgumentException(
                         "public actor protocol method '" + klass.name() + "." + endpoint.name()
-                                + "' conflicts with the reserved ActorRef control/runtime namespace");
+                                + "' collides with a reserved ActorRef control member");
             }
             if (!endpoint.genericParameters().isEmpty()) {
                 throw new IllegalArgumentException(
@@ -1088,10 +1088,9 @@ public final class TypeChecker {
                             }
                             return Primitive.BOOL;
                         }
-                        if (member.member().equals("send")
-                                || member.member().equals("mailbox")) {
+                        if (member.member().equals("mailbox")) {
                             throw new IllegalArgumentException(
-                                    "raw ActorRef mailbox operations are runtime-private; "
+                                    "ActorRef mailbox state is runtime-private; "
                                             + "invoke a declared typed actor protocol method instead");
                         }
 
@@ -1802,10 +1801,14 @@ public final class TypeChecker {
                         where + " ActorRef protocol must name an actor class or interface");
             }
             if (actorInterface != null) {
+                // ActorRef<Interface> does not encode the target actor's
+                // execution domain. Validate the protocol against the strict
+                // common-denominator boundary so a domain-agnostic capability
+                // cannot smuggle shared-memory authority.
                 validateActorProtocolInterface(
                         actorInterface,
                         protocolNamed,
-                        actorKind,
+                        Ast.ActorKind.UNTRUSTED,
                         where);
             }
             return;
@@ -1838,10 +1841,15 @@ public final class TypeChecker {
                     where + " cannot transport an actor instance by value; pass an actor capability/reference");
         }
 
-        if (!isSharedSafe(type, new LinkedHashSet<>(), Map.of())) {
-            throw new IllegalArgumentException(
-                    where + " contains state that is not safe to transport across an actor boundary");
-        }
+        // Ordinary class instances carry object identity and potentially
+        // mutable fields/methods. The current runtime transport intentionally
+        // rejects such host/interpreter objects rather than sharing an alias or
+        // erasing nominal identity into a Map. Use records/tuples/lists/maps
+        // for mailbox data until a dedicated compiler-owned struct wire value
+        // is available.
+        throw new IllegalArgumentException(
+                where + " cannot transport class instance '" + named.name()
+                        + "' by value; use a data record/struct wire value or an explicit capability");
     }
 
     private void validateActorProtocolInterface(
@@ -1889,11 +1897,11 @@ public final class TypeChecker {
                 }
 
                 Ast.InterfaceFunctionDecl fn = (Ast.InterfaceFunctionDecl) member;
-                if (isReservedActorRefMember(fn.name())) {
+                if (isReservedActorRefControlMember(fn.name())) {
                     throw new IllegalArgumentException(
                             where + " ActorRef interface method '" + iface.name()
                                     + "." + fn.name()
-                                    + "' conflicts with the reserved ActorRef control/runtime namespace");
+                                    + "' collides with a reserved ActorRef control member");
                 }
                 if (!fn.genericParameters().isEmpty()) {
                     throw new IllegalArgumentException(
@@ -2120,8 +2128,8 @@ public final class TypeChecker {
                     }
                     yield new Function(List.of(), Primitive.BOOL);
                 }
-                case "send", "mailbox" -> throw new IllegalArgumentException(
-                        "raw ActorRef mailbox operations are runtime-private; "
+                case "mailbox" -> throw new IllegalArgumentException(
+                        "ActorRef mailbox state is runtime-private; "
                                 + "invoke a declared typed actor protocol method instead");
                 default -> {
                     if (named.arguments().size() == 1) {
@@ -3365,11 +3373,10 @@ public final class TypeChecker {
         if (!assignable(actual, expected)) throw new IllegalArgumentException(where + " has type " + actual + " but expected " + expected);
     }
 
-    private boolean isReservedActorRefMember(String name) {
-        return switch (name) {
-            case "id", "is_alive", "send", "mailbox" -> true;
-            default -> false;
-        };
+    private boolean isReservedActorRefControlMember(String name) {
+        return name.equals("id")
+                || name.equals("is_alive")
+                || name.equals("mailbox");
     }
 
     private String methodKey(String name, int arity) {
