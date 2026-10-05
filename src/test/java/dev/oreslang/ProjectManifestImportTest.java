@@ -318,10 +318,10 @@ final class ProjectManifestImportTest {
         assertTrue(wildcardFailure.getMessage().contains("polymorphic function values are not supported yet"));
 
         Files.writeString(classMain, """
-                import class GenericTools from "./child.ores";
+                import * as external from "./child.ores";
 
                 pub routine main(): void {
-                  val callback = GenericTools.identity;
+                  val callback = external.GenericTools.identity;
                   return;
                 }
                 """);

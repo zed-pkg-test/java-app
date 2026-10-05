@@ -15,7 +15,13 @@ routine routine_down(int n): int {
 }
 
 pub routine main(): void {
-  let Fnc<int, int> lambda_down = |int n| -> n == 0 ? 0 : lambda_down(n - 1);
+  let Fnc<int, int> lambda_down = |int n| -> {
+    if n == 0; do
+      return 0;
+    else
+      return lambda_down(n - 1);
+    fi
+  };
 
   stdio.stdout.write(fnc_down(50000));
   stdio.stdout.write("|");
