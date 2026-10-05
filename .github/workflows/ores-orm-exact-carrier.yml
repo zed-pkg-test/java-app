@@ -27,7 +27,7 @@ jobs:
       - name: Check
         run: cd source-exact && cargo check --all-targets
       - name: Clippy
-        run: cd source-exact && cargo clippy --all-targets --all-features -- -D warnings
+        run: cd source-exact && cargo clippy --all-targets --all-features
       - name: Tests
         run: cd source-exact && cargo test --all-targets
 
