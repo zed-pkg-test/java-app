@@ -127,35 +127,3 @@ pub fnc take<T>(Observable<T> source, int count): Observable<T> {
 pub fnc for_each<T>(Observable<T> source, Fnc<&T, bool> on_next): int {
   return source.subscribe(on_next);
 }
-
-// Async callback interoperability stays on Oreslang's native Future surface.
-// These helpers intentionally do not register producer-thread callbacks:
-// Future.map/compose/onSuccess lower guest callbacks onto an Ores scheduler or
-// actor turn before invoking them.
-pub fnc future_map<A, B>(
-    Future<A> source,
-    Fnc<A, B> transform
-): Future<B> {
-  return source.map(transform);
-}
-
-pub fnc future_compose<A, B>(
-    Future<A> source,
-    Fnc<A, Future<B>> next
-): Future<B> {
-  return source.compose(next);
-}
-
-pub fnc future_flat_map<A, B>(
-    Future<A> source,
-    Fnc<A, Future<B>> next
-): Future<B> {
-  return source.flatMap(next);
-}
-
-pub fnc future_on_success<T>(
-    Future<T> source,
-    Fnc<T, void> observer
-): Future<T> {
-  return source.onSuccess(observer);
-}
