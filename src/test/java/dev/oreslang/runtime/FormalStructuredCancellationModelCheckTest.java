@@ -278,6 +278,9 @@ final class FormalStructuredCancellationModelCheckTest {
     private static boolean canReachStable(State start, List<Edge> edges) {
         Map<State, List<State>> adjacency = new HashMap<>();
         for (Edge edge : edges) {
+            if (edge.action() == Action.FORCE_KILL_TREE) {
+                continue;
+            }
             adjacency.computeIfAbsent(edge.from(), ignored -> new ArrayList<>()).add(edge.to());
         }
 
