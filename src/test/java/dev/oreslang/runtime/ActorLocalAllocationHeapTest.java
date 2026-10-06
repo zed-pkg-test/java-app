@@ -131,9 +131,10 @@ final class ActorLocalAllocationHeapTest {
 
     @Test
     void allLocalAndExplicitSharedCategoriesCompeteForOneRuntimeHeapCeiling() throws Exception {
+        long minimumHeap = 16L * 1024L * 1024L;
         IsolatePolicy tiny = new IsolatePolicy(
                 IsolatePolicy.developer().capabilities(),
-                4096,
+                minimumHeap,
                 IsolatePolicy.developer().maxMailboxMessages(),
                 IsolatePolicy.developer().maxWallTime(),
                 false);
@@ -141,7 +142,7 @@ final class ActorLocalAllocationHeapTest {
         try (ActorRuntime runtime = new ActorRuntime(tiny)) {
             CountDownLatch reserved = new CountDownLatch(1);
             var ref = runtime.<String>spawnSharedTrusted(tiny, context -> (message, turn) -> {
-                context.localMemory().orElseThrow().reserveHeap(3072);
+                context.localMemory().orElseThrow().reserveHeap(15L * 1024L * 1024L);
                 reserved.countDown();
             });
 
@@ -150,7 +151,7 @@ final class ActorLocalAllocationHeapTest {
 
             IllegalStateException exceeded = assertThrows(
                     IllegalStateException.class,
-                    () -> runtime.syncCell("this shared cell must exceed the remaining aggregate budget"));
+                    () -> runtime.syncCell("x".repeat(700_000)));
             assertTrue(exceeded.getMessage().contains("aggregate runtime limit exceeded"),
                     exceeded.getMessage());
 
