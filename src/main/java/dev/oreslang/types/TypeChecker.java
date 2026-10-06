@@ -909,8 +909,43 @@ public final class TypeChecker {
             Type callableSelf = method.isStatic() ? null : new SelfType(self);
             Env env = new Env(null);
             if (!method.isStatic()) env.define("self", callableSelf, Ast.BindingKind.VAL);
+            boolean actorEndpoint =
+                    klass.actorKind() != Ast.ActorKind.NONE
+                            && !method.isStatic()
+                            && method.visibility() == Ast.Visibility.PUBLIC;
+            if (actorEndpoint
+                    && (method.name().equals("id")
+                        || method.name().equals("is_alive")
+                        || method.name().equals("mailbox"))) {
+                throw new IllegalArgumentException(
+                        "public actor protocol method '" + klass.name() + "."
+                                + method.name()
+                                + "' conflicts with the reserved ActorRef control namespace");
+            }
+            if (actorEndpoint && !method.genericParameters().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "public actor protocol method '" + klass.name() + "."
+                                + method.name()
+                                + "' cannot declare method generic parameters");
+            }
+
             for (Ast.Param param : method.parameters()) {
                 Type parameterType = resolveParam(param, generics, callableSelf);
+                if (actorEndpoint) {
+                    if (param.mutable()) {
+                        throw new IllegalArgumentException(
+                                "public actor protocol parameter '" + klass.name() + "."
+                                        + method.name() + "." + param.name()
+                                        + "' cannot be mut");
+                    }
+                    validateActorCallableBoundaryType(
+                            parameterType,
+                            klass.actorKind(),
+                            false,
+                            "parameter '" + param.name()
+                                    + "' of actor protocol method '"
+                                    + klass.name() + "." + method.name() + "'");
+                }
                 if (param.structural() && klass.actorKind() != Ast.ActorKind.NONE) {
                     throw new IllegalArgumentException(
                             "structural parameter '" + param.name() + "' cannot cross actor method mailbox boundaries; "
@@ -930,6 +965,14 @@ public final class TypeChecker {
                 env.define(param.name(), parameterType, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
             Type returns = resolve(method.returnType(), generics, callableSelf);
+            if (actorEndpoint) {
+                validateActorCallableBoundaryType(
+                        returns,
+                        klass.actorKind(),
+                        true,
+                        "return type of actor protocol method '"
+                                + klass.name() + "." + method.name() + "'");
+            }
             if (method.async()) {
                 validateAsyncBoundaryType(
                         returns,
@@ -1667,6 +1710,67 @@ public final class TypeChecker {
                 Type receiverValueType = receiver;
                 receiver = receiverDispatchType(receiver);
 
+                if (receiver instanceof Named actorRef
+                        && actorRef.name().equals("ActorRef")
+                        && actorRef.arguments().size() == 1) {
+                    if (!(deref(actorRef.arguments().getFirst()) instanceof Named actorType)) {
+                        throw new IllegalArgumentException(
+                                "ActorRef protocol must name an actor class");
+                    }
+                    Ast.ClassDecl actorClass = findClass(actorType.name());
+                    if (actorClass == null
+                            || actorClass.actorKind() == Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException(
+                                "ActorRef<" + actorType.name()
+                                        + "> does not name an actor class");
+                    }
+                    ResolvedMethod target = findMethodTarget(
+                            actorClass,
+                            actorType,
+                            member.member(),
+                            call.arguments().size(),
+                            new LinkedHashSet<>());
+                    if (target == null
+                            || target.method().visibility() != Ast.Visibility.PUBLIC) {
+                        throw new IllegalArgumentException(
+                                "no public actor protocol method '"
+                                        + member.member() + "' with arity "
+                                        + call.arguments().size() + " on "
+                                        + actorClass.name());
+                    }
+                    Ast.MethodDecl method = target.method();
+                    if (!method.genericParameters().isEmpty()
+                            || call.typeArgumentsPresent()) {
+                        throw new IllegalArgumentException(
+                                "actor protocol methods do not support call-site or method generics yet");
+                    }
+                    Type result = checkGenericCallable(
+                            target.owner().genericParameters(),
+                            method.parameters(),
+                            method.returnType(),
+                            call.arguments(),
+                            env,
+                            generics,
+                            self,
+                            target.ownerType(),
+                            classGenericBindings(
+                                    target.owner(),
+                                    target.ownerType()),
+                            "actor protocol method "
+                                    + target.owner().name() + "."
+                                    + method.name());
+                    validateActorCallableBoundaryType(
+                            result,
+                            actorClass.actorKind(),
+                            true,
+                            "actor protocol reply from "
+                                    + target.owner().name() + "."
+                                    + method.name());
+                    return new Named(
+                            "Future",
+                            List.of(result));
+                }
+
                 if (receiver instanceof Named guard
                         && guard.name().equals("MutexGuard")
                         && guard.arguments().size() == 1) {
@@ -2126,6 +2230,35 @@ public final class TypeChecker {
             if (receiver instanceof ListType list) return list.element();
             if (receiver instanceof Tuple tuple) return tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
             throw new IllegalArgumentException("indexing requires an array/list, tuple, or DynamicStruct");
+        }
+        if (expr instanceof Ast.SpawnExpr spawned) {
+            Ast.CallExpr call = spawned.call();
+            if (!(call.callee() instanceof Ast.NameExpr name)) {
+                throw new IllegalArgumentException(
+                        "spawn currently requires a direct actor-class name such as spawn Worker()");
+            }
+            Ast.ClassDecl klass = findClass(name.name());
+            if (klass == null) {
+                throw new IllegalArgumentException(
+                        "spawn target '" + name.name() + "' is not a known actor class");
+            }
+            if (klass.actorKind() == Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException(
+                        "spawn target '" + klass.name() + "' is a normal class; use new for ordinary class construction");
+            }
+            if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
+                throw new IllegalArgumentException(
+                        "untrusted actors cannot create child actors with spawn");
+            }
+            if (!klass.genericParameters().isEmpty() || call.typeArgumentsPresent()) {
+                throw new IllegalArgumentException(
+                        "generic actor-class spawn is not enabled yet; actor construction must remain ABI-stable");
+            }
+            if (!call.arguments().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "actor-class spawn arguments are not enabled until actor initializer semantics are converged");
+            }
+            return new Named("ActorRef", List.of(nominalClassType(klass)));
         }
         if (expr instanceof Ast.NewExpr created) {
             if (created.type().name().equals("DynamicStruct")) {
@@ -4373,6 +4506,8 @@ public final class TypeChecker {
             for (Ast.Expr argument : created.arguments()) {
                 rejectStaticClassGenericReferences(argument, classGenerics, klass, method);
             }
+        } else if (expression instanceof Ast.SpawnExpr spawned) {
+            rejectStaticClassGenericReferences(spawned.call(), classGenerics, klass, method);
         } else if (expression instanceof Ast.AwaitExpr awaited) {
             rejectStaticClassGenericReferences(awaited.expression(), classGenerics, klass, method);
         } else if (expression instanceof Ast.ChannelOpExpr operation) {
