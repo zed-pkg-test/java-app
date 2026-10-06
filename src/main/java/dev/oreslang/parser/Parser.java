@@ -1321,10 +1321,10 @@ public final class Parser {
                     throw error(peek(), "select case must start with readch or writech");
                 }
 
-                List<Ast.Stmt> body = new ArrayList<>();
-                while (!check(CASE) && !check(DEFAULT) && !check(RBRACE) && !check(EOF)) {
-                    body.add(parseStatement());
+                if (!check(LBRACE)) {
+                    throw error(peek(), "select case requires a braced body '{ ... }'");
                 }
+                List<Ast.Stmt> body = parseBlock();
                 arms.add(new Ast.SelectArm(
                         operation,
                         channel,
@@ -1337,10 +1337,10 @@ public final class Parser {
 
             if (match(DEFAULT)) {
                 consume(COLON, "select default arm requires ':'");
-                List<Ast.Stmt> body = new ArrayList<>();
-                while (!check(CASE) && !check(DEFAULT) && !check(RBRACE) && !check(EOF)) {
-                    body.add(parseStatement());
+                if (!check(LBRACE)) {
+                    throw error(peek(), "select default arm requires a braced body '{ ... }'");
                 }
+                List<Ast.Stmt> body = parseBlock();
                 arms.add(new Ast.SelectArm(
                         Ast.ChannelOperation.DEFAULT,
                         null,
