@@ -911,7 +911,7 @@ The central invariant is:
 
 ### `rt proxy`: explicit synchronized escape hatch
 
-`rt proxy` exists for the exceptional case where copying or actor-owner routing would be disproportionately expensive. It consumes an owned class instance or dynamic struct and returns a `Proxy<T>` backed by a runtime-owned **fair read/write lock**:
+`rt proxy` exists for the exceptional case where copying or actor-owner routing would be disproportionately expensive. It consumes an owned class instance or dynamic struct and returns a `Proxy<T>` backed by a runtime-owned **fair logical read/write lease queue**. Lock ownership is not JVM-thread/carrier identity:
 
 ```ores
 define class Cache as
@@ -924,12 +924,16 @@ define class Cache as
 end
 
 val cache = rt proxy new Cache();
-cache.hits = 10;       // write lock
-val n = cache.hits;    // read lock
-val m = cache.inc();   // conservative write lock
+cache.hits = 10;       // write lease
+val n = cache.hits;    // read lease
+val m = cache.inc();   // conservative write lease
 ```
 
 Both `rt proxy value` and `rt proxy(value)` are accepted. The original move-only owner is consumed, so code cannot keep a raw mutable alias beside the proxy. A proxy can cross only SHARED actor boundaries and requires the explicit `ACTOR_SHARED_PROXY` capability; private/untrusted actors and ordinary async-task boundaries reject it.
+
+Proxy contention is scheduler-cooperative. An uncontended access receives a logical lease immediately. If a read/write lease is unavailable, source execution registers a runtime-owned `OresFuture` waiter, stores its continuation, and returns from the current scheduler turn so the physical actor/source carrier can run other work. The lock reserves the grant before settling that future; the continuation is resumed only by its owning scheduler. Future completion never executes guest Oreslang code directly. Cancellation detaches queued waiters, and runtime shutdown fails queued waiters instead of leaving suspended continuations retained. FIFO ordering admits consecutive readers at the head as a batch while a queued writer prevents later readers from barging, bounding writer starvation.
+
+The synchronous host/runtime convenience API may wait only outside actor/source scheduler execution. A contended synchronous access from an actor or scheduler turn fails closed rather than parking its carrier.
 
 Proxy access is deliberately restrictive:
 

@@ -62,6 +62,60 @@ final class ActorRuntimeProxyTest {
     }
 
     @Test
+    void cooperativeRwLeasesPreserveWriterFairnessWithoutThreadOwnership() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{1});
+
+            var firstReader = proxy.acquireReadAsync().get(2, TimeUnit.SECONDS);
+            var writer = proxy.acquireWriteAsync();
+            var lateReader = proxy.acquireReadAsync();
+
+            assertFalse(writer.isDone(), "writer must wait behind an active reader");
+            assertFalse(lateReader.isDone(),
+                    "reader arriving behind a queued writer must not barge");
+
+            firstReader.close();
+
+            var writeLease = writer.get(2, TimeUnit.SECONDS);
+            assertFalse(lateReader.isDone(),
+                    "queued writer must receive the next exclusive grant");
+            writeLease.write(value -> {
+                value[0] = 9;
+                return null;
+            });
+            writeLease.close();
+
+            var secondReader = lateReader.get(2, TimeUnit.SECONDS);
+            assertEquals(9, secondReader.read(value -> value[0]).intValue());
+            secondReader.close();
+            assertEquals(0, proxy.queuedWaiters());
+        }
+    }
+
+    @Test
+    void cancellingQueuedProxyLeaseRemovesWaiterAndDoesNotLoseTheNextGrant() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{4});
+
+            var writer = proxy.acquireWriteAsync().get(2, TimeUnit.SECONDS);
+            var cancelledReader = proxy.acquireReadAsync();
+            var survivingReader = proxy.acquireReadAsync();
+
+            assertEquals(2, proxy.queuedWaiters());
+            assertTrue(cancelledReader.cancel(false));
+            assertEquals(1, proxy.queuedWaiters(),
+                    "cancellation hook must detach the queued waiter immediately");
+
+            writer.close();
+
+            var reader = survivingReader.get(2, TimeUnit.SECONDS);
+            assertEquals(4, reader.read(value -> value[0]).intValue());
+            reader.close();
+            assertEquals(0, proxy.queuedWaiters());
+        }
+    }
+
+    @Test
     void crossProxyNestingAndReadToWriteUpgradeFailClosed() {
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
             ActorRuntime.Proxy<int[]> first = runtime.proxy(new int[]{1});
