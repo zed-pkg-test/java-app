@@ -936,6 +936,14 @@ public final class Parser {
                 if (generatorSeen) throw error(previous(), "duplicate 'generator' modifier");
                 generatorSeen = true;
                 generator = true;
+                // generator* is declaration sugar; plain generator remains accepted.
+                match(STAR);
+            } else if (check(IDENT) && peek().lexeme().equals("gen") && checkNext(STAR)) {
+                Token gen = advance();
+                advance(); // '*'
+                if (generatorSeen) throw error(gen, "duplicate generator modifier");
+                generatorSeen = true;
+                generator = true;
             } else if (matchContextualStructuralModifier()) {
                 if (structuralSeen) throw error(previous(), "duplicate 'structural' modifier");
                 structuralSeen = true;
@@ -1426,10 +1434,15 @@ public final class Parser {
             return new Ast.ReturnStmt(value);
         }
         if (match(YIELD)) {
-            if (check(SEMICOLON) || isSafeStatementBoundary()) throw error(previous(), "yield requires a value");
+            boolean delegated = match(STAR);
+            if (check(SEMICOLON) || isSafeStatementBoundary()) {
+                throw error(previous(), delegated ? "yield* requires an iterable value" : "yield requires a value");
+            }
             Ast.Expr value = parseExpression();
-            consumeStatementTerminator("yield statement should end with ';'");
-            return new Ast.YieldStmt(value);
+            consumeStatementTerminator(delegated
+                    ? "yield* statement should end with ';'"
+                    : "yield statement should end with ';'");
+            return new Ast.YieldStmt(value, delegated);
         }
         if (match(DEFER)) {
             Ast.Expr expression = parseExpression();
@@ -2482,17 +2495,37 @@ public final class Parser {
     }
 
     private Ast.Expr parseRuntimeExpression() {
-        Token operation = consume(IDENT, "expected runtime operation after 'rt'");
+        Token operation;
+        if (match(YIELD)) {
+            operation = previous(); // compatibility spelling: rt yield
+        } else {
+            operation = consume(IDENT, "expected runtime operation after 'rt'");
+        }
+
         String name = operation.lexeme();
+        if (operation.type() == YIELD || name.equals("yield") || name.equals("cooperate")) {
+            if (match(LPAREN)) {
+                if (!check(RPAREN)) {
+                    throw error(peek(),
+                            "rt cooperate currently takes no arguments; scheduling policy hints are not enabled yet");
+                }
+                consume(RPAREN, "expected ')' after rt cooperate");
+            }
+            return new Ast.RuntimeCallExpr("cooperate", List.of());
+        }
+
         if (!name.equals("copy") && !name.equals("take")
                 && !name.equals("borrow") && !name.equals("share")) {
             throw error(operation,
                     "unknown rt operation '" + name
-                            + "'; supported ownership operations are copy, take, borrow, and share");
+                            + "'; supported operations are cooperate, copy, take, borrow, and share");
         }
 
         Ast.Expr argument;
         if (match(LPAREN)) {
+            if (check(RPAREN)) {
+                throw error(peek(), "rt " + name + " expects exactly one argument");
+            }
             argument = parseExpression();
             consume(RPAREN, "expected ')' after rt " + name + " argument");
         } else {
