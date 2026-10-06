@@ -127,6 +127,10 @@ public final class TypeChecker {
                 if (decl instanceof Ast.FunctionDecl fn) {
                     putFunction(module.name(), fn);
                 } else if (decl instanceof Ast.ClassDecl klass) {
+                    if (klass.name().equals("Tuple")) {
+                        throw new IllegalArgumentException(
+                                "Tuple is a final built-in value class and cannot be redefined");
+                    }
                     putQualified(classes, ambiguousClasses, module.name(), klass.name(), klass, "class");
                     classOwners.put(klass, module.name());
                 } else if (decl instanceof Ast.InterfaceDecl iface) {
@@ -756,6 +760,10 @@ public final class TypeChecker {
 
         Set<String> parentNames = new HashSet<>();
         for (Ast.TypeRef parent : klass.parents()) {
+            if (parent.name().equals("Tuple")) {
+                throw new IllegalArgumentException(
+                        "class '" + klass.name() + "' cannot extend final built-in class 'Tuple'");
+            }
             if (!parentNames.add(parent.name())) throw new IllegalArgumentException("duplicate parent class '" + parent.name() + "' on " + klass.name());
             if (parent.name().equals("Object") || parent.name().equals("List")) {
                 if (parent.inferArguments() || !parent.arguments().isEmpty()) {
@@ -1052,7 +1060,12 @@ public final class TypeChecker {
             if (destructure.kind() == Ast.DestructureKind.SEQUENCE) {
                 List<Type> elementTypes = sequenceDestructureTypes(source, destructure.bindings());
                 for (int i = 0; i < destructure.bindings().size(); i++) {
-                    defineDestructureBinding(env, destructure.bindings().get(i), elementTypes.get(i));
+                    defineDestructureBinding(
+                            env,
+                            destructure.bindings().get(i),
+                            elementTypes.get(i),
+                            generics,
+                            self);
                 }
             } else {
                 Set<String> selectedMembers = new LinkedHashSet<>();
@@ -1064,7 +1077,7 @@ public final class TypeChecker {
                     Type bindingType = binding.rest()
                             ? objectDestructureRestType(source, selectedMembers)
                             : objectDestructureMemberType(source, binding.name());
-                    env.define(binding.name(), bindingType, binding.kind());
+                    defineDestructureBinding(env, binding, bindingType, generics, self);
                 }
             }
             return;
@@ -1206,7 +1219,12 @@ public final class TypeChecker {
             List<Type> elementTypes = sequenceDestructureTypes(element, loop.bindings());
             Env loopEnv = new Env(env);
             for (int i = 0; i < loop.bindings().size(); i++) {
-                defineDestructureBinding(loopEnv, loop.bindings().get(i), elementTypes.get(i));
+                defineDestructureBinding(
+                        loopEnv,
+                        loop.bindings().get(i),
+                        elementTypes.get(i),
+                        generics,
+                        self);
             }
             checkLoopBlock(loop.body(), loopEnv, generics, expectedReturn, self);
             return;
@@ -1322,8 +1340,10 @@ public final class TypeChecker {
                 } else {
                     requireAssignable(index, Primitive.INT, "array/list index");
                     if (receiver instanceof ListType list) targetType = list.element();
-                    else if (receiver instanceof Tuple tuple) targetType = tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
-                    else throw new IllegalArgumentException("indexed assignment requires an array/list, tuple, or DynamicStruct");
+                    else if (receiver instanceof Tuple) {
+                        throw new IllegalArgumentException(
+                                "tuple elements are immutable; destructure or construct a new tuple instead");
+                    } else throw new IllegalArgumentException("indexed assignment requires an array/list or DynamicStruct");
                 }
                 where = "index";
             } else throw new IllegalArgumentException("unsupported assignment target");
@@ -1450,6 +1470,25 @@ public final class TypeChecker {
             if (call.arguments().stream().anyMatch(Ast.SpreadExpr.class::isInstance)) {
                 throw new IllegalArgumentException(
                         "spread arguments require a variadic callable; fixed-arity Oreslang callables do not accept dynamic spread");
+            }
+            if (call.callee() instanceof Ast.MemberExpr equalityCall
+                    && equalityCall.member().equals("isEqualsTo")) {
+                Type receiverType = receiverDispatchType(
+                        deref(typeOf(equalityCall.receiver(), env, generics, self)));
+                if (receiverType instanceof ListType || receiverType instanceof Tuple) {
+                    if (call.typeArgumentsPresent()) {
+                        throw new IllegalArgumentException(
+                                "isEqualsTo does not accept call-site type arguments");
+                    }
+                    if (call.arguments().size() != 1
+                            || call.arguments().getFirst() instanceof Ast.NamedArgExpr) {
+                        throw new IllegalArgumentException(
+                                "isEqualsTo expects exactly one positional argument");
+                    }
+                    Type otherType = typeOf(call.arguments().getFirst(), env, generics, self);
+                    requireEqualityComparable(receiverType, otherType);
+                    return Primitive.BOOL;
+                }
             }
             if (call.callee() instanceof Ast.NameExpr name
                     && name.name().equals("init")) {
@@ -1999,6 +2038,10 @@ public final class TypeChecker {
             }
             Type receiver = typeOf(member.receiver(), env, generics, self);
             Type sumReceiver = receiverDispatchType(deref(receiver));
+            if ((sumReceiver instanceof ListType || sumReceiver instanceof Tuple)
+                    && member.member().equals("isEqualsTo")) {
+                return new Function(List.of(Unknown.INSTANCE), Primitive.BOOL);
+            }
             Type iteratorMember = builtinIteratorMember(sumReceiver, member.member());
             if (iteratorMember != null) return iteratorMember;
             Type sumMember = builtinOptionResultMember(sumReceiver, member.member());
@@ -2147,10 +2190,68 @@ public final class TypeChecker {
             }
             requireAssignable(index, Primitive.INT, "array/list index");
             if (receiver instanceof ListType list) return list.element();
-            if (receiver instanceof Tuple tuple) return tuple.elements().stream().reduce(Unknown.INSTANCE, this::commonType);
+            if (receiver instanceof Tuple tuple) {
+                if (indexed.index() instanceof Ast.LiteralExpr literal
+                        && literal.value() instanceof Long rawIndex) {
+                    int tupleIndex;
+                    try {
+                        tupleIndex = Math.toIntExact(rawIndex);
+                    } catch (ArithmeticException overflow) {
+                        throw new IllegalArgumentException("tuple index is outside integer range: " + rawIndex);
+                    }
+                    if (tupleIndex < 0 || tupleIndex >= tuple.elements().size()) {
+                        throw new IllegalArgumentException(
+                                "tuple index " + tupleIndex + " is out of bounds for arity " + tuple.elements().size());
+                    }
+                    return tuple.elements().get(tupleIndex);
+                }
+                if (tuple.elements().isEmpty()) return Unknown.INSTANCE;
+                return Types.unionOf(tuple.elements());
+            }
             throw new IllegalArgumentException("indexing requires an array/list, tuple, or DynamicStruct");
         }
         if (expr instanceof Ast.NewExpr created) {
+            if (created.type().name().equals("Tuple")) {
+                if (created.arguments().isEmpty()) {
+                    throw new IllegalArgumentException("new Tuple(...) requires at least one element");
+                }
+                for (Ast.Expr argument : created.arguments()) {
+                    if (argument instanceof Ast.NamedArgExpr || argument instanceof Ast.SpreadExpr) {
+                        throw new IllegalArgumentException(
+                                "Tuple construction is positional; named and spread constructor arguments are not permitted");
+                    }
+                }
+
+                if (created.type().arguments().isEmpty()) {
+                    return new Tuple(created.arguments().stream()
+                            .map(argument -> typeOf(argument, env, generics, self))
+                            .toList());
+                }
+
+                Type resolved = resolve(created.type(), generics, self);
+                if (!(resolved instanceof Tuple expectedTuple)) {
+                    throw new IllegalArgumentException("Tuple constructor target did not resolve to a tuple type");
+                }
+                if (expectedTuple.elements().size() != created.arguments().size()) {
+                    throw new IllegalArgumentException(
+                            "Tuple constructor expects " + expectedTuple.elements().size()
+                                    + " element(s), got " + created.arguments().size());
+                }
+                for (int i = 0; i < expectedTuple.elements().size(); i++) {
+                    Type expectedElement = expectedTuple.elements().get(i);
+                    Type actualElement = typeOfAgainstExpected(
+                            created.arguments().get(i),
+                            expectedElement,
+                            env,
+                            generics,
+                            self);
+                    requireAssignable(
+                            actualElement,
+                            expectedElement,
+                            "Tuple constructor element " + i);
+                }
+                return expectedTuple;
+            }
             if (created.type().name().equals("DynamicStruct")) {
                 Type dynamic = resolve(created.type(), generics, self);
                 if (!created.arguments().isEmpty()) {
@@ -2576,8 +2677,23 @@ public final class TypeChecker {
         return null;
     }
 
-    private void defineDestructureBinding(Env env, Ast.DestructureBinding binding, Type type) {
-        if (!binding.isDiscard()) env.define(binding.name(), type, binding.kind());
+    private void defineDestructureBinding(
+            Env env,
+            Ast.DestructureBinding binding,
+            Type inferredType,
+            Set<String> generics,
+            Type self) {
+        if (binding.isDiscard()) return;
+        Type bindingType = inferredType;
+        if (binding.declaredType() != null) {
+            Type declared = resolve(binding.declaredType(), generics, self);
+            requireAssignable(
+                    inferredType,
+                    declared,
+                    "destructure binding '" + binding.name() + "'");
+            bindingType = declared;
+        }
+        env.define(binding.name(), bindingType, binding.kind());
     }
 
     private List<Type> sequenceDestructureTypes(Type source, List<Ast.DestructureBinding> bindings) {
@@ -4201,6 +4317,10 @@ public final class TypeChecker {
     }
 
     private Ast.ClassDecl resolveClassParent(Ast.TypeRef parentRef, Ast.ClassDecl child) {
+        if (parentRef.name().equals("Tuple")) {
+            throw new IllegalArgumentException(
+                    "class '" + child.name() + "' cannot extend final built-in class 'Tuple'");
+        }
         if (parentRef.name().equals("Object") || parentRef.name().equals("List")) return null;
         if (parentRef.name().equals("obj") || parentRef.name().equals("arr")) throw new IllegalArgumentException("inline obj/arr values cannot be subclassed; extend Object or List instead");
         Ast.ClassDecl parent = findClass(parentRef.name());
@@ -4316,6 +4436,13 @@ public final class TypeChecker {
                 rejectStaticClassGenericReference(binding.declaredType(), classGenerics, klass, method);
                 rejectStaticClassGenericReferences(binding.initializer(), classGenerics, klass, method);
             } else if (statement instanceof Ast.DestructureStmt destructure) {
+                for (Ast.DestructureBinding binding : destructure.bindings()) {
+                    rejectStaticClassGenericReference(
+                            binding.declaredType(),
+                            classGenerics,
+                            klass,
+                            method);
+                }
                 rejectStaticClassGenericReferences(destructure.initializer(), classGenerics, klass, method);
             } else if (statement instanceof Ast.ReturnStmt returned) {
                 rejectStaticClassGenericReferences(returned.value(), classGenerics, klass, method);
