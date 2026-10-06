@@ -121,6 +121,56 @@ final class ActorSpawnBoundaryTest {
     }
 
     @Test
+    void suspendingProtocolMethodResumesThroughActorMailboxAndKeepsStateOwned() throws Exception {
+        String program = """
+                async fnc bounce(int value): int {
+                  return value;
+                }
+
+                actor Counter {
+                  let int value = 0;
+
+                  pub add_after(int amount): int {
+                    val int delta = await bounce(amount);
+                    self.value = self.value + delta;
+                    return self.value;
+                  }
+                }
+
+                pub async fnc main(): void {
+                  val counter = spawn Counter();
+                  val Future<int> first = counter.add_after(2);
+                  val Future<int> second = counter.add_after(3);
+                  stdio.println(await first);
+                  stdio.println(await second);
+                  return;
+                }
+                """;
+
+        Source source = Source.newBuilder(
+                        OresLanguage.ID,
+                        program,
+                        "actor-protocol-suspension.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+
+        java.io.ByteArrayOutputStream output =
+                new java.io.ByteArrayOutputStream();
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            assertDoesNotThrow(() -> context.eval(source));
+        }
+
+        assertEquals(
+                "2\n5",
+                output.toString(
+                                java.nio.charset.StandardCharsets.UTF_8)
+                        .strip());
+    }
+
+    @Test
     void privateActorObjectLoweringStillFailsClosedAtRuntime() throws Exception {
         String program = """
                 isoactor Worker {
