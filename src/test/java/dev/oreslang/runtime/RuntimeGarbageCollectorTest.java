@@ -1,7 +1,10 @@
 package dev.oreslang.runtime;
 
 import org.junit.jupiter.api.Test;
+import dev.oreslang.OresLanguage;
+import org.graalvm.polyglot.Context;
 
+import java.lang.ref.Reference;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -12,6 +15,152 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class RuntimeGarbageCollectorTest {
+    // Enqueue deterministically: these tests exercise queue bookkeeping, not
+    // the JVM's nondeterministic decision to collect an owner.
+    private static void enqueue(RuntimeGarbageCollector.CleanupHandle handle) throws Exception {
+        var entry = handle.getClass().getDeclaredField("entry");
+        entry.setAccessible(true);
+        Reference<?> reference = (Reference<?>) entry.get(handle);
+        reference.clear();
+        assertTrue(reference.enqueue());
+    }
+
+    @Test
+    void explicitReleaseFailureIsRetriedWhileOwnerRemainsReachable() {
+        AtomicInteger attempts = new AtomicInteger();
+        Object owner = new Object();
+        try (RuntimeGarbageCollector gc = new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1))) {
+            var handle = gc.track(owner, () -> {
+                if (attempts.incrementAndGet() == 1) throw new IllegalStateException("transient");
+            });
+            assertThrows(IllegalStateException.class, handle::close);
+            assertEquals(1, attempts.get());
+
+            var retry = gc.collectPeriodic();
+            assertEquals(1, retry.cleaned());
+            assertEquals(0, retry.trackedAfter());
+            assertEquals(2, attempts.get());
+
+            java.lang.ref.Reference.reachabilityFence(owner);
+        }
+    }
+
+    @Test
+    void queuedFailureIsRetriedAfterItsNotificationWasConsumed() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        try (RuntimeGarbageCollector gc = new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1))) {
+            var handle = gc.track(new Object(), () -> {
+                if (attempts.incrementAndGet() == 1) throw new IllegalStateException("transient");
+            });
+            enqueue(handle);
+            var first = gc.collectPeriodic();
+            assertEquals(1, first.cleanupFailures());
+            assertEquals(1, first.trackedAfter());
+            var retry = gc.collectPeriodic();
+            assertEquals(1, retry.cleaned());
+            assertEquals(0, retry.trackedAfter());
+            assertEquals(2, attempts.get());
+        }
+    }
+
+    @Test
+    void queueDrainDuringFailingExplicitReleaseRemainsRetryable() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        AtomicReference<Throwable> releaseFailure = new AtomicReference<>();
+        CountDownLatch cleaning = new CountDownLatch(1);
+        CountDownLatch failRelease = new CountDownLatch(1);
+        try (RuntimeGarbageCollector gc = new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1))) {
+            var handle = gc.track(new Object(), () -> {
+                if (attempts.incrementAndGet() == 1) {
+                    cleaning.countDown();
+                    try {
+                        if (!failRelease.await(2, TimeUnit.SECONDS)) throw new AssertionError("release timed out");
+                    } catch (InterruptedException interrupted) {
+                        throw new AssertionError(interrupted);
+                    }
+                    throw new IllegalStateException("transient");
+                }
+            });
+            Thread releasing = new Thread(() -> {
+                try { handle.close(); }
+                catch (Throwable failure) { releaseFailure.set(failure); }
+            });
+            releasing.start();
+            try {
+                assertTrue(cleaning.await(2, TimeUnit.SECONDS));
+                enqueue(handle);
+                assertEquals(0, gc.collectPeriodic().cleaned());
+            } finally {
+                failRelease.countDown();
+                releasing.join(2_000);
+            }
+            assertFalse(releasing.isAlive());
+            assertInstanceOf(IllegalStateException.class, releaseFailure.get());
+            var retry = gc.collectPeriodic();
+            assertEquals(1, retry.cleaned());
+            assertEquals(0, retry.trackedAfter());
+            handle.close();
+            assertEquals(2, attempts.get());
+        }
+    }
+
+    @Test
+    void actorExitFailureIsRetriedWithAStillReachableOwner() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        Object owner = new Object();
+        try (RuntimeGarbageCollector gc = new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1));
+             ActorRuntime runtime = new ActorRuntime()) {
+            runtime.setActorExitHook(gc::retireActorDomain);
+            var ref = runtime.<String>spawn(() -> (message, context) -> {
+                gc.track(owner, () -> {
+                    if (attempts.incrementAndGet() == 1) throw new IllegalStateException("transient");
+                });
+                context.self().stop();
+            });
+            ref.send("stop");
+            assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
+            assertEquals(1, attempts.get());
+            assertEquals(1, gc.collectPeriodic().cleaned());
+            assertEquals(2, attempts.get());
+            java.lang.ref.Reference.reachabilityFence(owner);
+        }
+    }
+
+    @Test
+    void contextShutdownCleansLiveProcessAndActorResourcesAndClosesRegistry() throws Exception {
+        AtomicInteger processCleanups = new AtomicInteger();
+        AtomicInteger actorCleanups = new AtomicInteger();
+        Object processOwner = new Object();
+        Object actorOwner = new Object();
+        Context context = Context.newBuilder(OresLanguage.ID).build();
+        OresContext runtimeContext;
+        try {
+            context.initialize(OresLanguage.ID);
+            context.enter();
+            try { runtimeContext = OresContext.get(null); }
+            finally { context.leave(); }
+            var gc = runtimeContext.garbageCollector();
+            gc.track(processOwner, processCleanups::incrementAndGet);
+            CountDownLatch registered = new CountDownLatch(1);
+            var actor = runtimeContext.actors().<String>spawn(() -> (message, actorContext) -> {
+                gc.track(actorOwner, actorCleanups::incrementAndGet);
+                registered.countDown();
+            });
+            actor.send("register");
+            assertTrue(registered.await(2, TimeUnit.SECONDS));
+            context.close();
+            assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+            assertEquals(1, processCleanups.get());
+            assertEquals(1, actorCleanups.get());
+            assertThrows(IllegalStateException.class, gc::collectPeriodic);
+            assertThrows(IllegalStateException.class, () -> gc.track(new Object(), () -> {}));
+            java.lang.ref.Reference.reachabilityFence(processOwner);
+            java.lang.ref.Reference.reachabilityFence(actorOwner);
+        } finally {
+            context.close();
+        }
+    }
+
     @Test
     void processCollectionRequestsJvmGcAtMostOncePerThrottleWindow() {
         AtomicInteger gcRequests = new AtomicInteger();
