@@ -1103,8 +1103,19 @@ public final class OwnershipChecker {
             Ast.MemberExpr member,
             List<Ast.Expr> arguments,
             Scope scope) {
-        ValueInfo receiver = checkExpr(member.receiver(), scope, false);
-        Ast.TypeRef type = receiver.type;
+        // Do not speculatively evaluate arbitrary member receivers here:
+        // ownership checking is stateful and a failed "is this a channel?"
+        // probe must not move/borrow an unrelated value before normal method
+        // resolution runs. Built-in channel instance methods currently require
+        // a bound channel place, which is also the useful lifetime model for
+        // the non-owning async iterator view.
+        if (!(member.receiver() instanceof Ast.NameExpr receiverName)) {
+            return null;
+        }
+        VarState state = scope.lookup(receiverName.name());
+        if (state == null) return null;
+        requireUsable(state, receiverName.name(), false);
+        Ast.TypeRef type = state.type;
         if (type == null || type.isBorrow()
                 || !type.name().equals("Channel")
                 || type.arguments().size() != 1) {
