@@ -1,0 +1,29 @@
+name: oreslang-http-routing-diagnostic
+
+on:
+  push:
+    branches:
+      - proof/oreslang-http-routing-refsem-f849-20261005
+
+permissions:
+  contents: read
+
+jobs:
+  route-library:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - name: Install Java 21 and Maven
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends --yes openjdk-21-jdk maven
+      - name: Compile exact compiler
+        run: JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn -B -ntp -f proof245/compiler/pom.xml -DskipTests compile
+      - name: Run router without quiet mode
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
+          mvn -B -ntp -f proof245/compiler/pom.xml -DskipTests exec:java -Dexec.args="--platform=server proof245/routing/tests/router_semantics.ores"
