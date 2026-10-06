@@ -249,28 +249,43 @@ final class ActorRuntimeTest {
     }
 
     @Test
-    void sharedActorsCanCoordinateThroughExplicitSyncCell() throws Exception {
+    void sharedActorsCannotCoordinateThroughAmbientSyncCellMutation() throws Exception {
         var config = new ActorRuntime.DispatcherConfig(1, 4, 32);
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
             ActorRuntime.SyncCell<Integer> cell = runtime.syncCell(0);
-            CountDownLatch received = new CountDownLatch(200);
+            CountDownLatch attempted = new CountDownLatch(2);
+            AtomicReference<Throwable> first = new AtomicReference<>();
+            AtomicReference<Throwable> second = new AtomicReference<>();
 
-            var a = runtime.<Integer>spawnShared(() -> (message, context) -> {
-                cell.update(value -> value + 1);
-                received.countDown();
+            var a = runtime.<Integer>spawnSharedTrusted(context -> (message, actorContext) -> {
+                try {
+                    cell.update(value -> value + 1);
+                } catch (Throwable failure) {
+                    first.set(failure);
+                } finally {
+                    attempted.countDown();
+                    actorContext.self().stop();
+                }
             });
-            var b = runtime.<Integer>spawnShared(() -> (message, context) -> {
-                cell.update(value -> value + 1);
-                received.countDown();
+            var b = runtime.<Integer>spawnSharedTrusted(context -> (message, actorContext) -> {
+                try {
+                    cell.update(value -> value + 1);
+                } catch (Throwable failure) {
+                    second.set(failure);
+                } finally {
+                    attempted.countDown();
+                    actorContext.self().stop();
+                }
             });
 
-            for (int i = 0; i < 100; i++) {
-                a.send(i);
-                b.send(i);
-            }
+            a.send(1);
+            b.send(1);
 
-            assertTrue(received.await(5, TimeUnit.SECONDS));
-            assertEquals(200, cell.snapshot());
+            assertTrue(attempted.await(5, TimeUnit.SECONDS));
+            assertInstanceOf(SecurityException.class, first.get());
+            assertInstanceOf(SecurityException.class, second.get());
+            assertEquals(0, cell.snapshot(),
+                    "ordinary actor mutation must flow through owner actors/messages or explicit rt proxy");
         }
     }
 

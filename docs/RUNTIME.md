@@ -16,7 +16,7 @@
 12. Private actor transport rejects synchronized shared-memory cells.
 13. Shared actor state is still actor-owned; ordinary actor field mutation is serialized by the mailbox, not by implicit locks.
 14. Actor `self` and move-only actor-owned state cannot escape a mailbox turn as ordinary mutable aliases.
-15. Synchronized shared memory requires `SHARED_MEMORY`; strict FaaS does not grant it by default.
+15. Legacy host/runtime synchronized shared memory requires `SHARED_MEMORY`; actor policies strip that authority. Actor-facing synchronized sharing uses the narrower `ACTOR_SHARED_PROXY` capability.
 16. Private slices and synchronized shared cells compete for one parent actor-memory ceiling.
 17. Actor message graphs are cycle-checked and bounded by depth, node count, and logical byte quotas before transport.
 18. SharedMutex runtime ownership is reserved before mailbox visibility and committed only after successful admission; failed first publication rolls back.
@@ -200,7 +200,7 @@ The host actor runtime follows the same scheduling shape as Akka's event-based d
 Oreslang deliberately uses two executors:
 
 - **private dispatcher** — private actors, isolation-copy message transport;
-- **shared dispatcher** — shared actors, immutable sharing plus explicit `SyncCell<T>` shared state.
+- **shared dispatcher** — shared actors with actor-owned mutable heaps, mailbox/channel mutation, immutable published reads, and optional explicit `Proxy<T>` capabilities. `SyncCell<T>` / `SharedMutex<T>` are legacy host/runtime compatibility primitives, not ambient actor state.
 
 A per-actor atomic scheduling gate ensures only one drain task for that actor is active. The executor may run different turns on different threads; thread identity is never actor identity.
 
@@ -236,7 +236,7 @@ The lock domain is independent of native carrier identity, so an actor may migra
 
 A proxy may be transported only between SHARED actors in the same `ActorRuntime`, with `ACTOR_SHARED_PROXY` on both sides. PRIVATE/UNTRUSTED actors, data-only freezes, immutable `Shared<T>` wrappers, and ordinary async-task boundaries reject proxy handles.
 
-`SyncCell<T>` and `SharedMutex<T>` remain host/runtime compatibility primitives during migration. They continue to require the separate `SHARED_MEMORY` capability, but source SHARED actors no longer receive that authority merely because their actor kind is SHARED. New actor-facing designs should prefer actor ownership/messages, immutable publication, or the explicit proxy capability.
+`SyncCell<T>` and `SharedMutex<T>` remain host/runtime compatibility primitives during migration. They continue to require the separate `SHARED_MEMORY` capability, but **no actor kind receives that authority**, including trusted host-created SHARED actors. Host/supervisor code may still use the compatibility primitives directly. New actor-facing designs should prefer actor ownership/messages, immutable publication, or the explicit proxy capability.
 
 Actor failures remain fail-stop. The actor ref retains the failure cause for diagnostics, queued reservations are drained, and later sends receive an `ActorTerminatedException` rather than silently targeting a dead mailbox.
 

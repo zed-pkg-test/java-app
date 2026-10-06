@@ -2780,13 +2780,13 @@ public final class ActorRuntime implements AutoCloseable {
                     IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
                     IsolatePolicy.Capability.JAVA_INTEROP,
                     IsolatePolicy.Capability.JAVA_SOURCE_INTEROP);
-        } else if (kind == ActorKind.SHARED && !trustedFactory) {
+        } else if (kind == ActorKind.SHARED) {
             /*
-             * Source/compiler-facing shared actors own their mutable state.
-             * They may read published immutable data and use an explicit
-             * synchronized Proxy<T> capability, but broad SHARED_MEMORY is a
-             * host/runtime-internal legacy escape hatch, not ambient actor
-             * authority. spawnSharedTrusted(...) remains explicit opt-in.
+             * Every actor owns its mutable state, including host-created shared
+             * actors. Broad SHARED_MEMORY is runtime/host authority only; it is
+             * never ambient actor authority. Cross-actor mutation is mailbox/
+             * channel based, with rt Proxy<T> as the explicit synchronized
+             * capability escape hatch under ACTOR_SHARED_PROXY.
              */
             effectivePolicy = policy.withoutCapabilities(
                     IsolatePolicy.Capability.SHARED_MEMORY);
