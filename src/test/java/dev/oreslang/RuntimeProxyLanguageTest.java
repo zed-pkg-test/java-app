@@ -211,6 +211,51 @@ final class RuntimeProxyLanguageTest {
     }
 
     @Test
+    void helperReturnedProxyKeepsTheSameProtectionRules() {
+        assertDoesNotThrow(() -> check("""
+                define class Box as
+                  pub let int value = 7;
+
+                  pub current(): int {
+                    return self.value;
+                  }
+                end
+
+                fnc make(): Proxy<Box> {
+                  return rt proxy new Box();
+                }
+
+                fnc good(): int {
+                  return make().current();
+                }
+                """));
+
+        IllegalArgumentException escaped = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        define class Inner as
+                          pub let int value = 1;
+                        end
+
+                        define class Outer as
+                          pub let Inner inner = new Inner();
+                        end
+
+                        fnc make(): Proxy<Outer> {
+                          return rt proxy new Outer();
+                        }
+
+                        fnc bad(): void {
+                          val leaked = make().inner;
+                          return;
+                        }
+                        """));
+        assertTrue(escaped.getMessage().contains("move-only")
+                        || escaped.getMessage().contains("Proxy"),
+                escaped.getMessage());
+    }
+
+    @Test
     void proxyDoesNotLeakMoveOnlyFields() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
