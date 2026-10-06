@@ -940,7 +940,10 @@ Proxy access is deliberately restrictive:
 - bound methods cannot be extracted from a proxy;
 - move-only/mutable nested state cannot escape through a proxy read or method result; return a copy/immutable snapshot instead;
 - nested locking across different proxies is rejected to avoid ABBA lock-order deadlocks;
-- read-to-write lock upgrade on the same proxy is rejected rather than blocking forever.
+- read-to-write lock upgrade on the same proxy is rejected rather than blocking forever;
+- `proxy.dispose()` explicitly revokes the proxy handle and releases its runtime quota/root; it is reserved on `Proxy<T>` and does not dispatch to a wrapped class method.
+
+Proxy field/index assignment is statement-like: it returns `void`. A move-only value assigned into a proxy therefore cannot also escape as the value of the assignment expression.
 
 `rt proxy` is therefore **not** the ordinary meaning of `shared actor`. It is an explicit synchronized capability for large or awkward object graphs where the programmer knowingly chooses shared mutable access.
 
