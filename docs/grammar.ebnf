@@ -430,8 +430,10 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      still exits the enclosing callable. Loop control never crosses a callable
      boundary.
    - Every if statement closes with "fi". Braces delimit branch bodies but never
-     replace the structural terminator. Keyword-delimited then/elseif/else/fi
-     and legacy do ... fi lower to the same conditional semantics.
+     replace the structural terminator. "then" is the canonical keyword-delimited
+     branch introducer; deprecated "do" remains accepted for migration and may
+     be mixed with "then" across branches. Canonical "elif" accepts "elseif"
+     and single-fi "else if" as aliases. All forms lower to the same semantics.
    - "loop" and "block" are contextual statement keywords: outside the
      statement-plus-"{" form they remain legal callable names/references.
    - Single- and double-quoted object keys are equivalent static string keys.
