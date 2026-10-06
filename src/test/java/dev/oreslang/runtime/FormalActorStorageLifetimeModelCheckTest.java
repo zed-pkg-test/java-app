@@ -46,7 +46,12 @@ final class FormalActorStorageLifetimeModelCheckTest {
     @Test
     void everyReachableStateForbidsReclaimWhileAnyRootRemains() {
         Set<State> states = explore();
-        assertTrue(states.size() >= 10, "lifetime model must explore promotion/teardown races");
+        assertTrue(states.contains(new State(false, true, false, true, false)),
+                "model must reach actor-stop with promoted runtime root still live");
+        assertTrue(states.contains(new State(false, true, false, false, false)),
+                "model must reach stopped unrooted storage before reclamation");
+        assertTrue(states.contains(new State(false, true, false, false, true)),
+                "model must reach reclaimed storage only after all roots are gone");
 
         for (State state : states) {
             if (state.reclaimed()) {
