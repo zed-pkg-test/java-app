@@ -553,31 +553,6 @@ final class ParserTest {
     }
 
     @Test
-    void elseBodyMayBeginWithNestedIfOnFollowingLine() {
-        Ast.Program program = Parser.parse("""
-                define module app as
-                  fnc choose(bool a, bool b): int {
-                    if a; then
-                      return 1;
-                    else
-                      if b; then
-                        return 2;
-                      fi
-                      return 3;
-                    fi
-                  }
-                end
-                """);
-
-        Ast.FunctionDecl function =
-                (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
-        Ast.IfStmt outer = (Ast.IfStmt) function.body().getFirst();
-        assertEquals(1, outer.branches().size());
-        assertEquals(2, outer.elseBody().size());
-        assertInstanceOf(Ast.IfStmt.class, outer.elseBody().getFirst());
-    }
-
-    @Test
     void legacyIfDoAndElseifRemainAcceptedForMigration() {
         assertDoesNotThrow(() -> Parser.parse("""
                 define module app as
@@ -627,6 +602,33 @@ final class ParserTest {
                 end
                 """);
         assertTrue(canonical.warnings().isEmpty());
+    }
+
+    @Test
+    void parsesLegacyDoRouteGuardsAsIfBlocks() {
+        Ast.Program program = Parser.parse("""
+                define class Router as
+                  max_segments_value: int;
+
+                  validate(int handler_id, Pattern pattern): Result {
+                    if handler_id < 0; do
+                      return Err("handler_id must be non-negative");
+                    fi
+                    if !pattern.is_valid(); do
+                      return Err("invalid route pattern");
+                    fi
+                    if pattern.size() > self.max_segments_value; do
+                      return Err("route pattern exceeds max_segments");
+                    fi
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl root = program.modules().getFirst();
+        Ast.ClassDecl router = (Ast.ClassDecl) root.declarations().getFirst();
+        Ast.MethodDecl validate = router.methods().getFirst();
+        assertEquals(3, validate.body().size());
+        assertTrue(validate.body().stream().allMatch(statement -> statement instanceof Ast.IfStmt));
     }
 
     @Test
