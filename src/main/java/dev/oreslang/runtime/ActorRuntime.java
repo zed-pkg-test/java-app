@@ -571,6 +571,66 @@ public final class ActorRuntime implements AutoCloseable {
         }
         return rootAllocationDomain();
     }
+
+    /**
+     * Compiler/interpreter-facing local allocator for the currently executing
+     * semantic actor. Root/process code has no actor-local slice.
+     *
+     * <p>The lookup is deliberately tied to ActorId/runtime execution context,
+     * never carrier-thread identity. Mailman CONTROL execution has no guest
+     * allocator authority and fails closed.</p>
+     */
+    public Optional<ActorMemorySlice> currentLocalMemory() {
+        ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
+        if (current != null) {
+            if (current.runtime() != this) {
+                throw new SecurityException(
+                        "local-memory lookup crossed ActorRuntime boundary");
+            }
+            ActorCell<?> cell = currentActor.get();
+            if (cell == null
+                    || !cell.ref.id().equals(current.actorId())
+                    || cell.kind != current.kind()) {
+                throw new IllegalStateException(
+                        "actor allocation context is not bound to its logical ActorCell");
+            }
+            return Optional.of(cell.memorySlice);
+        }
+        if (CURRENT_ACTOR_GROUP_MAILMAN.get() != null) {
+            throw new SecurityException(
+                    "ActorGroup Mailman CONTROL execution has no guest local allocator");
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Accounts one ordinary guest heap allocation against the current semantic
+     * actor-local arena and returns its provenance.
+     *
+     * <p>The JVM reference backend currently uses conservative arena-style
+     * accounting: the reservation is retained logically until the actor-local
+     * slice retires. This intentionally avoids putting every ordinary Ores
+     * object into the residual host-resource GC registry. Future escape analysis
+     * may lower non-escaping values into per-turn bump regions and promote only
+     * escaping values without changing this allocation-domain contract.</p>
+     *
+     * <p>Root/process allocations are not actor-accounted. Callers must not use
+     * this method for primitive/value-semantic copies; those are COPY_ELIDED.</p>
+     */
+    public AllocationDomain accountGuestHeapAllocation(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException(
+                    "guest heap allocation size cannot be negative");
+        }
+        AllocationDomain domain = currentAllocationDomain();
+        Optional<ActorMemorySlice> local = currentLocalMemory();
+        if (local.isPresent() && bytes != 0) {
+            // Deliberately arena-owned: ActorMemorySlice.close() bulk-retires
+            // the accounting on actor exit. The ticket itself need not escape.
+            local.get().reserveHeap(bytes);
+        }
+        return domain;
+    }
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
     public int maxActors() { return dispatcherConfig.maxActors(); }
 

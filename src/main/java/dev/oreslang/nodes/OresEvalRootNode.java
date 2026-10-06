@@ -146,6 +146,17 @@ public final class OresEvalRootNode extends RootNode {
         private static final int TAIL_SAFEPOINT_INTERVAL = 64;
         private static final Object UNINITIALIZED_FIELD = new Object();
 
+        // Logical allocation units for the JVM/reference backend. These are
+        // quota/accounting estimates, not claims about HotSpot object layout.
+        private static final long GUEST_OBJECT_BASE_BYTES = 64L;
+        private static final long GUEST_FIELD_SLOT_BYTES = 24L;
+        private static final long GUEST_SEQUENCE_BASE_BYTES = 32L;
+        private static final long GUEST_SEQUENCE_SLOT_BYTES = 8L;
+        private static final long GUEST_MAP_BASE_BYTES = 64L;
+        private static final long GUEST_MAP_ENTRY_BYTES = 40L;
+        private static final long GUEST_CLOSURE_BASE_BYTES = 64L;
+        private static final long GUEST_CONTINUATION_BASE_BYTES = 96L;
+
         private enum InvocationKind {
             FUNCTION,
             FUNCTION_BODY,
@@ -179,6 +190,47 @@ public final class OresEvalRootNode extends RootNode {
             this.codeUnitId = normalizeUnitId(codeUnitId);
             indexImports();
             indexDeclarations();
+        }
+
+        private ActorRuntime.AllocationDomain accountGuestHeapAllocation(
+                long baseBytes,
+                long slots,
+                long bytesPerSlot) {
+            long slotBytes;
+            long total;
+            try {
+                slotBytes = Math.multiplyExact(Math.max(0L, slots), bytesPerSlot);
+                total = Math.addExact(baseBytes, slotBytes);
+            } catch (ArithmeticException overflow) {
+                throw new IllegalStateException("guest allocation accounting overflow", overflow);
+            }
+            return context.actors().accountGuestHeapAllocation(total);
+        }
+
+        private ActorRuntime.AllocationDomain accountGuestObjectAllocation(long fields) {
+            return accountGuestHeapAllocation(
+                    GUEST_OBJECT_BASE_BYTES, fields, GUEST_FIELD_SLOT_BYTES);
+        }
+
+        private ActorRuntime.AllocationDomain accountGuestSequenceAllocation(long elements) {
+            return accountGuestHeapAllocation(
+                    GUEST_SEQUENCE_BASE_BYTES, elements, GUEST_SEQUENCE_SLOT_BYTES);
+        }
+
+        private ActorRuntime.AllocationDomain accountGuestMapAllocation(long entries) {
+            return accountGuestHeapAllocation(
+                    GUEST_MAP_BASE_BYTES, entries, GUEST_MAP_ENTRY_BYTES);
+        }
+
+        private ActorRuntime.AllocationDomain accountGuestClosureAllocation() {
+            return context.actors().accountGuestHeapAllocation(GUEST_CLOSURE_BASE_BYTES);
+        }
+
+        private ActorRuntime.AllocationDomain accountGuestContinuationAllocation(long capturedSlots) {
+            return accountGuestHeapAllocation(
+                    GUEST_CONTINUATION_BASE_BYTES,
+                    capturedSlots,
+                    GUEST_SEQUENCE_SLOT_BYTES);
         }
 
         private void indexImports() {
@@ -596,6 +648,7 @@ public final class OresEvalRootNode extends RootNode {
                 this.receiver = null;
                 this.blockBody = null;
                 this.arguments = List.copyOf(arguments);
+                accountGuestContinuationAllocation(this.arguments.size());
             }
 
             private SourceTask(
@@ -607,6 +660,7 @@ public final class OresEvalRootNode extends RootNode {
                 this.receiver = receiver;
                 this.blockBody = null;
                 this.arguments = List.copyOf(arguments);
+                accountGuestContinuationAllocation(this.arguments.size() + 1L);
             }
 
             private SourceTask(List<Ast.Stmt> blockBody) {
@@ -616,6 +670,7 @@ public final class OresEvalRootNode extends RootNode {
                 this.blockBody = List.copyOf(
                         Objects.requireNonNull(blockBody, "blockBody"));
                 this.arguments = List.of();
+                accountGuestContinuationAllocation(1L);
             }
 
             @Override
@@ -2819,13 +2874,17 @@ public final class OresEvalRootNode extends RootNode {
                             task,
                             list.elements(),
                             env,
-                            (t, values, failure) ->
-                                    continuation.accept(
-                                            t,
-                                            failure == null
-                                                    ? List.copyOf(values)
-                                                    : null,
-                                            failure));
+                            (t, values, failure) -> {
+                                if (failure == null) {
+                                    accountGuestSequenceAllocation(values.size());
+                                }
+                                continuation.accept(
+                                        t,
+                                        failure == null
+                                                ? List.copyOf(values)
+                                                : null,
+                                        failure);
+                            });
                     return;
                 }
 
@@ -2834,13 +2893,17 @@ public final class OresEvalRootNode extends RootNode {
                             task,
                             tuple.elements(),
                             env,
-                            (t, values, failure) ->
-                                    continuation.accept(
-                                            t,
-                                            failure == null
-                                                    ? List.copyOf(values)
-                                                    : null,
-                                            failure));
+                            (t, values, failure) -> {
+                                if (failure == null) {
+                                    accountGuestSequenceAllocation(values.size());
+                                }
+                                continuation.accept(
+                                        t,
+                                        failure == null
+                                                ? List.copyOf(values)
+                                                : null,
+                                        failure);
+                            });
                     return;
                 }
 
@@ -2942,6 +3005,7 @@ public final class OresEvalRootNode extends RootNode {
                                 "duplicate obj field " + entry.getKey());
                     }
                 }
+                accountGuestMapAllocation(result.size());
                 continuation.accept(task, result, null);
                 return;
             }
@@ -3604,7 +3668,7 @@ public final class OresEvalRootNode extends RootNode {
                     throw new IllegalArgumentException(
                             "DynamicStruct<T> constructor takes no positional arguments");
                 }
-                return new DynamicStructValue();
+                return new DynamicStructValue(this);
             }
             HostClassFacade hostClass =
                     hostClasses.get(created.type().name());
@@ -3788,7 +3852,7 @@ public final class OresEvalRootNode extends RootNode {
                     for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
                         fields.put(entry.getKey(), detachAsyncValue(entry.getValue(), visiting));
                     }
-                    return new DynamicStructValue(fields);
+                    return new DynamicStructValue(this, fields);
                 }
                 if (value instanceof OptionValue option) {
                     return option.present()
@@ -5053,7 +5117,7 @@ public final class OresEvalRootNode extends RootNode {
                     if (!created.arguments().isEmpty()) {
                         throw new IllegalArgumentException("DynamicStruct<T> constructor takes no positional arguments");
                     }
-                    return new DynamicStructValue();
+                    return new DynamicStructValue(this);
                 }
                 HostClassFacade hostClass = hostClasses.get(created.type().name());
                 if (hostClass != null) {
@@ -5114,11 +5178,15 @@ public final class OresEvalRootNode extends RootNode {
                 return awaitBlockingChannelFuture(future, "dynamic select");
             }
             if (expr instanceof Ast.ListExpr list) {
+                accountGuestSequenceAllocation(list.elements().size());
                 ArrayList<Object> result = new ArrayList<>(list.elements().size());
                 for (Ast.Expr item : list.elements()) result.add(eval(item, env));
                 return result;
             }
-            if (expr instanceof Ast.TupleExpr tuple) return tuple.elements().stream().map(item -> eval(item, env)).toList();
+            if (expr instanceof Ast.TupleExpr tuple) {
+                accountGuestSequenceAllocation(tuple.elements().size());
+                return tuple.elements().stream().map(item -> eval(item, env)).toList();
+            }
             if (expr instanceof Ast.ObjectExpr object) {
                 boolean dynamicKeys = object.fields().stream().anyMatch(Ast.ObjectField::isDynamic);
                 LinkedHashMap<String, Object> result = new LinkedHashMap<>();
@@ -5137,11 +5205,13 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("duplicate obj field " + key);
                     }
                 }
-                return dynamicKeys ? new DynamicStructValue(result) : Map.copyOf(result);
+                if (!dynamicKeys) accountGuestMapAllocation(result.size());
+                return dynamicKeys ? new DynamicStructValue(this, result) : Map.copyOf(result);
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
                 boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
+                accountGuestClosureAllocation();
                 return tailCallable(args -> {
                     if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
                     Env local = new Env(captured, nonLexical);
@@ -5897,7 +5967,8 @@ public final class OresEvalRootNode extends RootNode {
                             "too many constructor arguments for " + klass.name());
                 }
                 LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
-                OresObject object = new OresObject(this, klass, fields);
+                OresObject object =
+                        new OresObject(this, klass, fields, classFields.size());
                 for (int i = 0; i < classFields.size(); i++) {
                     Ast.FieldDecl field = classFields.get(i);
                     Object value;
@@ -5933,7 +6004,8 @@ public final class OresEvalRootNode extends RootNode {
             for (Ast.FieldDecl field : classFields) {
                 fields.put(field.name(), UNINITIALIZED_FIELD);
             }
-            OresObject object = new OresObject(this, klass, fields);
+            OresObject object =
+                    new OresObject(this, klass, fields, classFields.size());
 
             // Field initializers run before the constructor body and with the
             // declaring class's private-member authority.
@@ -7200,9 +7272,21 @@ public final class OresEvalRootNode extends RootNode {
     }
 
     private static final class DynamicStructValue implements OresMutex.SharedState {
+        private final Evaluator owner;
+        private final ActorRuntime.AllocationDomain allocationDomain;
         private final LinkedHashMap<String, Object> fields;
-        private DynamicStructValue() { this.fields = new LinkedHashMap<>(); }
-        private DynamicStructValue(Map<String, Object> initial) { this.fields = new LinkedHashMap<>(initial); }
+
+        private DynamicStructValue(Evaluator owner) {
+            this(owner, Map.of());
+        }
+
+        private DynamicStructValue(Evaluator owner, Map<String, Object> initial) {
+            this.owner = Objects.requireNonNull(owner);
+            this.allocationDomain =
+                    owner.accountGuestMapAllocation(initial.size());
+            this.fields = new LinkedHashMap<>(initial);
+        }
+
         @Override public Iterable<?> sharedStateChildren() { return fields.values(); }
         @Override public String toString() { return "DynamicStruct" + fields; }
     }
@@ -7211,11 +7295,28 @@ public final class OresEvalRootNode extends RootNode {
         private final Evaluator owner;
         private final Ast.ClassDecl klass;
         private final Map<String,Object> fields;
-        private OresObject(Evaluator owner, Ast.ClassDecl klass, Map<String,Object> fields) {
-            this.owner = owner;
-            this.klass = klass;
-            this.fields = fields;
+        private final ActorRuntime.AllocationDomain allocationDomain;
+
+        private OresObject(
+                Evaluator owner,
+                Ast.ClassDecl klass,
+                Map<String,Object> fields) {
+            this(owner, klass, fields, fields.size());
         }
+
+        private OresObject(
+                Evaluator owner,
+                Ast.ClassDecl klass,
+                Map<String,Object> fields,
+                int expectedFieldCount) {
+            this.owner = Objects.requireNonNull(owner);
+            this.klass = Objects.requireNonNull(klass);
+            this.fields = Objects.requireNonNull(fields);
+            this.allocationDomain =
+                    owner.accountGuestObjectAllocation(
+                            Math.max(fields.size(), expectedFieldCount));
+        }
+
         @Override public Iterable<?> sharedStateChildren(){return fields.values();}
         @Override public String toString(){
             LinkedHashMap<String,Object> display = new LinkedHashMap<>();
