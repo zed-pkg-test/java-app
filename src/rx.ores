@@ -65,7 +65,7 @@ define class ValuesSubscription<T> extends Subscription<T> as
   let int cursor = 0;
   val int size;
 
-  pub constructor(Array<T> values) {
+  constructor(Array<T> values) {
     let int size = 0;
     for const value of values do
       size = size + 1;
@@ -87,7 +87,7 @@ end
 define class ValuesObservable<T> extends Observable<T> as
   val Array<T> values;
 
-  pub constructor(Array<T> values) {
+  constructor(Array<T> values) {
     self.values = values;
   }
 
@@ -104,7 +104,7 @@ define class FutureSubscription<T> extends Subscription<T> as
   val Future<T> pending;
   let bool emitted = false;
 
-  pub constructor(Future<T> pending) {
+  constructor(Future<T> pending) {
     self.pending = pending;
   }
 
@@ -121,7 +121,7 @@ end
 define class FutureObservable<T> extends Observable<T> as
   val Future<T> pending;
 
-  pub constructor(Future<T> pending) {
+  constructor(Future<T> pending) {
     self.pending = pending;
   }
 
@@ -138,7 +138,7 @@ define class MapSubscription<A, B> extends Subscription<B> as
   val Subscription<A> upstream;
   val Fnc<A, B> transform;
 
-  pub constructor(Subscription<A> upstream, Fnc<A, B> transform) {
+  constructor(Subscription<A> upstream, Fnc<A, B> transform) {
     self.upstream = upstream;
     self.transform = transform;
   }
@@ -161,7 +161,7 @@ define class FilterSubscription<T> extends Subscription<T> as
   val Subscription<T> upstream;
   val Fnc<T, bool> predicate;
 
-  pub constructor(Subscription<T> upstream, Fnc<T, bool> predicate) {
+  constructor(Subscription<T> upstream, Fnc<T, bool> predicate) {
     self.upstream = upstream;
     self.predicate = predicate;
   }
@@ -189,7 +189,7 @@ define class TakeSubscription<T> extends Subscription<T> as
   val Subscription<T> upstream;
   let int remaining;
 
-  pub constructor(Subscription<T> upstream, int count) {
+  constructor(Subscription<T> upstream, int count) {
     if count < 0; then
       val Result<bool, String> failure = Err("take count must be nonnegative");
       failure.expect("rx.take");
@@ -227,7 +227,7 @@ define class MapObservable<A, B> extends Observable<B> as
   val Observable<A> source;
   val Fnc<A, B> transform;
 
-  pub constructor(Observable<A> source, Fnc<A, B> transform) {
+  constructor(Observable<A> source, Fnc<A, B> transform) {
     self.source = source;
     self.transform = transform;
   }
@@ -241,7 +241,7 @@ define class FilterObservable<T> extends Observable<T> as
   val Observable<T> source;
   val Fnc<T, bool> predicate;
 
-  pub constructor(Observable<T> source, Fnc<T, bool> predicate) {
+  constructor(Observable<T> source, Fnc<T, bool> predicate) {
     self.source = source;
     self.predicate = predicate;
   }
@@ -255,7 +255,7 @@ define class TakeObservable<T> extends Observable<T> as
   val Observable<T> source;
   val int count;
 
-  pub constructor(Observable<T> source, int count) {
+  constructor(Observable<T> source, int count) {
     self.source = source;
     self.count = count;
   }
