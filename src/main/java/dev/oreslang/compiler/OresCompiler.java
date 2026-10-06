@@ -18,6 +18,7 @@ public final class OresCompiler {
     /** Runs the complete front-end admission policy on an already parsed program. */
     public static Ast.Program analyze(Ast.Program program) {
         program = TypeChecker.checkTypes(program);
+        QuantumSafetyChecker.check(program);
         OwnershipChecker.check(program);
         return program;
     }

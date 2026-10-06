@@ -1,7 +1,9 @@
 package dev.oreslang;
 
 import dev.oreslang.ast.Ast;
+import dev.oreslang.compiler.BuildOptions;
 import dev.oreslang.compiler.IncrementalCompiler;
+import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.parser.Parser;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
@@ -92,6 +94,107 @@ final class QuantumExecutionTest {
                 IllegalArgumentException.class,
                 () -> Ast.executionTarget(annotations));
         assertTrue(error.getMessage().contains("both GPU and quantum"));
+    }
+
+    @Test
+    void quantumAdmissionRejectsCpuCallsAndHostEffects() {
+        IllegalArgumentException cpuCall = assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        fnc cpu(int value): int { return value + 1; }
+                        quantum fnc qpu(int value): int {
+                          return cpu(value);
+                        }
+                        """));
+        assertTrue(cpuCall.getMessage().contains("cannot call CPU fnc"), cpuCall.getMessage());
+
+        IllegalArgumentException hostCall = assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        quantum fnc qpu(int value): int {
+                          stdio.stdout.write(value);
+                          return value;
+                        }
+                        """));
+        assertTrue(hostCall.getMessage().contains("QPU call")
+                        || hostCall.getMessage().contains("dynamic/member"),
+                hostCall.getMessage());
+
+        IllegalArgumentException allocation = assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        define class Box as
+                          val int value = 1;
+                        end
+                        quantum fnc qpu(int value): int {
+                          val box = new Box();
+                          return value;
+                        }
+                        """));
+        assertTrue(allocation.getMessage().contains("unsupported QPU expression"),
+                allocation.getMessage());
+
+        IllegalArgumentException stringAbi = assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        quantum fnc qpu(String value): int {
+                          return 1;
+                        }
+                        """));
+        assertTrue(stringAbi.getMessage().contains("scalar QPU ABI"), stringAbi.getMessage());
+    }
+
+    @Test
+    void quantumAdmissionAllowsOnlyStaticQuantumCallGraphEdges() {
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck("""
+                quantum fnc helper(int value): int {
+                  return value + 1;
+                }
+
+                define class QuantumOps as
+                  quantum static fnc twice(int value): int {
+                    return value * 2;
+                  }
+                end
+
+                quantum fnc qpu(int value): int {
+                  let int bumped = helper(value);
+                  return QuantumOps.twice(bumped);
+                }
+                """));
+
+        IllegalArgumentException cpuStatic = assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        define class HostOps as
+                          static fnc twice(int value): int {
+                            return value * 2;
+                          }
+                        end
+                        quantum fnc qpu(int value): int {
+                          return HostOps.twice(value);
+                        }
+                        """));
+        assertTrue(cpuStatic.getMessage().contains("CPU static fnc"), cpuStatic.getMessage());
+    }
+
+    @Test
+    void treeShakingPreservesQuantumPlacementMetadata() {
+        var build = OresCompiler.compileForBuild("""
+                pub quantum fnc solve(int shots): int {
+                  return shots;
+                }
+                """, BuildOptions.library(Map.of()));
+
+        Ast.FunctionDecl retained = build.program().modules().stream()
+                .flatMap(module -> module.declarations().stream())
+                .filter(Ast.FunctionDecl.class::isInstance)
+                .map(Ast.FunctionDecl.class::cast)
+                .filter(fn -> fn.name().equals("solve"))
+                .findFirst()
+                .orElseThrow();
+
+        assertEquals(Ast.ExecutionTarget.QUANTUM, Ast.executionTarget(retained.annotations()));
     }
 
     @Test
