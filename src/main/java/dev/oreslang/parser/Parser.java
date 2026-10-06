@@ -254,11 +254,25 @@ public final class Parser {
         if (modifiers.shared) throw error(previous(), "'shared' must modify an actor declaration");
         if (match(FNC)) {
             modifiers = mergeModifiers(modifiers, parseModifiers());
+            if (match(ACTOR, ISOACTOR)) {
+                Token actorToken = previous();
+                boolean isolated = actorToken.type() == ISOACTOR;
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
+                return parseFunction(annotations, modifiers, Ast.CallableKind.FNC, actorKind);
+            }
             if (modifiers.shared) throw error(previous(), "'shared' must modify an actor declaration");
             return parseFunction(annotations, modifiers, Ast.CallableKind.FNC);
         }
         if (match(ROUTINE)) {
             modifiers = mergeModifiers(modifiers, parseModifiers());
+            if (match(ACTOR, ISOACTOR)) {
+                Token actorToken = previous();
+                boolean isolated = actorToken.type() == ISOACTOR;
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
+                return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE, actorKind);
+            }
             if (modifiers.shared) throw error(previous(), "'shared' must modify an actor declaration");
             return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE);
         }
