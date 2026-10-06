@@ -330,6 +330,7 @@ final class GeneratorLanguageTest {
                   try {
                     yield 1;
                     yield 2;
+                  } catch (err) {
                   } finally {
                     stdio.stdout.write(":inner-closed");
                   }
