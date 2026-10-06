@@ -1,6 +1,6 @@
 namespace control_flow_demo;
 
-fnc classify(int value) => String {
+fnc classify(int value) -> String {
   if value < 0; then
     return "negative";
   elif value == 0; then
@@ -10,7 +10,7 @@ fnc classify(int value) => String {
   fi
 }
 
-fnc sumTo(int limit) => int {
+fnc sumTo(int limit) -> int {
   let total = 0;
 
   for (let i = 0; i <= limit; i = i + 1) {
@@ -20,7 +20,7 @@ fnc sumTo(int limit) => int {
   return total;
 }
 
-pub routine main() => void {
+pub routine main() -> void {
   stdio.println(classify(-1));
   stdio.println(classify(0));
   stdio.println(classify(1));

@@ -1,6 +1,6 @@
 namespace closure_demo;
 
-fnc make_counter() => (() -> int) {
+fnc make_counter() -> (() -> int) {
   let int count = 0;
 
   return || -> {
@@ -9,7 +9,7 @@ fnc make_counter() => (() -> int) {
   };
 }
 
-pub routine main() => void {
+pub routine main() -> void {
   val (() -> int) counter = make_counter();
 
   stdio.println(counter());

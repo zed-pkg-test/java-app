@@ -1,10 +1,10 @@
 namespace logical_operators_demo;
 
-fnc combined(bool a, bool b) => bool {
+fnc combined(bool a, bool b) -> bool {
   return a && b || a ^^ b;
 }
 
-pub routine main() => void {
+pub routine main() -> void {
   stdio.println(true && true);
   stdio.println(true && false);
 

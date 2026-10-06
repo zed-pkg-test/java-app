@@ -1,6 +1,6 @@
 namespace bitwise_operators_demo;
 
-pub routine main() => void {
+pub routine main() -> void {
   stdio.println(5 & 3);
   stdio.println(5 | 2);
   stdio.println(5 ^ 3);

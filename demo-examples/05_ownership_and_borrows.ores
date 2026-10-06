@@ -4,17 +4,17 @@ define class Box
   pub let String value = "start";
 end
 
-fnc change_owned(Box mut box) => Box {
+fnc change_owned(Box mut box) -> Box {
   box.value = "owned";
   return box;
 }
 
-fnc change_borrowed(&mut Box box) => void {
+fnc change_borrowed(&mut Box box) -> void {
   box.value = "borrowed";
   return;
 }
 
-pub routine main() => void {
+pub routine main() -> void {
   let Box original = new Box();
   let Box changed = change_owned(original);
 

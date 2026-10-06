@@ -4,7 +4,7 @@ define module model
 
   define class Answer
 
-    pub value() => int {
+    pub value() -> int {
       return 42;
     }
 
@@ -17,7 +17,7 @@ define module model
 
 end
 
-pub routine main() => void {
+pub routine main() -> void {
   val answer = new model.Answer();
 
   stdio.println(answer.value());

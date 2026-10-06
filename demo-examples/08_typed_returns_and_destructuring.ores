@@ -3,15 +3,15 @@ namespace returned_values_demo;
 type FixedResult = [int, bool, string];
 type NamedResult = {foo: int, bar: string};
 
-fnc fixed() => FixedResult {
+fnc fixed() -> FixedResult {
   return [3, true, "yes"];
 }
 
-fnc named() => NamedResult {
+fnc named() -> NamedResult {
   return obj{foo: 5, bar: "x"};
 }
 
-pub routine main() => void {
+pub routine main() -> void {
   const [number, flag, answer] = fixed();
   const {foo, bar} = named();
 

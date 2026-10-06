@@ -9,7 +9,7 @@ define module model
   define class Parent<T>
     pub val T value;
 
-    pub get() => T {
+    pub get() -> T {
       return self.value;
     }
   end
@@ -22,15 +22,15 @@ define module model
 
 end
 
-fnc read_child(model.Child<int> child) => int {
+fnc read_child(model.Child<int> child) -> int {
   return child.get();
 }
 
-fnc read_int_child(model.IntChild child) => int {
+fnc read_int_child(model.IntChild child) -> int {
   return child.value;
 }
 
-pub routine main() => void {
+pub routine main() -> void {
   val child = new model.Child<int>(7);
   val int_child = new model.IntChild(11);
 
