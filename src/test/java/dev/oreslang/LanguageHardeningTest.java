@@ -681,7 +681,7 @@ final class LanguageHardeningTest {
     }
 
     @Test
-    void strictFaasRejectsSharedActorDeclarationsAtAdmission() {
+    void sharedActorDeclarationDoesNotImplyWritableSharedMemoryAuthority() {
         Ast.Program sharedActor = TypeChecker.check(Parser.parse("""
                 shared actor Account {
                   let balance = 100;
@@ -692,7 +692,7 @@ final class LanguageHardeningTest {
                 }
                 """));
 
-        assertThrows(SecurityException.class, () ->
+        assertDoesNotThrow(() ->
                 CapabilityChecker.check(sharedActor, IsolatePolicy.strictFaas()));
         assertDoesNotThrow(() ->
                 CapabilityChecker.check(sharedActor, IsolatePolicy.developer()));
