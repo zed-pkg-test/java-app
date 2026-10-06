@@ -869,7 +869,7 @@ The interpreter represents a live generator with one serialized resumable activa
 
 Oreslang uses an Akka-style dispatcher model: an actor is **not** a thread. Every actor owns one mailbox, and at most one mailbox turn for a given actor may execute at a time. Actors are multiplexed over bounded thread pools, so the carrier thread may change between turns.
 
-There are two actor execution domains:
+There are three actor execution domains:
 
 ```ores
 pub actor fnc worker(int value): int {
@@ -886,12 +886,13 @@ shared actor Account {
 }
 ```
 
-- an unqualified `actor` is **private**;
-- `shared actor` is a **shared-memory-capable** actor;
-- private and shared actors are scheduled on **different dispatcher pools** for bulkheading;
-- compiler-generated/context-aware actor factories are capture-free for **both** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
+- `actor` (or `shared actor`) is a **shared-memory-capable** actor;
+- `isoactor` is a **private** actor with a confined logical memory slice;
+- `untrusted actor` also has a private slice, a fixed adversarial capability baseline, and bounded cooperative execution;
+- shared, private, and untrusted actors are scheduled on **different dispatcher pools** for bulkheading;
+- compiler-generated/context-aware actor factories are capture-free for **all** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
 - trusted host embedding has separately named supervisor-only construction escape hatches, and adversarial policies reject them;
-- both kinds still process their own mailbox serially;
+- all kinds still process their own mailbox serially;
 - actor-owned `let` fields may mutate during a mailbox turn because that turn is the exclusive mutation capability for `self`;
 - no lock is required around ordinary actor-owned fields, including fields of a shared actor;
 - actor `self` and move-only state rooted at `self` cannot escape the mailbox turn by value or returned borrow; copy-like values such as integers, booleans, and strings may be returned normally;
@@ -905,6 +906,8 @@ The slice has two simultaneous limits:
 - an aggregate private-actor memory budget from the parent runtime policy.
 
 This prevents many private actors from multiplying the parent's memory ceiling. Destroying the actor closes its slice and releases its accounting.
+
+The compiler-facing `ActorMemoryDomain` API provides a stable provenance and allocation context for every actor kind. Its allocation reservations use the private slice for `isoactor`/`untrusted actor` and an actor-local heap budget for `actor`; shared actor heap and mailbox charges count toward one per-actor ceiling. This is the runtime foundation for the separately stacked `rt` ownership compiler integration, not a claim that those operations have already been reconciled onto this branch. See [the ownership-domain contract](RT_ACTOR_MEMORY_DOMAINS.md).
 
 The JVM backend's slice is a language/runtime ownership and accounting boundary, not a separate Java GC heap. The slice follows the actor id across dispatcher workers; it is not thread-local state. When physical heap separation is required for adversarial tenant code, the same private-actor semantics must be backed by a cross-thread-capable private region or a separate Graal polyglot/native isolate.
 
