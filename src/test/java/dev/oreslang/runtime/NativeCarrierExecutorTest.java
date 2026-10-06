@@ -355,4 +355,45 @@ final class NativeCarrierExecutorTest {
         }
     }
 
+
+    @Test
+    void separateDedicatedExecutorsCanUseDistinctAffinityOrdinals() throws Exception {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        assumeTrue(os.contains("linux") || os.contains("mac") || os.contains("darwin"));
+        assumeTrue(Runtime.getRuntime().availableProcessors() >= 2);
+
+        try (NativeCarrierExecutor first =
+                     new NativeCarrierExecutor(1, 1, 8, "ores-native-affinity-base-a-", 0L);
+             NativeCarrierExecutor second =
+                     new NativeCarrierExecutor(1, 1, 8, "ores-native-affinity-base-b-", 1L)) {
+            CountDownLatch done = new CountDownLatch(2);
+            AtomicInteger firstTarget = new AtomicInteger(-1);
+            AtomicInteger secondTarget = new AtomicInteger(-1);
+            AtomicInteger firstCpu = new AtomicInteger(-1);
+            AtomicInteger secondCpu = new AtomicInteger(-1);
+
+            first.execute(() -> {
+                firstTarget.set(NativeCarrierExecutor.currentCarrierAffinityTarget());
+                firstCpu.set(NativeCarrierExecutor.currentCarrierCpu());
+                done.countDown();
+            });
+            second.execute(() -> {
+                secondTarget.set(NativeCarrierExecutor.currentCarrierAffinityTarget());
+                secondCpu.set(NativeCarrierExecutor.currentCarrierCpu());
+                done.countDown();
+            });
+
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            if (os.contains("linux")) {
+                assertNotEquals(firstTarget.get(), secondTarget.get(),
+                        "independent one-carrier executors must not collapse onto one CPU");
+                assertEquals(firstTarget.get(), firstCpu.get());
+                assertEquals(secondTarget.get(), secondCpu.get());
+            } else {
+                assertNotEquals(firstTarget.get(), secondTarget.get(),
+                        "independent one-carrier executors should receive distinct Mach affinity tags");
+            }
+        }
+    }
+
 }

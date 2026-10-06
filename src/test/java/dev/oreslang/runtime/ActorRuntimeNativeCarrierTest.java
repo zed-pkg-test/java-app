@@ -59,6 +59,15 @@ final class ActorRuntimeNativeCarrierTest {
                         1,
                         affinityTargets.size(),
                         "successive turns should preserve the carrier CPU/cache-affinity target");
+
+                ActorRuntime.CarrierAffinityDiagnostics diagnostics =
+                        runtime.carrierAffinityDiagnostics();
+                assertTrue(diagnostics.preferredHits() >= 32,
+                        "ActorRuntime must aggregate preferred-lane activity for operators");
+                if (os.contains("linux")) {
+                    assertEquals(0, diagnostics.bindingFailures(),
+                            "successful native Linux startup must report no affinity-binding failures");
+                }
             }
         } finally {
             if (previous == null) System.clearProperty("ores.runtime.carriers");

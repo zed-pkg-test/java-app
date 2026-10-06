@@ -313,11 +313,11 @@ static void *carrier_reaper_main(void *raw) {
 }
 
 JNIEXPORT jint JNICALL
-Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeBindCurrentThreadToCarrierSlot(
-        JNIEnv *env, jclass cls, jint slot) {
+Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeBindCurrentThreadToAffinityOrdinal(
+        JNIEnv *env, jclass cls, jlong affinity_ordinal) {
     (void)env;
     (void)cls;
-    if (slot < 0) return -1;
+    if (affinity_ordinal < 0) return -1;
 
 #if defined(__linux__)
     long configured_cpus = sysconf(_SC_NPROCESSORS_CONF);
@@ -362,7 +362,7 @@ Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeBindCurrentThreadToCarrier
         return -1;
     }
 
-    int ordinal = slot % allowed_count;
+    int ordinal = (int)((uint64_t)affinity_ordinal % (uint64_t)allowed_count);
     int selected = -1;
     for (int cpu = 0; cpu < cpu_capacity; cpu++) {
         if (!CPU_ISSET_S(cpu, set_size, allowed)) continue;
@@ -395,14 +395,15 @@ Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeBindCurrentThreadToCarrier
      * The actor scheduler still keeps a stable carrier lane above this hint.
      */
     thread_affinity_policy_data_t policy;
-    policy.affinity_tag = (integer_t)(slot + 1);
+    uint64_t tag = ((uint64_t)affinity_ordinal % (uint64_t)INT32_MAX) + 1ULL;
+    policy.affinity_tag = (integer_t)tag;
     mach_port_t thread = pthread_mach_thread_np(pthread_self());
     kern_return_t status = thread_policy_set(
             thread,
             THREAD_AFFINITY_POLICY,
             (thread_policy_t)&policy,
             THREAD_AFFINITY_POLICY_COUNT);
-    return status == KERN_SUCCESS ? (jint)slot : -1;
+    return status == KERN_SUCCESS ? (jint)tag : -1;
 #else
     return -1;
 #endif

@@ -191,7 +191,7 @@ Its invariants are:
 - `release()`/close relinquishes the carrier, with bounded shutdown observation;
 - it never consumes a private/shared ActorRuntime dispatcher worker.
 
-A HungryActor is intentionally expensive. It is appropriate when reserving a whole carrier is the requirement—not as the default way to obtain parallelism. Ordinary actors should remain multiplexed, and ordinary `async` should remain task/future based. The current class is a host/compiler runtime primitive; exposing a richer source-level constructor must preserve the same ownership and capability checks rather than becoming a raw guest thread API.
+A HungryActor is intentionally expensive. It is appropriate when reserving a whole carrier is the requirement—not as the default way to obtain parallelism. Ordinary actors should remain multiplexed, and ordinary `async` should remain task/future based. Dedicated one-carrier executors receive distinct process-wide affinity ordinals, so multiple HungryActors do not all collapse onto the first allowed Linux CPU (or the same Mach affinity tag). The current class is a host/compiler runtime primitive; exposing a richer source-level constructor must preserve the same ownership and capability checks rather than becoming a raw guest thread API.
 
 ## Actor dispatchers
 
@@ -211,7 +211,7 @@ Logical-CPU pinning is the current baseline, not a claim that slot numbers alrea
 
 This scheduler policy is deliberately aligned with actor-local heaps: an actor's mailbox turns, local allocation metadata, and hot state normally return to the same carrier/cache domain without making the heap thread-confined. If balancing pressure moves a turn, the actor retains the same ActorId, heap, mailbox, policy, and continuation state. Queue admission is globally bounded across local affinity lanes plus the spill queue; shutdown retracts a post-drain enqueue when possible so no accepted lane entry can be stranded solely by the shutdown race.
 
-The native executor exposes diagnostic counters for preferred-lane hits, delayed steals, global spills, and affinity-binding failures. These are runtime/control-plane diagnostics, not language semantics.
+The native executor exposes diagnostic counters for preferred-lane hits, delayed steals, global spills, and affinity-binding failures. `ActorRuntime.carrierAffinityDiagnostics()` aggregates them across the private/shared/untrusted bulkheads, and `process.descriptor.actor_carrier_affinity` publishes the aggregate for supervisors. These are runtime/control-plane diagnostics, not language semantics.
 
 The explicit `java` carrier backend remains a portability/debugging fallback and does not promise CPU affinity.
 

@@ -258,6 +258,12 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum CarrierBackend { NATIVE_PTHREAD, JVM_THREAD_POOL }
 
+    public record CarrierAffinityDiagnostics(
+            long preferredHits,
+            long steals,
+            long globalSpills,
+            int bindingFailures) { }
+
     private static final String CARRIER_BACKEND_PROPERTY = "ores.runtime.carriers";
 
     public record DispatcherConfig(
@@ -445,6 +451,26 @@ public final class ActorRuntime implements AutoCloseable {
                 && untrustedDispatcher instanceof NativeCarrierExecutor
                 ? CarrierBackend.NATIVE_PTHREAD
                 : CarrierBackend.JVM_THREAD_POOL;
+    }
+
+    public CarrierAffinityDiagnostics carrierAffinityDiagnostics() {
+        long preferredHits = 0L;
+        long steals = 0L;
+        long globalSpills = 0L;
+        int bindingFailures = 0;
+
+        for (ExecutorService dispatcher :
+                List.of(privateDispatcher, sharedDispatcher, untrustedDispatcher)) {
+            if (dispatcher instanceof NativeCarrierExecutor nativeDispatcher) {
+                preferredHits += nativeDispatcher.getAffinityPreferredHitCount();
+                steals += nativeDispatcher.getAffinityStealCount();
+                globalSpills += nativeDispatcher.getAffinityGlobalSpillCount();
+                bindingFailures += nativeDispatcher.getAffinityBindingFailureCount();
+            }
+        }
+
+        return new CarrierAffinityDiagnostics(
+                preferredHits, steals, globalSpills, bindingFailures);
     }
 
     /**

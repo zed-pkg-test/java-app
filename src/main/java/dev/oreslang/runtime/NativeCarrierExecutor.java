@@ -40,6 +40,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private static final ThreadLocal<Long> CURRENT_NATIVE_THREAD_ID = new ThreadLocal<>();
 
     private static final Object NATIVE_LIBRARY_LOCK = new Object();
+    private static final AtomicLong NEXT_AFFINITY_BASE = new AtomicLong();
     private static volatile boolean nativeLibraryLoaded;
 
     private static final long IDLE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
@@ -59,6 +60,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private final AtomicLongArray affinityLaneOldestEnqueueNanos;
     private final int queueCapacity;
     private final int maximumPoolSize;
+    private final long affinityBase;
     private final long nativeStackBytes;
     private final AtomicInteger corePoolSize;
     private final AtomicInteger largestPoolSize;
@@ -82,11 +84,26 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
             int maximumPoolSize,
             int queueCapacity,
             String threadPrefix) {
+        this(
+                corePoolSize,
+                maximumPoolSize,
+                queueCapacity,
+                threadPrefix,
+                reserveAffinityBase(maximumPoolSize));
+    }
+
+    NativeCarrierExecutor(
+            int corePoolSize,
+            int maximumPoolSize,
+            int queueCapacity,
+            String threadPrefix,
+            long affinityBase) {
         if (corePoolSize <= 0) throw new IllegalArgumentException("corePoolSize must be > 0");
         if (maximumPoolSize < corePoolSize) {
             throw new IllegalArgumentException("maximumPoolSize must be >= corePoolSize");
         }
         if (queueCapacity <= 0) throw new IllegalArgumentException("queueCapacity must be > 0");
+        if (affinityBase < 0) throw new IllegalArgumentException("affinityBase must be >= 0");
         Objects.requireNonNull(threadPrefix, "threadPrefix");
 
         ensureNativeLibraryLoaded();
@@ -100,6 +117,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
         this.affinityLaneOldestEnqueueNanos = new AtomicLongArray(maximumPoolSize);
         this.queueCapacity = queueCapacity;
         this.maximumPoolSize = maximumPoolSize;
+        this.affinityBase = affinityBase;
         this.nativeStackBytes = configuredCarrierStackBytes();
         this.carrierThreads = new AtomicReferenceArray<>(maximumPoolSize);
         this.corePoolSize = new AtomicInteger(corePoolSize);
@@ -116,6 +134,16 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
             started = true;
         } finally {
             if (!started) nativeShutdown(handle);
+        }
+    }
+
+    private static long reserveAffinityBase(int span) {
+        if (span <= 0) throw new IllegalArgumentException("affinity span must be > 0");
+        for (;;) {
+            long current = NEXT_AFFINITY_BASE.get();
+            long next = current <= Long.MAX_VALUE - span ? current + span : span;
+            long reserved = current <= Long.MAX_VALUE - span ? current : 0L;
+            if (NEXT_AFFINITY_BASE.compareAndSet(current, next)) return reserved;
         }
     }
 
@@ -162,7 +190,8 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private void nativeCarrierLoop(int slot) {
         CURRENT_EXECUTOR.set(this);
         CURRENT_SLOT.set(slot);
-        int affinityTarget = nativeBindCurrentThreadToCarrierSlot(slot);
+        long affinityOrdinal = affinityBase + slot;
+        int affinityTarget = nativeBindCurrentThreadToAffinityOrdinal(affinityOrdinal);
         CURRENT_AFFINITY_TARGET.set(affinityTarget);
         if (affinityTarget < 0) affinityBindingFailures.incrementAndGet();
         CURRENT_NATIVE_THREAD_ID.set(nativeCurrentThreadId());
@@ -552,6 +581,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     public int getAffinityBindingFailureCount() { return affinityBindingFailures.get(); }
     public int getLargestPoolSize() { return largestPoolSize.get(); }
     public int getMaximumPoolSize() { return maximumPoolSize; }
+    long affinityBase() { return affinityBase; }
     public long getNativeStackBytes() { return nativeStackBytes; }
     public int getCorePoolSize() { return corePoolSize.get(); }
     @Override
@@ -670,7 +700,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private static native void nativeStart(long handle);
     private static native void nativeSetDesired(long handle, int desiredThreads);
     private static native void nativeAwaitEnabled(long handle, int slot);
-    private static native int nativeBindCurrentThreadToCarrierSlot(int slot);
+    private static native int nativeBindCurrentThreadToAffinityOrdinal(long affinityOrdinal);
     private static native void nativeShutdown(long handle);
     private static native int nativeCurrentCpu();
     private static native long nativeCurrentThreadId();
