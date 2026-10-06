@@ -407,15 +407,17 @@ final class NativeCarrierExecutorTest {
                      new NativeCarrierExecutor(2, 2, 64, "ores-native-affinity-remove-")) {
             CountDownLatch blockersStarted = new CountDownLatch(2);
             CountDownLatch releaseBlockers = new CountDownLatch(1);
+            CountDownLatch blockersFinished = new CountDownLatch(2);
 
             for (int key = 0; key < 2; key++) {
                 executor.executeAffinity(key, () -> {
                     blockersStarted.countDown();
                     try {
-                        assertTrue(releaseBlockers.await(5, TimeUnit.SECONDS));
+                        releaseBlockers.await();
                     } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
-                        fail(interrupted);
+                    } finally {
+                        blockersFinished.countDown();
                     }
                 });
             }
@@ -439,6 +441,8 @@ final class NativeCarrierExecutorTest {
             } finally {
                 releaseBlockers.countDown();
             }
+            assertTrue(blockersFinished.await(5, TimeUnit.SECONDS),
+                    "carrier blockers must exit after the test releases them");
         }
     }
 
