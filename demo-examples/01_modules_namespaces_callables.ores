@@ -1,6 +1,6 @@
 namespace callable_demo;
 
-type IntFn = typeof fnc(int value) -> int;
+type IntFn = typeof fnc(int value) => int;
 
 define module math
 
