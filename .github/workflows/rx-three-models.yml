@@ -1,0 +1,35 @@
+name: rx-three-models
+on:
+  push:
+    branches:
+      - ci/rx-three-models-exact-20261006
+  pull_request:
+jobs:
+  rx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build exact local compiler
+        run: |
+          mkdir -p .work
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=.work/rx-classpath.txt
+      - name: Test pull/Future rx-ores
+        run: |
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat .work/rx-classpath.txt)"
+          python3 integration/rx-ores/scripts/test.py
+      - name: Test callback rx
+        run: |
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat .work/rx-classpath.txt)"
+          python3 integration/rx-ores-callbacks/scripts/test.py
+      - name: Test channel rx
+        run: |
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat .work/rx-classpath.txt)"
+          python3 integration/rx-oreslang-channels/scripts/test.py

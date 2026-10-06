@@ -1,0 +1,34 @@
+import * as rx from '../src/rx.ores';
+import class Observable, Subscription from '../src/rx.ores';
+
+async fnc twenty(): int {
+  return 20;
+}
+
+async fnc twice(int value): int {
+  return value * 2;
+}
+
+pub fnc main(): void {
+  val Future<int> mapped = twenty().map(|int value| -> {
+    return value + 1;
+  });
+  val Future<int> composed = mapped.compose(|int value| -> {
+    return twice(value);
+  });
+  val Future<int> ready = composed.onSuccess(|int value| -> {
+    stdio.stdout.write("seen:");
+    stdio.stdout.write(value);
+    stdio.stdout.write(":");
+    return;
+  });
+
+  val Observable<int> source = rx.from_future(ready);
+  val Subscription<int> sub = source.subscribe();
+  val Option<int> value = sub.next();
+
+  stdio.stdout.write(value.unwrap());
+  stdio.stdout.write(":");
+  stdio.stdout.write(sub.next().is_none());
+  return;
+}
