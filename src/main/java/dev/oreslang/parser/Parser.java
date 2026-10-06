@@ -328,7 +328,6 @@ public final class Parser {
             rejectCallableStructuralAnnotation(annotations, "actor class declarations");
             return parseActorClass(actorKind, modifiers.visibility);
         }
-        if (modifiers.shared || modifiers.untrusted) throw error(previous(), "'shared'/'untrusted' must modify an actor declaration");
         if (match(FNC)) {
             modifiers = mergeModifiers(modifiers, parseModifiers());
             if (match(ACTOR, ISOACTOR)) {
