@@ -104,6 +104,27 @@ final class ParserTest {
                     return;
                   }
                 end
+                """,
+                """
+                define module app
+                  shared fnc missing_actor(): void {
+                    return;
+                  }
+                end
+                """,
+                """
+                define module app
+                  fnc shared missing_actor_after_fnc(): void {
+                    return;
+                  }
+                end
+                """,
+                """
+                define module app
+                  fnc shared isoactor contradictory_after_fnc(): void {
+                    return;
+                  }
+                end
                 """
         );
 
