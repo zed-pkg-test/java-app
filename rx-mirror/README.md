@@ -1,6 +1,6 @@
 # rx-oreslang-channels
 
-A userland reactive stream library written in **Oreslang**. It uses bounded/rendezvous channels, `readch`, `nb writech`, `try` probes, dynamic `select`/`nb select`, and `await`. `src/rx.ores` is a plain file/code unit, not a synthetic package or module wrapper; callers import the file with `import * as ...` and/or select declarations by relative path. It has no dependency on `std/rx` and adds no Java reactive implementation.
+A userland reactive stream library written in **Oreslang**. It uses bounded/rendezvous channels, `readch`, `nb writech`, `try` probes, dynamic `select`/`nb select`, and `await`. It follows the pointerless ownership model throughout. `src/rx.ores` is a plain file/code unit, not a synthetic package or module wrapper; callers import the file with `import * as ...` and/or select declarations by relative path. It has no dependency on `std/rx` and adds no Java reactive implementation.
 
 This library lives outside core/std-lib. The core rx-ores implementation can evolve independently while this version exercises Oreslang's channel and source-frame suspension APIs.
 
@@ -14,7 +14,7 @@ source .work/env.sh
 python3 scripts/test.py
 ```
 
-`compiler.lock` pins the exact reference compiler revision. The initial release requires the source-method suspension fix in [oreslang-source.java PR #308](https://github.com/ores-truffle-oreslang/oreslang-source.java/pull/308). Setup fetches the pinned commit; it does not modify your compiler checkout or `std/rx`.
+`compiler.lock` pins the exact reference compiler revision. This branch requires the merged Future/select work plus the pointerless first-class `Fnc<T,...>` ownership convergence: callback calls temporarily read-borrow ordinary arguments, while explicit ownership operations use the reserved `rt copy`, `rt share`, `rt borrow`, and `rt take` surface. Setup fetches the pinned commit; it does not modify your compiler checkout or `std/rx`.
 
 You can also set `ORES_CLASSPATH` to an existing compatible compiler's `target/classes` plus its Maven dependency classpath. Set `JAVA` to the Java executable if necessary.
 
@@ -56,7 +56,7 @@ Imports of generic functions currently use the module-qualified direct-call form
 | `from_channel(Channel<Option<T>>)` | Hot input with one consumer; no background pump |
 | `from_future(Future<T>)` | One shared Future result, then completion |
 | `map(Observable<A>, Fnc<A, B>)` | One transform per demanded item |
-| `filter(Observable<T>, Fnc<&T, bool>)` | Iterative pulls until a predicate accepts |
+| `filter(Observable<T>, Fnc<T, bool>)` | Iterative pulls until a predicate accepts; the callback receives temporary read access |
 | `take(Observable<T>, int)` | At most N items, then cancels upstream |
 | `merge_channels(left, right)` | Fair deterministic merging of two channel inputs |
 | `first(Observable<T>)` | One pull, then cancels the subscription |
@@ -66,14 +66,15 @@ Imports of generic functions currently use the module-qualified direct-call form
 | `subscription.next()` | Suspends until data/completion/failure; one outstanding pull |
 | `subscription.cancel()` | Idempotent cancellation; returns true only once |
 
-A filter borrows its argument so rejection never moves away a retained payload. For scalar predicates the current compiler needs an explicit conversion from the borrowed value, for example:
+Oreslang's source ownership model is pointerless. Callback types stay ordinary, for example `Fnc<int, bool>` or `Fnc<T, bool>`; a first-class callback call receives temporary read access without encoding a C/Rust-style pointer type. If code needs a named borrow beyond one call expression it uses `rt borrow value`, not `&value`.
 
 ```ores
-val Fnc<&int, bool> even = |x| -> {
-  val int value = x as int;
+val Fnc<int, bool> even = |value| -> {
   return value % 2 == 0;
 };
 ```
+
+The library and test runner reject pointer-style callback types, unary address-of borrows, and pointer declarations.
 
 ## Stream contract
 
