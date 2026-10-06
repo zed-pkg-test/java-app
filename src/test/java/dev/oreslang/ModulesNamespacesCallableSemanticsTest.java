@@ -98,6 +98,171 @@ final class ModulesNamespacesCallableSemanticsTest {
         assertEquals("7|42", output);
     }
 
+    @Test
+    void modulesConformToDedicatedContracts() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define contract MathApi as
+                  fnc add(int a, int b) => int;
+                  String name;
+                end
+
+                define module math conforms MathApi as
+                  pub fnc add(int a, int b): int {
+                    return a + b;
+                  }
+                  pub val String name = "math";
+                end
+                """)));
+    }
+
+    @Test
+    void moduleContractsCannotBeUsedAsTypeInterfacesOrTraits() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract MathApi as
+                  fnc add(int a, int b) => int;
+                end
+
+                define class Bad implements MathApi as
+                  add(int a, int b): int {
+                    return a + b;
+                  }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract MathApi as
+                  fnc add(int a, int b) => int;
+                end
+
+                define module math conforms MathApi as
+                  pub fnc add(int a, int b): int {
+                    return a + b;
+                  }
+                end
+
+                fnc bad(): MathApi {
+                  return math;
+                }
+                """)));
+    }
+
+    @Test
+    void legacyModuleAdheresToIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract MathApi as
+                  fnc add(int a, int b) => int;
+                end
+
+                @AdheresTo(MathApi)
+                define module math as
+                  pub fnc add(int a, int b): int {
+                    return a + b;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void moduleContractFieldsRequireExactBindingSemantics() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define contract Config as
+                  val String name;
+                  let int capacity;
+                end
+
+                define module good conforms Config as
+                  pub val String name = "x";
+                  pub let int capacity = 10;
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract Config as
+                  val String name;
+                end
+
+                define module bad conforms Config as
+                  pub let String name = "x";
+                end
+                """)));
+    }
+
+    @Test
+    void moduleContractInheritanceIsContractOnly() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define contract Base as
+                  val String name;
+                end
+
+                define contract Derived extends Base as
+                  fnc size(): int;
+                end
+
+                define module good conforms Derived as
+                  pub val String name = "x";
+                  pub fnc size(): int { return 1; }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define interface Base as
+                  fnc size(): int;
+                end
+
+                define contract Bad extends Base as
+                  fnc size(): int;
+                end
+                """)));
+    }
+
+    @Test
+    void moduleContractsDoNotHaveSelfTypes() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract Bad as
+                  fnc clone(): self;
+                end
+                """)));
+    }
+
+    @Test
+    void publicModuleContractsAreLegalDeclarations() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                pub define contract PublicApi as
+                  fnc ping(): void;
+                end
+                """)));
+    }
+
+    @Test
+    void moduleContractsCannotLeakThroughNominalAssignability() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract Api as
+                  fnc ping(): void;
+                end
+
+                define class User as
+                  pub fnc ping(): void { return; }
+                end
+
+                fnc bad(): Api {
+                  return User();
+                }
+                """)));
+    }
+
+    @Test
+    void duplicateModuleContractsAreRejected() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract Api as
+                  fnc ping(): void;
+                end
+
+                define module m conforms Api, Api as
+                  pub fnc ping(): void { return; }
+                end
+                """)));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "modules-namespaces-callables.ores")

@@ -62,8 +62,12 @@ final class ChannelSelectSyntaxTest {
         Ast.FunctionDecl nonblocking =
                 (Ast.FunctionDecl) program.modules().getFirst().declarations().get(1);
         Ast.SelectStmt nb =
-                assertInstanceOf(Ast.SelectStmt.class, nonblocking.body().stream()
-                        .filter(statement -> statement instanceof Ast.SelectStmt).findFirst().orElseThrow());
+                assertInstanceOf(
+                        Ast.SelectStmt.class,
+                        nonblocking.body().stream()
+                                .filter(statement -> statement instanceof Ast.SelectStmt)
+                                .findFirst()
+                                .orElseThrow());
         assertEquals(Ast.WaitMode.NONBLOCKING, nb.mode());
 
         assertDoesNotThrow(() -> OwnershipChecker.check(program));
@@ -238,6 +242,60 @@ final class ChannelSelectSyntaxTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc bad(): Channel<void> {
                   return Channel.new<void>(1);
+                }
+                """)));
+    }
+
+    @Test
+    void nonblockingWriteHasRepresentableFutureVoidSurface() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                fnc write(Channel<int> output): Future<void> {
+                  return nb writech output, 42;
+                }
+                """));
+
+        Ast.FunctionDecl fn =
+                (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
+        Ast.ReturnStmt returned = assertInstanceOf(Ast.ReturnStmt.class, fn.body().getFirst());
+        Ast.ChannelOpExpr write =
+                assertInstanceOf(Ast.ChannelOpExpr.class, returned.value());
+        assertEquals(Ast.WaitMode.NONBLOCKING, write.mode());
+        assertEquals(Ast.ChannelOperation.WRITE, write.operation());
+        assertEquals(false, write.callback());
+    }
+
+    @Test
+    void nonblockingWriteCallbackUsesTheSameChannelOperationSurface() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                actor fnc write(): void {
+                  val Channel<int> output = Channel.new<int>(1);
+                  nb cb writech output, 42 || -> {
+                    stdio.println("write complete");
+                  };
+                  return;
+                }
+                """));
+
+        Ast.FunctionDecl fn =
+                (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
+        Ast.ExprStmt statement =
+                assertInstanceOf(Ast.ExprStmt.class, fn.body().get(1));
+        Ast.ChannelOpExpr write =
+                assertInstanceOf(Ast.ChannelOpExpr.class, statement.expression());
+        assertEquals(Ast.WaitMode.NONBLOCKING, write.mode());
+        assertEquals(Ast.ChannelOperation.WRITE, write.operation());
+        assertTrue(write.callback());
+        assertEquals(1, write.callbackBody().size());
+    }
+
+    @Test
+    void nonblockingWriteCallbackRequiresActorExecutionDomain() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                fnc wrong(Channel<int> output): void {
+                  nb cb writech output, 42 || -> {
+                    stdio.println("wrong");
+                  };
+                  return;
                 }
                 """)));
     }

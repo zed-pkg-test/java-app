@@ -110,6 +110,28 @@ final class ImportSelectorSyntaxTest {
     }
 
     @Test
+    void classDeclaredInsideModuleCanBeSelectedByClassImport() throws Exception {
+        Path child = temp.resolve("models.ores");
+        Path main = temp.resolve("main.ores");
+
+        Files.writeString(child, """
+                define module Models as
+                  pub define class Box as
+                    pub let int value = 7;
+                  end
+                end
+                """);
+
+        Files.writeString(main, """
+                import class Box from './models';
+
+                pub routine main(): void { return; }
+                """);
+
+        LinkedProgramRunner.validate(main);
+    }
+
+    @Test
     void classAndActorSelectorsDoNotAliasEachOther() throws Exception {
         Path child = temp.resolve("actors.ores");
         Files.writeString(child, """
