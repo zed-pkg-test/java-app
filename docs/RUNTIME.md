@@ -225,7 +225,11 @@ The evaluator keeps the raw target inaccessible to source code and maps operatio
 - all other direct methods -> write lock;
 - extracted/bound proxy methods -> rejected;
 - async or potentially suspending method -> rejected before executing under the lock;
-- mutable/move-only result escape -> rejected.
+- mutable/move-only result escape -> rejected;
+- field/index assignment -> write lock and `void` result, so storing a move-only value cannot manufacture a second raw owner;
+- `Proxy<T>.dispose()` -> proxy lifecycle revocation; the handle releases its quota and strong runtime root.
+
+Creating a proxy is also an allocation-provenance boundary. A value created inside a SHARED actor is semantically promoted from that actor's local allocation domain into a runtime-owned proxy domain before the capability can cross actors. The current JVM backend realizes that promotion as a strong `ActorRuntime` root and records the source ActorId/domain. Native/#289 arena lowering must perform a real move/promotion out of the actor-local arena before publishing the proxy; it must never leave a transportable proxy pointing into memory that actor teardown can retire.
 
 The lock domain is independent of native carrier identity, so an actor may migrate between carrier threads without changing proxy correctness. Cross-proxy nested locking is rejected rather than attempting a global lock-order protocol, and read-to-write upgrade is rejected rather than parking forever. Closing a proxy or the enclosing ActorRuntime from inside a live proxy read section also fails before attempting the write lock.
 
