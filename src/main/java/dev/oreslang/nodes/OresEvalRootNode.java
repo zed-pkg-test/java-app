@@ -1074,6 +1074,9 @@ public final class OresEvalRootNode extends RootNode {
                         arg -> expressionContainsPotentialSuspension(
                                 arg, seen));
             }
+            if (expr instanceof Ast.SpawnExpr spawned) {
+                return expressionContainsPotentialSuspension(spawned.call(), seen);
+            }
             if (expr instanceof Ast.ListExpr list) {
                 return list.elements().stream().anyMatch(
                         item -> expressionContainsPotentialSuspension(item, seen));
@@ -2385,6 +2388,11 @@ public final class OresEvalRootNode extends RootNode {
                     return;
                 }
 
+                if (expr instanceof Ast.SpawnExpr spawned) {
+                    continuation.accept(task, spawnActorClass(spawned), null);
+                    return;
+                }
+
                 if (expr instanceof Ast.AwaitExpr awaited) {
                     evalSuspendableExpr(
                             task,
@@ -3410,6 +3418,13 @@ public final class OresEvalRootNode extends RootNode {
             Ast.MemberExpr member =
                     (Ast.MemberExpr) call.callee();
 
+            if (receiver instanceof ActorRuntime.ActorRef<?> ref) {
+                return actorProtocolInvocation(
+                        ref,
+                        member.member(),
+                        args);
+            }
+
             if (receiver instanceof OresObject object) {
                 Ast.MethodDecl method =
                         object.owner.findMethod(
@@ -3724,6 +3739,128 @@ public final class OresEvalRootNode extends RootNode {
                 return future;
             }
             return future.join();
+        }
+
+        private Invocation actorProtocolInvocation(
+                ActorRuntime.ActorRef<?> ref,
+                String method,
+                List<Object> arguments) {
+            return invokableInvocation(
+                    ignored -> context.actors().invokeSourceProtocol(
+                            ref,
+                            method,
+                            arguments),
+                    List.of());
+        }
+
+        private ActorRuntime.ActorRef<Object> spawnActorClass(
+                Ast.SpawnExpr spawned) {
+            Ast.CallExpr call = spawned.call();
+            if (!(call.callee() instanceof Ast.NameExpr name)) {
+                throw new IllegalArgumentException(
+                        "spawn requires a direct actor-class name");
+            }
+            Ast.ClassDecl klass = findClass(name.name());
+            if (klass == null || klass.actorKind() == Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException(
+                        "spawn target '" + name.name()
+                                + "' is not a known actor class");
+            }
+            if (!call.arguments().isEmpty()) {
+                throw new IllegalStateException(
+                        "actor-class spawn arguments are not linked to the runtime initializer ABI yet");
+            }
+            if (klass.actorKind() != Ast.ActorKind.SHARED) {
+                throw new IllegalStateException(
+                        "source actor-class runtime lowering currently supports SHARED actors only; "
+                                + klass.actorKind()
+                                + " requires isolated actor-object heap lowering");
+            }
+
+            return context.actors().spawnSourceSharedProtocolActor(actorContext -> {
+                if (!ActorRuntime.inActorExecution()) {
+                    throw new IllegalStateException(
+                            "source actor state must be constructed inside actor execution");
+                }
+                OresObject actor = instantiateActorState(klass);
+                return (methodName, arguments, turnContext) -> {
+                    if (methodName.equals("id")
+                            || methodName.equals("is_alive")
+                            || methodName.equals("mailbox")) {
+                        throw new IllegalArgumentException(
+                                "actor protocol method conflicts with reserved ActorRef control name '"
+                                        + methodName + "'");
+                    }
+                    Ast.MethodDecl endpoint = findMethod(
+                            klass,
+                            CallableSelector.instance(methodName, arguments.size()),
+                            new LinkedHashSet<>());
+                    if (endpoint == null
+                            || endpoint.isStatic()
+                            || endpoint.visibility() != Ast.Visibility.PUBLIC) {
+                        throw new IllegalArgumentException(
+                                "actor class '" + klass.name()
+                                        + "' has no public protocol method '"
+                                        + methodName + "' with arity " + arguments.size());
+                    }
+                    if (endpoint.async()
+                            || methodContainsPotentialSuspension(endpoint)) {
+                        throw new IllegalStateException(
+                                "suspending actor protocol method '"
+                                        + klass.name() + "." + endpoint.name()
+                                        + "' is not linked to the current mailbox continuation ABI yet");
+                    }
+                    Object result = callMethod(actor, endpoint, arguments);
+                    if (result instanceof OresFuture<?>) {
+                        throw new IllegalStateException(
+                                "actor protocol method '" + klass.name() + "."
+                                        + endpoint.name()
+                                        + "' unexpectedly returned a Future without suspension lowering");
+                    }
+                    return result;
+                };
+            });
+        }
+
+        private OresObject instantiateActorState(Ast.ClassDecl klass) {
+            if (klass.actorKind() == Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException(
+                        "ordinary classes must be constructed with new");
+            }
+            if (klass.constructor() != null) {
+                throw new IllegalStateException(
+                        "actor constructors are not linked to the source spawn initializer ABI yet");
+            }
+
+            List<Ast.FieldDecl> classFields =
+                    effectiveFields(klass, new LinkedHashSet<>());
+            LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
+            for (Ast.FieldDecl field : classFields) {
+                fields.put(field.name(), UNINITIALIZED_FIELD);
+            }
+            OresObject object = new OresObject(this, klass, fields);
+
+            for (Ast.FieldDecl field : classFields) {
+                if (field.initializer() == null) {
+                    throw new IllegalStateException(
+                            "actor field '" + klass.name() + "." + field.name()
+                                    + "' requires an initializer until spawn constructor arguments are enabled");
+                }
+                OwnedField owned =
+                        findField(klass, field.name(), new LinkedHashSet<>());
+                Ast.ClassDecl fieldOwner =
+                        owned == null ? klass : owned.owner();
+                Env initializerEnv =
+                        new Env(null, false, fieldOwner);
+                initializerEnv.define(
+                        "self",
+                        object,
+                        Ast.BindingKind.VAL);
+                fields.put(
+                        field.name(),
+                        eval(field.initializer(), initializerEnv));
+            }
+            return object;
         }
 
         private List<Object> normalizeFunctionArguments(Ast.FunctionDecl fn, List<?> args) {
@@ -4590,6 +4727,13 @@ public final class OresEvalRootNode extends RootNode {
                 Object receiver = eval(methodCall.receiver(), env);
                 List<Object> args = evaluateArguments(call.arguments(), env);
 
+                if (receiver instanceof ActorRuntime.ActorRef<?> ref) {
+                    return actorProtocolInvocation(
+                            ref,
+                            methodCall.member(),
+                            args);
+                }
+
                 if (receiver instanceof OresObject object) {
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, CallableSelector.instance(methodCall.member(), args.size()), new LinkedHashSet<>());
@@ -5047,6 +5191,9 @@ public final class OresEvalRootNode extends RootNode {
                 if (receiver instanceof List<?> list) return list.get(i);
                 if (receiver instanceof Object[] array) return array[i];
                 throw new IllegalArgumentException("value is not indexable: " + receiver);
+            }
+            if (expr instanceof Ast.SpawnExpr spawned) {
+                return spawnActorClass(spawned);
             }
             if (expr instanceof Ast.NewExpr created) {
                 if (created.type().name().equals("DynamicStruct")) {
