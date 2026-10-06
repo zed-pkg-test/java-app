@@ -61,7 +61,7 @@ public final class Parser {
                 }
                 boolean afterDefineAbstract = match(ABSTRACT);
                 if (match(MODULE)) {
-                    if (modifiers.visibility != Ast.Visibility.PRIVATE || modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
+                    if (modifiers.visibility != Ast.Visibility.PRIVATE || modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical || modifiers.trapped || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
                         throw error(previous(), "modules do not accept function/class modifiers");
                     }
                     rejectCallableStructuralAnnotation(annotations, "module declarations");
@@ -69,7 +69,7 @@ public final class Parser {
                     continue;
                 }
                 if (match(CONTRACT)) {
-                    if (modifiers.structural || modifiers.async || modifiers.generator || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
+                    if (modifiers.structural || modifiers.async || modifiers.generator || modifiers.nonLexical || modifiers.trapped || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
                         throw error(previous(), "contracts do not accept class/callable modifiers");
                     }
                     rejectCallableStructuralAnnotation(annotations, "contract declarations");
@@ -90,6 +90,7 @@ public final class Parser {
                 if (match(INTERFACE)) {
                     if (modifiers.generator) throw error(previous(), "'generator' applies only to fnc or routine declarations");
                     if (modifiers.nonLexical) throw error(previous(), "'nlex' applies only to fnc, routine, or lambda");
+                    if (modifiers.trapped) throw error(previous(), "'trap' applies only to fnc or routine declarations");
                     if (modifiers.structural) throw error(previous(), "'structural' applies to callable declarations, not interface declarations");
                     rejectCallableStructuralAnnotation(annotations, "interface declarations");
                     rootDeclarations.add(parseInterface(modifiers.visibility));
@@ -259,8 +260,8 @@ public final class Parser {
             }
             if (match(FNC)) return parseFunction(annotations, modifiers, Ast.CallableKind.FNC, actorKind);
             if (match(ROUTINE)) return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE, actorKind);
-            if (modifiers.async || modifiers.structural || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
-                throw error(actorToken, "actor declarations do not accept async, structural, nlex, static, or abstract modifiers");
+            if (modifiers.async || modifiers.structural || modifiers.nonLexical || modifiers.trapped || modifiers.isStatic || modifiers.isAbstract) {
+                throw error(actorToken, "actor declarations do not accept async, structural, nlex, trap, static, or abstract modifiers");
             }
             rejectCallableStructuralAnnotation(annotations, "actor class declarations");
             return parseActorClass(actorKind);
@@ -270,6 +271,7 @@ public final class Parser {
         if (match(ROUTINE)) return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE);
         if (modifiers.structural) throw error(peek(), "'structural' applies only to fnc, routine, methods, or interface callable signatures");
         if (modifiers.nonLexical) throw error(peek(), "'nlex' applies only to fnc, routine, or lambda");
+        if (modifiers.trapped) throw error(peek(), "'trap' applies only to fnc or routine declarations");
         if (modifiers.generator) throw error(peek(), "'generator' applies only to fnc or routine declarations");
         if (match(CONTRACT)) {
             rejectCallableStructuralAnnotation(annotations, "contract declarations");
@@ -298,6 +300,15 @@ public final class Parser {
             Ast.ActorKind actorKind) {
         if (modifiers.isStatic) throw error(previous(), "'static fnc' is only valid inside a class");
         if (modifiers.isAbstract) throw error(previous(), "top-level/module callables cannot be abstract");
+        if (modifiers.trapped && modifiers.async) {
+            throw error(previous(), "async trap fnc/routine is not enabled until trap spans every await suspension");
+        }
+        if (modifiers.trapped && modifiers.generator) {
+            throw error(previous(), "trap generator fnc/routine is not enabled until trap spans generator suspension");
+        }
+        if (modifiers.trapped && actorKind != Ast.ActorKind.NONE) {
+            throw error(previous(), "trap actor callables are not enabled until actor supervision preserves the trap effect");
+        }
         CallableStructural structural = normalizeCallableStructural(annotations, modifiers.structural);
         annotations = structural.annotations();
         String name = consumeCallableName("expected callable name");
@@ -312,7 +323,7 @@ public final class Parser {
                     ? Ast.TypeRef.simple("void")
                     : parseTypeRef();
             List<Ast.Stmt> body = parseBlock();
-            return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.generator, structural.enabled(), modifiers.nonLexical, actorKind,
+            return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.generator, structural.enabled(), modifiers.nonLexical, modifiers.trapped, actorKind,
                     generics, params, returnType, annotations, body);
         }
 
@@ -322,7 +333,7 @@ public final class Parser {
         consume(RPAREN, "expected ')' after parameters");
         Ast.TypeRef returnType = parseReturnType(annotations);
         List<Ast.Stmt> body = parseBlock();
-        return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.generator, structural.enabled(), modifiers.nonLexical, actorKind, generics, params,
+        return new Ast.FunctionDecl(name, kind, modifiers.visibility, modifiers.async, modifiers.generator, structural.enabled(), modifiers.nonLexical, modifiers.trapped, actorKind, generics, params,
                 returnType, annotations, body);
     }
 
@@ -370,6 +381,7 @@ public final class Parser {
             }
             if (mods.generator) throw error(peek(), "'generator' is not permitted on class methods or static class fnc; declare a module/top-level generator fnc or routine");
             if (mods.nonLexical) throw error(peek(), "'nlex' is unnecessary on class members; methods/static fnc never capture enclosing local scopes");
+            if (mods.trapped) throw error(peek(), "'trap' on class methods/static fnc is not enabled until method callable metadata carries the trap effect");
             if (isBindingKind(peek().type())) {
                 if (mods.structural) throw error(peek(), "'structural' applies to methods/static fnc, not fields");
                 if (mods.isStatic) throw error(peek(), "static data members are not implemented yet; static class functions use 'static fnc'");
@@ -425,10 +437,10 @@ public final class Parser {
     }
 
     private void validateClassModifiers(Modifiers modifiers) {
-        if (modifiers.async || modifiers.generator || modifiers.nonLexical
+        if (modifiers.async || modifiers.generator || modifiers.nonLexical || modifiers.trapped
                 || modifiers.isStatic || modifiers.shared) {
             throw error(previous(),
-                    "classes accept only private/pub visibility and abstract; async, generator, nlex, static, and shared are not permitted");
+                    "classes accept only private/pub visibility and abstract; async, generator, nlex, trap, static, and shared are not permitted");
         }
     }
 
@@ -456,6 +468,7 @@ public final class Parser {
             }
             if (mods.shared) throw error(previous(), "'shared' is only valid on an actor declaration, not its members");
             if (mods.nonLexical) throw error(previous(), "'nlex' is unnecessary on actor members; actor methods already execute in the actor turn scope");
+            if (mods.trapped) throw error(previous(), "'trap' on actor members is not enabled until actor supervision preserves the trap effect");
             if (isContextualIdentifier("constructor")) {
                 throw error(peek(),
                         "actors do not declare constructors; actor state is initialized by the actor runtime");
@@ -513,6 +526,7 @@ public final class Parser {
             if (memberModifiers.visibility == Ast.Visibility.PUBLIC
                     || memberModifiers.async
                     || memberModifiers.nonLexical
+                    || memberModifiers.trapped
                     || memberModifiers.isStatic
                     || memberModifiers.isAbstract
                     || memberModifiers.shared) {
@@ -726,6 +740,7 @@ public final class Parser {
         boolean generator = false;
         boolean structural = false;
         boolean nonLexical = false;
+        boolean trapped = false;
         boolean isStatic = false;
         boolean isAbstract = false;
         boolean shared = false;
@@ -735,6 +750,7 @@ public final class Parser {
         boolean generatorSeen = false;
         boolean structuralSeen = false;
         boolean nonLexicalSeen = false;
+        boolean trapSeen = false;
         boolean staticSeen = false;
         boolean abstractSeen = false;
         boolean sharedSeen = false;
@@ -765,6 +781,10 @@ public final class Parser {
                 if (nonLexicalSeen) throw error(previous(), "duplicate 'nlex' modifier");
                 nonLexicalSeen = true;
                 nonLexical = true;
+            } else if (match(TRAP)) {
+                if (trapSeen) throw error(previous(), "duplicate 'trap' modifier");
+                trapSeen = true;
+                trapped = true;
             } else if (match(STATIC)) {
                 if (staticSeen) throw error(previous(), "duplicate 'static' modifier");
                 staticSeen = true;
@@ -785,7 +805,7 @@ public final class Parser {
                 break;
             }
         }
-        return new Modifiers(visibility, async, generator, structural, nonLexical, isStatic, isAbstract, shared, untrusted);
+        return new Modifiers(visibility, async, generator, structural, nonLexical, trapped, isStatic, isAbstract, shared, untrusted);
     }
 
     private Ast.TypeRef parseReturnType(List<Ast.Annotation> annotations) {
@@ -2424,7 +2444,7 @@ public final class Parser {
             case IDENT,
                     DEFINE, CLASS, MODULE, NAMESPACE, IMPORT, FROM, AS, EXTENDS, IMPLEMENTS,
                     TRY, CATCH, FINALLY, END, FI, IF, DO, ELSE, THEN,
-                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, NB, SELECT, READCH, WRITECH, ACTOR, ISOACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, EQ, NEQ, IS, WHEN, CASE, DEFAULT, FIRST, CB, UNTRUSTED, TYPE, TYPES, TYPEOF,
+                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, TRAP, NB, SELECT, READCH, WRITECH, ACTOR, ISOACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, EQ, NEQ, IS, WHEN, CASE, DEFAULT, FIRST, CB, UNTRUSTED, TYPE, TYPES, TYPEOF,
                     INTERFACE, TRAIT, STRUCT, IMPL, ABSTRACT, VOID, STATIC, PUB, PRIVATE, STRUCTURAL, RETURN, DEFER,
                     VAL, CONST, LET, MUT, SELF, TRUE, FALSE, NULL, OBJ, ARR -> true;
             default -> false;
@@ -2792,5 +2812,5 @@ public final class Parser {
         return new IllegalArgumentException("Oreslang parse error at " + token.line() + ":" + token.column() + ": " + message);
     }
 
-    private record Modifiers(Ast.Visibility visibility, boolean async, boolean generator, boolean structural, boolean nonLexical, boolean isStatic, boolean isAbstract, boolean shared, boolean untrusted) { }
+    private record Modifiers(Ast.Visibility visibility, boolean async, boolean generator, boolean structural, boolean nonLexical, boolean trapped, boolean isStatic, boolean isAbstract, boolean shared, boolean untrusted) { }
 }
