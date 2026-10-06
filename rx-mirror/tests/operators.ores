@@ -4,7 +4,7 @@ pub async fnc main(): void {
   val Observable<int> source = rx_channels.from_values([1, 2, 3, 4, 5]);
   val Fnc<int, int> twice = |x| -> { return x * 2; };
   val Observable<int> doubled = rx_channels.map(source, twice);
-  val Fnc<&int, bool> large = |x| -> { val int value = x as int; return value > 4; };
+  val Fnc<int, bool> large = |x| -> { val int value = x as int; return value > 4; };
   val Observable<int> selected = rx_channels.filter(doubled, large);
   val Observable<int> limited = rx_channels.take(selected, 2);
   val Subscription<int> sub = limited.subscribe();
