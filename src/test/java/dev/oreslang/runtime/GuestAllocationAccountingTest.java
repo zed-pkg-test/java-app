@@ -60,11 +60,15 @@ final class GuestAllocationAccountingTest {
                     new AtomicReference<>();
 
             var ref = runtime.<String>spawnSharedTrusted(factory -> (message, context) -> {
+                long sharedBeforeLocalAllocation = runtime.sharedMemoryBytes();
                 observedDomain.set(context.runtime().accountGuestHeapAllocation(256));
                 assertEquals(256L, context.localMemory().usedBytes());
                 assertEquals(256L, runtime.sharedActorLocalMemoryBytes());
                 assertEquals(0L, runtime.privateMemoryBytes());
-                assertEquals(0L, runtime.sharedMemoryBytes());
+                assertEquals(
+                        sharedBeforeLocalAllocation,
+                        runtime.sharedMemoryBytes(),
+                        "guest-local allocation must not add runtime-shared bytes");
                 checked.countDown();
                 context.self().stop();
             });
@@ -80,43 +84,45 @@ final class GuestAllocationAccountingTest {
     }
 
     @Test
-    void privateAndUntrustedGuestAllocationsStayConfined() throws Exception {
+    void privateAndUntrustedGuestAllocationsStayConfined() {
         try (ActorRuntime runtime = new ActorRuntime()) {
-            CountDownLatch privateChecked = new CountDownLatch(1);
-            AtomicReference<ActorRuntime.AllocationDomain> privateDomain =
-                    new AtomicReference<>();
+            String privateKind = runtime.invoke(
+                    ActorRuntime.ActorKind.PRIVATE,
+                    "allocate",
+                    (message, context) -> {
+                        ActorRuntime.AllocationDomain domain =
+                                context.runtime().accountGuestHeapAllocation(128);
+                        assertEquals(128L, context.localMemory().usedBytes());
+                        assertEquals(
+                                ActorRuntime.AllocationDomainKind.ACTOR_PRIVATE,
+                                domain.kind());
+                        return domain.kind().name();
+                    });
 
-            var isolated = runtime.<String>spawnPrivate(factory -> (message, context) -> {
-                privateDomain.set(context.runtime().accountGuestHeapAllocation(128));
-                assertEquals(128L, context.localMemory().usedBytes());
-                privateChecked.countDown();
-                context.self().stop();
-            });
+            assertEquals(
+                    ActorRuntime.AllocationDomainKind.ACTOR_PRIVATE.name(),
+                    privateKind);
+            assertEquals(0L, runtime.privateMemoryBytes(),
+                    "one-shot private actor retirement must reclaim its local arena");
 
-            isolated.send("allocate");
-            assertTrue(privateChecked.await(2, TimeUnit.SECONDS));
-            assertEquals(ActorRuntime.AllocationDomainKind.ACTOR_PRIVATE,
-                    privateDomain.get().kind());
-            assertTrue(isolated.awaitTermination(2, TimeUnit.SECONDS));
-            assertEquals(0L, runtime.privateMemoryBytes());
+            String untrustedKind = runtime.invoke(
+                    ActorRuntime.ActorKind.UNTRUSTED,
+                    "allocate",
+                    (message, context) -> {
+                        ActorRuntime.AllocationDomain domain =
+                                context.runtime().accountGuestHeapAllocation(128);
+                        assertEquals(128L, context.localMemory().usedBytes());
+                        assertEquals(
+                                ActorRuntime.AllocationDomainKind.UNTRUSTED_ISOLATE,
+                                domain.kind());
+                        return domain.kind().name();
+                    });
 
-            CountDownLatch untrustedChecked = new CountDownLatch(1);
-            AtomicReference<ActorRuntime.AllocationDomain> untrustedDomain =
-                    new AtomicReference<>();
-
-            var untrusted = runtime.<String>spawnUntrusted(factory -> (message, context) -> {
-                untrustedDomain.set(context.runtime().accountGuestHeapAllocation(128));
-                assertEquals(128L, context.localMemory().usedBytes());
-                untrustedChecked.countDown();
-                context.self().stop();
-            });
-
-            untrusted.send("allocate");
-            assertTrue(untrustedChecked.await(2, TimeUnit.SECONDS));
-            assertEquals(ActorRuntime.AllocationDomainKind.UNTRUSTED_ISOLATE,
-                    untrustedDomain.get().kind());
-            assertTrue(untrusted.awaitTermination(2, TimeUnit.SECONDS));
-            assertEquals(0L, runtime.privateMemoryBytes());
+            assertEquals(
+                    ActorRuntime.AllocationDomainKind.UNTRUSTED_ISOLATE.name(),
+                    untrustedKind);
+            assertEquals(0L, runtime.privateMemoryBytes(),
+                    "one-shot untrusted actor retirement must reclaim its local arena");
         }
     }
 
