@@ -2132,7 +2132,12 @@ public final class Parser {
 
     private boolean matchConditionalBranch() {
         if (match(ELSEIF)) return true; // Lexer maps both 'elif' and legacy 'elseif' here.
-        if (check(ELSE) && checkNext(IF)) {
+        // "else if" is a branch alias only when both keywords are on the
+        // same source line. Otherwise a normal else body is allowed to begin
+        // with a nested if statement on the following line.
+        if (check(ELSE)
+                && checkNext(IF)
+                && peek().line() == tokens.get(current + 1).line()) {
             advance();
             advance();
             return true;
