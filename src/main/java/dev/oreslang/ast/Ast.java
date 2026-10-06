@@ -653,7 +653,7 @@ public final class Ast {
     }
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
-            TypeTestExpr, PatternTestExpr, CastExpr, SpreadExpr,
+            TypeTestExpr, PatternTestExpr, CastExpr, SpreadExpr, NamedArgExpr,
             CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ChannelOpExpr, DynamicSelectExpr,
             ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
@@ -678,6 +678,19 @@ public final class Ast {
 
     /** Argument-list spread. The parser only constructs this inside call argument lists. */
     public record SpreadExpr(Expr expression) implements Expr { }
+
+    /**
+     * Named call/constructor argument. Declaration parameters remain canonical
+     * type-first ("Type name"); this node represents only call-site "name: value".
+     */
+    public record NamedArgExpr(String name, Expr value) implements Expr {
+        public NamedArgExpr {
+            if (name == null || name.isBlank()) {
+                throw new IllegalArgumentException("named argument name cannot be blank");
+            }
+            if (value == null) throw new IllegalArgumentException("named argument requires a value");
+        }
+    }
 
     public record CallExpr(
             Expr callee,

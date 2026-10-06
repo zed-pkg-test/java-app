@@ -599,6 +599,9 @@ public final class OwnershipChecker {
         if (expr instanceof Ast.SpreadExpr spread) {
             return checkExpr(spread.expression(), scope, consuming);
         }
+        if (expr instanceof Ast.NamedArgExpr named) {
+            return checkExpr(named.value(), scope, consuming);
+        }
         if (expr instanceof Ast.CallExpr call) {
             return checkCall(call, scope);
         }
@@ -1082,6 +1085,7 @@ public final class OwnershipChecker {
     }
 
     private void checkArguments(List<Ast.Expr> arguments, List<Ast.Param> params, Scope scope, String callable) {
+        arguments = bindNamedArguments(arguments, params, callable);
         if (arguments.size() != params.size()) return; // arity is TypeChecker's responsibility
         for (int i = 0; i < arguments.size(); i++) {
             Ast.Expr arg = arguments.get(i);
@@ -1397,6 +1401,8 @@ public final class OwnershipChecker {
             for (Ast.Expr arg : e.arguments()) scanExpr(arg, locals, outer, recursiveBinding, captures, false);
         } else if (expr instanceof Ast.SpreadExpr e) {
             scanExpr(e.expression(), locals, outer, recursiveBinding, captures, false);
+        } else if (expr instanceof Ast.NamedArgExpr e) {
+            scanExpr(e.value(), locals, outer, recursiveBinding, captures, false);
         } else if (expr instanceof Ast.MemberExpr e) scanExpr(e.receiver(), locals, outer, recursiveBinding, captures, write);
         else if (expr instanceof Ast.IndexExpr e) {
             scanExpr(e.receiver(), locals, outer, recursiveBinding, captures, write);
@@ -1717,6 +1723,48 @@ public final class OwnershipChecker {
         }
     }
 
+    private List<Ast.Expr> bindNamedArguments(
+            List<Ast.Expr> arguments,
+            List<Ast.Param> parameters,
+            String label) {
+        boolean hasNamed = arguments.stream().anyMatch(Ast.NamedArgExpr.class::isInstance);
+        if (!hasNamed) return arguments;
+        if (arguments.stream().anyMatch(Ast.SpreadExpr.class::isInstance)) {
+            throw error(label + " cannot mix named arguments with spread arguments");
+        }
+        if (arguments.size() != parameters.size()) return arguments;
+
+        List<Ast.Expr> ordered = new ArrayList<>(
+                java.util.Collections.nCopies(parameters.size(), null));
+        int positional = 0;
+        for (Ast.Expr argument : arguments) {
+            if (argument instanceof Ast.NamedArgExpr named) {
+                int index = -1;
+                for (int i = 0; i < parameters.size(); i++) {
+                    if (parameters.get(i).name().equals(named.name())) {
+                        index = i;
+                        break;
+                    }
+                }
+                if (index < 0) {
+                    throw error(label + " has no parameter named '" + named.name() + "'");
+                }
+                if (ordered.get(index) != null) {
+                    throw error(label + " parameter '" + named.name() + "' is supplied more than once");
+                }
+                ordered.set(index, named.value());
+                continue;
+            }
+            while (positional < ordered.size() && ordered.get(positional) != null) positional++;
+            if (positional >= ordered.size()) return arguments;
+            ordered.set(positional++, argument);
+        }
+        for (Ast.Expr argument : ordered) {
+            if (argument == null) return arguments;
+        }
+        return java.util.Collections.unmodifiableList(ordered);
+    }
+
     private CallSignature specializeCall(
             List<String> allGenericNames,
             List<String> explicitGenericNames,
@@ -1733,8 +1781,10 @@ public final class OwnershipChecker {
                 fixed.add(explicitGenericNames.get(i));
             }
         }
-        for (int i = 0; i < Math.min(parameters.size(), call.arguments().size()); i++) {
-            inferGenericBindings(parameters.get(i).type(), syntacticType(call.arguments().get(i), scope),
+        List<Ast.Expr> orderedArguments =
+                bindNamedArguments(call.arguments(), parameters, "call");
+        for (int i = 0; i < Math.min(parameters.size(), orderedArguments.size()); i++) {
+            inferGenericBindings(parameters.get(i).type(), syntacticType(orderedArguments.get(i), scope),
                     Set.copyOf(allGenericNames), bindings, fixed);
         }
         List<Ast.Param> specialized = parameters.stream()
