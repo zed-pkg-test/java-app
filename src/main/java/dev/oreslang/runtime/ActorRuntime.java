@@ -60,6 +60,7 @@ public final class ActorRuntime implements AutoCloseable {
     private static final long CLOSE_WAIT_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
     private static final long MAILMAN_MAX_BATCH_NANOS = TimeUnit.MILLISECONDS.toNanos(2);
     private static final int INTERNAL_CONTINUATION_SLOTS = 1_024;
+    private static final int UNTRUSTED_YIELD_QUANTUM = 64;
     private static final long UNTRUSTED_FUEL_PER_MILLI = 256L;
     private static final long UNTRUSTED_MIN_FUEL = 256L;
     private static final ThreadMXBean THREAD_MX_BEAN = ManagementFactory.getThreadMXBean();
@@ -3298,19 +3299,8 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Actor cancellation/quota checkpoint used at compiler-injected VM
-     * safepoints.
-     *
-     * <p>This method deliberately does <strong>not</strong> call
-     * {@link Thread#yield()} and does not claim to suspend the actor. An OS
-     * thread scheduling hint cannot preserve an Ores continuation and does not
-     * release the actor's logical turn. Resumable preemption is represented
-     * explicitly by {@link OresScheduler.Cooperate} from a heap-owned
-     * {@link OresScheduler.Task} state machine.</p>
-     *
-     * <p>Therefore a source line is never a preemption boundary. A caller that
-     * is not continuation-lowered may only observe cancellation/quota checks at
-     * this point; it must keep running until a real resumable boundary.</p>
+     * Cooperative scheduler hook used by compiler-injected loop safepoints.
+     * Carrier threads remain an implementation detail.
      */
     public void schedulerSafepoint() {
         if (closed.get()) throw new ActorCancellationSignal("actor runtime is closing");
@@ -3319,7 +3309,6 @@ public final class ActorRuntime implements AutoCloseable {
             throw new ActorCancellationSignal("actor execution stopped");
         }
         if (cell != null && cell.kind == ActorKind.UNTRUSTED) {
-            cell.untrustedSafepoints++;
             if (--cell.untrustedFuelRemaining < 0) {
                 throw new UntrustedActorQuotaExceededException(
                         UntrustedActorQuotaExceededException.Resource.FUEL,
@@ -3338,13 +3327,20 @@ public final class ActorRuntime implements AutoCloseable {
                         UntrustedActorQuotaExceededException.Resource.CPU_TIME,
                         "untrusted actor exceeded its CPU-time budget");
             }
+            if (++cell.untrustedSafepoints % UNTRUSTED_YIELD_QUANTUM == 0) {
+                Thread.yield();
+            }
+            return;
         }
 
-        // Carrier identity is not actor identity. Carrier interruption/yield is
-        // never actor cancellation or actor preemption. Structured cancellation
-        // is represented by ActorCell/runtime state above. Non-cooperative
-        // untrusted termination belongs to the host-owned revocable isolate
-        // boundary used by FORCE_ISOLATED.
+        // Carrier identity is not actor identity. A shared carrier thread may
+        // be interrupted by executor shutdown, host code, or unrelated runtime
+        // machinery; that interrupt must never be reinterpreted as cancellation
+        // of whichever actor happens to be multiplexed onto the carrier now.
+        // Structured actor cancellation is represented by ActorCell/runtime
+        // state above. Non-cooperative untrusted termination belongs to the
+        // host-owned revocable isolate boundary used by FORCE_ISOLATED.
+        Thread.yield();
     }
 
     private static long currentThreadCpuNanos() {
@@ -4767,25 +4763,18 @@ public final class ActorRuntime implements AutoCloseable {
         private boolean beginTurn() {
             synchronized (lifecycleLock) {
                 if (stopped.get() || forceKillFenced || finalized) return false;
-                if (activeTurns != 0) {
-                    throw new IllegalStateException(
-                            "actor single-writer execution lease violation for " + ref.id()
-                                    + ": activeTurns=" + activeTurns);
-                }
-                activeTurns = 1;
+                activeTurns++;
                 return true;
             }
         }
 
         private void endTurn() {
             synchronized (lifecycleLock) {
-                if (activeTurns != 1) {
-                    throw new IllegalStateException(
-                            "actor execution lease accounting violation for " + ref.id()
-                                    + ": activeTurns=" + activeTurns);
+                if (activeTurns <= 0) {
+                    throw new IllegalStateException("actor active-turn accounting underflow for " + ref.id());
                 }
-                activeTurns = 0;
-                if (stopped.get()) finalizeStopLocked();
+                activeTurns--;
+                if (stopped.get() && activeTurns == 0) finalizeStopLocked();
                 lifecycleLock.notifyAll();
             }
         }

@@ -441,6 +441,49 @@ final class MutexLanguageTest {
     }
 
     @Test
+    void withLockAcceptsVoidExpressionBodyLambda() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module model
+                  define class Counter as
+                    pub let int value = 0;
+                  end
+                end
+
+                define module app
+                  fnc good(): void {
+                    val mutex = Mutex.new(new Counter());
+                    mutex.with_lock(|counter| -> stdio.println(counter.value));
+                    return;
+                  }
+                end
+                """)));
+    }
+
+    @Test
+    void withLockRejectsValueReturningExpressionBodyLambda() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define module model
+                          define class Counter as
+                            pub let int value = 0;
+                          end
+                        end
+
+                        define module app
+                          fnc bad(): void {
+                            val mutex = Mutex.new(new Counter());
+                            mutex.with_lock(|counter| -> counter.value);
+                            return;
+                          }
+                        end
+                        """)));
+
+        assertTrue(error.getMessage().contains("mutex callback expression body")
+                || error.getMessage().contains("void"));
+    }
+
+    @Test
     void awaitInsideWithLockCriticalSectionIsRejected() {
         var program = Parser.parse("""
                 define module model
