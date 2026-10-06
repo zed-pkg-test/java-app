@@ -1007,9 +1007,26 @@ public final class Parser {
 
         if (check(LPAREN) && looksLikeFunctionType()) return parseFunctionTypeSignature();
         if (match(LPAREN)) {
-            Ast.TypeRef grouped = parseTypeRef();
+            if (check(RPAREN)) {
+                throw error(peek(), "empty '()' is not a tuple type; use Tuple[...] or a function type such as () => void");
+            }
+            Ast.TypeRef first = parseTypeRef();
+            if (match(COMMA)) {
+                if (check(RPAREN)) {
+                    throw error(peek(),
+                            "singleton tuple type shorthand is intentionally reserved; use Tuple[T] until singleton tuple syntax is finalized");
+                }
+                List<Ast.TypeRef> elements = new ArrayList<>();
+                elements.add(first);
+                while (!check(RPAREN)) {
+                    elements.add(parseTypeRef());
+                    if (!match(COMMA)) break;
+                }
+                consume(RPAREN, "expected ')' after tuple type");
+                return Ast.TypeRef.tupleType(elements);
+            }
             consume(RPAREN, "expected ')' after grouped type");
-            return grouped;
+            return first;
         }
 
         String name;
@@ -1169,8 +1186,85 @@ public final class Parser {
                             + "use Array[T] (or Array[ArrayList<T>] for an array of lists)");
         }
         List<Ast.TypeRef> patterns = new ArrayList<>();
-        do patterns.add(parseSequenceTypePattern()); while (match(COMMA));
+        do {
+            if (check(LPAREN) && looksLikeGroupedSequencePatternList()) {
+                patterns.addAll(parseGroupedSequencePatterns());
+            } else {
+                patterns.add(parseSequenceTypePattern());
+            }
+        } while (match(COMMA));
         return Ast.TypeRef.sequenceShape(patterns);
+    }
+
+    /**
+     * Parentheses inside a sequence shape are grouping syntax only when the
+     * group contains sequence-pattern operators such as "N of T" or "...".
+     * This keeps Tuple[(string, int)] available as a one-element tuple whose
+     * element is itself a tuple, while Tuple[(1 of string, 1 of int)] flattens
+     * exactly like Tuple[1 of string, 1 of int].
+     */
+    private boolean looksLikeGroupedSequencePatternList() {
+        if (!check(LPAREN)) return false;
+        int parenDepth = 0;
+        int bracketDepth = 0;
+        int braceDepth = 0;
+        int angleDepth = 0;
+        for (int i = current; i < tokens.size(); i++) {
+            Token.Type type = tokens.get(i).type();
+            if (type == LPAREN) {
+                parenDepth++;
+                continue;
+            }
+            if (type == RPAREN) {
+                parenDepth--;
+                if (parenDepth == 0) return false;
+                continue;
+            }
+
+            if (parenDepth != 1) continue;
+
+            if (type == LBRACKET) {
+                bracketDepth++;
+                continue;
+            }
+            if (type == RBRACKET) {
+                if (bracketDepth > 0) bracketDepth--;
+                continue;
+            }
+            if (type == LBRACE) {
+                braceDepth++;
+                continue;
+            }
+            if (type == RBRACE) {
+                if (braceDepth > 0) braceDepth--;
+                continue;
+            }
+            if (type == LT) {
+                angleDepth++;
+                continue;
+            }
+            if (type == GT) {
+                if (angleDepth > 0) angleDepth--;
+                continue;
+            }
+
+            if (bracketDepth == 0
+                    && braceDepth == 0
+                    && angleDepth == 0
+                    && (type == OF || type == ELLIPSIS)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<Ast.TypeRef> parseGroupedSequencePatterns() {
+        consume(LPAREN, "expected '(' to start grouped sequence pattern");
+        if (check(RPAREN)) throw error(peek(), "grouped sequence pattern cannot be empty");
+        List<Ast.TypeRef> patterns = new ArrayList<>();
+        do patterns.add(parseSequenceTypePattern()); while (match(COMMA));
+        consume(RPAREN, "expected ')' after grouped sequence pattern");
+        return List.copyOf(patterns);
     }
 
     private Ast.TypeRef parseSequenceTypePattern() {
@@ -1298,10 +1392,14 @@ public final class Parser {
         }
         if (isBindingKind(peek().type()) && looksLikePrefixedDestructure()) {
             Ast.BindingKind inherited = parseBindingKind();
-            return parseDestructure(check(LBRACKET) ? Ast.DestructureKind.SEQUENCE : Ast.DestructureKind.OBJECT, inherited);
+            return parseDestructure(
+                    check(LBRACE) ? Ast.DestructureKind.OBJECT : Ast.DestructureKind.SEQUENCE,
+                    inherited);
         }
         if (isBindingKind(peek().type())) return parseBindingStatement();
-        if (check(LBRACKET) && looksLikeDestructure()) return parseDestructure(Ast.DestructureKind.SEQUENCE, null);
+        if ((check(LBRACKET) || check(LPAREN)) && looksLikeDestructure()) {
+            return parseDestructure(Ast.DestructureKind.SEQUENCE, null);
+        }
         if (check(LBRACE) && looksLikeDestructure()) return parseDestructure(Ast.DestructureKind.OBJECT, null);
         if (match(RETURN)) {
             Ast.Expr value = check(SEMICOLON) || isSafeStatementBoundary() ? null : parseExpression();
@@ -1877,12 +1975,23 @@ public final class Parser {
 
     private Ast.DestructureStmt parseDestructure(Ast.DestructureKind kind, Ast.BindingKind inheritedKind) {
         Token.Type close;
+        String closeText;
+        boolean parenthesizedSequence = false;
         if (kind == Ast.DestructureKind.SEQUENCE) {
-            consume(LBRACKET, "expected '['");
-            close = RBRACKET;
+            if (match(LBRACKET)) {
+                close = RBRACKET;
+                closeText = "]";
+            } else if (match(LPAREN)) {
+                parenthesizedSequence = true;
+                close = RPAREN;
+                closeText = ")";
+            } else {
+                throw error(peek(), "expected '[' or '(' to start sequence destructure");
+            }
         } else {
             consume(LBRACE, "expected '{'");
             close = RBRACE;
+            closeText = "}";
         }
 
         if (check(close)) throw error(peek(), "destructure pattern cannot be empty");
@@ -1906,18 +2015,52 @@ public final class Parser {
             if (currentKind == null) {
                 throw error(peek(), "destructure binding kind must be declared before the first binding");
             }
-            String name = consume(IDENT, "expected binding name in destructure").lexeme();
-            bindings.add(new Ast.DestructureBinding(currentKind, name, rest));
+
+            Ast.TypeRef declaredType = null;
+            String name;
+            if (check(IDENT) && checkNext(COLON)) {
+                name = advance().lexeme();
+                consume(COLON, "expected ':' after destructure binding name");
+                declaredType = parseTypeRef();
+            } else if (looksLikeTypedDestructureBinding(close)) {
+                declaredType = parseTypeRef();
+                name = consume(IDENT, "expected binding name after destructure slot type").lexeme();
+            } else {
+                name = consume(IDENT, "expected binding name in destructure").lexeme();
+            }
+
+            bindings.add(new Ast.DestructureBinding(currentKind, name, declaredType, rest));
             if (rest && check(COMMA)) {
                 throw error(peek(), "rest destructure binding must be the final binding");
             }
         } while (match(COMMA));
 
-        consume(close, kind == Ast.DestructureKind.SEQUENCE ? "expected ']'" : "expected '}'");
+        if (parenthesizedSequence && bindings.size() < 2) {
+            throw error(peek(),
+                    "singleton parenthesized destructuring is intentionally reserved; use an ordinary binding or explicit tuple APIs until singleton tuple syntax is finalized");
+        }
+
+        consume(close, "expected '" + closeText + "' after destructure pattern");
         consume(EQUAL, "expected '=' after destructure pattern");
         Ast.Expr initializer = parseExpression();
         consumeStatementTerminator("destructure should end with ';'");
         return new Ast.DestructureStmt(kind, bindings, initializer);
+    }
+
+    private boolean looksLikeTypedDestructureBinding(Token.Type close) {
+        int mark = current;
+        try {
+            parseTypeRef();
+            if (!check(IDENT)) return false;
+            Token.Type afterName = current + 1 < tokens.size()
+                    ? tokens.get(current + 1).type()
+                    : EOF;
+            return afterName == COMMA || afterName == close;
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        } finally {
+            current = mark;
+        }
     }
 
     private boolean looksLikeDestructure() {
@@ -1931,6 +2074,7 @@ public final class Parser {
         Token.Type open = tokens.get(current + 1).type();
         Token.Type close;
         if (open == LBRACKET) close = RBRACKET;
+        else if (open == LPAREN) close = RPAREN;
         else if (open == LBRACE) close = RBRACE;
         else return false;
 
@@ -2520,7 +2664,7 @@ public final class Parser {
                     TRY, CATCH, FINALLY, END, FI, IF, DO, ELSE, THEN,
                     NEW, STOP, DONE, AWAIT, ASYNC, NLEX, NB, SELECT, READCH, WRITECH, ACTOR, ISOACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, EQ, NEQ, IS, WHEN, CASE, DEFAULT, FIRST, CB, UNTRUSTED, TYPE, TYPES, TYPEOF,
                     INTERFACE, TRAIT, STRUCT, IMPL, ABSTRACT, VOID, STATIC, PUB, PRIVATE, STRUCTURAL, RETURN, DEFER,
-                    VAL, CONST, LET, MUT, SELF, TRUE, FALSE, NULL, OBJ, ARR -> true;
+                    VAL, CONST, LET, MUT, SELF, TRUE, FALSE, NULL, OBJ, ARR, TUPLE -> true;
             default -> false;
         };
     }
@@ -2561,6 +2705,15 @@ public final class Parser {
             consume(RPAREN, "expected ')' after constructor arguments");
             return new Ast.NewExpr(type, args);
         }
+        if (match(TUPLE)) {
+            consume(LPAREN, "expected '(' after tuple");
+            if (check(RPAREN)) {
+                throw error(peek(), "tuple construction requires at least one element");
+            }
+            List<Ast.Expr> items = parseArgumentsUntil(RPAREN);
+            consume(RPAREN, "expected ')' after tuple elements");
+            return new Ast.TupleExpr(items);
+        }
         if (match(OBJ)) return parseObjectLiteral();
         if (match(ARR)) {
             consume(LBRACKET, "expected '[' after arr");
@@ -2576,16 +2729,13 @@ public final class Parser {
         if (check(PIPE)) return parsePipeLambda(false);
         if (check(LPAREN) && looksLikeLambda()) return parseLambda(false);
         if (match(LPAREN)) {
-            Ast.Expr first = parseExpression();
-            if (match(COMMA)) {
-                List<Ast.Expr> items = new ArrayList<>();
-                items.add(first);
-                do items.add(parseExpression()); while (match(COMMA));
-                consume(RPAREN, "expected ')' after tuple");
-                return new Ast.TupleExpr(items);
+            Ast.Expr grouped = parseExpression();
+            if (check(COMMA)) {
+                throw error(peek(),
+                        "parenthesized comma expressions do not construct tuples; use tuple (...)");
             }
             consume(RPAREN, "expected ')' after expression");
-            return first;
+            return grouped;
         }
         if (match(LBRACKET)) {
             List<Ast.Expr> items = parseArgumentsUntil(RBRACKET);

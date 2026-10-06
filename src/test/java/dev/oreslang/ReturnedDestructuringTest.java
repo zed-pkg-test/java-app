@@ -242,9 +242,9 @@ final class ReturnedDestructuringTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc variant(bool flag): [int, string] | [bool, string, int] {
                   if flag; do
-                    return (3, "number");
+                    return tuple (3, "number");
                   else
-                    return (true, "boolean", 9);
+                    return tuple (true, "boolean", 9);
                   fi
                 }
 

@@ -3655,6 +3655,12 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.NewExpr created,
                 List<Object> args,
                 Env env) {
+            if (created.type().name().equals("Tuple")) {
+                if (args.isEmpty()) {
+                    throw new IllegalArgumentException("new Tuple(...) requires at least one element");
+                }
+                return List.copyOf(args);
+            }
             if (created.type().name().equals("DynamicStruct")) {
                 if (!args.isEmpty()) {
                     throw new IllegalArgumentException(
@@ -5580,6 +5586,14 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof Map<?, ?> map) {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
                 return map.get(name);
+            }
+            if (receiver instanceof List<?> || receiver instanceof Object[]) {
+                if (name.equals("isEqualsTo")) {
+                    return (Invokable) args -> {
+                        requireOne(args, "isEqualsTo");
+                        return valueEquals(receiver, args.getFirst());
+                    };
+                }
             }
             InteropLibrary foreign = InteropLibrary.getUncached(receiver);
             if (foreign.hasMembers(receiver)) {

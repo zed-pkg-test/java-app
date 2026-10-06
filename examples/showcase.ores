@@ -36,7 +36,7 @@ define module app
     val complex z = 3 + 4i;
     val values = arr[answer, 2];
     val info = obj{name: "oreslang", stable: true};
-    [const first, let second] = (values[0], values[1]);
+    [const first, let second] = tuple (values[0], values[1]);
 
     if first == 43, info.stable | false; do
       stdio.println("oreslang-ok");

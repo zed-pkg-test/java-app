@@ -62,9 +62,9 @@ final class PolyglotFeatureTest {
         String program = """
                 define module app
                   pub fnc main(): void {
-                    [const foo, _, let bar] = (1, 200, 3);
-                    [const z, _, let y] = (4, 500, 6);
-                    [_, _, const tail] = (700, 800, 9);
+                    [const foo, _, let bar] = tuple (1, 200, 3);
+                    [const z, _, let y] = tuple (4, 500, 6);
+                    [_, _, const tail] = tuple (700, 800, 9);
                     stdio.println(foo + bar + z + y + tail);
                     return;
                   }

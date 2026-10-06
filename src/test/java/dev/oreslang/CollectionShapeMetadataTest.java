@@ -227,7 +227,7 @@ final class CollectionShapeMetadataTest {
                       allocator=Arena,
                       align=64,
                       size=2
-                  >[int, string] = (7, "seven");
+                  >[int, string] = tuple (7, "seven");
                   return;
                 }
                 """)));
@@ -235,7 +235,7 @@ final class CollectionShapeMetadataTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 pub fnc main(): void {
                   @NamedParams<size=2, growth_policy=GP.Fixed, align=64>
-                  val pair: [int, string] = (7, "seven");
+                  val pair: [int, string] = tuple (7, "seven");
                   return;
                 }
                 """)));
@@ -243,7 +243,7 @@ final class CollectionShapeMetadataTest {
         IllegalArgumentException mismatch = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
                         pub fnc main(): void {
-                          val pair: Tuple<size=3>[int, string] = (7, "seven");
+                          val pair: Tuple<size=3>[int, string] = tuple (7, "seven");
                           return;
                         }
                         """)));
@@ -351,7 +351,7 @@ final class CollectionShapeMetadataTest {
                 pub fnc takesTuple(Tuple[int, string] value): void { return; }
 
                 pub fnc main(): void {
-                  val pair: Tuple[int, string] = (7, "seven");
+                  val pair: Tuple[int, string] = tuple (7, "seven");
                   takesTuple(pair);
                   return;
                 }
@@ -374,7 +374,7 @@ final class CollectionShapeMetadataTest {
                         pub fnc takesFixed(FixedArray[int, string] value): void { return; }
 
                         pub fnc main(): void {
-                          val pair: Tuple[int, string] = (7, "seven");
+                          val pair: Tuple[int, string] = tuple (7, "seven");
                           takesFixed(pair);
                           return;
                         }
@@ -387,7 +387,7 @@ final class CollectionShapeMetadataTest {
         IllegalArgumentException inlineCapacity = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
                         pub fnc main(): void {
-                          val pair: Tuple<inline_capacity=1>[int, string] = (7, "seven");
+                          val pair: Tuple<inline_capacity=1>[int, string] = tuple (7, "seven");
                           return;
                         }
                         """)));
@@ -396,7 +396,7 @@ final class CollectionShapeMetadataTest {
         IllegalArgumentException rank = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
                         pub fnc main(): void {
-                          val pair: Tuple<rank=2>[int, string] = (7, "seven");
+                          val pair: Tuple<rank=2>[int, string] = tuple (7, "seven");
                           return;
                         }
                         """)));
@@ -405,7 +405,7 @@ final class CollectionShapeMetadataTest {
         IllegalArgumentException capacity = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
                         pub fnc main(): void {
-                          val pair: Tuple<capacity=2>[int, string] = (7, "seven");
+                          val pair: Tuple<capacity=2>[int, string] = tuple (7, "seven");
                           return;
                         }
                         """)));
