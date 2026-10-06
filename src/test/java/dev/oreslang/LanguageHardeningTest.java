@@ -661,10 +661,12 @@ final class LanguageHardeningTest {
                             val Channel<int> input = Channel.new<int>(1);
 
                             try select {
-                            case readch input: val value
-                              val token = new Token<T>();
-                            default:
-                              stdio.println("not ready");
+                              case readch input: val value {
+                                val token = new Token<T>();
+                              }
+                              default: {
+                                stdio.println("not ready");
+                              }
                             }
 
                             return;
