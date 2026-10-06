@@ -55,7 +55,7 @@ final class ActorRuntimeProxyTest {
             first.join(2_000L);
             second.join(2_000L);
             writer.join(2_000L);
-            assertEquals(7, proxy.read(value -> value[0]));
+            assertEquals(7, proxy.read(value -> value[0]).intValue());
             assertTrue(proxy.readAcquisitions() >= 3);
             assertTrue(proxy.writeAcquisitions() >= 1);
         }

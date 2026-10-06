@@ -144,7 +144,7 @@ final class ActorCapabilityIsolationTest {
     }
 
     @Test
-    void sharedActorMayUseTransitiveSharedStateWhenParentPolicyAllowsIt() {
+    void sharedActorDoesNotImplicitlyReceiveWritableSharedMemoryAuthority() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 type SharedInt = SharedMutex<int>;
 
@@ -157,8 +157,11 @@ final class ActorCapabilityIsolationTest {
                 }
                 """));
 
-        assertDoesNotThrow(() ->
-                CapabilityChecker.check(program, IsolatePolicy.developer()));
+        SecurityException denied = assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+
+        assertTrue(denied.getMessage().contains("SHARED_MEMORY"));
     }
 
     @Test
