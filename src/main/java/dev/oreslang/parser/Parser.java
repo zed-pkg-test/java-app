@@ -68,6 +68,28 @@ public final class Parser {
                 continue;
             }
 
+            if (check(CONTRACT) && defineFollowsAfterVisibilityModifiers()) {
+                advance();
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                consume(DEFINE, "compatibility contract declaration requires both 'contract' and 'define'");
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                validateOnlyVisibilityModifiers(modifiers, "contracts");
+                rejectCallableStructuralAnnotation(annotations, "contract declarations");
+                rootDeclarations.add(parseContract(modifiers.visibility));
+                continue;
+            }
+
+            if (check(INTERFACE) && defineFollowsAfterVisibilityModifiers()) {
+                advance();
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                consume(DEFINE, "compatibility interface declaration requires both 'interface' and 'define'");
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                validateOnlyVisibilityModifiers(modifiers, "interfaces");
+                rejectCallableStructuralAnnotation(annotations, "interface declarations");
+                rootDeclarations.add(parseInterface(modifiers.visibility));
+                continue;
+            }
+
             if (match(DEFINE)) {
                 modifiers = mergeModifiers(modifiers, parseModifiers());
                 if (modifiers.shared) {
@@ -83,6 +105,7 @@ public final class Parser {
                     continue;
                 }
                 if (match(CONTRACT)) {
+                    modifiers = mergeModifiers(modifiers, parseModifiers());
                     validateOnlyVisibilityModifiers(modifiers, "contracts");
                     rejectCallableStructuralAnnotation(annotations, "contract declarations");
                     rootDeclarations.add(parseContract(modifiers.visibility));
@@ -100,6 +123,7 @@ public final class Parser {
                     continue;
                 }
                 if (match(INTERFACE)) {
+                    modifiers = mergeModifiers(modifiers, parseModifiers());
                     validateOnlyVisibilityModifiers(modifiers, "interfaces");
                     rejectCallableStructuralAnnotation(annotations, "interface declarations");
                     rootDeclarations.add(parseInterface(modifiers.visibility));
@@ -219,6 +243,26 @@ public final class Parser {
             rejectCallableStructuralAnnotation(annotations, "class declarations");
             validateClassModifiers(modifiers);
             return parseClass(modifiers.visibility, modifiers.isAbstract, false);
+        }
+
+        if (check(CONTRACT) && defineFollowsAfterVisibilityModifiers()) {
+            advance();
+            modifiers = mergeModifiers(modifiers, parseModifiers());
+            consume(DEFINE, "compatibility contract declaration requires both 'contract' and 'define'");
+            modifiers = mergeModifiers(modifiers, parseModifiers());
+            validateOnlyVisibilityModifiers(modifiers, "contracts");
+            rejectCallableStructuralAnnotation(annotations, "contract declarations");
+            return parseContract(modifiers.visibility);
+        }
+
+        if (check(INTERFACE) && defineFollowsAfterVisibilityModifiers()) {
+            advance();
+            modifiers = mergeModifiers(modifiers, parseModifiers());
+            consume(DEFINE, "compatibility interface declaration requires both 'interface' and 'define'");
+            modifiers = mergeModifiers(modifiers, parseModifiers());
+            validateOnlyVisibilityModifiers(modifiers, "interfaces");
+            rejectCallableStructuralAnnotation(annotations, "interface declarations");
+            return parseInterface(modifiers.visibility);
         }
 
         if (match(DEFINE)) {
@@ -479,6 +523,19 @@ public final class Parser {
         }
         List<Ast.Stmt> body = parseBlock();
         return new Ast.ConstructorDecl(mods.visibility, params, annotations, body);
+    }
+
+    private boolean defineFollowsAfterVisibilityModifiers() {
+        int lookahead = current + 1;
+        while (lookahead < tokens.size()) {
+            Token.Type type = tokens.get(lookahead).type();
+            if (type == PUB || type == PRIVATE) {
+                lookahead++;
+                continue;
+            }
+            return type == DEFINE;
+        }
+        return false;
     }
 
     private void validateClassModifiers(Modifiers modifiers) {
