@@ -64,12 +64,18 @@ public final class TypeChecker {
     private int loopDepth;
 
     public static Ast.Program check(Ast.Program program) {
+        program = checkTypes(program);
+        OwnershipChecker.check(program);
+        return program;
+    }
+
+    /** Type analysis only; executable admission must use OresCompiler.analyze. */
+    public static Ast.Program checkTypes(Ast.Program program) {
         program = AnnotationExpander.expand(program);
         TypeChecker checker = new TypeChecker();
         checker.validateImports(program);
         checker.collect(program);
         checker.validate(program);
-        OwnershipChecker.check(program);
         return program;
     }
 
@@ -80,7 +86,7 @@ public final class TypeChecker {
                 "print", "Some", "None", "Ok", "Err", "And", "Or", "Xor", "BooleanOps",
                 "Mutex", "SharedMutex", "Channel", "SelectCase", "SelectSet", "SelectResult", "Object", "List", "Option", "Result", "Future",
                 "Iterator", "AsyncIterator", "IteratorResult", "Generator", "AsyncGenerator",
-                "int", "uint", "float", "decimal", "complex", "bool", "String", "void",
+                "int", "uint", "float", "decimal", "complex", "bool", "boolean", "String", "void",
                 "self", "null"));
 
         for (Ast.ModuleDecl module : program.modules()) {
@@ -4998,7 +5004,12 @@ public final class TypeChecker {
             case "f32", "f64", "float" -> Primitive.FLOAT;
             case "decimal" -> Primitive.DECIMAL;
             case "complex64", "complex128", "complex" -> Primitive.COMPLEX;
-            case "bool", "Bool" -> Primitive.BOOL;
+            case "bool", "Bool" -> {
+                if (!ref.arguments().isEmpty() || ref.inferArguments()) {
+                    throw new IllegalArgumentException("bool/boolean does not accept type arguments or sequence shapes");
+                }
+                yield Primitive.BOOL;
+            }
             case "string", "String" -> Primitive.STRING;
             case "void" -> Primitive.VOID;
             case "Array", "List", "Vector", "Slice", "Tuple", "FixedArray", "FixedList" -> {
