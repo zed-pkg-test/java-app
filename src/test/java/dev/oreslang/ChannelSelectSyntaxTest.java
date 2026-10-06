@@ -22,12 +22,15 @@ final class ChannelSelectSyntaxTest {
                     Channel<bool> finished
                 ): void {
                   select {
-                  case readch incoming: let msg
-                    stdio.println(msg);
-                  case readch payload: const body
-                    stdio.println(body);
-                  case readch finished:
-                    return;
+                    case readch incoming: let msg {
+                      stdio.println(msg);
+                    }
+                    case readch payload: const body {
+                      stdio.println(body);
+                    }
+                    case readch finished: {
+                      return;
+                    }
                   }
                   return;
                 }
@@ -38,12 +41,15 @@ final class ChannelSelectSyntaxTest {
                   val Channel<bool> finished = Channel.new<bool>(1);
 
                   nb select {
-                  case readch incoming: let msg
-                    stdio.println(msg);
-                  case readch payload: const body
-                    stdio.println(body);
-                  case readch finished: const signal
-                    return;
+                    case readch incoming: let msg {
+                      stdio.println(msg);
+                    }
+                    case readch payload: const body {
+                      stdio.println(body);
+                    }
+                    case readch finished: const signal {
+                      return;
+                    }
                   }
                   stdio.println("continued immediately");
                   return;
@@ -78,8 +84,9 @@ final class ChannelSelectSyntaxTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc wrong(Channel<int> input): void {
                   nb select {
-                  case readch input: val value
-                    stdio.println(value);
+                    case readch input: val value {
+                      stdio.println(value);
+                    }
                   }
                   return;
                 }
@@ -89,8 +96,9 @@ final class ChannelSelectSyntaxTest {
                 actor fnc right(): void {
                   val Channel<int> input = Channel.new<int>(1);
                   nb select {
-                  case readch input: val value
-                    stdio.println(value);
+                    case readch input: val value {
+                      stdio.println(value);
+                    }
                   }
                   return;
                 }
@@ -102,24 +110,30 @@ final class ChannelSelectSyntaxTest {
         Ast.Program program = Parser.parse("""
                 fnc policies(Channel<int> a, Channel<int> b): void {
                   select {
-                  case readch a: val x
-                    stdio.println(x);
-                  case readch b: val y
-                    stdio.println(y);
+                    case readch a: val x {
+                      stdio.println(x);
+                    }
+                    case readch b: val y {
+                      stdio.println(y);
+                    }
                   }
 
                   select first {
-                  case readch a: val x
-                    stdio.println(x);
-                  case readch b: val y
-                    stdio.println(y);
+                    case readch a: val x {
+                      stdio.println(x);
+                    }
+                    case readch b: val y {
+                      stdio.println(y);
+                    }
                   }
 
                   select random {
-                  case readch a: val x
-                    stdio.println(x);
-                  case readch b: val y
-                    stdio.println(y);
+                    case readch a: val x {
+                      stdio.println(x);
+                    }
+                    case readch b: val y {
+                      stdio.println(y);
+                    }
                   }
                   return;
                 }
@@ -211,10 +225,12 @@ final class ChannelSelectSyntaxTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 fnc send(Channel<string> output, string payload): void {
                   try select first {
-                  case writech output, payload:
-                    stdio.println("sent");
-                  default:
-                    stdio.println("busy");
+                    case writech output, payload: {
+                      stdio.println("sent");
+                    }
+                    default: {
+                      stdio.println("busy");
+                    }
                   }
                   return;
                 }
@@ -325,8 +341,9 @@ final class ChannelSelectSyntaxTest {
                           val Array<int> owned = [1, 2, 3];
 
                           nb select {
-                          case readch input: val value
-                            stdio.println(owned[0]);
+                            case readch input: val value {
+                              stdio.println(owned[0]);
+                            }
                           }
 
                           stdio.println(owned[0]);
@@ -348,8 +365,9 @@ final class ChannelSelectSyntaxTest {
                   val int label = 7;
 
                   nb select {
-                  case readch input: val value
-                    stdio.println(label + value);
+                    case readch input: val value {
+                      stdio.println(label + value);
+                    }
                   }
 
                   stdio.println(label);
@@ -370,8 +388,9 @@ final class ChannelSelectSyntaxTest {
 
                           val (() => void) callback = || -> {
                             nb select {
-                            case readch input: val value
-                              stdio.println(owned[0]);
+                              case readch input: val value {
+                                stdio.println(owned[0]);
+                              }
                             }
                             return;
                           };
@@ -410,10 +429,12 @@ final class ChannelSelectSyntaxTest {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 fnc bad(Channel<int> ch): void {
                   select {
-                  default:
-                    return;
-                  default:
-                    return;
+                    default: {
+                      return;
+                    }
+                    default: {
+                      return;
+                    }
                   }
                   return;
                 }
