@@ -8,6 +8,8 @@ This directory documents the executable formal-methods layer for Oreslang runtim
 
 `FormalSelectModelCheckTest` separately enumerates three-case select readiness, arbitration, loser detachment, and cancellation.
 
+`FormalChannelRendezvousModelCheckTest` models a zero-capacity channel's read/write waiter lifecycle: second-arrival atomic handoff, cancellation withdrawal, and close-time waiter failure.
+
 `FormalControlPlaneLivenessModelCheckTest` models the ActorGroup Mailman/CONTROL-carrier boundary in both the known blocking design and the required cooperative design. It keeps the blocking model as an executable counterexample oracle: a callback that waits while retaining its carrier strands already-queued CONTROL work. The cooperative model proves that suspension returns the carrier and queues the Mailman continuation behind work that was already ready.
 
 `FormalOwnershipDomainModelCheckTest` exhaustively checks the ownership/provenance algebra across root, SHARED, PRIVATE, and UNTRUSTED contexts for primitive, struct, and class values. It is a refinement target for the in-flight allocator/ownership work rather than a claim that every lowering is already on `main`.
@@ -32,6 +34,8 @@ The checked invariants are:
 12. **GC cleanup succeeds at most once.** Failed cleanup stays retryable while the registry is open, including after a queue notification was consumed; actor-domain retirement remains reclaimable even with a reachable stale owner.
 13. **Context-close cleanup is best effort.** The formal contract explicitly does not mislabel a failed final host cleanup hook as success.
 14. **No structured actor orphans.** Parent teardown fences/cancels descendants before parent termination, and lifecycle authority never propagates upward from child to parent.
+15. **Rendezvous is exactly one handoff.** A zero-capacity channel completes read and write together; the second arrival cannot leave both waiters pending.
+16. **Cancelled channel waiters are withdrawn.** Cancellation cannot consume later traffic, and channel close fails every remaining pending waiter without inventing a delivery.
 
 ## Relationship to runtime tests
 
@@ -51,7 +55,7 @@ No additional model-checking dependency is required; the finite-state explorer i
 
 The next models should cover:
 
-- Channel close/rendezvous details beyond select arbitration, including waiter ownership and wakeup ordering.
+- Buffered-channel capacity/FIFO state-space refinement beyond the now-modeled zero-capacity rendezvous case.
 - Concrete runtime refinement for the cooperative Mailman/CONTROL suspension model once #290 is redesigned to release carriers while waiting.
 - Concrete trace refinement for allocation-domain/ownership lowering once the #309/#328/#329/#332 stack is reconciled onto current `main`.
 - GC refinement for bounded actor-local sweep quanta and concurrent cleanup-slot ownership.
