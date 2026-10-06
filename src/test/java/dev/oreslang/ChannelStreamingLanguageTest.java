@@ -108,6 +108,98 @@ final class ChannelStreamingLanguageTest {
     }
 
     @Test
+    void channelIsDirectlyAsyncIterableAndDrainsBeforeCompletion() throws Exception {
+        assertEquals("123:true", run("""
+                pub async routine main(): void {
+                  val Channel<int> input = Channel.new<int>(3);
+                  writech input, 1;
+                  writech input, 2;
+                  writech input, 3;
+                  input.close();
+
+                  for await const value of input {
+                    stdio.stdout.write(value);
+                  }
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(input.is_closed());
+                  return;
+                }
+                """));
+    }
+
+    @Test
+    void channelAsyncIterIsAFirstClassNonOwningAsyncIterator() throws Exception {
+        assertEquals("12:3", run("""
+                pub async routine main(): void {
+                  val Channel<int> input = Channel.new<int>(3);
+                  writech input, 1;
+                  writech input, 2;
+
+                  val AsyncIterator<int> iterator = input.async_iter();
+                  val IteratorResult<int> first = await iterator.next();
+                  val IteratorResult<int> second = await iterator.next();
+                  stdio.stdout.write(first.value.unwrap());
+                  stdio.stdout.write(second.value.unwrap());
+                  iterator.close();
+
+                  writech input, 3;
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(readch input);
+                  input.close();
+                  return;
+                }
+                """));
+    }
+
+    @Test
+    void asyncGeneratorYieldStarDelegatesAChannel() throws Exception {
+        assertEquals("123", run("""
+                async fnc gen* relay(Channel<int> input): AsyncIterator<int> {
+                  yield* input;
+                  return;
+                }
+
+                pub async routine main(): void {
+                  val Channel<int> input = Channel.new<int>(3);
+                  writech input, 1;
+                  writech input, 2;
+                  writech input, 3;
+                  input.close();
+
+                  for await const value of relay(input) {
+                    stdio.stdout.write(value);
+                  }
+                  return;
+                }
+                """));
+    }
+
+    @Test
+    void synchronousIterationRejectsChannels() {
+        IllegalArgumentException loop = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc bad(Channel<int> input): void {
+                          for const value of input {
+                            stdio.stdout.write(value);
+                          }
+                          return;
+                        }
+                        """)));
+        assertTrue(loop.getMessage().contains("for await"), loop::getMessage);
+
+        IllegalArgumentException delegated = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        fnc gen* bad(Channel<int> input): Iterator<int> {
+                          yield* input;
+                          return;
+                        }
+                        """)));
+        assertTrue(delegated.getMessage().contains("for await"), delegated::getMessage);
+    }
+
+    @Test
     void awaitedStreamingWritesRespectBackpressureAndCloseIteratorOnBreak() throws Exception {
         assertEquals("1:closed|done", run("""
                 async generator fnc values(): int {
