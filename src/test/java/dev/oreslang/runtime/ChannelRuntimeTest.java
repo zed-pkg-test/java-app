@@ -12,6 +12,17 @@ import org.junit.jupiter.api.Test;
 
 final class ChannelRuntimeTest {
     @Test
+    void pendingWriterCannotOvertakeBufferedValue() {
+        ChannelRuntime.Channel<Integer> channel = new ChannelRuntime.Channel<>(1);
+        assertTrue(channel.tryWrite(1));
+        OresFuture<Void> pending = channel.writeAsync(2);
+        assertFalse(pending.isDone());
+        assertEquals(1, channel.tryRead().orElseThrow());
+        assertTrue(pending.isDone());
+        assertEquals(2, channel.tryRead().orElseThrow());
+    }
+
+    @Test
     void shutdownDrainReleasesBufferedValuesAndStopsAtClosedEmptyChannel() {
         ChannelRuntime.Channel<String> channel = new ChannelRuntime.Channel<>(2);
         assertTrue(channel.tryWrite("one"));
