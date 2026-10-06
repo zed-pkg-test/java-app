@@ -1,0 +1,127 @@
+// Shared codec options and error carriers.
+
+import class Value from './value';
+
+define class DecodeOptions as
+  // duplicate_key_policy: 0 reject, 1 first_wins, 2 last_wins.
+  pub val int duplicate_key_policy;
+  pub val bool allow_trailing_data;
+  pub val int max_depth;
+  pub val int max_input_bytes;
+  pub val int max_string_bytes;
+  pub val int max_binary_bytes;
+  pub val int max_number_bytes;
+  pub val int max_array_entries;
+  pub val int max_map_entries;
+end
+
+define class EncodeOptions as
+  pub val int max_depth;
+  pub val int max_output_bytes;
+end
+
+define class DecodeError as
+  pub val String code;
+  pub val int offset;
+  pub val String message;
+end
+
+define class EncodeError as
+  pub val String code;
+  pub val String message;
+end
+
+define class DecodedValue as
+  pub val Value value;
+  pub val int consumed;
+end
+
+define class DecodeAttempt as
+  // status: 0 ready, 1 need_more, 2 failed.
+  pub val int status;
+  pub val Value value;
+  pub val int consumed;
+  pub val DecodeError error;
+end
+
+define class DecodeStep as
+  // status: 0 need_more, 1 value_ready, 2 failed.
+  pub val int status;
+  pub val Value value;
+  pub val int consumed;
+  pub val DecodeError error;
+end
+
+pub fnc default_decode_options(): DecodeOptions {
+  return new DecodeOptions(
+    0,
+    false,
+    128,
+    16 * 1024 * 1024,
+    4 * 1024 * 1024,
+    16 * 1024 * 1024,
+    1024,
+    65536,
+    65536
+  );
+}
+
+pub fnc default_encode_options(): EncodeOptions {
+  return new EncodeOptions(
+    128,
+    16 * 1024 * 1024
+  );
+}
+
+pub fnc decode_error(String code, int offset, String message): DecodeError {
+  return new DecodeError(code, offset, message);
+}
+
+pub fnc empty_decode_error(): DecodeError {
+  return new DecodeError("", 0, "");
+}
+
+pub fnc encode_error(String code, String message): EncodeError {
+  return new EncodeError(code, message);
+}
+
+
+pub fnc max_supported_depth(): int {
+  return 128;
+}
+
+pub fnc decode_options_valid(DecodeOptions options): bool {
+  if options.duplicate_key_policy < 0 || options.duplicate_key_policy > 2 then
+    return false;
+  fi
+
+  if options.max_depth < 0 || options.max_depth > max_supported_depth() then
+    return false;
+  fi
+
+  if options.max_input_bytes < 0 ||
+     options.max_input_bytes > 256 * 1024 * 1024 ||
+     options.max_string_bytes < 0 ||
+     options.max_string_bytes > 64 * 1024 * 1024 ||
+     options.max_binary_bytes < 0 ||
+     options.max_binary_bytes > 256 * 1024 * 1024 ||
+     options.max_number_bytes <= 0 ||
+     options.max_number_bytes > 1024 * 1024 ||
+     options.max_array_entries < 0 ||
+     options.max_array_entries > 1000000 ||
+     options.max_map_entries < 0 ||
+     options.max_map_entries > 1000000 then
+    return false;
+  fi
+
+  return true;
+}
+
+pub fnc encode_options_valid(EncodeOptions options): bool {
+  if options.max_depth < 0 || options.max_depth > max_supported_depth() then
+    return false;
+  fi
+
+  return options.max_output_bytes >= 0 &&
+         options.max_output_bytes <= 256 * 1024 * 1024;
+}

@@ -1,0 +1,254 @@
+// Static codec metadata produced by compiler/build-time codegen.
+//
+// This is ordinary Oreslang data. The runtime never discovers class fields by
+// reflection. @FromJson/@WireName/@FieldNumber/validation annotations can lower
+// into these records, while JSON Schema / TypeSpec generators can emit the same
+// representation.
+
+import class Utf8Text from '../core/value';
+import fnc text_equal from '../core/value';
+import class ValueRule from '../validation/validation';
+import fnc value_rule_valid from '../validation/validation';
+import fnc utf8_is_valid from '../core/utf8';
+
+define class CodecFieldMeta as
+  pub val Utf8Text source_name;
+  pub val Utf8Text wire_name;
+
+  // 0 means "not assigned / format does not use field numbers".
+  pub val int field_number;
+
+  pub val bool required;
+  pub val ValueRule validation;
+end
+
+define class CodecTypeMeta as
+  pub val Utf8Text type_name;
+  pub val List<CodecFieldMeta> fields;
+
+  // 0 ignore, 1 reject, 2 preserve.
+  pub val int unknown_field_policy;
+end
+
+define class MetadataError as
+  pub val String code;
+  pub val int field_index;
+  pub val String message;
+end
+
+define class MetadataCheck as
+  pub val bool ok;
+  pub val CodecTypeMeta metadata;
+  pub val MetadataError error;
+end
+
+pub fnc codec_field(
+  Utf8Text source_name,
+  Utf8Text wire_name,
+  int field_number,
+  bool required,
+  ValueRule validation
+): CodecFieldMeta {
+  return new CodecFieldMeta(
+    source_name,
+    wire_name,
+    field_number,
+    required,
+    validation
+  );
+}
+
+pub fnc codec_type(
+  Utf8Text type_name,
+  List<CodecFieldMeta> fields,
+  int unknown_field_policy
+): CodecTypeMeta {
+  return new CodecTypeMeta(type_name, fields, unknown_field_policy);
+}
+
+pub fnc check_metadata(
+  CodecTypeMeta metadata
+): MetadataCheck {
+  if metadata.unknown_field_policy < 0 || metadata.unknown_field_policy > 2 then
+    return new MetadataCheck(
+      false,
+      metadata,
+      new MetadataError(
+        "unknown_field_policy",
+        -1,
+        "unknown-field policy must be ignore(0), reject(1), or preserve(2)"
+      )
+    );
+  fi
+
+  let int i = 0;
+  loop do
+    if i >= metadata.fields.length then
+      break;
+    fi
+
+    let CodecFieldMeta field = metadata.fields[i];
+
+    if field.source_name.bytes.length == 0 ||
+       !utf8_is_valid(field.source_name.bytes) then
+      return new MetadataCheck(
+        false,
+        metadata,
+        new MetadataError(
+          "invalid_source_name",
+          i,
+          "codec field source name must be non-empty valid UTF-8"
+        )
+      );
+    fi
+
+    if field.wire_name.bytes.length == 0 ||
+       !utf8_is_valid(field.wire_name.bytes) then
+      return new MetadataCheck(
+        false,
+        metadata,
+        new MetadataError(
+          "invalid_wire_name",
+          i,
+          "codec field wire name must be non-empty valid UTF-8"
+        )
+      );
+    fi
+
+    if field.field_number < 0 ||
+       field.field_number > 536870911 ||
+       (field.field_number >= 19000 && field.field_number <= 19999) then
+      return new MetadataCheck(
+        false,
+        metadata,
+        new MetadataError(
+          "field_number",
+          i,
+          "field number must be 0 or a non-reserved Protobuf field number"
+        )
+      );
+    fi
+
+    if !value_rule_valid(field.validation) then
+      return new MetadataCheck(
+        false,
+        metadata,
+        new MetadataError(
+          "invalid_validation_rule",
+          i,
+          "codec field contains an invalid validation rule"
+        )
+      );
+    fi
+
+    let int j = 0;
+    loop do
+      if j >= i then
+        break;
+      fi
+
+      let CodecFieldMeta previous = metadata.fields[j];
+
+      if text_equal(previous.source_name, field.source_name) then
+        return new MetadataCheck(
+          false,
+          metadata,
+          new MetadataError(
+            "duplicate_source_name",
+            i,
+            "duplicate source field name in codec metadata"
+          )
+        );
+      fi
+
+      if text_equal(previous.wire_name, field.wire_name) then
+        return new MetadataCheck(
+          false,
+          metadata,
+          new MetadataError(
+            "duplicate_wire_name",
+            i,
+            "duplicate wire field name in codec metadata"
+          )
+        );
+      fi
+
+      if field.field_number > 0 &&
+         previous.field_number == field.field_number then
+        return new MetadataCheck(
+          false,
+          metadata,
+          new MetadataError(
+            "duplicate_field_number",
+            i,
+            "duplicate Protobuf field number in codec metadata"
+          )
+        );
+      fi
+
+      j = j + 1;
+    done
+
+    i = i + 1;
+  done
+
+  return new MetadataCheck(
+    true,
+    metadata,
+    new MetadataError("", -1, "")
+  );
+}
+
+pub fnc validate_metadata(
+  CodecTypeMeta metadata
+): Result<CodecTypeMeta, MetadataError> {
+  let MetadataCheck checked = check_metadata(metadata);
+  if checked.ok then
+    return Ok(metadata);
+  fi
+  return Err(checked.error);
+}
+
+pub fnc field_by_wire_name(
+  CodecTypeMeta metadata,
+  Utf8Text wire_name
+): Result<CodecFieldMeta, MetadataError> {
+  let int i = 0;
+
+  for const field of metadata.fields do
+    if text_equal(field.wire_name, wire_name) then
+      return Ok(field);
+    fi
+    i = i + 1;
+  done
+
+  return Err(
+    new MetadataError(
+      "unknown_wire_name",
+      -1,
+      "wire field name is not present in codec metadata"
+    )
+  );
+}
+
+pub fnc field_by_number(
+  CodecTypeMeta metadata,
+  int field_number
+): Result<CodecFieldMeta, MetadataError> {
+  let int i = 0;
+
+  for const field of metadata.fields do
+    if field.field_number == field_number && field_number > 0 then
+      return Ok(field);
+    fi
+    i = i + 1;
+  done
+
+  return Err(
+    new MetadataError(
+      "unknown_field_number",
+      -1,
+      "field number is not present in codec metadata"
+    )
+  );
+}

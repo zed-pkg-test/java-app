@@ -1,0 +1,76 @@
+// JSON decode + validation trust-boundary helper.
+//
+// Generated typed decoders will eventually fuse these checks into field
+// construction. This dynamic path already gives callers one explicit operation
+// that never returns an invalid Value as a successful result.
+
+import class Value from '../core/value';
+import class DecodeOptions, DecodeError, DecodeAttempt from '../core/options';
+import class ValidationOptions, ValidationReport, ValidationError, ObjectSchema, ValidValue from '../validation/validation';
+import fnc decode_attempt from './json';
+import fnc validate_object, report_is_valid from '../validation/validation';
+
+define class JsonPayloadError as
+  // kind: 0 decode failure, 1 validation failure.
+  pub val int kind;
+  pub val DecodeError decode_error;
+  pub val ValidationReport validation_report;
+end
+
+define class ValidatedDecodedValue as
+  pub val ValidValue valid;
+  pub val int consumed;
+end
+
+fnc empty_decode_error(): DecodeError {
+  return new DecodeError("", 0, "");
+}
+
+fnc empty_validation_report(): ValidationReport {
+  return new ValidationReport(
+    new List<ValidationError>(),
+    false
+  );
+}
+
+pub fnc decode_and_validate_object(
+  List<int> input,
+  DecodeOptions decode_options,
+  ObjectSchema schema,
+  ValidationOptions validation_options
+): Result<ValidatedDecodedValue, JsonPayloadError> {
+  let DecodeAttempt attempt = decode_attempt(input, decode_options);
+
+  if attempt.status != 0 then
+    return Err(
+      new JsonPayloadError(
+        0,
+        attempt.error,
+        empty_validation_report()
+      )
+    );
+  fi
+
+  let ValidationReport report = validate_object(
+    attempt.value,
+    schema,
+    validation_options
+  );
+
+  if !report_is_valid(report) then
+    return Err(
+      new JsonPayloadError(
+        1,
+        empty_decode_error(),
+        report
+      )
+    );
+  fi
+
+  return Ok(
+    new ValidatedDecodedValue(
+      new ValidValue(attempt.value),
+      attempt.consumed
+    )
+  );
+}

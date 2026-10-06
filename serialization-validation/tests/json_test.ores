@@ -1,0 +1,112 @@
+import fnc require_true, require_int from './assert';
+
+import class Value, Utf8Text, WireMember from '../src/core/value';
+import fnc bytes_equal, value_deep_equal from '../src/core/value';
+import class DecodeOptions, EncodeOptions, DecodeError, EncodeError, DecodedValue, DecodeStep from '../src/core/options';
+import fnc default_decode_options, default_encode_options from '../src/core/options';
+import class JsonIncrementalDecoder from '../src/json/json';
+import fnc decode, decode_default, encode, new_incremental_decoder, feed, finish from '../src/json/json';
+import fnc utf8_is_valid from '../src/core/utf8';
+
+pub fnc run_json_tests(): void {
+  val List<int> input = new List<int>(
+    123,
+    34, 120, 34,
+    58,
+    91,
+    49,
+    44,
+    116, 114, 117, 101,
+    44,
+    110, 117, 108, 108,
+    93,
+    125
+  );
+
+  val Result<DecodedValue, DecodeError> decoded_result = decode_default(input);
+  require_true(decoded_result.is_err() == false, "JSON object should decode");
+
+  val DecodedValue decoded = decoded_result.unwrap();
+  require_int(decoded.value.kind, 6, "JSON root must be object");
+  require_int(decoded.value.object_value.length, 1, "JSON object must have one field");
+  require_int(decoded.value.object_value[0].value.kind, 5, "x must decode as array");
+  require_int(decoded.value.object_value[0].value.array_value.length, 3, "x array length");
+
+  val Result<List<int>, EncodeError> encoded_result = encode(
+    decoded.value,
+    default_encode_options()
+  );
+  require_true(encoded_result.is_err() == false, "decoded JSON should re-encode");
+  require_true(
+    bytes_equal(encoded_result.unwrap(), input),
+    "canonical JSON should round-trip byte-for-byte"
+  );
+
+  val List<int> duplicate = new List<int>(
+    123,
+    34, 120, 34, 58, 49,
+    44,
+    34, 120, 34, 58, 50,
+    125
+  );
+  val Result<DecodedValue, DecodeError> duplicate_result = decode_default(duplicate);
+  require_true(duplicate_result.is_err(), "duplicate JSON keys must reject by default");
+
+  let JsonIncrementalDecoder decoder = new_incremental_decoder(default_decode_options());
+  val DecodeStep first = feed(decoder, new List<int>(123, 34, 120));
+  require_int(first.status, 0, "partial JSON must request more input");
+
+  val DecodeStep second = feed(
+    decoder,
+    new List<int>(34, 58, 49, 125)
+  );
+  require_int(second.status, 1, "completed incremental JSON must yield a value");
+  require_int(second.value.kind, 6, "incremental JSON root kind");
+
+  let JsonIncrementalDecoder number_decoder = new_incremental_decoder(default_decode_options());
+  val DecodeStep number_partial = feed(number_decoder, new List<int>(49));
+  require_int(number_partial.status, 0, "chunk-terminal JSON number must wait for finish or a delimiter");
+
+  val DecodeStep number_finished = finish(number_decoder);
+  require_int(number_finished.status, 1, "finish must publish a complete terminal JSON number");
+
+  let JsonIncrementalDecoder bad_utf8_decoder = new_incremental_decoder(default_decode_options());
+  val DecodeStep bad_utf8 = feed(
+    bad_utf8_decoder,
+    new List<int>(34, 226, 40)
+  );
+  require_int(
+    bad_utf8.status,
+    2,
+    "invalid UTF-8 continuation must fail immediately even at a chunk boundary"
+  );
+
+  require_true(
+    utf8_is_valid(new List<int>(240, 159, 152, 128)),
+    "valid four-byte UTF-8 scalar must be accepted"
+  );
+  require_true(
+    !utf8_is_valid(new List<int>(192, 128)),
+    "overlong UTF-8 must be rejected"
+  );
+
+  val DecodeOptions shallow = new DecodeOptions(
+    0, false, 1, 64, 64, 64, 64, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> too_deep = decode(
+    new List<int>(91, 91, 48, 93, 93),
+    shallow
+  );
+  require_true(too_deep.is_err(), "JSON max_depth must reject before unbounded recursion");
+
+  val DecodeOptions tiny_input = new DecodeOptions(
+    0, false, 128, 1, 16, 16, 16, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> input_limited = decode(
+    new List<int>(91, 48, 93),
+    tiny_input
+  );
+  require_true(input_limited.is_err(), "JSON max_input_bytes must fail closed");
+
+  return;
+}

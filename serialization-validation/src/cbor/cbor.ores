@@ -1,0 +1,749 @@
+// Native CBOR dynamic codec.
+//
+// Emits shortest-form definite-length signed int64 / bounded uint64 integers,
+// UTF-8 text, byte strings, arrays, string-key maps, booleans, and null.
+// Indefinite-length containers, tags, and float16/32/64 fail explicitly until
+// their exact dynamic representation is finalized.
+
+import class Value, Utf8Text, WireMember, MapEntry, IntParse from '../core/value';
+import fnc value_null, value_bool, value_int, value_string, value_bytes, value_array, value_object, value_map, value_deep_equal, value_hash, parse_int from '../core/value';
+import fnc bytes_equal from '../core/value';
+import class DecodeOptions, EncodeOptions, DecodeError, EncodeError, DecodedValue from '../core/options';
+import fnc empty_decode_error, decode_error, encode_error, decode_options_valid, encode_options_valid from '../core/options';
+import fnc utf8_is_valid from '../core/utf8';
+import fnc byte_list_valid, byte_range_fits from '../core/bytes';
+
+define class CborCursor as
+  pub val List<int> input;
+  pub val DecodeOptions options;
+  pub let int index;
+  pub let bool failed;
+  pub let DecodeError error;
+end
+
+define class CborWriter as
+  pub let List<int> output;
+  pub val EncodeOptions options;
+  pub let bool failed;
+  pub let EncodeError error;
+end
+
+fnc cursor_fail(
+  CborCursor mut cursor,
+  String code,
+  String message
+): void {
+  if cursor.failed then
+    return;
+  fi
+  cursor.failed = true;
+  cursor.error = decode_error(code, cursor.index, message);
+  return;
+}
+
+fnc writer_fail(
+  CborWriter mut writer,
+  String code,
+  String message
+): void {
+  if writer.failed then
+    return;
+  fi
+  writer.failed = true;
+  writer.error = encode_error(code, message);
+  return;
+}
+
+fnc read_u8(CborCursor mut cursor): int {
+  if cursor.index >= cursor.input.length then
+    cursor_fail(cursor, "unexpected_eof", "truncated CBOR value");
+    return 0;
+  fi
+
+  let int value = cursor.input[cursor.index];
+  if value < 0 || value > 255 then
+    cursor_fail(cursor, "invalid_byte", "CBOR input bytes must be 0..255");
+    return 0;
+  fi
+
+  cursor.index = cursor.index + 1;
+  return value;
+}
+
+fnc read_uint_be(CborCursor mut cursor, int width): int {
+  let int value = 0;
+  let int i = 0;
+
+  loop do
+    if i >= width then
+      break;
+    fi
+    let int byte = read_u8(cursor);
+    if cursor.failed then
+      return 0;
+    fi
+    value = (value * 256) + byte;
+    i = i + 1;
+  done
+
+  return value;
+}
+
+fnc read_argument(
+  CborCursor mut cursor,
+  int additional
+): int {
+  if additional < 24 then
+    return additional;
+  fi
+
+  if additional == 24 then
+    return read_u8(cursor);
+  fi
+
+  if additional == 25 then
+    return read_uint_be(cursor, 2);
+  fi
+
+  if additional == 26 then
+    return read_uint_be(cursor, 4);
+  fi
+
+  if additional == 27 then
+    let int first = read_u8(cursor);
+    if cursor.failed then
+      return 0;
+    fi
+
+    if first >= 128 then
+      cursor_fail(
+        cursor,
+        "uint64_range",
+        "CBOR uint64 argument exceeds Oreslang signed int range"
+      );
+      return 0;
+    fi
+
+    let int value = first;
+    let int i = 1;
+    loop do
+      if i >= 8 then
+        break;
+      fi
+      value = (value * 256) + read_u8(cursor);
+      if cursor.failed then
+        return 0;
+      fi
+      i = i + 1;
+    done
+    return value;
+  fi
+
+  if additional == 31 then
+    cursor_fail(cursor, "indefinite_length", "indefinite-length CBOR is not supported by the baseline codec");
+    return 0;
+  fi
+
+  cursor_fail(cursor, "invalid_additional_info", "invalid CBOR additional information");
+  return 0;
+}
+
+fnc read_bytes(
+  CborCursor mut cursor,
+  int length,
+  int limit,
+  String code
+): List<int> {
+  let List<int> output = new List<int>();
+
+  if length < 0 then
+    cursor_fail(cursor, "invalid_length", "negative CBOR length");
+    return output;
+  fi
+
+  if length > limit then
+    cursor_fail(cursor, code, "CBOR payload exceeds configured limit");
+    return output;
+  fi
+
+  if !byte_range_fits(cursor.input.length, cursor.index, length) then
+    cursor_fail(cursor, "unexpected_eof", "truncated CBOR payload");
+    return output;
+  fi
+
+  let int i = 0;
+  loop do
+    if i >= length then
+      break;
+    fi
+    output.push(cursor.input[cursor.index + i]);
+    i = i + 1;
+  done
+  cursor.index = cursor.index + length;
+
+  return output;
+}
+
+fnc map_entry_index(
+  List<MapEntry> entries,
+  Map<int, List<int>> buckets,
+  Value key
+): int {
+  let int hash = value_hash(key);
+
+  if !buckets.contains(hash) then
+    return -1;
+  fi
+
+  let List<int> candidates = buckets.get(hash);
+  for const index of candidates do
+    if value_deep_equal(entries[index].key, key) then
+      return index;
+    fi
+  done
+
+  return -1;
+}
+
+fnc remember_map_entry(
+  Map<int, List<int>> buckets,
+  Value key,
+  int index
+): void {
+  let int hash = value_hash(key);
+
+  if buckets.contains(hash) then
+    let List<int> candidates = buckets.get(hash);
+    candidates.push(index);
+    return;
+  fi
+
+  let List<int> candidates = new List<int>();
+  candidates.push(index);
+  buckets.set(hash, candidates);
+  return;
+}
+
+fnc map_keys_unique(List<MapEntry> entries): bool {
+  let Map<int, List<int>> buckets = new Map<int, List<int>>();
+  let int i = 0;
+
+  loop do
+    if i >= entries.length then
+      break;
+    fi
+
+    let MapEntry entry = entries[i];
+    if map_entry_index(entries, buckets, entry.key) >= 0 then
+      return false;
+    fi
+
+    remember_map_entry(buckets, entry.key, i);
+    i = i + 1;
+  done
+
+  return true;
+}
+
+fnc decode_text(
+  CborCursor mut cursor,
+  int length
+): Value {
+  let List<int> bytes = read_bytes(
+    cursor,
+    length,
+    cursor.options.max_string_bytes,
+    "string_limit"
+  );
+
+  if cursor.failed then
+    return value_null();
+  fi
+
+  if !utf8_is_valid(bytes) then
+    cursor_fail(cursor, "invalid_utf8", "CBOR text string contains invalid UTF-8");
+    return value_null();
+  fi
+
+  return value_string(new Utf8Text(bytes));
+}
+
+fnc decode_array(
+  CborCursor mut cursor,
+  int count,
+  int depth
+): Value {
+  let List<Value> values = new List<Value>();
+
+  if count > cursor.options.max_array_entries then
+    cursor_fail(cursor, "array_limit", "CBOR array exceeds max_array_entries");
+    return value_array(values);
+  fi
+
+  let int i = 0;
+  loop do
+    if i >= count then
+      break;
+    fi
+
+    let Value value = decode_value(cursor, depth + 1);
+    if cursor.failed then
+      return value_array(values);
+    fi
+
+    values.push(value);
+    i = i + 1;
+  done
+
+  return value_array(values);
+}
+
+fnc decode_map(
+  CborCursor mut cursor,
+  int count,
+  int depth
+): Value {
+  let List<MapEntry> entries = new List<MapEntry>();
+  let Map<int, List<int>> buckets = new Map<int, List<int>>();
+  let bool all_text_keys = true;
+
+  if count > cursor.options.max_map_entries then
+    cursor_fail(cursor, "map_limit", "CBOR map exceeds max_map_entries");
+    return value_map(entries);
+  fi
+
+  let int i = 0;
+  loop do
+    if i >= count then
+      break;
+    fi
+
+    let Value key = decode_value(cursor, depth + 1);
+    if cursor.failed then
+      return value_map(entries);
+    fi
+
+    let Value member_value = decode_value(cursor, depth + 1);
+    if cursor.failed then
+      return value_map(entries);
+    fi
+
+    if key.kind != 3 then
+      all_text_keys = false;
+    fi
+
+    let int existing = map_entry_index(entries, buckets, key);
+    if existing >= 0 then
+      if cursor.options.duplicate_key_policy == 0 then
+        cursor_fail(cursor, "duplicate_key", "duplicate CBOR map key");
+        return value_map(entries);
+      elseif cursor.options.duplicate_key_policy == 2 then
+        entries[existing] = new MapEntry(key, member_value);
+      fi
+    else
+      let int index = entries.length;
+      entries.push(new MapEntry(key, member_value));
+      remember_map_entry(buckets, key, index);
+    fi
+
+    i = i + 1;
+  done
+
+  if all_text_keys then
+    let List<WireMember> members = new List<WireMember>();
+    for const entry of entries do
+      members.push(new WireMember(entry.key.string_value, entry.value));
+    done
+    return value_object(members);
+  fi
+
+  return value_map(entries);
+}
+
+fnc decode_value(
+  CborCursor mut cursor,
+  int depth
+): Value {
+  if depth > cursor.options.max_depth then
+    cursor_fail(cursor, "depth_limit", "CBOR nesting exceeds max_depth");
+    return value_null();
+  fi
+
+  let int initial = read_u8(cursor);
+  if cursor.failed then
+    return value_null();
+  fi
+
+  let int major = initial / 32;
+  let int additional = initial % 32;
+
+  if major == 0 then
+    return value_int(read_argument(cursor, additional));
+  fi
+
+  if major == 1 then
+    let int argument = read_argument(cursor, additional);
+    if cursor.failed then
+      return value_null();
+    fi
+    return value_int(-1 - argument);
+  fi
+
+  if major == 2 then
+    let int length = read_argument(cursor, additional);
+    if cursor.failed then
+      return value_null();
+    fi
+    return value_bytes(
+      read_bytes(
+        cursor,
+        length,
+        cursor.options.max_binary_bytes,
+        "binary_limit"
+      )
+    );
+  fi
+
+  if major == 3 then
+    let int length = read_argument(cursor, additional);
+    if cursor.failed then
+      return value_null();
+    fi
+    return decode_text(cursor, length);
+  fi
+
+  if major == 4 then
+    let int count = read_argument(cursor, additional);
+    if cursor.failed then
+      return value_null();
+    fi
+    return decode_array(cursor, count, depth);
+  fi
+
+  if major == 5 then
+    let int count = read_argument(cursor, additional);
+    if cursor.failed then
+      return value_null();
+    fi
+    return decode_map(cursor, count, depth);
+  fi
+
+  if major == 6 then
+    cursor_fail(cursor, "unsupported_tag", "CBOR tags require a finalized tagged Value representation");
+    return value_null();
+  fi
+
+  if major == 7 then
+    if additional == 20 then
+      return value_bool(false);
+    fi
+    if additional == 21 then
+      return value_bool(true);
+    fi
+    if additional == 22 then
+      return value_null();
+    fi
+
+    if additional == 25 || additional == 26 || additional == 27 then
+      cursor_fail(cursor, "unsupported_float", "CBOR floating point requires exact float-bit primitives");
+      return value_null();
+    fi
+
+    cursor_fail(cursor, "unsupported_simple", "unsupported CBOR simple value");
+    return value_null();
+  fi
+
+  cursor_fail(cursor, "invalid_major_type", "invalid CBOR major type");
+  return value_null();
+}
+
+pub fnc decode(
+  List<int> input,
+  DecodeOptions options
+): Result<DecodedValue, DecodeError> {
+  if !decode_options_valid(options) then
+    return Err(decode_error("invalid_options", 0, "invalid or unsafe decode options"));
+  fi
+
+  if input.length > options.max_input_bytes then
+    return Err(decode_error("input_limit", 0, "CBOR input exceeds max_input_bytes"));
+  fi
+
+  if !byte_list_valid(input) then
+    return Err(decode_error("invalid_byte", 0, "CBOR input values must all be bytes 0..255"));
+  fi
+
+  let CborCursor cursor = new CborCursor(
+    input,
+    options,
+    0,
+    false,
+    empty_decode_error()
+  );
+
+  let Value value = decode_value(cursor, 0);
+
+  if cursor.failed then
+    return Err(cursor.error);
+  fi
+
+  if !options.allow_trailing_data && cursor.index != input.length then
+    return Err(decode_error("trailing_data", cursor.index, "trailing bytes after CBOR value"));
+  fi
+
+  return Ok(new DecodedValue(value, cursor.index));
+}
+
+fnc append_byte(CborWriter mut writer, int byte): void {
+  if writer.failed then
+    return;
+  fi
+
+  if byte < 0 || byte > 255 then
+    writer_fail(writer, "invalid_byte", "internal CBOR byte outside 0..255");
+    return;
+  fi
+
+  if writer.output.length >= writer.options.max_output_bytes then
+    writer_fail(writer, "output_limit", "CBOR output exceeds max_output_bytes");
+    return;
+  fi
+
+  writer.output.push(byte);
+  return;
+}
+
+fnc append_uint_be(
+  CborWriter mut writer,
+  int value,
+  int width
+): void {
+  let int divisor = 1;
+  let int i = 1;
+
+  loop do
+    if i >= width then
+      break;
+    fi
+    divisor = divisor * 256;
+    i = i + 1;
+  done
+
+  let int remaining = value;
+  let int j = 0;
+
+  loop do
+    if j >= width then
+      break;
+    fi
+
+    let int byte = remaining / divisor;
+    append_byte(writer, byte);
+    remaining = remaining % divisor;
+
+    if divisor > 1 then
+      divisor = divisor / 256;
+    fi
+
+    j = j + 1;
+  done
+
+  return;
+}
+
+fnc append_bytes(
+  CborWriter mut writer,
+  List<int> bytes
+): void {
+  for const byte of bytes do
+    append_byte(writer, byte);
+    if writer.failed then
+      return;
+    fi
+  done
+  return;
+}
+
+fnc append_head(
+  CborWriter mut writer,
+  int major,
+  int argument
+): void {
+  if argument < 0 then
+    writer_fail(writer, "invalid_argument", "CBOR head argument cannot be negative");
+    return;
+  fi
+
+  if argument < 24 then
+    append_byte(writer, (major * 32) + argument);
+    return;
+  fi
+
+  if argument <= 255 then
+    append_byte(writer, (major * 32) + 24);
+    append_byte(writer, argument);
+    return;
+  fi
+
+  if argument <= 65535 then
+    append_byte(writer, (major * 32) + 25);
+    append_uint_be(writer, argument, 2);
+    return;
+  fi
+
+  if argument <= 4294967295 then
+    append_byte(writer, (major * 32) + 26);
+    append_uint_be(writer, argument, 4);
+    return;
+  fi
+
+  append_byte(writer, (major * 32) + 27);
+  append_uint_be(writer, argument, 8);
+  return;
+}
+
+fnc encode_value(
+  CborWriter mut writer,
+  Value value,
+  int depth
+): void {
+  if writer.failed then
+    return;
+  fi
+
+  if depth > writer.options.max_depth then
+    writer_fail(writer, "depth_limit", "CBOR encoding exceeds max_depth");
+    return;
+  fi
+
+  if value.kind == 0 then
+    append_byte(writer, 246);
+    return;
+  fi
+
+  if value.kind == 1 then
+    append_byte(writer, value.bool_value ? 245 : 244);
+    return;
+  fi
+
+  if value.kind == 2 then
+    let IntParse parsed = parse_int(value);
+    if !parsed.ok then
+      writer_fail(
+        writer,
+        "unsupported_number",
+        "CBOR encoder accepts exact integer number Values on this path"
+      );
+      return;
+    fi
+
+    if parsed.value >= 0 then
+      append_head(writer, 0, parsed.value);
+    else
+      append_head(writer, 1, -1 - parsed.value);
+    fi
+    return;
+  fi
+
+  if value.kind == 3 then
+    if !utf8_is_valid(value.string_value.bytes) then
+      writer_fail(writer, "invalid_utf8", "cannot encode invalid UTF-8 as CBOR text");
+      return;
+    fi
+    append_head(writer, 3, value.string_value.bytes.length);
+    append_bytes(writer, value.string_value.bytes);
+    return;
+  fi
+
+  if value.kind == 4 then
+    append_head(writer, 2, value.bytes_value.length);
+    append_bytes(writer, value.bytes_value);
+    return;
+  fi
+
+  if value.kind == 5 then
+    append_head(writer, 4, value.array_value.length);
+    for const item of value.array_value do
+      encode_value(writer, item, depth + 1);
+      if writer.failed then
+        return;
+      fi
+    done
+    return;
+  fi
+
+  if value.kind == 6 then
+    let List<MapEntry> object_entries = new List<MapEntry>();
+    for const member of value.object_value do
+      object_entries.push(new MapEntry(value_string(member.key), member.value));
+    done
+    if !map_keys_unique(object_entries) then
+      writer_fail(writer, "duplicate_key", "cannot encode CBOR object with duplicate keys");
+      return;
+    fi
+
+    append_head(writer, 5, value.object_value.length);
+    for const member of value.object_value do
+      if !utf8_is_valid(member.key.bytes) then
+        writer_fail(writer, "invalid_utf8", "CBOR map key contains invalid UTF-8");
+        return;
+      fi
+      append_head(writer, 3, member.key.bytes.length);
+      append_bytes(writer, member.key.bytes);
+      encode_value(writer, member.value, depth + 1);
+      if writer.failed then
+        return;
+      fi
+    done
+    return;
+  fi
+
+  if value.kind == 8 then
+    if !map_keys_unique(value.map_value) then
+      writer_fail(writer, "duplicate_key", "cannot encode CBOR map with duplicate keys");
+      return;
+    fi
+
+    append_head(writer, 5, value.map_value.length);
+    for const entry of value.map_value do
+      encode_value(writer, entry.key, depth + 1);
+      encode_value(writer, entry.value, depth + 1);
+      if writer.failed then
+        return;
+      fi
+    done
+    return;
+  fi
+
+
+  writer_fail(
+    writer,
+    "unsupported_value",
+    "baseline CBOR encoder does not map extension values or unknown Value kinds"
+  );
+  return;
+}
+
+pub fnc encode(
+  Value value,
+  EncodeOptions options
+): Result<List<int>, EncodeError> {
+  if !encode_options_valid(options) then
+    return Err(encode_error("invalid_options", "invalid or unsafe encode options"));
+  fi
+
+  let CborWriter writer = new CborWriter(
+    new List<int>(),
+    options,
+    false,
+    new EncodeError("", "")
+  );
+
+  encode_value(writer, value, 0);
+
+  if writer.failed then
+    return Err(writer.error);
+  fi
+
+  return Ok(writer.output);
+}

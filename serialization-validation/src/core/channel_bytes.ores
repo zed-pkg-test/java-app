@@ -1,0 +1,85 @@
+// Bounded byte transport over native Oreslang channels.
+//
+// Some(chunk) carries bytes; None is EOF. This helper owns only its local
+// accumulator. Channel payloads remain ordinary data and no callback/parser
+// capability crosses the transport boundary.
+//
+// Today this copies validated bytes into the accumulator. A future native
+// segmented byte buffer may consume whole chunks with explicit rt take, but
+// ordinary calls must not hide ownership transfer.
+
+import fnc byte_list_valid from './bytes';
+
+define class ByteStreamError as
+  pub val String code;
+  pub val int offset;
+  pub val String message;
+end
+
+define class ByteStreamResult as
+  pub val bool ok;
+  pub val List<int> bytes;
+  pub val ByteStreamError error;
+end
+
+fnc stream_error(String code, int offset, String message): ByteStreamResult {
+  return new ByteStreamResult(
+    false,
+    new List<int>(),
+    new ByteStreamError(code, offset, message)
+  );
+}
+
+pub async fnc collect_bytes_from_channel(
+  Channel<Option<List<int>>> input,
+  int max_bytes
+): ByteStreamResult {
+  if max_bytes < 0 then
+    return stream_error("invalid_limit", 0, "max_bytes cannot be negative");
+  fi
+
+  let List<int> output = new List<int>();
+
+  loop do
+    val Option<List<int>> frame = await (nb readch input);
+    if frame.is_none() then
+      return new ByteStreamResult(
+        true,
+        output,
+        new ByteStreamError("", 0, "")
+      );
+    fi
+
+    val List<int> chunk = frame.unwrap();
+
+    if chunk.length > max_bytes - output.length then
+      return stream_error(
+        "input_limit",
+        output.length,
+        "byte stream exceeds configured max_bytes"
+      );
+    fi
+
+    if !byte_list_valid(chunk) then
+      let int i = 0;
+      loop do
+        if i >= chunk.length then
+          break;
+        fi
+        if chunk[i] < 0 || chunk[i] > 255 then
+          return stream_error(
+            "invalid_byte",
+            output.length + i,
+            "channel payload values must be bytes 0..255"
+          );
+        fi
+        i = i + 1;
+      done
+      return stream_error("invalid_byte", output.length, "invalid byte chunk");
+    fi
+
+    for const byte of chunk do
+      output.push(byte);
+    done
+  done
+}

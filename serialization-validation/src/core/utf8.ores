@@ -1,0 +1,164 @@
+// Shared UTF-8 primitives for every text-bearing wire format.
+//
+// Text codecs operate on List<int> bytes and never delegate Unicode validation
+// to host/JVM strings. These helpers are format-neutral.
+
+pub fnc utf8_expected_width(int first): int {
+  if first >= 0 && first < 128 then
+    return 1;
+  fi
+  if first >= 194 && first <= 223 then
+    return 2;
+  fi
+  if first >= 224 && first <= 239 then
+    return 3;
+  fi
+  if first >= 240 && first <= 244 then
+    return 4;
+  fi
+  return -1;
+}
+
+pub fnc utf8_prefix_status(
+  List<int> bytes,
+  int index,
+  int expected_width
+): int {
+  // 0 invalid, 1 valid prefix but incomplete, 2 complete and valid.
+  if expected_width < 1 || index < 0 || index >= bytes.length then
+    return 0;
+  fi
+
+  let int available = bytes.length - index;
+  let int check_width = available < expected_width ? available : expected_width;
+  let int first = bytes[index];
+  let int i = 1;
+
+  loop do
+    if i >= check_width then
+      break;
+    fi
+
+    let int byte = bytes[index + i];
+    if byte < 128 || byte > 191 then
+      return 0;
+    fi
+
+    if i == 1 then
+      if first == 224 && byte < 160 then
+        return 0;
+      fi
+      if first == 237 && byte > 159 then
+        return 0;
+      fi
+      if first == 240 && byte < 144 then
+        return 0;
+      fi
+      if first == 244 && byte > 143 then
+        return 0;
+      fi
+    fi
+
+    i = i + 1;
+  done
+
+  if available < expected_width then
+    return 1;
+  fi
+
+  return 2;
+}
+
+pub fnc utf8_sequence_length(List<int> bytes, int index): int {
+  if index < 0 || index >= bytes.length then
+    return -1;
+  fi
+
+  let int expected_width = utf8_expected_width(bytes[index]);
+  if expected_width < 1 then
+    return -1;
+  fi
+
+  if utf8_prefix_status(bytes, index, expected_width) != 2 then
+    return -1;
+  fi
+
+  return expected_width;
+}
+
+pub fnc utf8_is_valid(List<int> bytes): bool {
+  let int i = 0;
+
+  loop do
+    if i >= bytes.length then
+      break;
+    fi
+
+    let int width = utf8_sequence_length(bytes, i);
+    if width < 1 then
+      return false;
+    fi
+
+    i = i + width;
+  done
+
+  return true;
+}
+
+pub fnc utf8_codepoint_count(List<int> bytes): int {
+  let int count = 0;
+  let int i = 0;
+
+  loop do
+    if i >= bytes.length then
+      break;
+    fi
+
+    let int width = utf8_sequence_length(bytes, i);
+    if width < 1 then
+      return -1;
+    fi
+
+    count = count + 1;
+    i = i + width;
+  done
+
+  return count;
+}
+
+pub fnc utf8_append_codepoint(
+  List<int> mut output,
+  int codepoint
+): bool {
+  if codepoint < 0 || codepoint > 1114111 then
+    return false;
+  fi
+
+  if codepoint >= 55296 && codepoint <= 57343 then
+    return false;
+  fi
+
+  if codepoint <= 127 then
+    output.push(codepoint);
+    return true;
+  fi
+
+  if codepoint <= 2047 then
+    output.push(192 + (codepoint / 64));
+    output.push(128 + (codepoint % 64));
+    return true;
+  fi
+
+  if codepoint <= 65535 then
+    output.push(224 + (codepoint / 4096));
+    output.push(128 + ((codepoint / 64) % 64));
+    output.push(128 + (codepoint % 64));
+    return true;
+  fi
+
+  output.push(240 + (codepoint / 262144));
+  output.push(128 + ((codepoint / 4096) % 64));
+  output.push(128 + ((codepoint / 64) % 64));
+  output.push(128 + (codepoint % 64));
+  return true;
+}

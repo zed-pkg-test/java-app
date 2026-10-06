@@ -1,0 +1,558 @@
+import fnc byte_list_valid, byte_range_fits from '../core/bytes';
+
+// Native Protocol Buffers wire codec.
+//
+// This layer intentionally operates on numbered wire fields rather than
+// inventing JSON-like names without a descriptor. Generated typed codecs can
+// dispatch these fields directly into Oreslang classes/structs. Unknown varints
+// retain their exact raw bytes, including uint64 values above signed int max.
+
+define class ProtoField as
+  pub val int field_number;
+  pub val int wire_type;
+
+  // Wire type 0 may exceed Oreslang signed int. When varint_fits_int is false,
+  // payload retains the exact raw varint bytes for unknown-field preservation.
+  pub val bool varint_fits_int;
+  pub val int varint_value;
+
+  // Wire type 0: exact raw varint bytes when decoded.
+  // Wire types 1/5: exact fixed-width little-endian bytes.
+  // Wire type 2: exact content bytes without the length prefix.
+  pub val List<int> payload;
+end
+
+define class ProtoMessage as
+  pub val List<ProtoField> fields;
+end
+
+define class ProtoDecodeOptions as
+  pub val int max_input_bytes;
+  pub val int max_fields;
+  pub val int max_length_delimited_bytes;
+end
+
+define class ProtoEncodeOptions as
+  pub val int max_output_bytes;
+end
+
+define class ProtoError as
+  pub val String code;
+  pub val int offset;
+  pub val String message;
+end
+
+define class ProtoCursor as
+  pub val List<int> input;
+  pub val ProtoDecodeOptions options;
+  pub let int index;
+  pub let bool failed;
+  pub let ProtoError error;
+end
+
+define class ProtoWriter as
+  pub let List<int> output;
+  pub val ProtoEncodeOptions options;
+  pub let bool failed;
+  pub let ProtoError error;
+end
+
+define class VarintRead as
+  pub val bool ok;
+  pub val bool fits_int;
+  pub val int value;
+  pub val List<int> bytes;
+end
+
+pub fnc default_proto_decode_options(): ProtoDecodeOptions {
+  return new ProtoDecodeOptions(
+    16 * 1024 * 1024,
+    65536,
+    16 * 1024 * 1024
+  );
+}
+
+pub fnc default_proto_encode_options(): ProtoEncodeOptions {
+  return new ProtoEncodeOptions(16 * 1024 * 1024);
+}
+
+pub fnc proto_decode_options_valid(ProtoDecodeOptions options): bool {
+  return options.max_input_bytes >= 0 &&
+         options.max_input_bytes <= 256 * 1024 * 1024 &&
+         options.max_fields >= 0 &&
+         options.max_fields <= 1000000 &&
+         options.max_length_delimited_bytes >= 0 &&
+         options.max_length_delimited_bytes <= 256 * 1024 * 1024;
+}
+
+pub fnc proto_encode_options_valid(ProtoEncodeOptions options): bool {
+  return options.max_output_bytes >= 0 &&
+         options.max_output_bytes <= 256 * 1024 * 1024;
+}
+
+pub fnc proto_varint(int field_number, int value): ProtoField {
+  return new ProtoField(field_number, 0, true, value, new List<int>());
+}
+
+pub fnc proto_raw_varint(int field_number, List<int> bytes): ProtoField {
+  return new ProtoField(field_number, 0, false, 0, bytes);
+}
+
+pub fnc proto_fixed64(int field_number, List<int> bytes): ProtoField {
+  return new ProtoField(field_number, 1, false, 0, bytes);
+}
+
+pub fnc proto_bytes(int field_number, List<int> bytes): ProtoField {
+  return new ProtoField(field_number, 2, false, 0, bytes);
+}
+
+pub fnc proto_fixed32(int field_number, List<int> bytes): ProtoField {
+  return new ProtoField(field_number, 5, false, 0, bytes);
+}
+
+fnc empty_error(): ProtoError {
+  return new ProtoError("", 0, "");
+}
+
+fnc cursor_fail(
+  ProtoCursor mut cursor,
+  String code,
+  String message
+): void {
+  if cursor.failed then
+    return;
+  fi
+  cursor.failed = true;
+  cursor.error = new ProtoError(code, cursor.index, message);
+  return;
+}
+
+fnc writer_fail(
+  ProtoWriter mut writer,
+  String code,
+  String message
+): void {
+  if writer.failed then
+    return;
+  fi
+  writer.failed = true;
+  writer.error = new ProtoError(code, writer.output.length, message);
+  return;
+}
+
+fnc read_u8(ProtoCursor mut cursor): int {
+  if cursor.index >= cursor.input.length then
+    cursor_fail(cursor, "unexpected_eof", "truncated Protobuf message");
+    return 0;
+  fi
+
+  let int byte = cursor.input[cursor.index];
+  if byte < 0 || byte > 255 then
+    cursor_fail(cursor, "invalid_byte", "Protobuf input bytes must be 0..255");
+    return 0;
+  fi
+
+  cursor.index = cursor.index + 1;
+  return byte;
+}
+
+fnc read_varint(ProtoCursor mut cursor): VarintRead {
+  let List<int> bytes = new List<int>();
+  let int value = 0;
+  let int multiplier = 1;
+  let bool fits_int = true;
+  let int count = 0;
+
+  loop do
+    if count >= 10 then
+      cursor_fail(cursor, "varint_overflow", "Protobuf varint exceeds 10 bytes");
+      return new VarintRead(false, false, 0, bytes);
+    fi
+
+    let int byte = read_u8(cursor);
+    if cursor.failed then
+      return new VarintRead(false, false, 0, bytes);
+    fi
+
+    bytes.push(byte);
+    let int payload = byte % 128;
+
+    if count < 9 && fits_int then
+      value = value + (payload * multiplier);
+      if count < 8 then
+        multiplier = multiplier * 128;
+      fi
+    else
+      fits_int = false;
+    fi
+
+    count = count + 1;
+
+    if byte < 128 then
+      if count == 10 && byte > 1 then
+        cursor_fail(cursor, "varint_overflow", "Protobuf uint64 varint overflow");
+        return new VarintRead(false, false, 0, bytes);
+      fi
+      return new VarintRead(true, fits_int, value, bytes);
+    fi
+
+    if count == 10 then
+      cursor_fail(cursor, "varint_overflow", "Protobuf varint continuation exceeds 10 bytes");
+      return new VarintRead(false, false, 0, bytes);
+    fi
+  done
+
+  return new VarintRead(false, false, 0, bytes);
+}
+
+fnc raw_varint_is_valid(List<int> bytes): bool {
+  if bytes.length == 0 || bytes.length > 10 then
+    return false;
+  fi
+
+  let int i = 0;
+  loop do
+    if i >= bytes.length then
+      break;
+    fi
+
+    let int byte = bytes[i];
+    if byte < 0 || byte > 255 then
+      return false;
+    fi
+
+    let bool last = i == bytes.length - 1;
+    if last {
+      if byte >= 128 {
+        return false;
+      } fi
+      if bytes.length == 10 && byte > 1 {
+        return false;
+      } fi
+    } else {
+      if byte < 128 {
+        return false;
+      } fi
+    } fi
+
+    i = i + 1;
+  done
+
+  return true;
+}
+
+fnc read_payload(
+  ProtoCursor mut cursor,
+  int length,
+  int limit,
+  String code
+): List<int> {
+  let List<int> output = new List<int>();
+
+  if length < 0 then
+    cursor_fail(cursor, "invalid_length", "negative Protobuf length");
+    return output;
+  fi
+
+  if length > limit then
+    cursor_fail(cursor, code, "Protobuf payload exceeds configured limit");
+    return output;
+  fi
+
+  if !byte_range_fits(cursor.input.length, cursor.index, length) then
+    cursor_fail(cursor, "unexpected_eof", "truncated Protobuf field payload");
+    return output;
+  fi
+
+  let int i = 0;
+  loop do
+    if i >= length then
+      break;
+    fi
+    output.push(cursor.input[cursor.index + i]);
+    i = i + 1;
+  done
+
+  cursor.index = cursor.index + length;
+  return output;
+}
+
+pub fnc decode_message(
+  List<int> input,
+  ProtoDecodeOptions options
+): Result<ProtoMessage, ProtoError> {
+  if !proto_decode_options_valid(options) then
+    return Err(new ProtoError("invalid_options", 0, "invalid or unsafe Protobuf decode options"));
+  fi
+
+  if input.length > options.max_input_bytes then
+    return Err(new ProtoError("input_limit", 0, "Protobuf input exceeds max_input_bytes"));
+  fi
+
+  if !byte_list_valid(input) then
+    return Err(new ProtoError("invalid_byte", 0, "Protobuf input values must all be bytes 0..255"));
+  fi
+
+  let ProtoCursor cursor = new ProtoCursor(
+    input,
+    options,
+    0,
+    false,
+    empty_error()
+  );
+
+  let List<ProtoField> fields = new List<ProtoField>();
+
+  loop do
+    if cursor.index >= input.length then
+      break;
+    fi
+
+    if fields.length >= options.max_fields then
+      return Err(new ProtoError("field_limit", cursor.index, "Protobuf message exceeds max_fields"));
+    fi
+
+    let VarintRead key = read_varint(cursor);
+    if cursor.failed || !key.ok then
+      return Err(cursor.error);
+    fi
+    if !key.fits_int then
+      return Err(new ProtoError("field_key_range", cursor.index, "Protobuf field key exceeds signed int range"));
+    fi
+
+    let int field_number = key.value / 8;
+    let int wire_type = key.value % 8;
+
+    if field_number <= 0 || field_number > 536870911 then
+      return Err(new ProtoError("field_number", cursor.index, "invalid Protobuf field number"));
+    fi
+
+    if wire_type == 0 then
+      let VarintRead value = read_varint(cursor);
+      if cursor.failed || !value.ok then
+        return Err(cursor.error);
+      fi
+      fields.push(
+        new ProtoField(
+          field_number,
+          0,
+          value.fits_int,
+          value.value,
+          value.bytes
+        )
+      );
+    elseif wire_type == 1 then
+      let List<int> payload = read_payload(cursor, 8, 8, "fixed64_length");
+      if cursor.failed then
+        return Err(cursor.error);
+      fi
+      fields.push(new ProtoField(field_number, 1, false, 0, payload));
+    elseif wire_type == 2 then
+      let VarintRead length = read_varint(cursor);
+      if cursor.failed || !length.ok then
+        return Err(cursor.error);
+      fi
+      if !length.fits_int then
+        return Err(new ProtoError("length_range", cursor.index, "Protobuf length exceeds signed int range"));
+      fi
+
+      let List<int> payload = read_payload(
+        cursor,
+        length.value,
+        options.max_length_delimited_bytes,
+        "length_limit"
+      );
+      if cursor.failed then
+        return Err(cursor.error);
+      fi
+      fields.push(new ProtoField(field_number, 2, false, 0, payload));
+    elseif wire_type == 5 then
+      let List<int> payload = read_payload(cursor, 4, 4, "fixed32_length");
+      if cursor.failed then
+        return Err(cursor.error);
+      fi
+      fields.push(new ProtoField(field_number, 5, false, 0, payload));
+    else
+      return Err(
+        new ProtoError(
+          "wire_type",
+          cursor.index,
+          "unsupported or invalid Protobuf wire type; groups are intentionally rejected"
+        )
+      );
+    fi
+  done
+
+  return Ok(new ProtoMessage(fields));
+}
+
+fnc append_byte(
+  ProtoWriter mut writer,
+  int byte
+): void {
+  if writer.failed then
+    return;
+  fi
+
+  if byte < 0 || byte > 255 then
+    writer_fail(writer, "invalid_byte", "internal Protobuf byte outside 0..255");
+    return;
+  fi
+
+  if writer.output.length >= writer.options.max_output_bytes then
+    writer_fail(writer, "output_limit", "Protobuf output exceeds max_output_bytes");
+    return;
+  fi
+
+  writer.output.push(byte);
+  return;
+}
+
+fnc append_varint(
+  ProtoWriter mut writer,
+  int value
+): void {
+  if value < 0 then
+    writer_fail(
+      writer,
+      "negative_varint",
+      "baseline raw Protobuf varint encoder requires a non-negative value"
+    );
+    return;
+  fi
+
+  let int remaining = value;
+
+  loop do
+    if remaining < 128 then
+      append_byte(writer, remaining);
+      break;
+    fi
+
+    append_byte(writer, (remaining % 128) + 128);
+    remaining = remaining / 128;
+  done
+
+  return;
+}
+
+fnc append_payload(
+  ProtoWriter mut writer,
+  List<int> payload
+): void {
+  for const byte of payload do
+    append_byte(writer, byte);
+    if writer.failed then
+      return;
+    fi
+  done
+  return;
+}
+
+fnc valid_field_number(int field_number): bool {
+  return field_number > 0 && field_number <= 536870911;
+}
+
+fnc encode_field(
+  ProtoWriter mut writer,
+  ProtoField field
+): void {
+  if !valid_field_number(field.field_number) then
+    writer_fail(writer, "field_number", "invalid Protobuf field number");
+    return;
+  fi
+
+  if field.wire_type != 0 &&
+     field.wire_type != 1 &&
+     field.wire_type != 2 &&
+     field.wire_type != 5 then
+    writer_fail(writer, "wire_type", "unsupported Protobuf wire type");
+    return;
+  fi
+
+  append_varint(writer, (field.field_number * 8) + field.wire_type);
+  if writer.failed then
+    return;
+  fi
+
+  if field.wire_type == 0 then
+    if field.payload.length > 0 then
+      if !raw_varint_is_valid(field.payload) then
+        writer_fail(writer, "varint_payload", "raw Protobuf varint payload is malformed");
+        return;
+      fi
+      append_payload(writer, field.payload);
+      return;
+    fi
+
+    if !field.varint_fits_int then
+      writer_fail(writer, "varint_range", "wire type 0 requires an int value or preserved raw bytes");
+      return;
+    fi
+
+    append_varint(writer, field.varint_value);
+    return;
+  fi
+
+  if field.wire_type == 1 then
+    if field.payload.length != 8 then
+      writer_fail(writer, "fixed64_length", "wire type 1 payload must contain exactly 8 bytes");
+      return;
+    fi
+    append_payload(writer, field.payload);
+    return;
+  fi
+
+  if field.wire_type == 2 then
+    append_varint(writer, field.payload.length);
+    append_payload(writer, field.payload);
+    return;
+  fi
+
+  if field.payload.length != 4 then
+    writer_fail(writer, "fixed32_length", "wire type 5 payload must contain exactly 4 bytes");
+    return;
+  fi
+  append_payload(writer, field.payload);
+  return;
+}
+
+pub fnc encode_message(
+  ProtoMessage message,
+  ProtoEncodeOptions options
+): Result<List<int>, ProtoError> {
+  if !proto_encode_options_valid(options) then
+    return Err(new ProtoError("invalid_options", 0, "invalid or unsafe Protobuf encode options"));
+  fi
+
+  let ProtoWriter writer = new ProtoWriter(
+    new List<int>(),
+    options,
+    false,
+    empty_error()
+  );
+
+  for const field of message.fields do
+    encode_field(writer, field);
+    if writer.failed then
+      return Err(writer.error);
+    fi
+  done
+
+  return Ok(writer.output);
+}
+
+pub fnc fields_with_number(
+  ProtoMessage message,
+  int field_number
+): List<ProtoField> {
+  let List<ProtoField> fields = new List<ProtoField>();
+
+  for const field of message.fields do
+    if field.field_number == field_number then
+      fields.push(field);
+    fi
+  done
+
+  return fields;
+}

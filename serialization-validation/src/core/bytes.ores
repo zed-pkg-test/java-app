@@ -1,0 +1,26 @@
+// Shared byte-buffer invariants.
+
+pub fnc byte_list_valid(List<int> bytes): bool {
+  for const byte of bytes do
+    if byte < 0 || byte > 255 then
+      return false;
+    fi
+  done
+  return true;
+}
+
+pub fnc byte_range_fits(
+  int total_length,
+  int offset,
+  int length
+): bool {
+  if total_length < 0 || offset < 0 || length < 0 then
+    return false;
+  fi
+
+  if offset > total_length then
+    return false;
+  fi
+
+  return length <= total_length - offset;
+}
