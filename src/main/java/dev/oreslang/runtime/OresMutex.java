@@ -60,14 +60,44 @@ public final class OresMutex {
      * could be detached from the mutex's domain/permit accounting.</p>
      */
     public static final class GuardFuture<T> extends CompletableFuture<Guard<T>> {
+        private final AtomicReference<Runnable> failureCleanup = new AtomicReference<>();
+        private final AtomicBoolean failureCleanupRan = new AtomicBoolean();
+
         private GuardFuture() { }
+
+        private void installFailureCleanup(Runnable cleanup) {
+            Objects.requireNonNull(cleanup, "cleanup");
+            if (!failureCleanup.compareAndSet(null, cleanup)) {
+                throw new IllegalStateException("Mutex GuardFuture failure cleanup already installed");
+            }
+        }
+
+        private void runFailureCleanup() {
+            Runnable cleanup = failureCleanup.get();
+            if (cleanup != null && failureCleanupRan.compareAndSet(false, true)) {
+                cleanup.run();
+            }
+        }
 
         private boolean completeFromRuntime(Guard<T> guard) {
             return super.complete(guard);
         }
 
         private boolean failFromRuntime(Throwable failure) {
+            /*
+             * Publish terminal failure only after queue/deadlock bookkeeping is
+             * retired. Otherwise a caller unblocked by get()/join() can
+             * immediately attempt another SharedMutex and observe its own stale
+             * WAITING_ON edge.
+             */
+            runFailureCleanup();
             return super.completeExceptionally(failure);
+        }
+
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            runFailureCleanup();
+            return super.cancel(mayInterruptIfRunning);
         }
 
         @Override
@@ -536,6 +566,7 @@ public final class OresMutex {
             private final Object ownerDomain;
             private final boolean enforceOwnerDomain;
             private final GuardFuture<T> future;
+            private final AtomicBoolean accountingRetired = new AtomicBoolean();
 
             private AsyncWaiter(
                     Object ownerDomain,
@@ -545,6 +576,29 @@ public final class OresMutex {
                 this.enforceOwnerDomain = enforceOwnerDomain;
                 this.future = future;
             }
+        }
+
+        private void retireAsyncWaiterAccounting(AsyncWaiter waiter) {
+            if (!waiter.accountingRetired.compareAndSet(false, true)) return;
+            releaseAsyncWaiter();
+            releaseGlobalAsyncWaiter();
+        }
+
+        /**
+         * Remove one still-queued waiter before publishing cancellation/timeout.
+         * This establishes a happens-before edge from WAITING_ON/domain cleanup
+         * to the caller observing the terminal future state.
+         */
+        private void cleanupQueuedAsyncWaiter(AsyncWaiter waiter) {
+            boolean removed;
+            synchronized (asyncQueueLock) {
+                removed = asyncQueue.remove(waiter);
+            }
+            if (removed) {
+                endWait(waiter.ownerDomain);
+                releaseDomain(waiter.ownerDomain);
+            }
+            retireAsyncWaiterAccounting(waiter);
         }
 
         /**
@@ -719,8 +773,7 @@ public final class OresMutex {
                     endWait(ownerDomain);
                     releaseDomain(ownerDomain);
                 }
-                releaseAsyncWaiter();
-                releaseGlobalAsyncWaiter();
+                retireAsyncWaiterAccounting(waiter);
             });
 
             boolean acquired = false;
@@ -743,6 +796,8 @@ public final class OresMutex {
                             beginWait(ownerDomain);
                             waitRegistered = true;
                             asyncQueue.addLast(waiter);
+                            future.installFailureCleanup(
+                                    () -> cleanupQueuedAsyncWaiter(waiter));
                         }
                     } catch (InterruptedException interrupted) {
                         if (waitRegistered) endWait(ownerDomain);

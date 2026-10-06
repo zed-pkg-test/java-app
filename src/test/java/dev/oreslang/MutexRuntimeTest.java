@@ -914,14 +914,24 @@ final class MutexRuntimeTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread waiter = Thread.ofPlatform().start(() -> {
             try {
-                var timed = held.lockAsyncFor(Duration.ofMillis(25));
-                var timedFailure = assertThrows(
-                        java.util.concurrent.ExecutionException.class,
-                        () -> timed.get(2, TimeUnit.SECONDS));
-                assertInstanceOf(OresMutex.LockTimeoutException.class, timedFailure.getCause());
+                for (int attempt = 0; attempt < 16; attempt++) {
+                    var timed = held.lockAsyncFor(Duration.ofMillis(10));
+                    var timedFailure = assertThrows(
+                            java.util.concurrent.ExecutionException.class,
+                            () -> timed.get(2, TimeUnit.SECONDS));
+                    assertInstanceOf(
+                            OresMutex.LockTimeoutException.class,
+                            timedFailure.getCause());
 
-                var next = free.lock();
-                next.release();
+                    /*
+                     * Timeout completion must not become observable until the
+                     * semantic execution-domain wait edge is gone. Reacquiring
+                     * a different SharedMutex immediately is the regression
+                     * probe for that ordering.
+                     */
+                    var next = free.lock();
+                    next.release();
+                }
             } catch (Throwable problem) {
                 failure.set(problem);
             }
