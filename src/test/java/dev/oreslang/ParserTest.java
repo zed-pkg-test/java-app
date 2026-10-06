@@ -200,6 +200,19 @@ final class ParserTest {
                     """.formatted(String.join(" ", order))), String.join(" ", order));
         }
         assertEquals(120, actorRoutineCases);
+
+        int isoActorCases = 0;
+        for (List<String> order : permutations("pub", "async", "isoactor", "fnc")) {
+            isoActorCases++;
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app
+                      %s private_worker(int value): int {
+                        return value;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+        assertEquals(24, isoActorCases);
     }
 
     @Test
