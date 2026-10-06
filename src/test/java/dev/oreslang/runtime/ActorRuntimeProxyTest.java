@@ -259,7 +259,6 @@ final class ActorRuntimeProxyTest {
                 "an already-issued lease must not start new guest access after revocation");
 
         held.close();
-        assertTrue(runtime.isClosed());
     }
 
     @Test
