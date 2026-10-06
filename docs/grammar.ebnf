@@ -295,7 +295,7 @@ lambda_param    = IDENT | type_ref IDENT ;
 typed_legacy_lambda
                 = "(" [ param_list ] ")" "->" block ;
 
-tuple_literal   = "(" expression "," expression { "," expression } ")" ;
+tuple_literal   = "tuple" "(" expression { "," expression } ")" ;
 array_literal   = "arr" "[" [ expression { "," expression } ] "]" ;
 legacy_array_literal = "[" [ expression { "," expression } ] "]" ;
 object_literal  = "obj" "{" [ object_field { "," object_field } ] "}" ;
@@ -323,7 +323,8 @@ type_atom       = borrow_type
                 | "null" ;
 
 borrow_type     = "&" [ "mut" ] type_atom ;
-tuple_type      = "[" [ type_ref { "," type_ref } ] "]" ;
+tuple_type      = "(" type_ref "," [ type_ref { "," type_ref } [ "," ] ] ")"
+                | "[" [ type_ref { "," type_ref } ] "]" ;
 record_type     = "{" [ record_type_field { "," record_type_field } ] "}" ;
 record_type_field
                 = ( IDENT | STRING_LITERAL ) ":" type_ref ;
@@ -397,8 +398,12 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      remains runtime construction/instance state. Call-site "name: value" and
      type-level "name=value" are intentionally different syntactic layers.
    - Tuple/FixedArray/FixedList accept finite sequence shapes. Tuple[int,
-     string] is the named tuple spelling; bare [int, string] remains the compact
-     tuple spelling. Fixed arrays/lists also accept counted repetition such as
+     string] is the canonical named tuple spelling. In type position,
+     (int, string) is equivalent tuple shorthand; (T) remains a grouped type.
+     Bare [int, string] remains accepted as legacy compact tuple type syntax.
+     Tuple values are constructed explicitly with tuple (...); a bare
+     parenthesized comma expression such as (a, b) is not a tuple value.
+     Fixed arrays/lists also accept counted repetition such as
      FixedArray[3 of int, 3 of string].
    - Runtime-extent collections use one homogeneous element pattern
      (Vector[int]) or explicit unbounded repetition
