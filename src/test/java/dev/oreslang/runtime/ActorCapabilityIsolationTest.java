@@ -143,8 +143,9 @@ final class ActorCapabilityIsolationTest {
         assertTrue(error.getMessage().contains("ACTOR_SHARE_READONLY"));
     }
 
+
     @Test
-    void sharedActorMayUseTransitiveSharedStateWhenParentPolicyAllowsIt() {
+    void sharedActorCannotCarryMutableSharedStateEvenUnderDeveloperPolicy() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 type SharedInt = SharedMutex<int>;
 
@@ -157,8 +158,11 @@ final class ActorCapabilityIsolationTest {
                 }
                 """));
 
-        assertDoesNotThrow(() ->
-                CapabilityChecker.check(program, IsolatePolicy.developer()));
+        SecurityException error = assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+
+        assertTrue(error.getMessage().contains("SHARED_MEMORY"));
     }
 
     @Test
@@ -181,6 +185,7 @@ final class ActorCapabilityIsolationTest {
                 CapabilityChecker.check(program, IsolatePolicy.developer()));
     }
 
+
     @Test
     void actorLocalRuntimePolicyCannotBeBypassedByParentContextCapability() throws Exception {
         IsolatePolicy developer = IsolatePolicy.developer();
@@ -200,11 +205,14 @@ final class ActorCapabilityIsolationTest {
                                     IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
                                     "indirect-helper-readonly-share"));
 
-            var shared = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
+            var sharedWrite = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
                 OresContext.requireEffectiveCapability(
                         IsolatePolicy.developer(),
                         IsolatePolicy.Capability.SHARED_MEMORY,
                         "shared-actor-shared-memory");
+            });
+
+            var sharedRead = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
                 OresContext.requireEffectiveCapability(
                         IsolatePolicy.developer(),
                         IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
@@ -214,17 +222,21 @@ final class ActorCapabilityIsolationTest {
 
             privateSharedMemory.send("check");
             privateReadonlyShare.send("check");
-            shared.send("check");
+            sharedWrite.send("check");
+            sharedRead.send("check");
 
             assertTrue(privateSharedMemory.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(privateReadonlyShare.awaitTermination(2, TimeUnit.SECONDS));
-            assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(sharedWrite.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(sharedRead.awaitTermination(2, TimeUnit.SECONDS));
 
             assertInstanceOf(SecurityException.class, privateSharedMemory.failure().orElseThrow());
             assertInstanceOf(SecurityException.class, privateReadonlyShare.failure().orElseThrow());
-            assertTrue(shared.failure().isEmpty());
+            assertInstanceOf(SecurityException.class, sharedWrite.failure().orElseThrow());
+            assertTrue(sharedRead.failure().isEmpty());
         }
     }
+
     @Test
     void privateActorCannotLaunderSharedMemoryThroughFunctionValue() {
         Ast.Program program = TypeChecker.check(Parser.parse("""

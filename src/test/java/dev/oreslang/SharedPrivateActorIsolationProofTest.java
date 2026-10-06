@@ -14,27 +14,48 @@ import static org.junit.jupiter.api.Assertions.*;
 final class SharedPrivateActorIsolationProofTest {
 
     @Test
-    void sharedActorCanShareExplicitStateWhilePrivateActorRemainsConfined() throws Exception {
+    void sharedActorReadsPublishedStateWhileAllMutationRemainsActorOwned() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
-            // Positive control: SHARED actors may coordinate through an explicit SyncCell.
             ActorRuntime.SyncCell<Integer> sharedCell = runtime.syncCell(10);
+            var frozen = runtime.shareReadonly(List.of("alpha", "beta"));
+
             CountDownLatch sharedTurn = new CountDownLatch(1);
+            AtomicReference<Throwable> sharedFailure = new AtomicReference<>();
 
             var shared = runtime.<String>spawnShared(() -> (message, context) -> {
-                assertEquals(ActorRuntime.ActorKind.SHARED, context.kind());
-                assertTrue(context.privateMemory().isEmpty());
-                sharedCell.update(value -> value + 1);
-                sharedTurn.countDown();
-                context.self().stop();
+                try {
+                    assertEquals(ActorRuntime.ActorKind.SHARED, context.kind());
+                    assertTrue(context.privateMemory().isEmpty());
+
+                    // Read-only shared access is allowed.
+                    assertEquals(10, sharedCell.snapshot());
+                    assertEquals(List.of("alpha", "beta"), frozen.value());
+
+                    // Direct mutation of runtime-shared state is not actor authority.
+                    assertThrows(
+                            SecurityException.class,
+                            () -> sharedCell.update(value -> value + 1));
+                    assertThrows(SecurityException.class, sharedCell::close);
+                } catch (Throwable failure) {
+                    sharedFailure.set(failure);
+                } finally {
+                    sharedTurn.countDown();
+                    context.self().stop();
+                }
             });
 
-            shared.send("increment");
+            shared.send("observe");
             assertTrue(sharedTurn.await(2, TimeUnit.SECONDS));
             assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
+            assertNull(sharedFailure.get());
             assertTrue(shared.failure().isEmpty());
+            assertEquals(10, sharedCell.snapshot());
+
+            // Supervisor/runtime code may publish the next immutable version.
+            sharedCell.update(value -> value + 1);
             assertEquals(11, sharedCell.snapshot());
 
-            // Negative control: a PRIVATE actor may not receive that writable shared handle.
+            // An isolated actor may not directly dereference the live shared cell.
             var isolated = runtime.<Object>spawnPrivate(factoryContext -> {
                 assertEquals(ActorRuntime.ActorKind.PRIVATE, factoryContext.kind());
                 assertTrue(factoryContext.privateMemory().isPresent());
@@ -46,8 +67,7 @@ final class SharedPrivateActorIsolationProofTest {
             assertTrue(isolated.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(isolated.failure().isEmpty());
 
-            // Compiler-facing private construction is capture-free: mutable host state
-            // cannot silently become shared state reachable by the actor.
+            // Compiler-facing private construction is capture-free.
             ArrayList<String> mutableHostState = new ArrayList<>(List.of("host"));
             SecurityException capturedState = assertThrows(
                     SecurityException.class,
@@ -58,8 +78,7 @@ final class SharedPrivateActorIsolationProofTest {
             assertTrue(capturedState.getMessage().contains("stateless"));
             assertEquals(List.of("host"), mutableHostState);
 
-            // Even the explicit trusted-host escape hatch cannot make a private-memory
-            // block readable outside the owning actor execution domain.
+            // Private-memory blocks remain actor-confined even through trusted host setup.
             AtomicReference<ActorRuntime.PrivateMemoryBlock> leaked = new AtomicReference<>();
             CountDownLatch allocated = new CountDownLatch(1);
             CountDownLatch ownerVerified = new CountDownLatch(1);
@@ -79,13 +98,9 @@ final class SharedPrivateActorIsolationProofTest {
                 };
             });
 
-            // Private actor construction is lazy: admitting work starts the actor and
-            // creates its private slice.
             memoryOwner.send("verify-owner-access");
             assertTrue(allocated.await(2, TimeUnit.SECONDS));
             assertNotNull(leaked.get());
-
-            // The same block is usable by its owner but unreadable from the host.
             assertThrows(IllegalStateException.class, () -> leaked.get().readByte(0));
             assertTrue(ownerVerified.await(2, TimeUnit.SECONDS));
 
