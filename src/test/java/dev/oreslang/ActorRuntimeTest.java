@@ -2,12 +2,14 @@ package dev.oreslang;
 
 import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.IsolatePolicy;
+import dev.oreslang.runtime.OresFuture;
 import org.junit.jupiter.api.Test;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -34,6 +36,241 @@ final class ActorRuntimeTest {
             assertTrue(received.await(2, TimeUnit.SECONDS));
             assertEquals(List.of(1, 2), observed.get());
             assertThrows(UnsupportedOperationException.class, () -> ((List<Object>) observed.get()).add(9));
+        }
+    }
+
+    @Test
+    void sourceProtocolReplyIsPublishedOnlyAfterTurnExecutorExit() throws Exception {
+        CountDownLatch guestTurnReturned = new CountDownLatch(1);
+        CountDownLatch releaseCarrier = new CountDownLatch(1);
+
+        ActorRuntime.TurnExecutor boundary = turn -> {
+            turn.run();
+            guestTurnReturned.countDown();
+            try {
+                if (!releaseCarrier.await(2, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("test carrier release timed out");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("test carrier interrupted", interrupted);
+            }
+        };
+
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8),
+                boundary)) {
+            ActorRuntime.ActorRef<Object> ref =
+                    runtime.spawnSourceSharedProtocolActor(
+                            factoryContext ->
+                                    (method, arguments, context) -> 42);
+
+            OresFuture<Object> reply =
+                    runtime.invokeSourceProtocol(
+                            ref,
+                            "answer",
+                            List.of());
+
+            assertTrue(guestTurnReturned.await(2, TimeUnit.SECONDS));
+            assertFalse(
+                    reply.isDone(),
+                    "protocol reply must not become externally visible while the target carrier is still inside TurnExecutor");
+
+            releaseCarrier.countDown();
+            assertEquals(42, reply.get(2, TimeUnit.SECONDS));
+        } finally {
+            releaseCarrier.countDown();
+        }
+    }
+
+    @Test
+    void suspendedProtocolReplyIsPublishedOnlyAfterContinuationTurnExecutorExit() throws Exception {
+        CountDownLatch firstTurnReturned = new CountDownLatch(1);
+        CountDownLatch releaseFirstCarrier = new CountDownLatch(1);
+        CountDownLatch secondTurnReturned = new CountDownLatch(1);
+        CountDownLatch releaseSecondCarrier = new CountDownLatch(1);
+        AtomicInteger turns = new AtomicInteger();
+
+        ActorRuntime.TurnExecutor boundary = turn -> {
+            turn.run();
+            int turnNumber = turns.incrementAndGet();
+            CountDownLatch returned =
+                    turnNumber == 1 ? firstTurnReturned : secondTurnReturned;
+            CountDownLatch release =
+                    turnNumber == 1 ? releaseFirstCarrier : releaseSecondCarrier;
+            returned.countDown();
+            try {
+                if (!release.await(2, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException(
+                            "test carrier release timed out for turn " + turnNumber);
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("test carrier interrupted", interrupted);
+            }
+        };
+
+        CompletableFuture<Object> producer = new CompletableFuture<>();
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8),
+                boundary)) {
+            ActorRuntime.ActorRef<Object> ref =
+                    runtime.spawnSourceSharedProtocolActor(
+                            factoryContext ->
+                                    (method, arguments, context) ->
+                                            OresFuture.from(producer));
+
+            OresFuture<Object> reply =
+                    runtime.invokeSourceProtocol(
+                            ref,
+                            "answer_later",
+                            List.of());
+
+            assertTrue(firstTurnReturned.await(2, TimeUnit.SECONDS));
+            assertFalse(reply.isDone());
+
+            producer.complete(42);
+            Thread.sleep(25);
+            assertFalse(
+                    reply.isDone(),
+                    "producer completion must only enqueue actor continuation while the first carrier boundary is still entered");
+
+            releaseFirstCarrier.countDown();
+            assertTrue(secondTurnReturned.await(2, TimeUnit.SECONDS));
+            assertFalse(
+                    reply.isDone(),
+                    "suspended protocol reply must remain pending until the continuation carrier exits TurnExecutor");
+
+            releaseSecondCarrier.countDown();
+            assertEquals(42, reply.get(2, TimeUnit.SECONDS));
+            assertEquals(2, turns.get());
+        } finally {
+            releaseFirstCarrier.countDown();
+            releaseSecondCarrier.countDown();
+        }
+    }
+
+    @Test
+    void stoppedProtocolActorCancelsHandedOffPendingReply() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CountDownLatch invoked = new CountDownLatch(1);
+            CompletableFuture<Object> producer = new CompletableFuture<>();
+
+            ActorRuntime.ActorRef<Object> ref =
+                    runtime.spawnSourceSharedProtocolActor(
+                            factoryContext ->
+                                    (method, arguments, context) -> {
+                                        invoked.countDown();
+                                        return OresFuture.from(producer);
+                                    });
+
+            OresFuture<Object> reply =
+                    runtime.invokeSourceProtocol(
+                            ref,
+                            "wait_for_result",
+                            List.of());
+
+            assertTrue(invoked.await(2, TimeUnit.SECONDS));
+            assertFalse(reply.isDone());
+
+            runtime.stop(ref);
+
+            long deadline =
+                    System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!reply.isDone()
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+
+            assertTrue(
+                    reply.isCancelled(),
+                    "target teardown must cancel a handed-off protocol reply");
+        }
+    }
+
+    @Test
+    void invokeAsyncPublishesSuccessOnlyAfterDetachedContinuationDrains() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CompletableFuture<Void> producer = new CompletableFuture<>();
+            AtomicBoolean continuationRan = new AtomicBoolean();
+
+            OresFuture<Integer> result =
+                    runtime.invokeAsync(
+                            ActorRuntime.ActorKind.SHARED,
+                            41,
+                            (value, context) -> {
+                                OresFuture<Void> pending =
+                                        OresFuture.from(producer);
+                                ActorRuntime.ContinuationTarget target =
+                                        runtime.captureCurrentContinuationTarget();
+                                runtime.enqueueOnCompletion(
+                                        pending,
+                                        target,
+                                        (ignored, failure) -> {
+                                            if (failure != null) {
+                                                throw new RuntimeException(
+                                                        OresFuture.unwrap(failure));
+                                            }
+                                            continuationRan.set(true);
+                                        });
+                                producer.complete(null);
+                                return value + 1;
+                            });
+
+            assertEquals(42, result.get(2, TimeUnit.SECONDS));
+            assertTrue(
+                    continuationRan.get(),
+                    "successful one-shot actor result must not publish before detached actor continuations drain");
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (runtime.actorCount() != 0 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertEquals(0, runtime.actorCount());
+        }
+    }
+
+    @Test
+    void explicitCloseCancelsQuiescentOneShotResult() throws Exception {
+        ActorRuntime runtime = new ActorRuntime();
+        CompletableFuture<Void> producer = new CompletableFuture<>();
+        CountDownLatch invoked = new CountDownLatch(1);
+        try {
+            OresFuture<Integer> result =
+                    runtime.invokeAsync(
+                            ActorRuntime.ActorKind.SHARED,
+                            41,
+                            (value, context) -> {
+                                OresFuture<Void> pending =
+                                        OresFuture.from(producer);
+                                ActorRuntime.ContinuationTarget target =
+                                        runtime.captureCurrentContinuationTarget();
+                                runtime.enqueueOnCompletion(
+                                        pending,
+                                        target,
+                                        (ignored, failure) -> { });
+                                invoked.countDown();
+                                return value + 1;
+                            });
+
+            assertTrue(invoked.await(2, TimeUnit.SECONDS));
+            assertFalse(
+                    result.isDone(),
+                    "normal result must remain pending while a detached continuation lease is outstanding");
+
+            runtime.close();
+
+            assertTrue(
+                    result.isCancelled(),
+                    "explicit shutdown must abandon/cancel a quiescent normal completion");
+        } finally {
+            try {
+                runtime.close();
+            } catch (IllegalStateException ignored) {
+                // Preserve the primary assertion if shutdown already reported it.
+            }
         }
     }
 
