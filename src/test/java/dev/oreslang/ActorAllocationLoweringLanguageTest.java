@@ -98,7 +98,7 @@ final class ActorAllocationLoweringLanguageTest {
 
                 pub shared actor fnc object_value(): int {
                   val int before = actor.local_memory_bytes as int;
-                  val record = { name: "ores", version: 1 };
+                  val record = obj{name: "ores", version: 1};
                   val int after = actor.local_memory_bytes as int;
                   return after - before;
                 }
