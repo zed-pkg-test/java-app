@@ -368,12 +368,12 @@ final class IncrementalFunctorStaticTest {
                 }
                 """));
 
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                fnc expressionBody(): int {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc wrong(): int {
                   val Fnc<int> x = () -> 1;
                   return x();
                 }
-                """)));
+                """));
     }
 
     @Test
