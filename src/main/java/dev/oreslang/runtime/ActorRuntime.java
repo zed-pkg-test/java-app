@@ -928,24 +928,53 @@ public final class ActorRuntime implements AutoCloseable {
     public final class Proxy<T> implements AutoCloseable {
         private static final long HANDLE_BYTES = 96L;
 
+        /**
+         * Semantic allocation provenance for the synchronized target.
+         *
+         * <p>Once rt proxy consumes an actor-owned value, its lifetime is no
+         * longer tied to that actor's local heap retirement. The current JVM
+         * backend realizes this as a strong ActorRuntime root. Native/arena
+         * lowering MUST promote/move the target into a proxy/runtime-owned
+         * region before publishing this capability.</p>
+         */
+        public enum TargetProvenance {
+            HOST_RUNTIME,
+            PROMOTED_FROM_SHARED_ACTOR
+        }
+
         private final UUID id = UUID.randomUUID();
         private final ReentrantReadWriteLock lock;
+        private final TargetProvenance targetProvenance;
+        private final ActorId sourceActorId;
+        private final Object sourceExecutionDomain;
         private final AtomicBoolean proxyClosed = new AtomicBoolean();
         private final AtomicLong readAcquisitions = new AtomicLong();
         private final AtomicLong writeAcquisitions = new AtomicLong();
         private volatile T target;
         private long reservedBytes = HANDLE_BYTES;
 
-        private Proxy(T target) {
-            this(target, new ReentrantReadWriteLock(true));
-        }
-
-        private Proxy(T target, ReentrantReadWriteLock lock) {
+        private Proxy(
+                T target,
+                ReentrantReadWriteLock lock,
+                TargetProvenance targetProvenance,
+                ActorId sourceActorId,
+                Object sourceExecutionDomain) {
             this.target = Objects.requireNonNull(target, "proxy target");
             this.lock = Objects.requireNonNull(lock, "proxy lock");
+            this.targetProvenance =
+                    Objects.requireNonNull(targetProvenance, "targetProvenance");
+            this.sourceActorId = sourceActorId;
+            this.sourceExecutionDomain = sourceExecutionDomain;
         }
 
         public UUID id() { return id; }
+        public TargetProvenance targetProvenance() { return targetProvenance; }
+        public Optional<ActorId> sourceActorId() {
+            return Optional.ofNullable(sourceActorId);
+        }
+        public boolean promotedFromActorDomain() {
+            return targetProvenance == TargetProvenance.PROMOTED_FROM_SHARED_ACTOR;
+        }
         public boolean closed() { return proxyClosed.get(); }
         public long readAcquisitions() { return readAcquisitions.get(); }
         public long writeAcquisitions() { return writeAcquisitions.get(); }
@@ -993,7 +1022,12 @@ public final class ActorRuntime implements AutoCloseable {
             requireProxyAccess("derive rt proxy view");
             if (nested == null) throw new IllegalArgumentException("cannot proxy a null nested value");
             reserveSharedRuntimeBytes(HANDLE_BYTES, "shared proxy child handle");
-            Proxy<R> child = new Proxy<>(nested, lock);
+            Proxy<R> child = new Proxy<>(
+                    nested,
+                    lock,
+                    targetProvenance,
+                    sourceActorId,
+                    sourceExecutionDomain);
             sharedProxies.add(child);
             if (closed.get()) {
                 child.closeFromRuntime();
@@ -1052,8 +1086,27 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof Proxy<?>) {
             throw new IllegalArgumentException("rt proxy cannot wrap an existing proxy");
         }
+
+        ActorId sourceActorId = currentActorId().orElse(null);
+        Object sourceExecutionDomain = currentActorExecutionDomain();
+        Proxy.TargetProvenance provenance = sourceActorId == null
+                ? Proxy.TargetProvenance.HOST_RUNTIME
+                : Proxy.TargetProvenance.PROMOTED_FROM_SHARED_ACTOR;
+
+        /*
+         * The language ownership checker consumes the original source binding
+         * before this call. On the JVM backend this strong runtime root is the
+         * semantic promotion boundary. #289/native allocator lowering must
+         * replace this with a real move/promotion out of the actor-local arena
+         * before the proxy becomes transportable.
+         */
         reserveSharedRuntimeBytes(Proxy.HANDLE_BYTES, "shared proxy handle");
-        Proxy<T> proxy = new Proxy<>(value);
+        Proxy<T> proxy = new Proxy<>(
+                value,
+                new ReentrantReadWriteLock(true),
+                provenance,
+                sourceActorId,
+                sourceExecutionDomain);
         sharedProxies.add(proxy);
         if (closed.get()) {
             proxy.closeFromRuntime();
