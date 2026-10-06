@@ -346,7 +346,7 @@ final class RuntimeProxyLanguageTest {
                 define class Inner as
                   pub let int value = 1;
 
-                  pub bump(mut self): int {
+                  pub bump(): int {
                     self.value = self.value + 1;
                     return self.value;
                   }
