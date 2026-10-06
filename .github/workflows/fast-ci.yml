@@ -41,3 +41,19 @@ jobs:
           mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/native-testing-semantics.ores" | tee /tmp/oreslang-native-testing-semantics.out
           grep -F "ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=2" /tmp/oreslang-native-testing-semantics.out
           grep -F "ORES_TEST|SUMMARY|total=2|passed=1|failed=1|skipped=0|filtered=0" /tmp/oreslang-native-testing-semantics.out
+      - name: Build RX benchmark classpath
+        run: |
+          mvn -B -ntp dependency:build-classpath -Dmdep.outputFile=/tmp/ores-rx-cp.txt
+          echo "ORES_CLASSPATH=$PWD/target/classes:$(cat /tmp/ores-rx-cp.txt)" >> "$GITHUB_ENV"
+      - name: Typecheck RX variants
+        run: |
+          for f in rx-bench/pull/src/rx.ores rx-bench/callbacks/src/rx.ores rx-bench/channels/src/rx.ores; do
+            java --enable-native-access=ALL-UNNAMED -Dpolyglot.engine.WarnInterpreterOnly=false -cp "$ORES_CLASSPATH" dev.oreslang.launcher.OresMain --check "$f"
+          done
+      - name: Run comparative RX benchmark
+        run: python3 rx-bench/benchmark.py | tee rx-bench/results.txt
+      - name: Upload RX benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: rx-benchmark-results
+          path: rx-bench/results.txt
