@@ -25,8 +25,6 @@ final class FutureCompositionLanguageTest {
                 }
 
                 pub fnc main(): void {
-                  let int observed = 0;
-
                   val Future<int> mapped = base().map(|int value| -> {
                     return value + 1;
                   });
@@ -36,14 +34,15 @@ final class FutureCompositionLanguageTest {
                   });
 
                   val Future<int> observed_future = composed.onSuccess(|int value| -> {
-                    observed = value;
+                    stdio.stdout.write("seen:");
+                    stdio.stdout.write(value);
+                    stdio.stdout.write(":");
                     return;
                   });
 
                   val int answer = await observed_future;
                   stdio.stdout.write(answer);
                   stdio.stdout.write(":");
-                  stdio.stdout.write(observed);
 
                   val Future<int> flat = base().flatMap(|int value| -> {
                     return twice(value);
@@ -55,7 +54,7 @@ final class FutureCompositionLanguageTest {
                 """;
 
         assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
-        assertEquals("42:42:40", run(program));
+        assertEquals("seen:42:42:40", run(program));
     }
 
     private static String run(String program) throws Exception {
