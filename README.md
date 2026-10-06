@@ -1,73 +1,55 @@
-# litegraph-node
+# rx-ores
 
-Per-machine daemon and local authority for allocatable compute resources.
+Standalone pull/Future-oriented reactive streams for Oreslang.
 
-LiteGraph is a heterogeneous compute actor platform: CPU code owns control, networking, actor supervision and ordinary OS capabilities; suitable numerical work may be dispatched to one or more GPUs. A machine is therefore not classified as simply "CPU" or "GPU"—CPU, RAM, accelerator devices and VRAM are independently schedulable resources.
+This repository is the home of rx-ores. The compiler/runtime owns generic
+language primitives such as `Future<T>`, `await`, callables, ownership and
+scheduling; it does **not** own the reactive library.
 
-## Responsibilities
+## Source model
 
-- CPU/RAM and accelerator discovery.
-- device/lane health and allocatable capacity.
-- local invocation supervision.
-- health/snapshot APIs and standalone workstation mode.
+`src/rx.ores` is a file/code unit, not an implicit module or package:
 
-## Explicit non-responsibilities
-
-- cluster-wide scheduling.
-- control-plane tenant CRUD.
-- compiler/toolchain responsibilities.
-
-Keeping these boundaries explicit is important: moving policy into a lower-level component makes local execution harder to reason about and creates competing authorities.
-
-## Place in the system
-
-```text
-scheduler/router → node → runtime/modeld/gpu-host; node → scheduler telemetry
+```ores
+import * as rx from './src/rx.ores';
+import class Observable, Subscription from './src/rx.ores';
 ```
 
-Shared invariants across the platform:
+The initial implementation is demand-driven. `subscribe()` creates independent
+subscription state and each `next()` admits at most one item. There is no
+prefetch queue. `take(0)` consumes nothing and cancellation is idempotent.
 
-- invocation actors are ephemeral;
-- resident artifacts and compiled variants are immutable and revisioned;
-- guest/customer code receives capabilities, never raw accelerator pointers;
-- mutable accelerator state belongs to trusted lane/device actors;
-- CPU and GPU resources are accounted independently;
-- `cpu`, `gpu`, and `auto` describe execution requirements/preferences without changing logical function identity;
-- backpressure and cancellation must propagate rather than creating unbounded queues.
+RX APIs use Oreslang's pointerless ownership model. Callback signatures use
+ordinary managed value/reference types such as `Fnc<T, bool>`; they never encode
+ownership with `&T`, `T*`, unary `&`, or unary `*`. When this library needs
+to make a temporary read borrow explicit, it uses `rt borrow value`. Explicit
+ownership transitions belong to the reserved runtime surface (`rt copy`,
+`rt share`, `rt borrow`, `rt take`, and related runtime reference
+operations), not C/Rust-style pointer operators.
 
-## Contracts and compatibility
+Finite pull state is stored directly in subscription objects. `from_future()`
+uses Oreslang's native Future/await suspension path; it does not invent a second
+callback scheduler. Native Future values may be prepared first with `map`,
+`compose` / `flatMap`, and `onSuccess`; guest callbacks resume as Ores
+scheduler/actor turns rather than producer-thread callbacks. Higher-order
+operators currently include `map`, `filter` and `take`.
 
-Wire-visible names use `snake_case`. Cross-language contracts belong in `litegraph-contracts`: authored TypeSpec and JSON Schema Draft 2020-12 are peer authorities, and generated files are evidence rather than a third authored schema. Contract mismatches must fail closed before promotion.
+This repository intentionally stays separate from:
+- **rx-ores-callbacks** — synchronous push/callback composition.
+- **rx-oreslang-channels** — pull semantics whose coordination state and hot
+  sources use Channel/select.
 
-Public/shared semantic types belong in `litegraph-interfaces` or `litegraph-pub-lib-core`; this repository should not create a subtly different copy of an existing concept.
+The separation is deliberate so identical workloads can measure the costs and
+strengths of each execution model before any hybrid/high-performance library is
+designed.
 
-## Security and isolation
+## Validation
 
-Treat all tenant input and artifacts as untrusted. Validate sizes, identifiers and capability requests before allocating expensive resources. Never expose native accelerator pointers/driver handles across the tenant boundary, never place credentials in manifests or examples, and keep secrets in approved runtime secret channels.
+```sh
+python3 scripts/setup.py
+source .work/env.sh
+python3 scripts/test.py
+```
 
-Isolation policy uses the platform classes `shared`, `sandbox`, `partitioned`, and `dedicated` where applicable. Resource release on cancellation, timeout and failure is part of correctness.
-
-## Development expectations
-
-Follow the fleet policy in `ORESoftware/my-ai` (`AGENTS.md` plus `SHARED.md`) when changing this repository. Durable systems tooling, validators, code generation and CI helpers should be Rust-first. Do not add Python for repository scripts, validators, codegen or CI gates.
-
-When this repository exposes an executable with command-line configuration, its public option contract belongs in root `.cli-flags.toml` and the argv boundary should use the canonical `flags-2-env` integration rather than maintaining a second independent flag schema.
-
-Tests should cover both success and fail-closed behavior. Hardware-independent logic should run with deterministic fakes/simulators; hardware-specific certification belongs on real accelerator runners. A hosted workflow that starts zero test steps is not evidence of a passing build.
-
-## Integration map
-
-- `litegraph-contracts` — wire schemas.
-- `litegraph-interfaces` — canonical shared semantics.
-- `litegraph-scheduler` — cluster placement.
-- `litegraph-node` — machine inventory and local supervision.
-- `litegraph-runtime` — invocation lifecycle.
-- `litegraph-gpu-host` — trusted accelerator execution.
-- `litegraph-modeld` — resident model actors.
-- `litegraph-compiler` — deterministic multi-target build artifacts.
-- registries — immutable function/model artifact storage.
-- `litegraph-router.rs` — invocation forwarding and backpressure.
-
-## Documentation rule
-
-Keep this README specific to this repository. Architectural decisions that affect multiple repositories should be recorded in the canonical interface/contracts layer and linked here rather than copied into divergent local specifications.
+The benchmark driver lives in `bench/benchmark.py`; `bench/pipeline.ores`
+is this implementation's common map/filter/take workload.
