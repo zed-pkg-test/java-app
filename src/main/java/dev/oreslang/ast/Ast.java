@@ -710,7 +710,7 @@ public final class Ast {
         }
     }
 
-    /** Compiler-owned runtime namespace operation. The rt prefix cannot be rebound or shadowed. */
+    /** Compiler-owned runtime namespace call. The `rt` prefix cannot be rebound or shadowed. */
     public record RuntimeCallExpr(String operation, List<Expr> arguments) implements Expr {
         public RuntimeCallExpr {
             if (operation == null || operation.isBlank()) {
