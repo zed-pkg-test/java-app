@@ -43,8 +43,10 @@ public final class OresMutex {
     }
 
     public static <T> Shared<T> shared(T value) {
-        if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
-            throw new SecurityException("private actors cannot create SharedMutex<T>");
+        ActorRuntime.ActorKind actorKind = ActorRuntime.currentActorKind();
+        if (actorKind != null && actorKind != ActorRuntime.ActorKind.SHARED) {
+            throw new SecurityException(
+                    actorKind + " actors cannot create SharedMutex<T>; explicit runtime-shared memory is SHARED-actor/root authority");
         }
         IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
         if (actorPolicy != null) {
@@ -354,6 +356,18 @@ public final class OresMutex {
             return true;
         }
 
+        /**
+         * Allocation provenance once this SharedMutex has been bound/published
+         * into an ActorRuntime. Before first publication/use by an actor it is
+         * deliberately unbound rather than pretending to belong to a root or
+         * arbitrary runtime.
+         */
+        public synchronized Optional<ActorRuntime.AllocationDomain> allocationDomain() {
+            return owningRuntime == null
+                    ? Optional.empty()
+                    : Optional.of(owningRuntime.runtimeSharedAllocationDomain());
+        }
+
         synchronized boolean reserveRuntimePublication(ActorRuntime runtime) {
             Objects.requireNonNull(runtime, "runtime");
             if (owningRuntime == null) {
@@ -407,8 +421,10 @@ public final class OresMutex {
         }
 
         private void requireActorAccess() {
-            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
-                throw new SecurityException("private actors cannot access SharedMutex<T>");
+            ActorRuntime.ActorKind actorKind = ActorRuntime.currentActorKind();
+            if (actorKind != null && actorKind != ActorRuntime.ActorKind.SHARED) {
+                throw new SecurityException(
+                        actorKind + " actors cannot access SharedMutex<T>; explicit runtime-shared memory is SHARED-actor/root authority");
             }
             IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
             if (actorPolicy != null) {
