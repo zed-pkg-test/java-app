@@ -3724,11 +3724,11 @@ public final class OresEvalRootNode extends RootNode {
                                     + "' is immutable");
                 }
                 object.fields.put(member, value);
-                return value;
+                return null;
             }
             if (receiver instanceof DynamicStructValue dynamic) {
                 dynamic.fields.put(member, value);
-                return value;
+                return null;
             }
             throw new IllegalArgumentException(
                     "rt Proxy<T> member assignment requires class/struct state");
@@ -3744,7 +3744,7 @@ public final class OresEvalRootNode extends RootNode {
                             "DynamicStruct key must be a string");
                 }
                 dynamic.fields.put(key, value);
-                return value;
+                return null;
             }
             throw new IllegalArgumentException(
                     "indexed rt Proxy<T> assignment currently requires DynamicStruct<T>");
@@ -4875,6 +4875,18 @@ public final class OresEvalRootNode extends RootNode {
                 ActorRuntime.Proxy<?> proxy,
                 List<Object> args,
                 Env env) {
+            Ast.MemberExpr member = (Ast.MemberExpr) call.callee();
+            if (member.member().equals("dispose")) {
+                if (call.typeArgumentsPresent() || !args.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "Proxy<T>.dispose() takes no arguments or type arguments");
+                }
+                return invokableInvocation(ignored -> {
+                    proxy.close();
+                    return null;
+                }, List.of());
+            }
+
             Invocation inner = proxy.read(raw ->
                     prepareInvocationEvaluated(call, raw, args, env));
 
