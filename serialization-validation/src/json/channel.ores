@@ -14,7 +14,6 @@
 // consume storage with rt take once that ownership lowering is on the compiler
 // baseline.
 
-import class Value from '../core/value';
 import class DecodeOptions, DecodeError, DecodedValue, DecodeStep from '../core/options';
 import class JsonIncrementalDecoder from './json';
 import fnc new_incremental_decoder, feed, finish from './json';
