@@ -12,6 +12,11 @@ import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -22,6 +27,8 @@ public final class OresContext implements AutoCloseable {
     private final TruffleLanguage.Env env;
     private final BufferedReader input;
     private final PrintWriter output;
+    private final OresVM vm;
+    private final ArrayBlockingQueue<Runnable> isolatedRootTurns;
     private final ActorRuntime actors;
     private final AsyncRuntime asyncRuntime;
     private final RuntimeGarbageCollector garbageCollector;
@@ -46,13 +53,50 @@ public final class OresContext implements AutoCloseable {
         this.permissionCheckMode = PermissionCheckMode.fromApplicationArguments(
                 env.getApplicationArguments());
         this.executionProfile = IsolatePolicy.executionProfileFromApplicationArguments(env.getApplicationArguments());
-        this.actors = new ActorRuntime(
-                isolatePolicy,
-                ActorRuntime.DispatcherConfig.defaults(),
-                this::executeActorTurn);
-        this.asyncRuntime = new AsyncRuntime(this::executeAsyncTurn);
-        this.garbageCollector = new RuntimeGarbageCollector();
-        this.actors.setActorExitHook(garbageCollector::retireActorDomain);
+        // UNTRUSTED contexts admit one guest thread and the isolate's JNI
+        // scope belongs to the calling thread. Root task turns retain that
+        // admission while runtime CONTROL carriers remain prestarted.
+        this.isolatedRootTurns = isolatePolicy.adversarial()
+                ? new ArrayBlockingQueue<>(65_536) : null;
+        OresVM vm = OresVM.create(this::executeRootTurn,
+                isolatedRootTurns == null ? null : turn -> {
+                    if (!isolatedRootTurns.offer(turn)) {
+                        throw new RejectedExecutionException("isolated root turn queue is full");
+                    }
+                });
+        if (!vm.started()) {
+            vm.close();
+            throw new IllegalStateException(
+                    "Oreslang VM startup barrier was not established before context admission");
+        }
+
+        ActorRuntime actors = null;
+        AsyncRuntime async = null;
+        RuntimeGarbageCollector gc = null;
+        try {
+            actors = new ActorRuntime(
+                    isolatePolicy,
+                    ActorRuntime.DispatcherConfig.defaults(),
+                    this::executeActorTurn,
+                    vm::executeControl);
+            async = new AsyncRuntime(this::executeAsyncTurn);
+            gc = new RuntimeGarbageCollector();
+            actors.setActorExitHook(gc::retireActorDomain);
+
+            this.vm = vm;
+            this.actors = actors;
+            this.asyncRuntime = async;
+            this.garbageCollector = gc;
+        } catch (RuntimeException | Error failure) {
+            if (async != null) {
+                try { async.close(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+            }
+            if (actors != null) {
+                try { actors.close(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+            }
+            try { vm.close(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
     }
 
     public static OresContext get(Node node) {
@@ -63,6 +107,7 @@ public final class OresContext implements AutoCloseable {
     public TruffleLanguage.Env env() { return env; }
     public BufferedReader input() { return input; }
     public PrintWriter output() { return output; }
+    public OresVM vm() { return vm; }
     public ActorRuntime actors() { return actors; }
     public AsyncRuntime asyncRuntime() { return asyncRuntime; }
     public RuntimeGarbageCollector garbageCollector() { return garbageCollector; }
@@ -191,6 +236,87 @@ public final class OresContext implements AutoCloseable {
         return java.nio.file.Path.of(id).normalize().toString().replace('\\', '/');
     }
 
+    /**
+     * Run the VM root task only through the prestarted CONTROL scheduler.
+     * Completion of an async main Future is awaited through the same resumable
+     * scheduler ABI, so the CONTROL carrier itself is never parked waiting for
+     * the terminal Future.
+     */
+    public Object runRootMain(Callable<?> main) {
+        if (vm.isRootSchedulerCurrent()) {
+            try {
+                return main.call();
+            } catch (Exception failure) {
+                throw new IllegalStateException("root main failed", failure);
+            }
+        }
+
+        OresFuture<Object> task = vm.rootScheduler().start(new OresScheduler.Task<>() {
+            private int pc;
+
+            @Override
+            public OresScheduler.Step<Object> resume(OresScheduler.Resume resume)
+                    throws Exception {
+                if (pc == 0) {
+                    if (!resume.initial()) {
+                        throw new IllegalStateException(
+                                "root main task must begin with an initial resume");
+                    }
+                    Object result = main.call();
+                    if (result instanceof OresFuture<?> future) {
+                        pc = 1;
+                        return OresScheduler.await(future);
+                    }
+                    if (result instanceof CompletionStage<?> stage) {
+                        pc = 1;
+                        return OresScheduler.await(OresFuture.from(stage));
+                    }
+                    return OresScheduler.done(result);
+                }
+
+                if (pc == 1) {
+                    if (resume.failure() != null) {
+                        Throwable failure = OresFuture.unwrap(resume.failure());
+                        if (failure instanceof Exception checked) throw checked;
+                        if (failure instanceof Error error) throw error;
+                        throw new RuntimeException(failure);
+                    }
+                    @SuppressWarnings("unchecked")
+                    Object value = resume.value();
+                    pc = 2;
+                    return OresScheduler.done(value);
+                }
+
+                throw new IllegalStateException(
+                        "root main scheduler task resumed after terminal state");
+            }
+        });
+        if (isolatedRootTurns != null) {
+            while (!task.isDone()) {
+                Runnable turn = isolatedRootTurns.poll();
+                if (turn == null) {
+                    // Waiting is outside guest execution. Re-entering on this
+                    // same caller preserves both sandbox admission and JNI scope.
+                    turn = env.getContext().leaveAndEnter(null, () -> {
+                        try {
+                            return isolatedRootTurns.poll(100, TimeUnit.MILLISECONDS);
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new java.util.concurrent.CancellationException(
+                                    "isolated root execution interrupted");
+                        }
+                    });
+                }
+                if (turn != null) turn.run();
+            }
+        }
+        return task.join();
+    }
+
+    private void executeRootTurn(Runnable turn) {
+        executeGuestTurn(turn, isolatePolicy.adversarial());
+    }
+
     private void executeActorTurn(Runnable turn) {
         executeGuestTurn(turn, isolatePolicy.adversarial());
     }
@@ -232,6 +358,9 @@ public final class OresContext implements AutoCloseable {
                 "execution_mode", executionProfile.mode().name(),
                 "platform", executionProfile.platform().name(),
                 "actor_carrier_backend", actors.carrierBackend().name().toLowerCase(java.util.Locale.ROOT),
+                "root_scheduler", vm.rootScheduler().name(),
+                "scheduler_started", vm.started(),
+                "control_carriers_started", vm.controlCarrierCount(),
                 "scheduler_safepoints", schedulerSafepoints.get());
     }
 
@@ -248,6 +377,12 @@ public final class OresContext implements AutoCloseable {
         } catch (RuntimeException actorFailure) {
             if (failure == null) failure = actorFailure;
             else failure.addSuppressed(actorFailure);
+        }
+        try {
+            vm.close();
+        } catch (RuntimeException vmFailure) {
+            if (failure == null) failure = vmFailure;
+            else failure.addSuppressed(vmFailure);
         } finally {
             synchronized (this) {
                 linkedCodeUnits.clear();
