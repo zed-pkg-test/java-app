@@ -17,7 +17,7 @@ fnc marked(Channel<bool> marker): bool {
   return false;
 }
 
-pub define class Subscription<T> as
+define class Subscription<T> as
   val Channel<bool> cancelled = Channel.new<bool>(1);
   val Channel<bool> finished = Channel.new<bool>(1);
   val Channel<bool> pulling = Channel.new<bool>(1);
@@ -73,30 +73,30 @@ pub define class Subscription<T> as
   }
 end
 
-pub define class Observable<T> as
+define class Observable<T> as
   pub subscribe(): Subscription<T> {
     return new Subscription<T>();
   }
 end
 
-pub define class ChannelObservable<T> extends Observable<T> as
+define class ChannelObservable<T> extends Observable<T> as
   val Channel<Option<T>> input;
-  pub constructor(Channel<Option<T>> input) { self.input = input; }
+  constructor(Channel<Option<T>> input) { self.input = input; }
   pub subscribe(): Subscription<T> { return new ChannelSubscription<T>(self.input); }
 end
 
-pub define class ValuesObservable<T> extends Observable<T> as
+define class ValuesObservable<T> extends Observable<T> as
   val Array<T> values;
-  pub constructor(Array<T> values) { self.values = values; }
+  constructor(Array<T> values) { self.values = values; }
   pub subscribe(): Subscription<T> { return new ValuesSubscription<T>(self.values); }
 end
 
-pub define class ChannelSubscription<T> extends Subscription<T> as
+define class ChannelSubscription<T> extends Subscription<T> as
   val Channel<Option<T>> input;
   val Channel<bool> stopped;
   val SelectSet cases;
 
-  pub constructor(Channel<Option<T>> input) {
+  constructor(Channel<Option<T>> input) {
     self.input = input;
     self.stopped = Channel.new<bool>(1);
     self.cases = SelectSet.new([SelectCase.read(self.stopped), SelectCase.read(input)]);
@@ -125,12 +125,12 @@ pub define class ChannelSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class ValuesSubscription<T> extends Subscription<T> as
+define class ValuesSubscription<T> extends Subscription<T> as
   val Array<T> values;
   val Channel<int> cursor = Channel.new<int>(1);
   val int size;
 
-  pub constructor(Array<T> values) {
+  constructor(Array<T> values) {
     let int size = 0;
     for const value of values do
       size = size + 1;
@@ -169,11 +169,11 @@ pub fnc complete<T>(Channel<Option<T>> output): Future<void> {
   return nb writech output, terminal;
 }
 
-pub define class MapSubscription<A, B> extends Subscription<B> as
+define class MapSubscription<A, B> extends Subscription<B> as
   val Subscription<A> upstream;
   val Fnc<A, B> transform;
 
-  pub constructor(Subscription<A> upstream, Fnc<A, B> transform) {
+  constructor(Subscription<A> upstream, Fnc<A, B> transform) {
     self.upstream = upstream;
     self.transform = transform;
   }
@@ -192,11 +192,11 @@ pub define class MapSubscription<A, B> extends Subscription<B> as
   }
 end
 
-pub define class FilterSubscription<T> extends Subscription<T> as
+define class FilterSubscription<T> extends Subscription<T> as
   val Subscription<T> upstream;
-  val Fnc<&T, bool> predicate;
+  val Fnc<T, bool> predicate;
 
-  pub constructor(Subscription<T> upstream, Fnc<&T, bool> predicate) {
+  constructor(Subscription<T> upstream, Fnc<T, bool> predicate) {
     self.upstream = upstream;
     self.predicate = predicate;
   }
@@ -208,7 +208,7 @@ pub define class FilterSubscription<T> extends Subscription<T> as
         return None;
       fi
       val T value = frame.unwrap();
-      if self.predicate(&value); then
+      if self.predicate(value); then
         return Some(value);
       fi
     }
@@ -220,11 +220,11 @@ pub define class FilterSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class TakeSubscription<T> extends Subscription<T> as
+define class TakeSubscription<T> extends Subscription<T> as
   val Subscription<T> upstream;
   val Channel<int> remaining = Channel.new<int>(1);
 
-  pub constructor(Subscription<T> upstream, int count) {
+  constructor(Subscription<T> upstream, int count) {
     self.upstream = upstream;
     if count < 0; then
       val Result<bool, String> failure = Err("take count must be nonnegative");
@@ -254,10 +254,10 @@ pub define class TakeSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class MapObservable<A, B> extends Observable<B> as
+define class MapObservable<A, B> extends Observable<B> as
   val Observable<A> source;
   val Fnc<A, B> transform;
-  pub constructor(Observable<A> source, Fnc<A, B> transform) {
+  constructor(Observable<A> source, Fnc<A, B> transform) {
     self.source = source;
     self.transform = transform;
   }
@@ -266,10 +266,10 @@ pub define class MapObservable<A, B> extends Observable<B> as
   }
 end
 
-pub define class FilterObservable<T> extends Observable<T> as
+define class FilterObservable<T> extends Observable<T> as
   val Observable<T> source;
-  val Fnc<&T, bool> predicate;
-  pub constructor(Observable<T> source, Fnc<&T, bool> predicate) {
+  val Fnc<T, bool> predicate;
+  constructor(Observable<T> source, Fnc<T, bool> predicate) {
     self.source = source;
     self.predicate = predicate;
   }
@@ -278,10 +278,10 @@ pub define class FilterObservable<T> extends Observable<T> as
   }
 end
 
-pub define class TakeObservable<T> extends Observable<T> as
+define class TakeObservable<T> extends Observable<T> as
   val Observable<T> source;
   val int count;
-  pub constructor(Observable<T> source, int count) {
+  constructor(Observable<T> source, int count) {
     self.source = source;
     self.count = count;
   }
@@ -294,7 +294,7 @@ pub fnc map<A, B>(Observable<A> source, Fnc<A, B> transform): Observable<B> {
   return new MapObservable<A, B>(source, transform);
 }
 
-pub fnc filter<T>(Observable<T> source, Fnc<&T, bool> predicate): Observable<T> {
+pub fnc filter<T>(Observable<T> source, Fnc<T, bool> predicate): Observable<T> {
   return new FilterObservable<T>(source, predicate);
 }
 
@@ -302,7 +302,7 @@ pub fnc take<T>(Observable<T> source, int count): Observable<T> {
   return new TakeObservable<T>(source, count);
 }
 
-pub define class MergeSubscription<T> extends Subscription<T> as
+define class MergeSubscription<T> extends Subscription<T> as
   val Channel<bool> stopped = Channel.new<bool>(1);
   val Channel<bool> left_done = Channel.new<bool>(1);
   val Channel<bool> right_done = Channel.new<bool>(1);
@@ -310,7 +310,7 @@ pub define class MergeSubscription<T> extends Subscription<T> as
   val SelectSet left_only;
   val SelectSet right_only;
 
-  pub constructor(Channel<Option<T>> left, Channel<Option<T>> right) {
+  constructor(Channel<Option<T>> left, Channel<Option<T>> right) {
     self.both = SelectSet.new([
       SelectCase.read(self.stopped), SelectCase.read(left), SelectCase.read(right)
     ]);
@@ -361,10 +361,10 @@ pub define class MergeSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class MergeObservable<T> extends Observable<T> as
+define class MergeObservable<T> extends Observable<T> as
   val Channel<Option<T>> left;
   val Channel<Option<T>> right;
-  pub constructor(Channel<Option<T>> left, Channel<Option<T>> right) {
+  constructor(Channel<Option<T>> left, Channel<Option<T>> right) {
     self.left = left;
     self.right = right;
   }
@@ -381,10 +381,10 @@ pub fnc merge_channels<T>(Channel<Option<T>> left, Channel<Option<T>> right): Ob
 
 // Future producers keep their own lifetime. Cancellation of this adapter does
 // not cancel the shared Future; an already pending pull waits for settlement.
-pub define class FutureSubscription<T> extends Subscription<T> as
+define class FutureSubscription<T> extends Subscription<T> as
   val Future<T> pending;
   val Channel<bool> emitted = Channel.new<bool>(1);
-  pub constructor(Future<T> pending) { self.pending = pending; }
+  constructor(Future<T> pending) { self.pending = pending; }
   pub pull(): Option<T> {
     if !(try writech self.emitted, true); then
       return None;
@@ -394,9 +394,9 @@ pub define class FutureSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class FutureObservable<T> extends Observable<T> as
+define class FutureObservable<T> extends Observable<T> as
   val Future<T> pending;
-  pub constructor(Future<T> pending) { self.pending = pending; }
+  constructor(Future<T> pending) { self.pending = pending; }
   pub subscribe(): Subscription<T> { return new FutureSubscription<T>(self.pending); }
 end
 
