@@ -911,6 +911,14 @@ public final class TypeChecker {
             if (!method.isStatic()) env.define("self", callableSelf, Ast.BindingKind.VAL);
             for (Ast.Param param : method.parameters()) {
                 Type parameterType = resolveParam(param, generics, callableSelf);
+                if (!method.isStatic() && klass.actorKind() != Ast.ActorKind.NONE) {
+                    validateActorCallableBoundaryType(
+                            parameterType,
+                            klass.actorKind(),
+                            false,
+                            "parameter '" + param.name() + "' of actor method '"
+                                    + klass.name() + "." + method.name() + "'");
+                }
                 if (param.structural() && klass.actorKind() != Ast.ActorKind.NONE) {
                     throw new IllegalArgumentException(
                             "structural parameter '" + param.name() + "' cannot cross actor method mailbox boundaries; "
@@ -930,6 +938,13 @@ public final class TypeChecker {
                 env.define(param.name(), parameterType, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
             Type returns = resolve(method.returnType(), generics, callableSelf);
+            if (!method.isStatic() && klass.actorKind() != Ast.ActorKind.NONE) {
+                validateActorCallableBoundaryType(
+                        returns,
+                        klass.actorKind(),
+                        true,
+                        "return type of actor method '" + klass.name() + "." + method.name() + "'");
+            }
             if (method.async()) {
                 validateAsyncBoundaryType(
                         returns,
@@ -2868,16 +2883,9 @@ public final class TypeChecker {
             return;
         }
         if (named.name().equals("SharedMutex")) {
-            if (actorKind == Ast.ActorKind.PRIVATE || actorKind == Ast.ActorKind.UNTRUSTED) {
-                throw new IllegalArgumentException(
-                        where + " cannot use SharedMutex<T> with isoactor/private actors");
-            }
-            if (named.arguments().size() != 1
-                    || !isSharedSafe(named.arguments().getFirst(), new LinkedHashSet<>(), Map.of())) {
-                throw new IllegalArgumentException(
-                        where + " requires SharedMutex<T> to contain shared-safe owned data");
-            }
-            return;
+            throw new IllegalArgumentException(
+                    where + " cannot use SharedMutex<T> across any actor boundary; "
+                            + "actors own mutable state and cross-actor mutation uses mailbox/channel messages");
         }
 
         for (Type argument : named.arguments()) {
