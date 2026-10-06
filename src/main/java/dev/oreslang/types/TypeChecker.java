@@ -491,10 +491,15 @@ public final class TypeChecker {
                     param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
         }
 
-        // For a generator declaration the source return annotation is the
-        // yielded element type. The call result is Generator<T> or
-        // AsyncGenerator<T>; bare return only terminates the sequence.
-        Type returns = resolve(fn.returnType(), generics, null);
+        // Generator declarations accept both the original element annotation
+        // (: int) and the explicit iterator protocol spelling
+        // (: Iterator<int> / : AsyncIterator<int>). The body always checks
+        // yield values against the element type, while calls expose exactly
+        // one iterator wrapper.
+        Type declaredReturn = resolve(fn.returnType(), generics, null);
+        Type returns = fn.generator()
+                ? generatorYieldType(fn.async(), declaredReturn)
+                : declaredReturn;
         if (returns == Primitive.VOID && fn.generator()) {
             throw new IllegalArgumentException(
                     "generator '" + module + "." + fn.name() + "' must declare a non-void yielded element type");
@@ -1438,17 +1443,18 @@ public final class TypeChecker {
                     "spread expressions are only valid as arguments to a variadic callable");
         }
         if (expr instanceof Ast.RuntimeCallExpr runtime) {
-            if (runtime.arguments().size() != 1) {
+            if (!runtime.operation().equals("cooperate")) {
                 throw new IllegalArgumentException(
-                        "rt " + runtime.operation() + " expects exactly one argument");
+                        "runtime intrinsic 'rt " + runtime.operation() + "' is not available on this compiler head");
             }
-            Type operand = typeOf(runtime.arguments().getFirst(), env, generics, self);
-            return switch (runtime.operation()) {
-                case "borrow" -> new Borrow(operand, false);
-                case "copy", "take", "share" -> operand;
-                default -> throw new IllegalArgumentException(
-                        "unknown runtime ownership operation 'rt " + runtime.operation() + "'");
-            };
+            if (!runtime.arguments().isEmpty()) {
+                throw new IllegalArgumentException("rt cooperate takes no arguments");
+            }
+            if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
+                throw new IllegalArgumentException(
+                        "rt cooperate is not enabled for untrusted actors until continuation quotas preserve fuel/deadline state across scheduler handoffs");
+            }
+            return Primitive.VOID;
         }
         if (expr instanceof Ast.CallExpr call) {
             if (isBuiltinStdoutCall(call, "log", env)) {
@@ -4242,9 +4248,32 @@ public final class TypeChecker {
                 trapResult(true, raw.result()));
     }
 
+    private Type generatorYieldType(boolean async, Type declared) {
+        if (!(declared instanceof Named named) || named.arguments().size() != 1) {
+            return declared;
+        }
+
+        String name = named.name();
+        boolean syncProtocol = name.equals("Iterator") || name.equals("Generator");
+        boolean asyncProtocol = name.equals("AsyncIterator") || name.equals("AsyncGenerator");
+
+        if (async && asyncProtocol) return named.arguments().getFirst();
+        if (!async && syncProtocol) return named.arguments().getFirst();
+
+        if (syncProtocol || asyncProtocol) {
+            throw new IllegalArgumentException(
+                    (async ? "async " : "")
+                            + "generator return protocol must be "
+                            + (async ? "AsyncIterator<T>" : "Iterator<T>")
+                            + ", not " + declared);
+        }
+        return declared;
+    }
+
     private Type callableResult(boolean async, boolean generator, Type result) {
         if (generator) {
-            return new Named(async ? "AsyncIterator" : "Iterator", List.of(result));
+            Type element = generatorYieldType(async, result);
+            return new Named(async ? "AsyncIterator" : "Iterator", List.of(element));
         }
         return async ? new Named("Future", List.of(result)) : result;
     }
@@ -4432,10 +4461,6 @@ public final class TypeChecker {
             rejectStaticClassGenericReferences(conditional.whenFalse(), classGenerics, klass, method);
         } else if (expression instanceof Ast.SpreadExpr spread) {
             rejectStaticClassGenericReferences(spread.expression(), classGenerics, klass, method);
-        } else if (expression instanceof Ast.RuntimeCallExpr runtime) {
-            for (Ast.Expr argument : runtime.arguments()) {
-                rejectStaticClassGenericReferences(argument, classGenerics, klass, method);
-            }
         } else if (expression instanceof Ast.CallExpr call) {
             for (Ast.TypeRef argument : call.typeArguments()) {
                 rejectStaticClassGenericReference(argument, classGenerics, klass, method);
