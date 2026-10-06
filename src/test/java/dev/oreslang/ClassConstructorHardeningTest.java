@@ -151,14 +151,24 @@ final class ClassConstructorHardeningTest {
     }
 
     @Test
-    void topLevelClassesStayFilePrivateAndModuleVisibilityIsExplicit() {
-        IllegalArgumentException topLevelPublic = assertThrows(
-                IllegalArgumentException.class,
-                () -> Parser.parse("""
-                        pub define class Exported as
-                        end
-                        """));
-        assertTrue(topLevelPublic.getMessage().contains("top-level classes are file-private"));
+    void fileRootAndModuleClassVisibilityIsExplicit() {
+        Ast.Program rootProgram = Parser.parse("""
+                pub define class Exported as
+                  pub constructor() { return; }
+                end
+
+                define class Hidden as
+                end
+                """);
+        Ast.ModuleDecl root = rootProgram.modules().stream()
+                .filter(module -> module.name().equals(Parser.ROOT_MODULE))
+                .findFirst()
+                .orElseThrow();
+        Ast.ClassDecl rootExported = (Ast.ClassDecl) root.declarations().get(0);
+        Ast.ClassDecl rootHidden = (Ast.ClassDecl) root.declarations().get(1);
+        assertEquals(Ast.Visibility.PUBLIC, rootExported.visibility());
+        assertEquals(Ast.Visibility.PUBLIC, rootExported.constructor().visibility());
+        assertEquals(Ast.Visibility.PRIVATE, rootHidden.visibility());
 
         IllegalArgumentException publicConstructorOnPrivateClass = assertThrows(
                 IllegalArgumentException.class,
@@ -169,7 +179,7 @@ final class ClassConstructorHardeningTest {
                           end
                         end
                         """));
-        assertTrue(publicConstructorOnPrivateClass.getMessage().contains("public constructor requires a public module class"));
+        assertTrue(publicConstructorOnPrivateClass.getMessage().contains("public constructor requires a public class"));
 
         Ast.Program program = Parser.parse("""
                 define module model as

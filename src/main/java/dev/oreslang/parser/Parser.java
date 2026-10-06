@@ -61,10 +61,10 @@ public final class Parser {
                 modifiers = mergeModifiers(modifiers, parseModifiers());
                 rejectCallableStructuralAnnotation(annotations, "class declarations");
                 validateClassModifiers(modifiers);
-                if (modifiers.visibility == Ast.Visibility.PUBLIC) {
-                    throw error(previous(), "top-level classes are file-private; put the class in a module to export it");
-                }
-                rootDeclarations.add(parseClass(Ast.Visibility.PRIVATE, modifiers.isAbstract, true));
+                rootDeclarations.add(parseClass(
+                        modifiers.visibility,
+                        modifiers.isAbstract,
+                        modifiers.visibility != Ast.Visibility.PUBLIC));
                 continue;
             }
 
@@ -115,11 +115,10 @@ public final class Parser {
                     modifiers = mergeModifiers(modifiers, parseModifiers());
                     rejectCallableStructuralAnnotation(annotations, "class declarations");
                     validateClassModifiers(modifiers);
-                    if (modifiers.visibility == Ast.Visibility.PUBLIC) {
-                        throw error(previous(), "top-level classes are file-private; put the class in a module to export it");
-                    }
-                    rootDeclarations.add(parseClass(Ast.Visibility.PRIVATE,
-                            modifiers.isAbstract, true));
+                    rootDeclarations.add(parseClass(
+                            modifiers.visibility,
+                            modifiers.isAbstract,
+                            modifiers.visibility != Ast.Visibility.PUBLIC));
                     continue;
                 }
                 if (match(INTERFACE)) {
@@ -527,7 +526,7 @@ public final class Parser {
         if (mods.visibility == Ast.Visibility.PUBLIC
                 && (filePrivateScope || classVisibility != Ast.Visibility.PUBLIC)) {
             throw error(keyword,
-                    "a public constructor requires a public module class; top-level classes and private module classes cannot export constructors");
+                    "a public constructor requires a public class; private file-root/module classes cannot export constructors");
         }
 
         consume(LPAREN, "expected '(' after constructor");
