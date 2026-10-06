@@ -143,6 +143,7 @@ final class ImportGraph {
                             && klass.actorKind() != Ast.ActorKind.NONE
                             && klass.name().equals(name);
                     case CLASS -> decl instanceof Ast.ClassDecl klass
+                            && klass.visibility() == Ast.Visibility.PUBLIC
                             && klass.actorKind() == Ast.ActorKind.NONE
                             && klass.name().equals(name);
                     case INTERFACE -> decl instanceof Ast.InterfaceDecl iface
@@ -165,6 +166,7 @@ final class ImportGraph {
                                     && fn.visibility() == Ast.Visibility.PUBLIC
                                     && fn.name().equals(name))
                             || (decl instanceof Ast.ClassDecl klass
+                                    && klass.visibility() == Ast.Visibility.PUBLIC
                                     && klass.name().equals(name));
                     case MODULE -> false;
                 };
