@@ -321,6 +321,27 @@ final class ParserTest {
                     return;
                   }
                 end
+                """,
+                """
+                define module app as
+                  shared fnc missing_actor(): void {
+                    return;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  fnc untrusted missing_actor_after_fnc(): void {
+                    return;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  fnc shared isoactor contradictory_after_fnc(): void {
+                    return;
+                  }
+                end
                 """
         );
 
