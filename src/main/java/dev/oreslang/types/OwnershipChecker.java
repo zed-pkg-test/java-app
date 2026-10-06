@@ -646,6 +646,11 @@ public final class OwnershipChecker {
                             ownershipFieldType(target.field()),
                             genericBindings(target.owner().genericParameters(), target.ownerType().arguments()));
                     ValueKind fieldKind = kindOfType(fieldType);
+                    if (isProxyReceiver(member.receiver(), scope) && fieldKind != ValueKind.COPY) {
+                        throw error("cannot extract move-only field '" + target.owner().name() + "."
+                                + member.member()
+                                + "' through rt Proxy<T>; expose a copy/immutable snapshot or keep mutation behind proxy methods");
+                    }
                     if (consuming && isRootedAtActorSelf(member.receiver(), scope) && fieldKind != ValueKind.COPY) {
                         throw error("cannot move actor-owned field '" + member.member()
                                 + "' out of its mailbox turn; return a copy/immutable value or explicit shared snapshot");
@@ -784,6 +789,29 @@ public final class OwnershipChecker {
     }
 
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
+        if (call.callee() instanceof Ast.NameExpr runtimeOp
+                && runtimeOp.name().equals("$rt$proxy")) {
+            if (call.arguments().size() != 1 || call.typeArgumentsPresent()) {
+                throw error("rt proxy requires exactly one value operand");
+            }
+            ValueInfo owned = checkExpr(call.arguments().getFirst(), scope, true);
+            if (owned.type == null || owned.type.isBorrow()) {
+                throw error("rt proxy requires an owned class/struct value, not a borrow");
+            }
+            if (owned.type.name().equals("Proxy")) {
+                throw error("rt proxy cannot wrap an existing Proxy<T>");
+            }
+            Ast.ClassDecl klass = findClass(owned.type.name());
+            boolean dynamicStruct = owned.type.name().equals("DynamicStruct")
+                    && owned.type.arguments().size() == 1;
+            if (klass == null && !dynamicStruct) {
+                throw error("rt proxy currently accepts class instances or DynamicStruct<T>; got "
+                        + owned.type);
+            }
+            Ast.TypeRef proxyType = new Ast.TypeRef("Proxy", List.of(owned.type), false);
+            return new ValueInfo(proxyType, ValueKind.COPY, null);
+        }
+
         if (isBooleanIntrinsicCall(call, scope)) {
             for (Ast.Expr argument : call.arguments()) {
                 checkExpr(argument, scope, false);
@@ -966,10 +994,16 @@ public final class OwnershipChecker {
                 if (AnnotationExpander.isGeneratedFromJsonSetter(method)) {
                     ensureMutableReceiver(member.receiver(), scope, "generated JSON setter '" + method.name() + "'");
                 }
-                boolean protectedReceiver = false;
+                boolean proxyReceiver = isProxyReceiver(member.receiver(), scope);
+                boolean protectedReceiver = proxyReceiver;
                 if (member.receiver() instanceof Ast.NameExpr receiverName) {
                     VarState receiverState = scope.lookup(receiverName.name());
-                    protectedReceiver = receiverState != null && isScopedMutexReceiver(receiverState);
+                    protectedReceiver = proxyReceiver
+                            || (receiverState != null && isScopedMutexReceiver(receiverState));
+                }
+                if (proxyReceiver && method.async()) {
+                    throw error("async method '" + target.owner().name() + "." + method.name()
+                            + "' cannot execute while an rt Proxy<T> lock is held; send a message or return a Future created outside the proxy critical section");
                 }
                 Map<String, Ast.TypeRef> ownerBindings = genericBindings(
                         target.owner().genericParameters(), target.ownerType().arguments());
@@ -982,7 +1016,7 @@ public final class OwnershipChecker {
                 if (protectedReceiver && !isCopyType(signature.result())
                         && !signature.result().name().equals("void")) {
                     throw error("method '" + target.owner().name() + "." + method.name()
-                            + "' cannot return move-only state through a mutex guard/critical-section borrow");
+                            + "' cannot return move-only state through a mutex/proxy critical section");
                 }
                 Ast.TypeRef result = signature.result().name().equals("self")
                         ? concreteReceiver : signature.result();
@@ -1166,6 +1200,7 @@ public final class OwnershipChecker {
             VarState state = requireState(scope, name.name());
             requireUsable(state, name.name(), true);
             if (isMutexGuardType(state.type)) return;
+            if (isProxyType(state.type)) return; // interior mutation is synchronized by the proxy.
             boolean mutableBorrow = state.kind == ValueKind.MUT_BORROW || (state.type.isBorrow() && state.type.mutableBorrow());
             if (!state.mutable && !mutableBorrow) {
                 throw error("cannot mutate " + what + " through immutable parameter/binding '" + name.name() + "'; declare the owned parameter as 'mut' or pass '&mut'");
@@ -1523,6 +1558,7 @@ public final class OwnershipChecker {
         if (type == null) return null;
         if (type.isBorrow()) type = type.borrowedTarget();
         if (isMutexGuardType(type)) type = type.arguments().getFirst();
+        if (isProxyType(type)) type = type.arguments().getFirst();
         return type;
     }
 
@@ -2195,7 +2231,7 @@ public final class OwnershipChecker {
         return switch (type.name()) {
             case "i8","i16","i32","i64","u8","u16","u32","u64","int","uint","bigint",
                     "f32","f64","float","decimal","complex64","complex128","complex",
-                    "bool","Bool","string","String","void","SharedMutex",
+                    "bool","Bool","string","String","void","SharedMutex","Proxy",
                     "Channel","SelectCase","SelectSet","OptionUnwrapError" -> true;
             case "Option" -> type.arguments().size() == 1 && isCopyType(type.arguments().getFirst());
             case "Result" -> type.arguments().size() == 2
@@ -2208,6 +2244,21 @@ public final class OwnershipChecker {
     private boolean isScopedMutexReceiver(VarState state) {
         return isMutexGuardType(state.type)
                 || (mutexCriticalSectionDepth > 0 && state.type.isBorrow() && state.type.mutableBorrow());
+    }
+
+    private static boolean isProxyType(Ast.TypeRef type) {
+        return type != null
+                && !type.isBorrow()
+                && type.name().equals("Proxy")
+                && type.arguments().size() == 1;
+    }
+
+    private boolean isProxyReceiver(Ast.Expr receiver, Scope scope) {
+        if (receiver instanceof Ast.NameExpr name) {
+            VarState state = scope.lookup(name.name());
+            return state != null && isProxyType(state.type);
+        }
+        return false;
     }
 
     private static boolean isMutexGuardType(Ast.TypeRef type) {

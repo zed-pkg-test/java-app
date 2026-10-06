@@ -1310,7 +1310,8 @@ public final class TypeChecker {
                 targetType = memberType(member, env, generics, self);
                 where = member.member();
             } else if (assignment.target() instanceof Ast.IndexExpr indexed) {
-                Type receiver = deref(typeOf(indexed.receiver(), env, generics, self));
+                Type receiver = unwrapProxy(deref(typeOf(
+                        indexed.receiver(), env, generics, self)));
                 Type index = typeOf(indexed.index(), env, generics, self);
                 if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
                     if (dynamic.arguments().size() != 1) {
@@ -1419,6 +1420,42 @@ public final class TypeChecker {
                     "spread expressions are only valid as arguments to a variadic callable");
         }
         if (expr instanceof Ast.CallExpr call) {
+            if (call.callee() instanceof Ast.NameExpr runtimeOp
+                    && runtimeOp.name().equals("$rt$proxy")) {
+                if (call.typeArgumentsPresent() || call.arguments().size() != 1) {
+                    throw new IllegalArgumentException("rt proxy requires exactly one value operand");
+                }
+                Type operand = deref(typeOf(
+                        call.arguments().getFirst(), env, generics, self));
+                if (operand instanceof Primitive
+                        || operand instanceof StringLiteral
+                        || operand instanceof Borrow
+                        || operand instanceof Function
+                        || operand instanceof ClassNamespace
+                        || operand == Unknown.INSTANCE
+                        || operand instanceof Generic
+                        || operand instanceof SelfType) {
+                    throw new IllegalArgumentException(
+                            "rt proxy requires a concrete owned class/struct value; got " + operand);
+                }
+                if (operand instanceof Named named
+                        && named.name().equals("Proxy")) {
+                    throw new IllegalArgumentException(
+                            "rt proxy cannot wrap an existing Proxy<T>");
+                }
+                boolean dynamicStruct = operand instanceof Named named
+                        && named.name().equals("DynamicStruct")
+                        && named.arguments().size() == 1;
+                boolean classInstance = operand instanceof Named named
+                        && findClass(named.name()) != null;
+                if (!dynamicStruct && !classInstance) {
+                    throw new IllegalArgumentException(
+                            "rt proxy currently accepts class instances or DynamicStruct<T>; got "
+                                    + operand);
+                }
+                return new Named("Proxy", List.of(operand));
+            }
+
             if (isBuiltinStdoutCall(call, "log", env)) {
                 if (call.typeArgumentsPresent()) {
                     throw new IllegalArgumentException("stdio.stdout.log does not accept call-site type arguments");
@@ -1664,8 +1701,8 @@ public final class TypeChecker {
             }
             if (call.callee() instanceof Ast.MemberExpr member) {
                 Type receiver = deref(typeOf(member.receiver(), env, generics, self));
-                Type receiverValueType = receiver;
-                receiver = receiverDispatchType(receiver);
+                Type receiverValueType = receiverDispatchType(receiver);
+                receiver = receiverValueType;
 
                 if (receiver instanceof Named guard
                         && guard.name().equals("MutexGuard")
@@ -2101,7 +2138,8 @@ public final class TypeChecker {
             return Unknown.INSTANCE;
         }
         if (expr instanceof Ast.IndexExpr indexed) {
-            Type receiver = deref(typeOf(indexed.receiver(), env, generics, self));
+            Type receiver = unwrapProxy(deref(typeOf(
+                    indexed.receiver(), env, generics, self)));
             Type index = typeOf(indexed.index(), env, generics, self);
             if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
                 if (dynamic.arguments().size() != 1) {
@@ -2736,9 +2774,19 @@ public final class TypeChecker {
         return type instanceof Borrow borrow ? borrow.target() : type;
     }
 
+    private Type unwrapProxy(Type type) {
+        if (type instanceof Named named
+                && named.name().equals("Proxy")
+                && named.arguments().size() == 1) {
+            return named.arguments().getFirst();
+        }
+        return type;
+    }
+
     /** Nominal/structural view used only to resolve members on a polymorphic receiver. */
     private Type receiverDispatchType(Type type) {
-        return type instanceof SelfType receiverSelf ? receiverSelf.bound() : type;
+        Type value = type instanceof SelfType receiverSelf ? receiverSelf.bound() : type;
+        return unwrapProxy(value);
     }
 
     /**
@@ -2867,6 +2915,28 @@ public final class TypeChecker {
                     where + " value");
             return;
         }
+        if (named.name().equals("Proxy")) {
+            if (actorKind != Ast.ActorKind.SHARED) {
+                throw new IllegalArgumentException(
+                        where + " cannot use Proxy<T> with private/untrusted actors; "
+                                + "rt proxy is a synchronized shared-runtime capability");
+            }
+            if (named.arguments().size() != 1) {
+                throw new IllegalArgumentException(
+                        where + " requires Proxy<T> with one payload type");
+            }
+            Type payload = named.arguments().getFirst();
+            boolean dynamicStruct = payload instanceof Named payloadNamed
+                    && payloadNamed.name().equals("DynamicStruct")
+                    && payloadNamed.arguments().size() == 1;
+            boolean classInstance = payload instanceof Named payloadNamed
+                    && findClass(payloadNamed.name()) != null;
+            if (!dynamicStruct && !classInstance) {
+                throw new IllegalArgumentException(
+                        where + " requires Proxy<T> to wrap a class or DynamicStruct<T>");
+            }
+            return;
+        }
         if (named.name().equals("SharedMutex")) {
             if (actorKind == Ast.ActorKind.PRIVATE || actorKind == Ast.ActorKind.UNTRUSTED) {
                 throw new IllegalArgumentException(
@@ -2935,7 +3005,8 @@ public final class TypeChecker {
 
         if (named.name().equals("Mutex") || named.name().equals("MutexGuard")
                 || named.name().equals("Future") || named.name().equals("Iterator")
-                || named.name().equals("AsyncIterator") || named.name().equals("SharedMutex")) return false;
+                || named.name().equals("AsyncIterator") || named.name().equals("SharedMutex")
+                || named.name().equals("Proxy")) return false;
         if (named.name().equals("DynamicStruct")) {
             return named.arguments().size() == 1
                     && isSharedSafe(named.arguments().getFirst(), seen, genericBindings);
@@ -5072,6 +5143,33 @@ public final class TypeChecker {
                     throw new IllegalArgumentException(ref.name() + "<void> is invalid");
                 }
                 yield new Named(ref.name().equals("Generator") ? "Iterator" : ref.name().equals("AsyncGenerator") ? "AsyncIterator" : ref.name(), List.of(element));
+            }
+            case "Proxy" -> {
+                if (ref.inferArguments() || ref.arguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "Proxy requires exactly one explicit type argument");
+                }
+                Type element = resolve(ref.arguments().getFirst(), generics, self);
+                if (element instanceof Borrow
+                        || element instanceof Primitive
+                        || element instanceof Function
+                        || element instanceof ClassNamespace
+                        || element == Unknown.INSTANCE
+                        || element instanceof Generic
+                        || element instanceof SelfType) {
+                    throw new IllegalArgumentException(
+                            "Proxy<T> requires a concrete owned class/struct type");
+                }
+                boolean dynamicStruct = element instanceof Named named
+                        && named.name().equals("DynamicStruct")
+                        && named.arguments().size() == 1;
+                boolean classInstance = element instanceof Named named
+                        && findClass(named.name()) != null;
+                if (!dynamicStruct && !classInstance) {
+                    throw new IllegalArgumentException(
+                            "Proxy<T> currently requires a class or DynamicStruct<T> payload");
+                }
+                yield new Named("Proxy", List.of(element));
             }
             case "SharedMutex" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("SharedMutex requires exactly one explicit type argument");

@@ -2219,6 +2219,7 @@ public final class Parser {
     }
 
     private Ast.Expr parseUnary() {
+        if (match(RT)) return parseRuntimeExpression();
         if (match(BANG, TILDE, MINUS, PLUS)) return new Ast.UnaryExpr(previous().lexeme(), parseUnary());
         if (match(AMP)) {
             boolean mutable = match(MUT);
@@ -2302,6 +2303,32 @@ public final class Parser {
                 "dynamic select requires 'select from cases'; static select uses 'select { case ... }'");
         Ast.Expr cases = parseUnary();
         return new Ast.DynamicSelectExpr(mode, policy, cases);
+    }
+
+    /**
+     * Runtime ownership operations use command form (rt proxy x) or call form
+     * (rt proxy(x)). They lower to an unspellable compiler intrinsic so the
+     * ordinary AST/call machinery stays closed-world while source code cannot
+     * shadow or forge the operation.
+     */
+    private Ast.Expr parseRuntimeExpression() {
+        Token operation = consume(IDENT, "expected runtime operation after 'rt'");
+        if (!operation.lexeme().equals("proxy")) {
+            throw error(operation,
+                    "current runtime supports 'rt proxy'; copy/take/borrow/share/publish "
+                            + "are being converged separately with allocation-domain semantics");
+        }
+
+        Ast.Expr operand;
+        if (match(LPAREN)) {
+            operand = parseExpression();
+            consume(RPAREN, "expected ')' after rt " + operation.lexeme() + " operand");
+        } else {
+            operand = parseUnary();
+        }
+        return new Ast.CallExpr(
+                new Ast.NameExpr("$rt$" + operation.lexeme()),
+                List.of(operand));
     }
 
     private Ast.Expr parsePostfix() {
