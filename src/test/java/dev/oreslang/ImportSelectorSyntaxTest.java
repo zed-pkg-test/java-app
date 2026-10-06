@@ -80,7 +80,7 @@ final class ImportSelectorSyntaxTest {
                   pub fnc value(): int { return 2; }
                 }
 
-                define class Box as
+                pub define class Box as
                 end
 
                 pub interface Api {
