@@ -1744,7 +1744,14 @@ public final class ActorRuntime implements AutoCloseable {
             private final AtomicReference<OresFuture.RuntimeWaiterRegistration<?>> waiter =
                     new AtomicReference<>();
             private final AtomicBoolean released = new AtomicBoolean();
-            private final AtomicBoolean resumeQueued = new AtomicBoolean();
+            /**
+             * Producer completion may race the tail of the current CONTROL turn.
+             * Record readiness separately from dispatch so another CONTROL carrier
+             * cannot resume this logical Mailman before executionLease is released.
+             */
+            private final AtomicReference<OresScheduler.Resume> readyResume =
+                    new AtomicReference<>();
+            private final AtomicBoolean resumeDispatchScheduled = new AtomicBoolean();
 
             private PendingMailmanTask(
                     GroupMailmanEnvelope<Out> envelope,
@@ -1988,6 +1995,12 @@ public final class ActorRuntime implements AutoCloseable {
                 task = Objects.requireNonNull(
                         cooperativeMailman.createTask(envelope.mail, context),
                         "cooperative Mailman returned null task");
+            } catch (Throwable factoryFailure) {
+                // The envelope has already left the bounded outbox, so generic
+                // drain logic can no longer see its reservation. Release it
+                // here before propagating the factory failure.
+                envelope.release();
+                throw factoryFailure;
             } finally {
                 active.set(false);
             }
@@ -2043,7 +2056,8 @@ public final class ActorRuntime implements AutoCloseable {
                 throw new IllegalStateException(
                         "ActorGroup Mailman attempted overlapping cooperative suspension");
             }
-            pending.resumeQueued.set(false);
+            pending.readyResume.set(null);
+            pending.resumeDispatchScheduled.set(false);
 
             Object terminal = awaited.runtimeTerminalStateOrNull();
             if (terminal != null) {
@@ -2077,19 +2091,36 @@ public final class ActorRuntime implements AutoCloseable {
                 PendingMailmanTask pending,
                 OresScheduler.Resume resume) {
             if (stopped.get() || suspended.get() != pending) return;
-            if (!pending.resumeQueued.compareAndSet(false, true)) {
+            if (!pending.readyResume.compareAndSet(null, resume)) {
                 failAndDrain(new IllegalStateException(
                         "cooperative Mailman await queued more than one resume"));
                 return;
             }
 
+            /*
+             * Future completion may happen before the current CONTROL turn has
+             * finished unwinding. Never submit a resumable turn while this
+             * logical Mailman still owns a physical carrier: with CONTROL
+             * parallelism > 1 that could violate the single-Mailman lease.
+             * finishControlTurn() retries after leaveExecutionLease().
+             */
+            schedulePendingResumeIfReady(pending);
+        }
+
+        private void schedulePendingResumeIfReady(PendingMailmanTask pending) {
+            if (stopped.get() || suspended.get() != pending) return;
+            if (pending.readyResume.get() == null) return;
+            if (executionLease.get() != null) return;
+            if (!pending.resumeDispatchScheduled.compareAndSet(false, true)) return;
+
             final OresFuture<Void> dispatch;
             try {
                 dispatch = Objects.requireNonNull(
                         controlDispatcher.execute(
-                                () -> resumePending(pending, resume)),
+                                () -> resumePending(pending)),
                         "ActorGroup Mailman CONTROL dispatcher returned null Future");
             } catch (RuntimeException | Error submissionFailure) {
+                pending.resumeDispatchScheduled.set(false);
                 failAndDrain(submissionFailure);
                 return;
             }
@@ -2101,16 +2132,25 @@ public final class ActorRuntime implements AutoCloseable {
             });
         }
 
-        private void resumePending(
-                PendingMailmanTask pending,
-                OresScheduler.Resume resume) {
+        private void resumePending(PendingMailmanTask pending) {
             if (stopped.get() || suspended.get() != pending) return;
 
             enterExecutionLease();
             try {
                 pending.detachWaiter();
                 if (!suspended.compareAndSet(pending, null)) return;
-                pending.resumeQueued.set(false);
+
+                OresScheduler.Resume resume = pending.readyResume.getAndSet(null);
+                pending.resumeDispatchScheduled.set(false);
+                if (resume == null) {
+                    pending.release();
+                    failure.compareAndSet(
+                            null,
+                            new IllegalStateException(
+                                    "cooperative Mailman resumed without an await result"));
+                    stopped.set(true);
+                    return;
+                }
 
                 try {
                     boolean done = advancePending(pending, resume);
@@ -2138,9 +2178,13 @@ public final class ActorRuntime implements AutoCloseable {
                 drainOutbox();
                 return;
             }
-            if (suspended.get() != null) {
+            PendingMailmanTask pending = suspended.get();
+            if (pending != null) {
                 // The logical Mailman lease remains held, but no physical
                 // carrier is retained while its awaited Future is pending.
+                // If completion raced the tail of the prior turn, this is the
+                // first point at which a new CONTROL dispatch is permitted.
+                schedulePendingResumeIfReady(pending);
                 return;
             }
 
