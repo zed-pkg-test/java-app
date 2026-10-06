@@ -48,6 +48,51 @@ public final class GeneratorRuntime {
         return new AsyncGenerator<>(runtime, new Engine<>(runtime, producer));
     }
 
+    /**
+     * Create a non-owning async-iterator view over a channel.
+     *
+     * <p>Each iterator pull performs exactly one destructive channel receive.
+     * Multiple views therefore compete for values; this is not a broadcast
+     * abstraction. Closing the iterator cancels only its currently pending
+     * receive and never closes the underlying channel.</p>
+     *
+     * <p>A normally closed channel completes the iterator after already
+     * buffered values drain. A channel closed with a cause fails the iterator
+     * after the same drain rule.</p>
+     */
+    public static <T> AsyncGenerator<T> channelAsyncIterator(
+            AsyncRuntime runtime,
+            ChannelRuntime.Channel<T> channel) {
+        Objects.requireNonNull(runtime, "runtime");
+        Objects.requireNonNull(channel, "channel");
+
+        AtomicReference<OresFuture<T>> pendingRead = new AtomicReference<>();
+        return asyncGenerator(runtime, emitter -> {
+            try {
+                while (true) {
+                    OresFuture<T> read = channel.readAsync();
+                    pendingRead.set(read);
+                    try {
+                        T value = AsyncRuntime.await(read);
+                        pendingRead.compareAndSet(read, null);
+                        emitter.emit(value);
+                    } catch (ChannelRuntime.ChannelClosedException closed) {
+                        pendingRead.compareAndSet(read, null);
+                        if (closed.getCause() == null) {
+                            return;
+                        }
+                        throw closed;
+                    }
+                }
+            } finally {
+                OresFuture<T> read = pendingRead.getAndSet(null);
+                if (read != null && !read.isDone()) {
+                    read.cancel(false);
+                }
+            }
+        });
+    }
+
     public static final class Generator<T> implements Iterable<T>, AutoCloseable {
         private final Engine<T> engine;
 
