@@ -36,6 +36,7 @@ public final class OwnershipChecker {
     private record CallSignature(List<Ast.Param> parameters, Ast.TypeRef result) { }
     private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
     private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
+    private final Set<String> modules = new HashSet<>();
     private final Set<String> ambiguousFunctions = new HashSet<>();
     private final Set<String> ambiguousClasses = new HashSet<>();
     private int mutexCriticalSectionDepth;
@@ -53,6 +54,7 @@ public final class OwnershipChecker {
 
     private void index(Ast.Program program) {
         for (Ast.ModuleDecl module : program.modules()) {
+            modules.add(module.name());
             for (Ast.Decl decl : module.declarations()) {
                 if (decl instanceof Ast.FunctionDecl fn) index(functions, ambiguousFunctions, module.name(), fn.name(), fn);
                 else if (decl instanceof Ast.ClassDecl klass) index(classes, ambiguousClasses, module.name(), klass.name(), klass);
@@ -782,6 +784,12 @@ public final class OwnershipChecker {
     }
 
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
+        if (isBooleanIntrinsicCall(call, scope)) {
+            for (Ast.Expr argument : call.arguments()) {
+                checkExpr(argument, scope, false);
+            }
+            return new ValueInfo(Ast.TypeRef.simple("bool"), ValueKind.COPY, null);
+        }
         if (isBuiltinStdoutCall(call, "log", scope) || isBuiltinStdoutCall(call, "logList", scope)) {
             for (Ast.Expr argument : call.arguments()) {
                 Ast.Expr value = argument instanceof Ast.SpreadExpr spread ? spread.expression() : argument;
@@ -991,6 +999,25 @@ public final class OwnershipChecker {
             }
         }
         return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
+    }
+
+    private boolean isBooleanIntrinsicCall(Ast.CallExpr call, Scope scope) {
+        if (call.callee() instanceof Ast.NameExpr name) {
+            return isBooleanIntrinsicName(name.name())
+                    && scope.lookup(name.name()) == null
+                    && !functions.containsKey(name.name())
+                    && !ambiguousFunctions.contains(name.name());
+        }
+        return call.callee() instanceof Ast.MemberExpr member
+                && member.receiver() instanceof Ast.NameExpr namespace
+                && namespace.name().equals("BooleanOps")
+                && isBooleanIntrinsicName(member.member())
+                && scope.lookup("BooleanOps") == null
+                && !modules.contains("BooleanOps");
+    }
+
+    private static boolean isBooleanIntrinsicName(String name) {
+        return name.equals("And") || name.equals("Or") || name.equals("Xor");
     }
 
     private static boolean isBuiltinStdoutCall(Ast.CallExpr call, String memberName, Scope scope) {
