@@ -592,6 +592,7 @@ public final class OresEvalRootNode extends RootNode {
             private final OresObject receiver;
             private final List<Ast.Stmt> blockBody;
             private final List<?> arguments;
+            private final boolean proxyAware;
             private Env initialBlockEnv;
 
             private SourceValueCont awaitingContinuation;
@@ -605,6 +606,7 @@ public final class OresEvalRootNode extends RootNode {
                 this.receiver = null;
                 this.blockBody = null;
                 this.arguments = List.copyOf(arguments);
+                this.proxyAware = functionUsesProxyCapability(function);
             }
 
             private SourceTask(
@@ -616,6 +618,7 @@ public final class OresEvalRootNode extends RootNode {
                 this.receiver = receiver;
                 this.blockBody = null;
                 this.arguments = List.copyOf(arguments);
+                this.proxyAware = methodUsesProxyCapability(method);
             }
 
             private SourceTask(List<Ast.Stmt> blockBody) {
@@ -625,6 +628,11 @@ public final class OresEvalRootNode extends RootNode {
                 this.blockBody = List.copyOf(
                         Objects.requireNonNull(blockBody, "blockBody"));
                 this.arguments = List.of();
+                // Detached callback blocks can capture a Proxy<T> through their
+                // environment snapshot even when no declaration appears in the
+                // block itself. Conservatively keep their member/index accesses
+                // on the suspendable path.
+                this.proxyAware = true;
             }
 
             @Override
@@ -847,9 +855,268 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.FunctionDecl function,
                 Set<Object> seen) {
             if (!seen.add(function)) return false;
+            if (functionUsesProxyCapability(function)) return true;
             for (Ast.Stmt stmt : function.body()) {
                 if (statementContainsPotentialSuspension(stmt, seen)) {
                     return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean functionUsesProxyCapability(Ast.FunctionDecl function) {
+            if (typeContainsProxy(function.returnType())) return true;
+            for (Ast.Param param : function.parameters()) {
+                if (typeContainsProxy(param.type())) return true;
+            }
+            return statementsContainProxyCapability(function.body());
+        }
+
+        private boolean methodUsesProxyCapability(Ast.MethodDecl method) {
+            if (typeContainsProxy(method.returnType())
+                    || typeContainsProxy(method.explicitReceiverType())) {
+                return true;
+            }
+            for (Ast.Param param : method.parameters()) {
+                if (typeContainsProxy(param.type())) return true;
+            }
+            Ast.ClassDecl owner = declaringClass(method);
+            if (owner != null) {
+                for (Ast.FieldDecl field : owner.fields()) {
+                    if (typeContainsProxy(field.type())) return true;
+                }
+            }
+            return statementsContainProxyCapability(method.body());
+        }
+
+        private boolean typeContainsProxy(Ast.TypeRef type) {
+            if (type == null) return false;
+            if (type.name().equals("Proxy")) return true;
+            for (Ast.TypeRef argument : type.arguments()) {
+                if (typeContainsProxy(argument)) return true;
+            }
+            return false;
+        }
+
+        private boolean statementsContainProxyCapability(List<Ast.Stmt> statements) {
+            for (Ast.Stmt statement : statements) {
+                if (statementContainsProxyCapability(statement)) return true;
+            }
+            return false;
+        }
+
+        private boolean statementContainsProxyCapability(Ast.Stmt stmt) {
+            if (stmt instanceof Ast.BindingStmt binding) {
+                return typeContainsProxy(binding.declaredType())
+                        || expressionContainsProxyCapability(binding.initializer());
+            }
+            if (stmt instanceof Ast.DestructureStmt destructure) {
+                return expressionContainsProxyCapability(destructure.initializer());
+            }
+            if (stmt instanceof Ast.ReturnStmt ret) {
+                return expressionContainsProxyCapability(ret.value());
+            }
+            if (stmt instanceof Ast.YieldStmt yield) {
+                return expressionContainsProxyCapability(yield.value());
+            }
+            if (stmt instanceof Ast.ExprStmt expr) {
+                return expressionContainsProxyCapability(expr.expression());
+            }
+            if (stmt instanceof Ast.DeferStmt defer) {
+                return expressionContainsProxyCapability(defer.expression());
+            }
+            if (stmt instanceof Ast.BlockStmt block) {
+                return statementsContainProxyCapability(block.body());
+            }
+            if (stmt instanceof Ast.IfStmt conditional) {
+                for (Ast.IfBranch branch : conditional.branches()) {
+                    if (expressionContainsProxyCapability(branch.condition())
+                            || statementsContainProxyCapability(branch.body())) return true;
+                }
+                return statementsContainProxyCapability(conditional.elseBody());
+            }
+            if (stmt instanceof Ast.MatchStmt matched) {
+                if (expressionContainsProxyCapability(matched.subject())) return true;
+                for (Ast.MatchArm arm : matched.arms()) {
+                    if (expressionContainsProxyCapability(arm.guard())
+                            || statementsContainProxyCapability(arm.body())) return true;
+                }
+                return false;
+            }
+            if (stmt instanceof Ast.SwitchStmt switched) {
+                if (expressionContainsProxyCapability(switched.subject())) return true;
+                for (Ast.SwitchCase arm : switched.cases()) {
+                    if (statementsContainProxyCapability(arm.body())) return true;
+                }
+                return statementsContainProxyCapability(switched.defaultBody());
+            }
+            if (stmt instanceof Ast.TryStmt attempted) {
+                return statementsContainProxyCapability(attempted.body())
+                        || statementsContainProxyCapability(attempted.catchBody())
+                        || statementsContainProxyCapability(attempted.finallyBody());
+            }
+            if (stmt instanceof Ast.ForOfStmt loop) {
+                return expressionContainsProxyCapability(loop.iterable())
+                        || statementsContainProxyCapability(loop.body());
+            }
+            if (stmt instanceof Ast.ForOfDestructureStmt loop) {
+                return expressionContainsProxyCapability(loop.iterable())
+                        || statementsContainProxyCapability(loop.body());
+            }
+            if (stmt instanceof Ast.ForStmt loop) {
+                return (loop.initializer() != null && statementContainsProxyCapability(loop.initializer()))
+                        || expressionContainsProxyCapability(loop.condition())
+                        || expressionContainsProxyCapability(loop.update())
+                        || statementsContainProxyCapability(loop.body());
+            }
+            if (stmt instanceof Ast.LoopStmt loop) {
+                return statementsContainProxyCapability(loop.body());
+            }
+            return false;
+        }
+
+        private boolean expressionContainsProxyCapability(Ast.Expr expr) {
+            if (expr == null) return false;
+            if (expr instanceof Ast.CallExpr call) {
+                if (isRuntimeProxyIntrinsic(call)) return true;
+                if (call.callee() instanceof Ast.NameExpr name) {
+                    Ast.FunctionDecl target = findFunction(name.name(), call.arguments().size());
+                    if (target != null && typeContainsProxy(target.returnType())) return true;
+                    if (namedImports.containsKey(name.name())) return true;
+                }
+                if (call.callee() instanceof Ast.MemberExpr member
+                        && member.receiver() instanceof Ast.NameExpr namespace
+                        && namespaceImports.containsKey(namespace.name())) {
+                    return true;
+                }
+                if (expressionContainsProxyCapability(call.callee())) return true;
+                for (Ast.Expr argument : call.arguments()) {
+                    if (expressionContainsProxyCapability(argument)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.UnaryExpr unary) {
+                return expressionContainsProxyCapability(unary.operand());
+            }
+            if (expr instanceof Ast.BinaryExpr binary) {
+                return expressionContainsProxyCapability(binary.left())
+                        || expressionContainsProxyCapability(binary.right());
+            }
+            if (expr instanceof Ast.AssignExpr assignment) {
+                return expressionContainsProxyCapability(assignment.target())
+                        || expressionContainsProxyCapability(assignment.value());
+            }
+            if (expr instanceof Ast.ConditionalExpr conditional) {
+                return expressionContainsProxyCapability(conditional.condition())
+                        || expressionContainsProxyCapability(conditional.whenTrue())
+                        || expressionContainsProxyCapability(conditional.whenFalse());
+            }
+            if (expr instanceof Ast.TypeTestExpr test) {
+                return typeContainsProxy(test.targetType())
+                        || expressionContainsProxyCapability(test.value());
+            }
+            if (expr instanceof Ast.PatternTestExpr test) {
+                return expressionContainsProxyCapability(test.value());
+            }
+            if (expr instanceof Ast.CastExpr cast) {
+                return typeContainsProxy(cast.targetType())
+                        || expressionContainsProxyCapability(cast.value());
+            }
+            if (expr instanceof Ast.MemberExpr member) {
+                return expressionContainsProxyCapability(member.receiver());
+            }
+            if (expr instanceof Ast.IndexExpr index) {
+                return expressionContainsProxyCapability(index.receiver())
+                        || expressionContainsProxyCapability(index.index());
+            }
+            if (expr instanceof Ast.NewExpr created) {
+                if (typeContainsProxy(created.type())) return true;
+                for (Ast.Expr argument : created.arguments()) {
+                    if (expressionContainsProxyCapability(argument)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.ListExpr list) {
+                for (Ast.Expr item : list.elements()) {
+                    if (expressionContainsProxyCapability(item)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.TupleExpr tuple) {
+                for (Ast.Expr item : tuple.elements()) {
+                    if (expressionContainsProxyCapability(item)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.ObjectExpr object) {
+                for (Ast.ObjectField field : object.fields()) {
+                    if ((field.isDynamic()
+                                    && expressionContainsProxyCapability(field.dynamicName()))
+                            || expressionContainsProxyCapability(field.value())) return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean expressionContainsProxyLeaseCandidate(Ast.Expr expr) {
+            if (expr == null) return false;
+            if (expr instanceof Ast.MemberExpr || expr instanceof Ast.IndexExpr) return true;
+            if (expr instanceof Ast.AssignExpr assignment) {
+                return expressionContainsProxyLeaseCandidate(assignment.target())
+                        || expressionContainsProxyLeaseCandidate(assignment.value());
+            }
+            if (expr instanceof Ast.CallExpr call) {
+                if (call.callee() instanceof Ast.MemberExpr) return true;
+                if (expressionContainsProxyLeaseCandidate(call.callee())) return true;
+                for (Ast.Expr argument : call.arguments()) {
+                    if (expressionContainsProxyLeaseCandidate(argument)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.UnaryExpr unary) {
+                return expressionContainsProxyLeaseCandidate(unary.operand());
+            }
+            if (expr instanceof Ast.BinaryExpr binary) {
+                return expressionContainsProxyLeaseCandidate(binary.left())
+                        || expressionContainsProxyLeaseCandidate(binary.right());
+            }
+            if (expr instanceof Ast.ConditionalExpr conditional) {
+                return expressionContainsProxyLeaseCandidate(conditional.condition())
+                        || expressionContainsProxyLeaseCandidate(conditional.whenTrue())
+                        || expressionContainsProxyLeaseCandidate(conditional.whenFalse());
+            }
+            if (expr instanceof Ast.TypeTestExpr test) {
+                return expressionContainsProxyLeaseCandidate(test.value());
+            }
+            if (expr instanceof Ast.PatternTestExpr test) {
+                return expressionContainsProxyLeaseCandidate(test.value());
+            }
+            if (expr instanceof Ast.CastExpr cast) {
+                return expressionContainsProxyLeaseCandidate(cast.value());
+            }
+            if (expr instanceof Ast.NewExpr created) {
+                for (Ast.Expr argument : created.arguments()) {
+                    if (expressionContainsProxyLeaseCandidate(argument)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.ListExpr list) {
+                for (Ast.Expr item : list.elements()) {
+                    if (expressionContainsProxyLeaseCandidate(item)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.TupleExpr tuple) {
+                for (Ast.Expr item : tuple.elements()) {
+                    if (expressionContainsProxyLeaseCandidate(item)) return true;
+                }
+                return false;
+            }
+            if (expr instanceof Ast.ObjectExpr object) {
+                for (Ast.ObjectField field : object.fields()) {
+                    if ((field.isDynamic()
+                                    && expressionContainsProxyLeaseCandidate(field.dynamicName()))
+                            || expressionContainsProxyLeaseCandidate(field.value())) return true;
                 }
             }
             return false;
@@ -2386,7 +2653,9 @@ public final class OresEvalRootNode extends RootNode {
                 if (!expressionContainsPotentialSuspension(
                         expr,
                         java.util.Collections.newSetFromMap(
-                                new IdentityHashMap<>()))) {
+                                new IdentityHashMap<>()))
+                        && !(task.proxyAware
+                                && expressionContainsProxyLeaseCandidate(expr))) {
                     continuation.accept(
                             task,
                             eval(expr, env),
@@ -2709,6 +2978,30 @@ public final class OresEvalRootNode extends RootNode {
                                     continuation.accept(t, null, failure);
                                     return;
                                 }
+                                if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
+                                    completeProxyAccess(
+                                            t,
+                                            proxy,
+                                            false,
+                                            raw -> {
+                                                Object value = member(
+                                                        raw,
+                                                        member.member(),
+                                                        env);
+                                                if (value instanceof Invokable) {
+                                                    throw new IllegalArgumentException(
+                                                            "rt Proxy<T> methods are direct-call-only; invoke '"
+                                                                    + member.member()
+                                                                    + "(...)' instead of extracting the method");
+                                                }
+                                                return requireProxyBoundaryValue(
+                                                        proxy,
+                                                        value,
+                                                        "rt proxy member '" + member.member() + "'");
+                                            },
+                                            continuation);
+                                    return;
+                                }
                                 try {
                                     continuation.accept(
                                             t,
@@ -2746,6 +3039,18 @@ public final class OresEvalRootNode extends RootNode {
                                                         failure2);
                                                 return;
                                             }
+                                            if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
+                                                completeProxyAccess(
+                                                        t2,
+                                                        proxy,
+                                                        false,
+                                                        raw -> requireProxyBoundaryValue(
+                                                                proxy,
+                                                                indexValue(raw, key),
+                                                                "rt proxy indexed read"),
+                                                        continuation);
+                                                return;
+                                            }
                                             try {
                                                 continuation.accept(
                                                         t2,
@@ -2774,17 +3079,104 @@ public final class OresEvalRootNode extends RootNode {
                                     continuation.accept(t, null, failure);
                                     return;
                                 }
-                                try {
-                                    continuation.accept(
-                                            t,
-                                            assignEvaluated(
-                                                    assignment.target(),
-                                                    value,
-                                                    env),
-                                            null);
-                                } catch (RuntimeException | Error failure2) {
-                                    continuation.accept(t, null, failure2);
+                                if (assignment.target() instanceof Ast.NameExpr name) {
+                                    try {
+                                        env.assign(name.name(), value);
+                                        continuation.accept(t, value, null);
+                                    } catch (RuntimeException | Error failure2) {
+                                        continuation.accept(t, null, failure2);
+                                    }
+                                    return;
                                 }
+                                if (assignment.target() instanceof Ast.MemberExpr target) {
+                                    evalSuspendableExpr(
+                                            t,
+                                            target.receiver(),
+                                            env,
+                                            (t2, receiver, failure2) -> {
+                                                if (failure2 != null) {
+                                                    continuation.accept(t2, null, failure2);
+                                                    return;
+                                                }
+                                                if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
+                                                    completeProxyAccess(
+                                                            t2,
+                                                            proxy,
+                                                            true,
+                                                            raw -> assignProxyMemberRaw(
+                                                                    raw,
+                                                                    target.member(),
+                                                                    value,
+                                                                    env),
+                                                            continuation);
+                                                    return;
+                                                }
+                                                try {
+                                                    continuation.accept(
+                                                            t2,
+                                                            assignMemberEvaluated(
+                                                                    receiver,
+                                                                    target.member(),
+                                                                    value,
+                                                                    env),
+                                                            null);
+                                                } catch (RuntimeException | Error failure3) {
+                                                    continuation.accept(t2, null, failure3);
+                                                }
+                                            });
+                                    return;
+                                }
+                                if (assignment.target() instanceof Ast.IndexExpr target) {
+                                    evalSuspendableExpr(
+                                            t,
+                                            target.receiver(),
+                                            env,
+                                            (t2, receiver, failure2) -> {
+                                                if (failure2 != null) {
+                                                    continuation.accept(t2, null, failure2);
+                                                    return;
+                                                }
+                                                evalSuspendableExpr(
+                                                        t2,
+                                                        target.index(),
+                                                        env,
+                                                        (t3, key, failure3) -> {
+                                                            if (failure3 != null) {
+                                                                continuation.accept(t3, null, failure3);
+                                                                return;
+                                                            }
+                                                            if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
+                                                                completeProxyAccess(
+                                                                        t3,
+                                                                        proxy,
+                                                                        true,
+                                                                        raw -> assignProxyIndexRaw(
+                                                                                raw,
+                                                                                key,
+                                                                                value),
+                                                                        continuation);
+                                                                return;
+                                                            }
+                                                            try {
+                                                                continuation.accept(
+                                                                        t3,
+                                                                        assignIndexEvaluated(
+                                                                                receiver,
+                                                                                key,
+                                                                                value),
+                                                                        null);
+                                                            } catch (RuntimeException | Error failure4) {
+                                                                continuation.accept(t3, null, failure4);
+                                                            }
+                                                        });
+                                            });
+                                    return;
+                                }
+                                continuation.accept(
+                                        t,
+                                        null,
+                                        new IllegalArgumentException(
+                                                "unsupported assignment target"));
                             });
                     return;
                 }
@@ -3055,6 +3447,79 @@ public final class OresEvalRootNode extends RootNode {
                                     t,
                                     result,
                                     failure));
+        }
+
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private void completeProxyAccess(
+                SourceTask task,
+                ActorRuntime.Proxy<?> proxy,
+                boolean write,
+                Function<Object, Object> operation,
+                SourceValueCont continuation) {
+            final OresFuture<?> acquisition;
+            try {
+                ActorRuntime.Proxy rawProxy = (ActorRuntime.Proxy) proxy;
+                acquisition = write
+                        ? rawProxy.acquireWriteAsync()
+                        : rawProxy.acquireReadAsync();
+            } catch (RuntimeException | Error failure) {
+                continuation.accept(task, null, failure);
+                return;
+            }
+
+            if (acquisition.isDone()) {
+                try {
+                    completeGrantedProxyAccess(
+                            task,
+                            acquisition.join(),
+                            write,
+                            operation,
+                            continuation);
+                } catch (RuntimeException | Error failure) {
+                    continuation.accept(task, null, failure);
+                }
+                return;
+            }
+
+            task.suspend(
+                    acquisition,
+                    (resumed, granted, failure) -> {
+                        if (failure != null) {
+                            continuation.accept(resumed, null, failure);
+                            return;
+                        }
+                        completeGrantedProxyAccess(
+                                resumed,
+                                granted,
+                                write,
+                                operation,
+                                continuation);
+                    });
+        }
+
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private void completeGrantedProxyAccess(
+                SourceTask task,
+                Object granted,
+                boolean write,
+                Function<Object, Object> operation,
+                SourceValueCont continuation) {
+            if (!(granted instanceof ActorRuntime.Proxy.Access access)) {
+                continuation.accept(
+                        task,
+                        null,
+                        new IllegalStateException(
+                                "rt Proxy acquisition resumed without an access lease"));
+                return;
+            }
+            try (ActorRuntime.Proxy.Access lease = access) {
+                Object result = write
+                        ? lease.write((Function) operation)
+                        : lease.read((Function) operation);
+                continuation.accept(task, result, null);
+            } catch (RuntimeException | Error failure) {
+                continuation.accept(task, null, failure);
+            }
         }
 
         private void evalSuspendableChannel(
@@ -3340,6 +3805,64 @@ public final class OresEvalRootNode extends RootNode {
                                             continuation.accept(t2, null, failure2);
                                             return;
                                         }
+                                        if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
+                                            if (member.member().equals("dispose")) {
+                                                if (call.typeArgumentsPresent() || !values.isEmpty()) {
+                                                    continuation.accept(
+                                                            t2,
+                                                            null,
+                                                            new IllegalArgumentException(
+                                                                    "Proxy<T>.dispose() takes no arguments or type arguments"));
+                                                    return;
+                                                }
+                                                try {
+                                                    OresFuture<Void> closing = proxy.closeAsync();
+                                                    if (closing.isDone()) {
+                                                        closing.join();
+                                                        continuation.accept(t2, null, null);
+                                                    } else {
+                                                        t2.suspend(
+                                                                closing,
+                                                                (t3, ignored, failure3) ->
+                                                                        continuation.accept(
+                                                                                t3,
+                                                                                null,
+                                                                                failure3));
+                                                    }
+                                                } catch (RuntimeException | Error failure3) {
+                                                    continuation.accept(t2, null, failure3);
+                                                }
+                                                return;
+                                            }
+
+                                            completeProxyAccess(
+                                                    t2,
+                                                    proxy,
+                                                    false,
+                                                    raw -> prepareProxyInvocationLocked(
+                                                            call,
+                                                            proxy,
+                                                            raw,
+                                                            values,
+                                                            env),
+                                                    (t3, planned, failure3) -> {
+                                                        if (failure3 != null) {
+                                                            continuation.accept(
+                                                                    t3,
+                                                                    null,
+                                                                    failure3);
+                                                            return;
+                                                        }
+                                                        Invocation invocation =
+                                                                (Invocation) planned;
+                                                        completeSourceInvocation(
+                                                                t3,
+                                                                invocation,
+                                                                false,
+                                                                continuation);
+                                                    });
+                                            return;
+                                        }
                                         try {
                                             Invocation invocation =
                                                     prepareInvocationEvaluated(
@@ -3405,6 +3928,13 @@ public final class OresEvalRootNode extends RootNode {
                 Invocation invocation,
                 boolean declaredFuture,
                 SourceValueCont continuation) {
+            if (invocation.kind() == InvocationKind.PROXY_METHOD) {
+                completeSourceProxyInvocation(
+                        task,
+                        (ProxyMethodPlan) invocation.target(),
+                        continuation);
+                return;
+            }
             try {
                 Object result = invoke(invocation);
                 if (result instanceof OresFuture<?> future
@@ -3425,6 +3955,24 @@ public final class OresEvalRootNode extends RootNode {
             } catch (RuntimeException | Error failure) {
                 continuation.accept(task, null, failure);
             }
+        }
+
+        private void completeSourceProxyInvocation(
+                SourceTask task,
+                ProxyMethodPlan plan,
+                SourceValueCont continuation) {
+            completeProxyAccess(
+                    task,
+                    plan.proxy(),
+                    !plan.readOnly(),
+                    ignored -> {
+                        Object result = plan.inner().owner().invoke(plan.inner());
+                        return requireProxyBoundaryValue(
+                                plan.proxy(),
+                                result,
+                                "rt proxy method '" + plan.label() + "' result");
+                    },
+                    continuation);
         }
 
         private boolean invocationDeclaresAsync(Invocation invocation) {
@@ -3652,31 +4200,11 @@ public final class OresEvalRootNode extends RootNode {
                                     value,
                                     env));
                 }
-                if (receiver instanceof OresObject object) {
-                    OwnedField targetField =
-                            object.owner.findField(
-                                    object.klass,
-                                    member.member(),
-                                    new LinkedHashSet<>());
-                    if (targetField == null) {
-                        throw new IllegalArgumentException(
-                                "unknown field " + member.member());
-                    }
-                    if (targetField.field().bindingKind() != Ast.BindingKind.LET) {
-                        throw new IllegalArgumentException(
-                                "field '" + object.klass.name()
-                                        + "." + member.member()
-                                        + "' is immutable");
-                    }
-                    object.fields.put(member.member(), value);
-                    return value;
-                }
-                if (receiver instanceof DynamicStructValue dynamic) {
-                    dynamic.fields.put(member.member(), value);
-                    return value;
-                }
-                throw new IllegalArgumentException(
-                        "member assignment requires mutable object state");
+                return assignMemberEvaluated(
+                        receiver,
+                        member.member(),
+                        value,
+                        env);
             }
             if (target instanceof Ast.IndexExpr index) {
                 Object receiver = eval(index.receiver(), env);
@@ -3685,26 +4213,71 @@ public final class OresEvalRootNode extends RootNode {
                     return proxy.write(raw ->
                             assignProxyIndexRaw(raw, key, value));
                 }
-                if (receiver instanceof DynamicStructValue dynamic) {
-                    if (!(key instanceof String string)) {
-                        throw new IllegalArgumentException(
-                                "DynamicStruct key must be a string");
-                    }
-                    dynamic.fields.put(string, value);
-                    return value;
-                }
-                if (receiver instanceof List<?> raw
-                        && key instanceof Number number) {
-                    @SuppressWarnings("unchecked")
-                    List<Object> list = (List<Object>) raw;
-                    list.set(Math.toIntExact(number.longValue()), value);
-                    return value;
-                }
-                throw new IllegalArgumentException(
-                        "indexed assignment requires mutable array/list or DynamicStruct");
+                return assignIndexEvaluated(receiver, key, value);
             }
             throw new IllegalArgumentException(
                     "unsupported assignment target");
+        }
+
+        private Object assignMemberEvaluated(
+                Object receiver,
+                String member,
+                Object value,
+                Env env) {
+            if (receiver instanceof OresObject object) {
+                OwnedField targetField =
+                        object.owner.findField(
+                                object.klass,
+                                member,
+                                new LinkedHashSet<>());
+                if (targetField == null) {
+                    throw new IllegalArgumentException(
+                            "unknown field " + member);
+                }
+                object.owner.requireClassMemberVisible(
+                        targetField.field().visibility(),
+                        targetField.owner(),
+                        env == null ? null : env.accessClass(),
+                        "field",
+                        targetField.field().name());
+                if (targetField.field().bindingKind() != Ast.BindingKind.LET) {
+                    throw new IllegalArgumentException(
+                            "field '" + object.klass.name()
+                                    + "." + member
+                                    + "' is immutable");
+                }
+                object.fields.put(member, value);
+                return value;
+            }
+            if (receiver instanceof DynamicStructValue dynamic) {
+                dynamic.fields.put(member, value);
+                return value;
+            }
+            throw new IllegalArgumentException(
+                    "member assignment requires mutable object state");
+        }
+
+        private Object assignIndexEvaluated(
+                Object receiver,
+                Object key,
+                Object value) {
+            if (receiver instanceof DynamicStructValue dynamic) {
+                if (!(key instanceof String string)) {
+                    throw new IllegalArgumentException(
+                            "DynamicStruct key must be a string");
+                }
+                dynamic.fields.put(string, value);
+                return value;
+            }
+            if (receiver instanceof List<?> raw
+                    && key instanceof Number number) {
+                @SuppressWarnings("unchecked")
+                List<Object> list = (List<Object>) raw;
+                list.set(Math.toIntExact(number.longValue()), value);
+                return value;
+            }
+            throw new IllegalArgumentException(
+                    "indexed assignment requires mutable array/list or DynamicStruct");
         }
 
         private Object assignProxyMemberRaw(
@@ -4037,6 +4610,7 @@ public final class OresEvalRootNode extends RootNode {
 
         private boolean methodContainsPotentialSuspension(
                 Ast.MethodDecl method) {
+            if (methodUsesProxyCapability(method)) return true;
             for (Ast.Stmt stmt : method.body()) {
                 if (statementContainsPotentialSuspension(
                         stmt,
@@ -4896,8 +5470,22 @@ public final class OresEvalRootNode extends RootNode {
                 }, List.of());
             }
 
-            Invocation inner = proxy.read(raw ->
-                    prepareInvocationEvaluated(call, raw, args, env));
+            return proxy.read(raw ->
+                    prepareProxyInvocationLocked(
+                            call,
+                            proxy,
+                            raw,
+                            args,
+                            env));
+        }
+
+        private Invocation prepareProxyInvocationLocked(
+                Ast.CallExpr call,
+                ActorRuntime.Proxy<?> proxy,
+                Object raw,
+                List<Object> args,
+                Env env) {
+            Invocation inner = prepareInvocationEvaluated(call, raw, args, env);
 
             if (inner.kind() != InvocationKind.METHOD) {
                 throw new IllegalArgumentException(
