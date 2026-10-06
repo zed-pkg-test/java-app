@@ -47,7 +47,6 @@ final class FutureCompositionLanguageTest {
                   val Future<int> flat = base().flatMap(|int value| -> {
                     return twice(value);
                   });
-                  stdio.stdout.write(":");
                   stdio.stdout.write(await flat);
                   return;
                 }
