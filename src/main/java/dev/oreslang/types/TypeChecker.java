@@ -1300,6 +1300,7 @@ public final class TypeChecker {
         if (expr instanceof Ast.AssignExpr assignment) {
             Type targetType;
             String where;
+            boolean proxyTarget = false;
             if (assignment.target() instanceof Ast.NameExpr name) {
                 Env.Binding binding = env.lookup(name.name());
                 if (binding == null) throw new IllegalArgumentException("cannot assign unknown name '" + name.name() + "'");
@@ -1307,11 +1308,19 @@ public final class TypeChecker {
                 targetType = binding.type();
                 where = name.name();
             } else if (assignment.target() instanceof Ast.MemberExpr member) {
+                Type receiver = deref(typeOf(member.receiver(), env, generics, self));
+                proxyTarget = receiver instanceof Named named
+                        && named.name().equals("Proxy")
+                        && named.arguments().size() == 1;
                 targetType = memberType(member, env, generics, self);
                 where = member.member();
             } else if (assignment.target() instanceof Ast.IndexExpr indexed) {
-                Type receiver = unwrapProxy(deref(typeOf(
-                        indexed.receiver(), env, generics, self)));
+                Type rawReceiver = deref(typeOf(
+                        indexed.receiver(), env, generics, self));
+                proxyTarget = rawReceiver instanceof Named named
+                        && named.name().equals("Proxy")
+                        && named.arguments().size() == 1;
+                Type receiver = unwrapProxy(rawReceiver);
                 Type index = typeOf(indexed.index(), env, generics, self);
                 if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
                     if (dynamic.arguments().size() != 1) {
@@ -1329,7 +1338,10 @@ public final class TypeChecker {
             } else throw new IllegalArgumentException("unsupported assignment target");
             Type value = typeOf(assignment.value(), env, generics, self);
             requireAssignable(value, targetType, "assignment to " + where);
-            return targetType;
+            // Assigning through Proxy<T> transfers the value into the
+            // synchronized domain. Treat the assignment as statement-like so
+            // its raw value cannot be duplicated outside the lock boundary.
+            return proxyTarget ? Primitive.VOID : targetType;
         }
         if (expr instanceof Ast.ConditionalExpr conditional) {
             requireAssignable(typeOf(conditional.condition(), env, generics, self), Primitive.BOOL, "ternary condition");
@@ -1701,6 +1713,16 @@ public final class TypeChecker {
             }
             if (call.callee() instanceof Ast.MemberExpr member) {
                 Type receiver = deref(typeOf(member.receiver(), env, generics, self));
+                if (receiver instanceof Named proxy
+                        && proxy.name().equals("Proxy")
+                        && proxy.arguments().size() == 1
+                        && member.member().equals("dispose")) {
+                    if (call.typeArgumentsPresent() || !call.arguments().isEmpty()) {
+                        throw new IllegalArgumentException(
+                                "Proxy<T>.dispose() takes no arguments or type arguments");
+                    }
+                    return Primitive.VOID;
+                }
                 Type receiverValueType = receiverDispatchType(receiver);
                 receiver = receiverValueType;
 
