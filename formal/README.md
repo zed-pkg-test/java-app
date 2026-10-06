@@ -10,7 +10,7 @@ This directory documents the executable formal-methods layer for Oreslang runtim
 
 `FormalChannelRendezvousModelCheckTest` models a zero-capacity channel's read/write waiter lifecycle: second-arrival atomic handoff, cancellation withdrawal, and close-time waiter failure.
 
-`FormalBufferedChannelModelCheckTest` exhaustively explores a capacity-two buffer with three distinct messages, proving capacity, FIFO conservation, nonblocking full-buffer rejection, successful retry after a read frees capacity, and one-way close fencing.
+`FormalBufferedChannelModelCheckTest` exhaustively explores a capacity-two buffer with three distinct messages, proving capacity, FIFO conservation, nonblocking full-buffer rejection, successful retry after a read frees capacity, one-way write fencing on close, and FIFO draining of values buffered before close.
 
 `FormalControlPlaneLivenessModelCheckTest` models the ActorGroup Mailman/CONTROL-carrier boundary in both the known blocking design and the required cooperative design. It keeps the blocking model as an executable counterexample oracle: a callback that waits while retaining its carrier strands already-queued CONTROL work. The cooperative model proves that suspension returns the carrier and queues the Mailman continuation behind work that was already ready.
 
@@ -66,7 +66,7 @@ No additional model-checking dependency is required; the finite-state explorer i
 
 The next models should cover:
 
-- Runtime trace refinement for the buffered-channel capacity/FIFO model across retry-after-full and close behavior.
+- Keep `BufferedChannelRefinementTest` aligned with the buffered-channel model whenever concrete close/backpressure semantics change.
 - Concrete runtime refinement for cooperative proxy-lock acquisition against `FormalProxyLockLivenessModelCheckTest`.
 - Concrete runtime refinement for the cooperative Mailman/CONTROL suspension model tracked in #358.
 - Concrete trace refinement for allocation-domain/ownership lowering once the #309/#328/#329/#332 stack is reconciled onto current `main`.
