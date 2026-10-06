@@ -54,6 +54,44 @@ final class ParserTest {
     }
 
     @Test
+    void parsesMixedThenAndDoAcrossElseifAndElifBranches() {
+        String source = """
+                define module app as
+                  fnc choose(bool a, bool b, bool c, bool d): int {
+                    if a; then
+                      return 1;
+                    elif b; do
+                      return 2;
+                    elseif c; then
+                      return 3;
+                    elif d; do
+                      return 4;
+                    else
+                      return 5;
+                    fi
+                  }
+                end
+                """;
+
+        Parser.ParseResult parsed = Parser.parseWithWarnings(source);
+        assertDoesNotThrow(() -> TypeChecker.check(parsed.program()));
+        assertEquals(2, parsed.warnings().size());
+        assertTrue(parsed.warnings().stream()
+                .allMatch(warning -> warning.message().contains("use 'then'")));
+    }
+
+    @Test
+    void lexerNormalizesElifAndElseifToTheSameBranchToken() {
+        var tokens = new Lexer("if a; then elif b; do elseif c; then else fi").scan();
+        var branchTokens = tokens.stream()
+                .filter(token -> token.type() == Token.Type.ELSEIF)
+                .toList();
+
+        assertEquals(2, branchTokens.size());
+        assertEquals(List.of("elif", "elseif"), branchTokens.stream().map(Token::lexeme).toList());
+    }
+
+    @Test
     void canonicalIfThenSupportsElifAndSingleFiElseIf() {
         Ast.Program elifProgram = Parser.parse("""
                 define module app as
