@@ -1,0 +1,23 @@
+import class ProtoMessage, ProtoError, ProtoDecodeOptions from './wire';
+import fnc proto_decode_options_valid, decode_message from './wire';
+import class ByteStreamError, ByteStreamResult from '../core/channel_bytes';
+import fnc collect_bytes_from_channel from '../core/channel_bytes';
+
+pub async fnc decode_protobuf_from_channel(
+  Channel<Option<List<int>>> input,
+  ProtoDecodeOptions options
+): Result<ProtoMessage, ProtoError> {
+  if !proto_decode_options_valid(options) then
+    return Err(new ProtoError("invalid_options", 0, "invalid or unsafe Protobuf decode options"));
+  fi
+
+  val ByteStreamResult collected =
+    await collect_bytes_from_channel(input, options.max_input_bytes);
+
+  if !collected.ok then
+    val ByteStreamError error = collected.error;
+    return Err(new ProtoError(error.code, error.offset, error.message));
+  fi
+
+  return decode_message(collected.bytes, options);
+}

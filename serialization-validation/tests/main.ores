@@ -7,6 +7,7 @@ import fnc run_metadata_tests from './metadata_test';
 import fnc run_object_codec_tests from './object_codec_test';
 import fnc run_generated_typed_codec_tests from './generated_typed_codec_test';
 import fnc run_json_channel_tests from './json_channel_test';
+import fnc run_channel_codec_tests from './channel_codec_test';
 
 pub async fnc main(): void {
   run_json_tests();
@@ -18,6 +19,7 @@ pub async fnc main(): void {
   run_object_codec_tests();
   run_generated_typed_codec_tests();
   await run_json_channel_tests();
+  await run_channel_codec_tests();
 
   stdio.stdout.println("serialization/validation native tests passed");
   return;

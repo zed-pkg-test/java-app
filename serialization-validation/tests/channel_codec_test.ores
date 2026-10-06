@@ -1,0 +1,56 @@
+import fnc require_true, require_int from './assert';
+
+import class DecodeError, DecodedValue from '../src/core/options';
+import fnc default_decode_options from '../src/core/options';
+
+import class ProtoMessage, ProtoError from '../src/protobuf/wire';
+import fnc default_proto_decode_options from '../src/protobuf/wire';
+
+import fnc decode_messagepack_from_channel from '../src/messagepack/channel';
+import fnc decode_cbor_from_channel from '../src/cbor/channel';
+import fnc decode_protobuf_from_channel from '../src/protobuf/channel';
+
+pub async fnc run_channel_codec_tests(): void {
+  val Option<List<int>> eof = None;
+
+  val Channel<Option<List<int>>> msgpack = Channel.new<Option<List<int>>>(3);
+  writech msgpack, Some(new List<int>(147, 1));
+  writech msgpack, Some(new List<int>(2, 3));
+  writech msgpack, eof;
+
+  val Result<DecodedValue, DecodeError> msgpack_result =
+    await decode_messagepack_from_channel(msgpack, default_decode_options());
+  require_true(!msgpack_result.is_err(), "MessagePack channel decode must succeed");
+  require_int(msgpack_result.unwrap().value.array_value.length, 3, "MessagePack channel array length");
+
+  val Channel<Option<List<int>>> cbor = Channel.new<Option<List<int>>>(3);
+  writech cbor, Some(new List<int>(24));
+  writech cbor, Some(new List<int>(42));
+  writech cbor, eof;
+
+  val Result<DecodedValue, DecodeError> cbor_result =
+    await decode_cbor_from_channel(cbor, default_decode_options());
+  require_true(!cbor_result.is_err(), "CBOR channel decode must succeed");
+  require_int(cbor_result.unwrap().value.kind, 2, "CBOR channel integer kind");
+
+  val Channel<Option<List<int>>> protobuf = Channel.new<Option<List<int>>>(3);
+  writech protobuf, Some(new List<int>(8, 150));
+  writech protobuf, Some(new List<int>(1));
+  writech protobuf, eof;
+
+  val Result<ProtoMessage, ProtoError> protobuf_result =
+    await decode_protobuf_from_channel(protobuf, default_proto_decode_options());
+  require_true(!protobuf_result.is_err(), "Protobuf channel decode must succeed");
+  require_int(protobuf_result.unwrap().fields.length, 1, "Protobuf channel field count");
+  require_int(protobuf_result.unwrap().fields[0].varint_value, 150, "Protobuf channel varint");
+
+  val Channel<Option<List<int>>> invalid = Channel.new<Option<List<int>>>(2);
+  writech invalid, Some(new List<int>(256));
+  writech invalid, eof;
+
+  val Result<DecodedValue, DecodeError> invalid_result =
+    await decode_messagepack_from_channel(invalid, default_decode_options());
+  require_true(invalid_result.is_err(), "channel byte validation must reject values outside 0..255");
+
+  return;
+}

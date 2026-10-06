@@ -16,12 +16,17 @@
 
 import class DecodeOptions, DecodeError, DecodedValue, DecodeStep from '../core/options';
 import class JsonIncrementalDecoder from './json';
+import fnc decode_options_valid, decode_error from '../core/options';
 import fnc new_incremental_decoder, feed, finish from './json';
 
 pub async fnc decode_one_from_channel(
   Channel<Option<List<int>>> input,
   DecodeOptions options
 ): Result<DecodedValue, DecodeError> {
+  if !decode_options_valid(options) then
+    return Err(decode_error("invalid_options", 0, "invalid or unsafe decode options"));
+  fi
+
   let JsonIncrementalDecoder decoder = new_incremental_decoder(options);
 
   loop do
