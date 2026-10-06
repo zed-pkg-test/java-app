@@ -333,6 +333,63 @@ final class OwnershipAndClosureTest {
     }
 
     @Test
+    void nestedExpressionLambdaTransitivelyMovesOuterMoveOnlyCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub val int value = 7;
+                        end
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          val (() => (() => int)) outer = || -> || -> box.value;
+                          stdio.println(box.value);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("use of moved value 'box'"));
+    }
+
+    @Test
+    void nestedBlockLambdaTransitivelyMovesOuterMoveOnlyCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub val int value = 7;
+                        end
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          val (() => (() => int)) outer = || -> {
+                            return || -> {
+                              return box.value;
+                            };
+                          };
+                          stdio.println(box.value);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("use of moved value 'box'"));
+    }
+
+    @Test
+    void explicitNlexNestedLambdaDoesNotCreateTransitiveCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        fnc bad(): void {
+                          val int outer_value = 7;
+                          val (() => (() => int)) outer = || -> nlex || -> outer_value;
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("outer_value")
+                || error.getMessage().contains("unknown name"));
+    }
+
+    @Test
     void actorSelfBoundMethodCannotEscapeMailboxTurn() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
