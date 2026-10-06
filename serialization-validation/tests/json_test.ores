@@ -5,7 +5,7 @@ import fnc bytes_equal, value_deep_equal from '../src/core/value';
 import class DecodeOptions, EncodeOptions, DecodeError, EncodeError, DecodedValue, DecodeStep from '../src/core/options';
 import fnc default_decode_options, default_encode_options from '../src/core/options';
 import class JsonIncrementalDecoder from '../src/json/json';
-import fnc decode_default, encode, new_incremental_decoder, feed, finish from '../src/json/json';
+import fnc decode, decode_default, encode, new_incremental_decoder, feed, finish from '../src/json/json';
 import fnc utf8_is_valid from '../src/core/utf8';
 
 pub fnc run_json_tests(): void {
@@ -89,6 +89,24 @@ pub fnc run_json_tests(): void {
     !utf8_is_valid(new List<int>(192, 128)),
     "overlong UTF-8 must be rejected"
   );
+
+  val DecodeOptions shallow = new DecodeOptions(
+    0, false, 1, 64, 64, 64, 64, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> too_deep = decode(
+    new List<int>(91, 91, 48, 93, 93),
+    shallow
+  );
+  require_true(too_deep.is_err(), "JSON max_depth must reject before unbounded recursion");
+
+  val DecodeOptions tiny_input = new DecodeOptions(
+    0, false, 128, 1, 16, 16, 16, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> input_limited = decode(
+    new List<int>(91, 48, 93),
+    tiny_input
+  );
+  require_true(input_limited.is_err(), "JSON max_input_bytes must fail closed");
 
   return;
 }

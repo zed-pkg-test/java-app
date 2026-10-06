@@ -2,7 +2,7 @@ import fnc require_true, require_int from './assert';
 
 import class Value, Utf8Text, WireMember from '../src/core/value';
 import fnc value_int, value_bool, value_string, value_array, value_object, value_deep_equal from '../src/core/value';
-import class DecodeError, EncodeError, DecodedValue from '../src/core/options';
+import class DecodeOptions, DecodeError, EncodeError, DecodedValue from '../src/core/options';
 import fnc default_decode_options, default_encode_options from '../src/core/options';
 import fnc encode, decode from '../src/messagepack/messagepack';
 
@@ -95,6 +95,30 @@ pub fnc run_messagepack_tests(): void {
     value_deep_equal(value_int(max_int), max_decoded.unwrap().value),
     "MessagePack int64 maximum must round-trip"
   );
+
+  val Result<DecodedValue, DecodeError> truncated = decode(
+    new List<int>(217, 2, 97),
+    default_decode_options()
+  );
+  require_true(truncated.is_err(), "MessagePack truncated str8 must reject");
+
+  val Result<DecodedValue, DecodeError> declared_length_bomb = decode(
+    new List<int>(219, 255, 255, 255, 255),
+    default_decode_options()
+  );
+  require_true(
+    declared_length_bomb.is_err(),
+    "MessagePack huge declared string length must reject before allocation"
+  );
+
+  val DecodeOptions tiny_input = new DecodeOptions(
+    0, false, 128, 1, 16, 16, 16, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> input_limited = decode(
+    new List<int>(146, 1, 2),
+    tiny_input
+  );
+  require_true(input_limited.is_err(), "MessagePack max_input_bytes must fail closed");
 
   return;
 }

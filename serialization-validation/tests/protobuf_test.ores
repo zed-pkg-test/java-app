@@ -1,6 +1,6 @@
 import fnc require_true, require_int from './assert';
 
-import class ProtoField, ProtoMessage, ProtoError from '../src/protobuf/wire';
+import class ProtoField, ProtoMessage, ProtoError, ProtoDecodeOptions from '../src/protobuf/wire';
 import fnc proto_varint, proto_bytes, default_proto_decode_options, default_proto_encode_options from '../src/protobuf/wire';
 import fnc encode_message, decode_message, fields_with_number from '../src/protobuf/wire';
 
@@ -79,6 +79,39 @@ pub fnc run_protobuf_tests(): void {
     require_int(raw_bytes[j], uint64_max[j], "preserved uint64 max byte mismatch");
     j = j + 1;
   done
+
+  val Result<ProtoMessage, ProtoError> zero_field = decode_message(
+    new List<int>(0),
+    default_proto_decode_options()
+  );
+  require_true(zero_field.is_err(), "Protobuf field number zero must reject");
+
+  val Result<ProtoMessage, ProtoError> overlong_varint = decode_message(
+    new List<int>(
+      8,
+      128, 128, 128, 128, 128,
+      128, 128, 128, 128, 128
+    ),
+    default_proto_decode_options()
+  );
+  require_true(overlong_varint.is_err(), "Protobuf varint continuation beyond ten bytes must reject");
+
+  val Result<ProtoMessage, ProtoError> length_range = decode_message(
+    new List<int>(
+      18,
+      255, 255, 255, 255, 255,
+      255, 255, 255, 255, 1
+    ),
+    default_proto_decode_options()
+  );
+  require_true(length_range.is_err(), "Protobuf uint64 length above signed range must reject");
+
+  val ProtoDecodeOptions tiny_input = new ProtoDecodeOptions(1, 16, 16);
+  val Result<ProtoMessage, ProtoError> input_limited = decode_message(
+    new List<int>(8, 1),
+    tiny_input
+  );
+  require_true(input_limited.is_err(), "Protobuf max_input_bytes must fail closed");
 
   return;
 }

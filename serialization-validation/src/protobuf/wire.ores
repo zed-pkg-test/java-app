@@ -222,18 +222,18 @@ fnc raw_varint_is_valid(List<int> bytes): bool {
     fi
 
     let bool last = i == bytes.length - 1;
-    if last then
-      if byte >= 128 then
+    if last {
+      if byte >= 128 {
         return false;
-      fi
-      if bytes.length == 10 && byte > 1 then
+      } fi
+      if bytes.length == 10 && byte > 1 {
         return false;
-      fi
-    else
-      if byte < 128 then
+      } fi
+    } else {
+      if byte < 128 {
         return false;
-      fi
-    fi
+      } fi
+    } fi
 
     i = i + 1;
   done
