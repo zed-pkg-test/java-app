@@ -463,8 +463,10 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
             releaseReadySlot();
             return true;
         }
-        for (ArrayBlockingQueue<Runnable> lane : affinityQueues) {
+        for (int slot = 0; slot < affinityQueues.size(); slot++) {
+            ArrayBlockingQueue<Runnable> lane = affinityQueues.get(slot);
             if (lane.remove(task)) {
+                clearLaneAgeIfEmpty(slot, lane);
                 releaseReadySlot();
                 return true;
             }
