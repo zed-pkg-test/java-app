@@ -1,0 +1,285 @@
+// rx-ores: pull/Future-oriented reactive streams.
+//
+// This file is a code unit, not an implicit module or package. Consumers choose
+// a local namespace with a relative wildcard import and import nominal classes
+// explicitly when they want static type names.
+
+define class Subscription<T> as
+  let bool cancelled = false;
+  let bool finished = false;
+  let bool pulling = false;
+
+  pub next(): Option<T> {
+    if self.cancelled || self.finished; then
+      return None;
+    fi
+    if self.pulling; then
+      val Result<bool, String> failure = Err("only one outstanding next() is allowed");
+      failure.expect("rx.Subscription.next");
+    fi
+
+    self.pulling = true;
+    try {
+      val Option<T> frame = self.pull();
+      if frame.is_none(); then
+        self.finished = true;
+        self.dispose();
+      fi
+      return frame;
+    } catch (err) {
+      self.finished = true;
+      self.dispose();
+      val Result<Option<T>, Object> failure = Err(err);
+      return failure.expect("rx upstream failed");
+    } finally {
+      self.pulling = false;
+    }
+  }
+
+  pub pull(): Option<T> {
+    return None;
+  }
+
+  pub dispose(): void {
+    return;
+  }
+
+  pub cancel(): bool {
+    if self.cancelled || self.finished; then
+      return false;
+    fi
+    self.cancelled = true;
+    self.dispose();
+    return true;
+  }
+end
+
+define class Observable<T> as
+  pub subscribe(): Subscription<T> {
+    return new Subscription<T>();
+  }
+end
+
+define class ValuesSubscription<T> extends Subscription<T> as
+  val Array<T> values;
+  let int cursor = 0;
+  val int size;
+
+  constructor(Array<T> values) {
+    let int size = 0;
+    for const value of values do
+      size = size + 1;
+    done
+    self.values = values;
+    self.size = size;
+  }
+
+  pub pull(): Option<T> {
+    if self.cursor >= self.size; then
+      return None;
+    fi
+    val T value = self.values[self.cursor];
+    self.cursor = self.cursor + 1;
+    return Some(value);
+  }
+end
+
+define class ValuesObservable<T> extends Observable<T> as
+  val Array<T> values;
+
+  constructor(Array<T> values) {
+    self.values = values;
+  }
+
+  pub subscribe(): Subscription<T> {
+    return new ValuesSubscription<T>(self.values);
+  }
+end
+
+pub fnc from_values<T>(Array<T> values): Observable<T> {
+  return new ValuesObservable<T>(values);
+}
+
+define class FutureSubscription<T> extends Subscription<T> as
+  val Future<T> pending;
+  let bool emitted = false;
+
+  constructor(Future<T> pending) {
+    self.pending = pending;
+  }
+
+  pub pull(): Option<T> {
+    if self.emitted; then
+      return None;
+    fi
+    self.emitted = true;
+    val T value = await self.pending;
+    return Some(value);
+  }
+end
+
+define class FutureObservable<T> extends Observable<T> as
+  val Future<T> pending;
+
+  constructor(Future<T> pending) {
+    self.pending = pending;
+  }
+
+  pub subscribe(): Subscription<T> {
+    return new FutureSubscription<T>(self.pending);
+  }
+end
+
+pub fnc from_future<T>(Future<T> pending): Observable<T> {
+  return new FutureObservable<T>(pending);
+}
+
+define class MapSubscription<A, B> extends Subscription<B> as
+  val Subscription<A> upstream;
+  val Fnc<A, B> transform;
+
+  constructor(Subscription<A> upstream, Fnc<A, B> transform) {
+    self.upstream = upstream;
+    self.transform = transform;
+  }
+
+  pub pull(): Option<B> {
+    val Option<A> frame = self.upstream.next();
+    if frame.is_none(); then
+      return None;
+    fi
+    return Some(self.transform(frame.unwrap()));
+  }
+
+  pub dispose(): void {
+    self.upstream.cancel();
+    return;
+  }
+end
+
+define class FilterSubscription<T> extends Subscription<T> as
+  val Subscription<T> upstream;
+  val Fnc<T, bool> predicate;
+
+  constructor(Subscription<T> upstream, Fnc<T, bool> predicate) {
+    self.upstream = upstream;
+    self.predicate = predicate;
+  }
+
+  pub pull(): Option<T> {
+    loop {
+      val Option<T> frame = self.upstream.next();
+      if frame.is_none(); then
+        return None;
+      fi
+      val T value = frame.unwrap();
+      if self.predicate(value); then
+        return Some(value);
+      fi
+    }
+  }
+
+  pub dispose(): void {
+    self.upstream.cancel();
+    return;
+  }
+end
+
+define class TakeSubscription<T> extends Subscription<T> as
+  val Subscription<T> upstream;
+  let int remaining;
+
+  constructor(Subscription<T> upstream, int count) {
+    if count < 0; then
+      val Result<bool, String> failure = Err("take count must be nonnegative");
+      failure.expect("rx.take");
+    fi
+    self.upstream = upstream;
+    self.remaining = count;
+  }
+
+  pub pull(): Option<T> {
+    if self.remaining == 0; then
+      self.upstream.cancel();
+      return None;
+    fi
+
+    val Option<T> frame = self.upstream.next();
+    if frame.is_none(); then
+      self.remaining = 0;
+      return None;
+    fi
+
+    self.remaining = self.remaining - 1;
+    if self.remaining == 0; then
+      self.upstream.cancel();
+    fi
+    return frame;
+  }
+
+  pub dispose(): void {
+    self.upstream.cancel();
+    return;
+  }
+end
+
+define class MapObservable<A, B> extends Observable<B> as
+  val Observable<A> source;
+  val Fnc<A, B> transform;
+
+  constructor(Observable<A> source, Fnc<A, B> transform) {
+    self.source = source;
+    self.transform = transform;
+  }
+
+  pub subscribe(): Subscription<B> {
+    return new MapSubscription<A, B>(self.source.subscribe(), self.transform);
+  }
+end
+
+define class FilterObservable<T> extends Observable<T> as
+  val Observable<T> source;
+  val Fnc<T, bool> predicate;
+
+  constructor(Observable<T> source, Fnc<T, bool> predicate) {
+    self.source = source;
+    self.predicate = predicate;
+  }
+
+  pub subscribe(): Subscription<T> {
+    return new FilterSubscription<T>(self.source.subscribe(), self.predicate);
+  }
+end
+
+define class TakeObservable<T> extends Observable<T> as
+  val Observable<T> source;
+  val int count;
+
+  constructor(Observable<T> source, int count) {
+    self.source = source;
+    self.count = count;
+  }
+
+  pub subscribe(): Subscription<T> {
+    return new TakeSubscription<T>(self.source.subscribe(), self.count);
+  }
+end
+
+pub fnc map<A, B>(Observable<A> source, Fnc<A, B> transform): Observable<B> {
+  return new MapObservable<A, B>(source, transform);
+}
+
+pub fnc filter<T>(Observable<T> source, Fnc<T, bool> predicate): Observable<T> {
+  return new FilterObservable<T>(source, predicate);
+}
+
+pub fnc take<T>(Observable<T> source, int count): Observable<T> {
+  return new TakeObservable<T>(source, count);
+}
+
+pub fnc first<T>(Observable<T> source): Option<T> {
+  val Subscription<T> sub = source.subscribe();
+  val Option<T> value = sub.next();
+  sub.cancel();
+  return value;
+}

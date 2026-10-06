@@ -1,0 +1,31 @@
+import * as rx from '../src/rx.ores';
+import class Observable, Subscription from '../src/rx.ores';
+
+pub async fnc main(): void {
+  let int checksum = 0;
+
+  for let iteration = 0; iteration < 20000; iteration++ do
+    val Observable<int> source = rx.from_values([1, 2, 3, 4, 5, 6, 7, 8]);
+    val Fnc<int, int> twice = |value| -> { return value * 2; };
+    val Observable<int> doubled = rx.map(source, twice);
+    val Fnc<int, bool> above_four = |value| -> {
+      val int item = value as int;
+      return item > 4;
+    };
+    val Observable<int> selected = rx.filter(doubled, above_four);
+    val Observable<int> limited = rx.take(selected, 3);
+    val Subscription<int> sub = limited.subscribe();
+
+    checksum = checksum + sub.next().unwrap();
+    checksum = checksum + sub.next().unwrap();
+    checksum = checksum + sub.next().unwrap();
+    val Option<int> terminal = sub.next();
+    if !terminal.is_none(); then
+      val Result<bool, String> failure = Err("take(3) produced an unexpected fourth value");
+      failure.expect("rx benchmark");
+    fi
+  done
+
+  stdio.println(checksum);
+  return;
+}
