@@ -1,0 +1,266 @@
+// rx-ores: standalone pull/Future-oriented reactive streams.
+//
+// This file is a code unit, not an implicit module. Consumers choose the local
+// namespace at import time:
+//   import * as rx from '../src/rx.ores';
+//
+// Unlike rx-oreslang-channels, this implementation does not use Channel<T> for
+// cursor/cancellation state. Each subscription owns one command closure. The
+// closure is the only mutable owner of its local cursor/flags, which keeps the
+// ordinary class receiver immutable while preserving per-subscription state.
+
+pub define class Subscription<T> as
+  // cancel=true requests terminal cancellation; cancel=false requests one item.
+  // The single closure owns all mutable subscription state, so next/cancel
+  // cannot disagree about whether this subscription is terminal.
+  val Fnc<bool, Option<T>> step;
+
+  pub constructor(Fnc<bool, Option<T>> step) {
+    self.step = step;
+  }
+
+  pub next(): Option<T> {
+    return self.step(false);
+  }
+
+  pub cancel(): bool {
+    // The command is idempotent inside step. For the initial source surface the
+    // bool acknowledges the cancellation request; a later command-result ABI
+    // can expose first-transition-vs-already-terminal without adding hot-path
+    // allocation to next().
+    self.step(true);
+    return true;
+  }
+end
+
+pub define class Observable<T> as
+  pub subscribe(): Subscription<T> {
+    val Fnc<bool, Option<T>> empty = |bool cancel| -> {
+      return None;
+    };
+    return new Subscription<T>(empty);
+  }
+end
+
+pub define class ValuesObservable<T> extends Observable<T> as
+  val Array<T> values;
+  val int size;
+
+  pub constructor(Array<T> values) {
+    let int size = 0;
+    for const value of values do
+      size = size + 1;
+    done
+    self.values = values;
+    self.size = size;
+  }
+
+  pub subscribe(): Subscription<T> {
+    val Array<T> values = self.values;
+    val int size = self.size;
+    let int cursor = 0;
+    let bool stopped = false;
+
+    val Fnc<bool, Option<T>> step = |bool cancel| -> {
+      if cancel; then
+        stopped = true;
+        return None;
+      fi
+      if stopped || cursor >= size; then
+        stopped = true;
+        return None;
+      fi
+      val T value = values[cursor];
+      cursor = cursor + 1;
+      return Some(value);
+    };
+
+    return new Subscription<T>(step);
+  }
+end
+
+pub fnc from_values<T>(Array<T> values): Observable<T> {
+  return new ValuesObservable<T>(values);
+}
+
+pub define class FutureObservable<T> extends Observable<T> as
+  val Future<T> pending;
+
+  pub constructor(Future<T> pending) {
+    self.pending = pending;
+  }
+
+  pub subscribe(): Subscription<T> {
+    val Future<T> pending = self.pending;
+    let bool emitted = false;
+    let bool stopped = false;
+
+    val Fnc<bool, Option<T>> step = |bool cancel| -> {
+      if cancel; then
+        stopped = true;
+        return None;
+      fi
+      if stopped || emitted; then
+        return None;
+      fi
+      emitted = true;
+      val T value = await pending;
+      if stopped; then
+        return None;
+      fi
+      return Some(value);
+    };
+
+    return new Subscription<T>(step);
+  }
+end
+
+pub fnc from_future<T>(Future<T> pending): Observable<T> {
+  return new FutureObservable<T>(pending);
+}
+
+pub define class MapObservable<A, B> extends Observable<B> as
+  val Observable<A> source;
+  val Fnc<A, B> transform;
+
+  pub constructor(Observable<A> source, Fnc<A, B> transform) {
+    self.source = source;
+    self.transform = transform;
+  }
+
+  pub subscribe(): Subscription<B> {
+    val Subscription<A> upstream = self.source.subscribe();
+    val Fnc<A, B> transform = self.transform;
+    let bool stopped = false;
+
+    val Fnc<bool, Option<B>> step = |bool cancel| -> {
+      if cancel; then
+        if !stopped; then
+          upstream.cancel();
+          stopped = true;
+        fi
+        return None;
+      fi
+      if stopped; then
+        return None;
+      fi
+      val Option<A> frame = upstream.next();
+      if frame.is_none(); then
+        stopped = true;
+        return None;
+      fi
+      return Some(transform(frame.unwrap()));
+    };
+
+    return new Subscription<B>(step);
+  }
+end
+
+pub define class FilterObservable<T> extends Observable<T> as
+  val Observable<T> source;
+  val Fnc<&T, bool> predicate;
+
+  pub constructor(Observable<T> source, Fnc<&T, bool> predicate) {
+    self.source = source;
+    self.predicate = predicate;
+  }
+
+  pub subscribe(): Subscription<T> {
+    val Subscription<T> upstream = self.source.subscribe();
+    val Fnc<&T, bool> predicate = self.predicate;
+    let bool stopped = false;
+
+    val Fnc<bool, Option<T>> step = |bool cancel| -> {
+      if cancel; then
+        if !stopped; then
+          upstream.cancel();
+          stopped = true;
+        fi
+        return None;
+      fi
+      if stopped; then
+        return None;
+      fi
+
+      loop {
+        val Option<T> frame = upstream.next();
+        if frame.is_none(); then
+          stopped = true;
+          return None;
+        fi
+        val T value = frame.unwrap();
+        if predicate(&value); then
+          return Some(value);
+        fi
+      }
+    };
+
+    return new Subscription<T>(step);
+  }
+end
+
+pub define class TakeObservable<T> extends Observable<T> as
+  val Observable<T> source;
+  val int count;
+
+  pub constructor(Observable<T> source, int count) {
+    if count < 0; then
+      val Result<bool, String> failure = Err("take count must be nonnegative");
+      failure.expect("rx.take");
+    fi
+    self.source = source;
+    self.count = count;
+  }
+
+  pub subscribe(): Subscription<T> {
+    val Subscription<T> upstream = self.source.subscribe();
+    let int remaining = self.count;
+    let bool stopped = false;
+
+    val Fnc<bool, Option<T>> step = |bool cancel| -> {
+      if cancel; then
+        if !stopped; then
+          upstream.cancel();
+          stopped = true;
+        fi
+        return None;
+      fi
+      if stopped || remaining == 0; then
+        if !stopped; then
+          upstream.cancel();
+          stopped = true;
+        fi
+        return None;
+      fi
+
+      remaining = remaining - 1;
+      val Option<T> frame = upstream.next();
+      if remaining == 0 || frame.is_none(); then
+        upstream.cancel();
+        stopped = true;
+      fi
+      return frame;
+    };
+
+    return new Subscription<T>(step);
+  }
+end
+
+pub fnc map<A, B>(Observable<A> source, Fnc<A, B> transform): Observable<B> {
+  return new MapObservable<A, B>(source, transform);
+}
+
+pub fnc filter<T>(Observable<T> source, Fnc<&T, bool> predicate): Observable<T> {
+  return new FilterObservable<T>(source, predicate);
+}
+
+pub fnc take<T>(Observable<T> source, int count): Observable<T> {
+  return new TakeObservable<T>(source, count);
+}
+
+pub fnc first<T>(Observable<T> source): Option<T> {
+  val Subscription<T> sub = source.subscribe();
+  val Option<T> value = sub.next();
+  sub.cancel();
+  return value;
+}
