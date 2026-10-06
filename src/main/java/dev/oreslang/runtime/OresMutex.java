@@ -23,9 +23,10 @@ import java.util.function.Function;
  * <p>{@link Local} is an actor/private-domain mutex. It deliberately does not
  * use a JVM lock: the creating semantic execution domain owns it and recursive
  * acquisition is rejected. Shared actors may migrate JVM worker threads without
- * changing that domain. {@link Shared} is an explicit same-process
- * shared-memory capability backed by a JVM synchronizer with poisoning and
- * acquire/release ordering.</p>
+ * changing that domain. {@link Shared} is a host/supervisor same-process
+ * shared-memory primitive backed by a JVM synchronizer with poisoning and
+ * acquire/release ordering. Actor code cannot acquire it directly; mutable
+ * cross-actor application state must be owned and updated through messages.</p>
  */
 public final class OresMutex {
     private OresMutex() { }
@@ -43,15 +44,7 @@ public final class OresMutex {
     }
 
     public static <T> Shared<T> shared(T value) {
-        if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
-            throw new SecurityException("private actors cannot create SharedMutex<T>");
-        }
-        IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
-        if (actorPolicy != null) {
-            actorPolicy.require(
-                    IsolatePolicy.Capability.SHARED_MEMORY,
-                    "SharedMutex.new");
-        }
+        ActorRuntime.rejectActorSharedMemoryMutation("SharedMutex.new");
         return new Shared<>(value);
     }
 
@@ -407,36 +400,14 @@ public final class OresMutex {
         }
 
         private void requireActorAccess() {
-            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
-                throw new SecurityException("private actors cannot access SharedMutex<T>");
-            }
-            IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
-            if (actorPolicy != null) {
-                actorPolicy.require(
-                        IsolatePolicy.Capability.SHARED_MEMORY,
-                        "SharedMutex operation");
-            }
-
-            ActorRuntime current = ActorRuntime.currentActorRuntime();
-            if (current != null && !bindToRuntime(current)) {
-                throw new WrongMutexDomainException(
-                        "SharedMutex belongs to another ActorRuntime");
-            }
-        }
-
-        private void rejectBlockingActorAcquisition() {
-            requireActorAccess();
             if (ActorRuntime.inActorExecution()) {
-                throw new WrongMutexDomainException(
-                        "blocking SharedMutex.lock()/lock_for()/with_lock() is forbidden during actor execution; use try_lock() or await lock_async()");
+                throw new SecurityException(
+                        "actors cannot access SharedMutex<T> directly; "
+                                + "mutable cross-actor state must be owned by an actor "
+                                + "and changed through mailbox/channel commands");
             }
         }
 
-        /**
-         * Reserve the semantic execution domain before waiting. This prevents a
-         * single actor from queueing a second acquisition behind itself and
-         * deadlocking, even when the actor migrates JVM workers.
-         */
         private Object reserveDomain(boolean tryOnly) {
             requireActorAccess();
             Object domain = ActorRuntime.currentExecutionDomain();
@@ -910,6 +881,11 @@ public final class OresMutex {
             }
 
             private void requireOwnerDomain() {
+                // A guard is itself mutable shared-memory authority. Recheck
+                // here so a host-acquired guard cannot be captured/laundered
+                // into actor code even when domain enforcement was disabled for
+                // the original host acquisition.
+                Shared.this.requireActorAccess();
                 if (enforceOwnerDomain
                         && !Objects.equals(ActorRuntime.currentExecutionDomain(), ownerDomain)) {
                     throw new WrongMutexDomainException(
