@@ -444,7 +444,13 @@ public final class CapabilityChecker {
                 if (path.startsWith("thread.")) require(policy, IsolatePolicy.Capability.THREAD_CREATE, path);
                 if (path.startsWith("process.spawn")) require(policy, IsolatePolicy.Capability.CHILD_PROCESS, path);
             }
-            checkExpr(m.receiver(), policy);
+            // Self-only allocator diagnostics expose no external authority
+            // and are safe even for zero-capability untrusted actors. Do not
+            // recurse into the bare "actor" facade in this one case, because
+            // extracting that facade itself remains forbidden.
+            if (!"actor.local_memory_bytes".equals(path)) {
+                checkExpr(m.receiver(), policy);
+            }
         } else if (expr instanceof Ast.SpreadExpr e) {
             checkExpr(e.expression(), policy);
         } else if (expr instanceof Ast.BinaryExpr e) { checkExpr(e.left(), policy); checkExpr(e.right(), policy); }
