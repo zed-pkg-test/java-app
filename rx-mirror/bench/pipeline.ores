@@ -8,7 +8,7 @@ pub async fnc main(): void {
     val Observable<int> source = rx_channels.from_values([1, 2, 3, 4, 5, 6, 7, 8]);
     val Fnc<int, int> twice = |value| -> { return value * 2; };
     val Observable<int> doubled = rx_channels.map(source, twice);
-    val Fnc<&int, bool> above_four = |value| -> {
+    val Fnc<int, bool> above_four = |value| -> {
       val int item = value as int;
       return item > 4;
     };
