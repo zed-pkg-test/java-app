@@ -945,6 +945,9 @@ public final class OwnershipChecker {
             ValueInfo sumCall = checkBuiltinSumCall(member, call.arguments(), scope);
             if (sumCall != null) return sumCall;
 
+            ValueInfo channelCall = checkBuiltinChannelCall(member, call.arguments(), scope);
+            if (channelCall != null) return channelCall;
+
             Ast.ClassDecl staticClass = classNamespaceOf(member.receiver(), scope);
             if (staticClass != null) {
                 Ast.MethodDecl staticFunction = findStaticMethod(
@@ -1094,6 +1097,35 @@ public final class OwnershipChecker {
             }
         }
         return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
+    }
+
+    private ValueInfo checkBuiltinChannelCall(
+            Ast.MemberExpr member,
+            List<Ast.Expr> arguments,
+            Scope scope) {
+        ValueInfo receiver = checkExpr(member.receiver(), scope, false);
+        Ast.TypeRef type = receiver.type;
+        if (type == null || type.isBorrow()
+                || !type.name().equals("Channel")
+                || type.arguments().size() != 1) {
+            return null;
+        }
+        if (!arguments.isEmpty()) {
+            return null; // TypeChecker owns arity diagnostics.
+        }
+        Ast.TypeRef element = type.arguments().getFirst();
+        return switch (member.member()) {
+            case "async_iter" -> {
+                Ast.TypeRef iterator =
+                        new Ast.TypeRef("AsyncIterator", List.of(element), false);
+                yield new ValueInfo(iterator, ValueKind.MOVE_ONLY, null);
+            }
+            case "close" ->
+                    new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
+            case "is_closed" ->
+                    new ValueInfo(Ast.TypeRef.simple("bool"), ValueKind.COPY, null);
+            default -> null;
+        };
     }
 
     private boolean isBooleanIntrinsicCall(Ast.CallExpr call, Scope scope) {
@@ -2282,7 +2314,10 @@ public final class OwnershipChecker {
     private Ast.TypeRef iterableElementType(Ast.TypeRef iterableType, boolean asyncIteration) {
         if (iterableType == null) return Ast.TypeRef.inferred();
         Ast.TypeRef concrete = iterableType.isBorrow() ? iterableType.borrowedTarget() : iterableType;
-        if (asyncIteration && (concrete.name().equals("AsyncGenerator") || concrete.name().equals("AsyncIterator"))
+        if (asyncIteration
+                && (concrete.name().equals("AsyncGenerator")
+                    || concrete.name().equals("AsyncIterator")
+                    || concrete.name().equals("Channel"))
                 && concrete.arguments().size() == 1) {
             return concrete.arguments().getFirst();
         }
