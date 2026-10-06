@@ -263,6 +263,43 @@ final class ChannelSelectSyntaxTest {
     }
 
     @Test
+    void channelsCarryDataNotCallableAuthority() {
+        for (String source : new String[]{
+                """
+                fnc bad(Channel<Fnc<int, int>> input): void {
+                  return;
+                }
+                """,
+                """
+                fnc bad(Channel<Option<Fnc<int, int>>> input): void {
+                  return;
+                }
+                """,
+                """
+                define class Envelope as
+                  val Fnc<int, int> callback;
+                end
+
+                fnc bad(Channel<Envelope> input): void {
+                  return;
+                }
+                """}) {
+            IllegalArgumentException error = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> TypeChecker.check(Parser.parse(source)));
+            assertTrue(error.getMessage().contains("data-only"), error::getMessage);
+            assertTrue(error.getMessage().contains("cannot be transported through channels"), error::getMessage);
+        }
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc local_callback(Fnc<int, int> callback, Channel<int> output): void {
+                  writech output, callback(1);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
     void nonblockingWriteHasRepresentableFutureVoidSurface() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 fnc write(Channel<int> output): Future<void> {
