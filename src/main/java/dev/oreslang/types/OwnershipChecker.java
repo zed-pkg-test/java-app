@@ -1121,7 +1121,7 @@ public final class OwnershipChecker {
         }
 
         throw error(where + " cannot expose unsynchronized move-only/capability type '"
-                + displayType(type)
+                + type
                 + "'; return a scalar/snapshot or a nested class/struct proxy view");
     }
 
