@@ -1132,35 +1132,35 @@ fnc scan_incremental(JsonIncrementalDecoder mut decoder): int {
       return 2;
     fi
 
-    if decoder.mode == 1 then
-      if decoder.in_string then
-        if decoder.escaped then
+    if decoder.mode == 1 {
+      if decoder.in_string {
+        if decoder.escaped {
           decoder.escaped = false;
-        elseif byte == 92 then
+        } elseif byte == 92 {
           decoder.escaped = true;
-        elseif byte == 34 then
+        } elseif byte == 34 {
           decoder.in_string = false;
-        fi
-      else
-        if byte == 34 then
+        } fi
+      } else {
+        if byte == 34 {
           decoder.in_string = true;
-        elseif byte == 123 || byte == 91 then
+        } elseif byte == 123 || byte == 91 {
           decoder.depth = decoder.depth + 1;
-        elseif byte == 125 || byte == 93 then
+        } elseif byte == 125 || byte == 93 {
           decoder.depth = decoder.depth - 1;
-          if decoder.depth == 0 then
+          if decoder.depth == 0 {
             decoder.scan_index = decoder.scan_index + 1;
             return 1;
-          fi
-          if decoder.depth < 0 then
+          } fi
+          if decoder.depth < 0 {
             return 2;
-          fi
-        fi
-      fi
+          } fi
+        } fi
+      } fi
 
       decoder.scan_index = decoder.scan_index + 1;
       continue;
-    fi
+    } fi
 
     if decoder.mode == 2 then
       if decoder.escaped then
