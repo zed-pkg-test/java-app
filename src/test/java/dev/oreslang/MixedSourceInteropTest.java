@@ -154,6 +154,43 @@ final class MixedSourceInteropTest {
     }
 
     @Test
+    void javaBridgeTreatsBoolAndBooleanReturnsAsTheSamePrimitive() throws Exception {
+        Path source = temp.resolve("BooleanBridge.java");
+        Files.writeString(source, """
+                public final class BooleanBridge {
+                  public static void main(String[] args) {
+                    boolean all = Ores.all(true, false, true);
+                    boolean any = Ores.any(false, false, true);
+                    boolean parity = Ores.parity(true, true, true);
+                    if (all || !any || !parity) {
+                      throw new AssertionError("boolean bridge returned incorrect results");
+                    }
+                    Ores.report();
+                  }
+                  ores {
+                    pub fnc all(boolean a, bool b, boolean c): boolean {
+                      return And(a, b, c);
+                    }
+                    pub fnc any(bool a, boolean b, bool c): bool {
+                      return Or(a, b, c);
+                    }
+                    pub fnc parity(boolean a, boolean b, boolean c): boolean {
+                      return Xor(a, b, c);
+                    }
+                    pub fnc report(): void {
+                      stdio.println("boolean-bridge-ok");
+                      return;
+                    }
+                  }
+                }
+                """);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        LinkedProgramRunner.run(source, trustedMixedPolicy(), ExecutionProfile.serverJit(),
+                Set.of(), out, new ByteArrayOutputStream());
+        assertTrue(out.toString(StandardCharsets.UTF_8).contains("boolean-bridge-ok"));
+    }
+
+    @Test
     void mixedJavaSourceRequiresSeparateTrustedCapability() throws Exception {
         Path source = temp.resolve("capability.ores");
         Files.writeString(source, """
