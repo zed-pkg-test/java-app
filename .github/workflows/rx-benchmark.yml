@@ -1,0 +1,31 @@
+name: rx-three-way-benchmark
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Build compiler
+        run: mvn -B -ntp -DskipTests package
+      - name: Build runtime classpath
+        run: |
+          mvn -B -ntp dependency:build-classpath -Dmdep.outputFile=/tmp/ores-cp.txt
+          echo "ORES_CLASSPATH=$PWD/target/classes:$(cat /tmp/ores-cp.txt)" >> "$GITHUB_ENV"
+      - name: Typecheck benchmark libraries
+        run: |
+          for f in rx-bench/pull/src/rx.ores rx-bench/callbacks/src/rx.ores rx-bench/channels/src/rx.ores; do
+            java --enable-native-access=ALL-UNNAMED -Dpolyglot.engine.WarnInterpreterOnly=false -cp "$ORES_CLASSPATH" dev.oreslang.launcher.OresMain --check "$f"
+          done
+      - name: Run comparative benchmark
+        run: python3 rx-bench/benchmark.py | tee rx-bench/results.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rx-benchmark-results
+          path: rx-bench/results.txt
