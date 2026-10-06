@@ -2034,6 +2034,8 @@ public final class TypeChecker {
             if (futureMember != null) return futureMember;
             Type iteratorMember = builtinIteratorMember(sumReceiver, member.member());
             if (iteratorMember != null) return iteratorMember;
+            Type channelMember = builtinChannelMember(sumReceiver, member.member());
+            if (channelMember != null) return channelMember;
             Type sumMember = builtinOptionResultMember(sumReceiver, member.member());
             if (sumMember != null) return sumMember;
             if (sumReceiver instanceof Named sumNamed
@@ -3441,6 +3443,23 @@ public final class TypeChecker {
         return null;
     }
 
+    private Type builtinChannelMember(Type receiver, String member) {
+        if (!(receiver instanceof Named named)
+                || !named.name().equals("Channel")
+                || named.arguments().size() != 1) {
+            return null;
+        }
+        Type element = named.arguments().getFirst();
+        return switch (member) {
+            case "async_iter" -> new Function(
+                    List.of(),
+                    new Named("AsyncIterator", List.of(element)));
+            case "close" -> new Function(List.of(), Primitive.VOID);
+            case "is_closed" -> new Function(List.of(), Primitive.BOOL);
+            default -> null;
+        };
+    }
+
     private Type builtinIteratorMember(Type receiver, String member) {
         if (!(receiver instanceof Named named) || named.arguments().size() != 1) return null;
         Type element = named.arguments().getFirst();
@@ -3519,6 +3538,10 @@ public final class TypeChecker {
             if (named.name().equals("Iterator") && named.arguments().size() == 1) {
                 return named.arguments().getFirst();
             }
+            if (named.name().equals("Channel") && named.arguments().size() == 1) {
+                throw new IllegalArgumentException(
+                        "ordinary for-of cannot consume Channel<T>; use 'for await ... of ...' or channel.async_iter()");
+            }
             if (named.name().equals("AsyncIterator")) {
                 throw new IllegalArgumentException(
                         "ordinary for-of cannot consume AsyncGenerator<T>; use 'for await ... of ...'");
@@ -3560,6 +3583,9 @@ public final class TypeChecker {
         iterable = receiverDispatchType(iterable);
         if (iterable instanceof Named named) {
             if (named.name().equals("AsyncIterator") && named.arguments().size() == 1) {
+                return named.arguments().getFirst();
+            }
+            if (named.name().equals("Channel") && named.arguments().size() == 1) {
                 return named.arguments().getFirst();
             }
             Ast.ClassDecl klass = findClass(named.name());
