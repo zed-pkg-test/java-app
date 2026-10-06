@@ -1,0 +1,134 @@
+// rx-ores-callbacks: synchronous push/callback reactive streams.
+//
+// This file is a code unit, not an implicit module. Consumers choose a local
+// namespace with a relative wildcard import.
+//
+// This variant intentionally has no Channel<T>, Future<T>, await, or pull
+// Subscription. Backpressure/cancellation is cooperative: each on_next callback
+// returns true to continue or false to stop upstream immediately.
+//
+// Oreslang is pointerless at source level. Callback signatures use ordinary
+// Fnc<T, ...> types. Ordinary callback calls receive temporary read access
+// under the ownership checker; an explicit longer-lived read view is spelled
+// `rt borrow value`. Copy/share transitions use `rt copy` / `rt share`.
+
+pub define class Observable<T> as
+  // Return the number of source values consumed before completion/early stop.
+  // The count gives tests/benchmarks a deterministic observable result without
+  // adding I/O to the hot loop.
+  pub subscribe(Fnc<T, bool> on_next): int {
+    return 0;
+  }
+end
+
+pub define class ValuesObservable<T> extends Observable<T> as
+  val Array<T> values;
+
+  pub constructor(Array<T> values) {
+    self.values = values;
+  }
+
+  pub subscribe(Fnc<T, bool> on_next): int {
+    let int consumed = 0;
+    for const value of self.values do
+      consumed = consumed + 1;
+      if !on_next(value); then
+        return consumed;
+      fi
+    done
+    return consumed;
+  }
+end
+
+pub fnc from_values<T>(Array<T> values): Observable<T> {
+  return new ValuesObservable<T>(values);
+}
+
+pub define class MapObservable<A, B> extends Observable<B> as
+  val Observable<A> source;
+  val Fnc<A, B> transform;
+
+  pub constructor(Observable<A> source, Fnc<A, B> transform) {
+    self.source = source;
+    self.transform = transform;
+  }
+
+  pub subscribe(Fnc<B, bool> on_next): int {
+    val Fnc<A, B> transform = self.transform;
+    val Fnc<A, bool> forward = |value| -> {
+      val B mapped = transform(value);
+      return on_next(mapped);
+    };
+    return self.source.subscribe(forward);
+  }
+end
+
+pub define class FilterObservable<T> extends Observable<T> as
+  val Observable<T> source;
+  val Fnc<T, bool> predicate;
+
+  pub constructor(Observable<T> source, Fnc<T, bool> predicate) {
+    self.source = source;
+    self.predicate = predicate;
+  }
+
+  pub subscribe(Fnc<T, bool> on_next): int {
+    val Fnc<T, bool> predicate = self.predicate;
+    val Fnc<T, bool> forward = |value| -> {
+      if !predicate(value); then
+        return true;
+      fi
+      return on_next(value);
+    };
+    return self.source.subscribe(forward);
+  }
+end
+
+pub define class TakeObservable<T> extends Observable<T> as
+  val Observable<T> source;
+  val int count;
+
+  pub constructor(Observable<T> source, int count) {
+    if count < 0; then
+      val Result<bool, String> failure = Err("take count must be nonnegative");
+      failure.expect("rx_callbacks.take");
+    fi
+    self.source = source;
+    self.count = count;
+  }
+
+  pub subscribe(Fnc<T, bool> on_next): int {
+    if self.count == 0; then
+      return 0;
+    fi
+
+    let int remaining = self.count;
+    val Fnc<T, bool> forward = |value| -> {
+      if remaining == 0; then
+        return false;
+      fi
+      remaining = remaining - 1;
+      if !on_next(value); then
+        return false;
+      fi
+      return remaining > 0;
+    };
+    return self.source.subscribe(forward);
+  }
+end
+
+pub fnc map<A, B>(Observable<A> source, Fnc<A, B> transform): Observable<B> {
+  return new MapObservable<A, B>(source, transform);
+}
+
+pub fnc filter<T>(Observable<T> source, Fnc<T, bool> predicate): Observable<T> {
+  return new FilterObservable<T>(source, predicate);
+}
+
+pub fnc take<T>(Observable<T> source, int count): Observable<T> {
+  return new TakeObservable<T>(source, count);
+}
+
+pub fnc for_each<T>(Observable<T> source, Fnc<T, bool> on_next): int {
+  return source.subscribe(on_next);
+}
