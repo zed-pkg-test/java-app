@@ -1686,6 +1686,34 @@ public final class TypeChecker {
                 Type receiverValueType = receiver;
                 receiver = receiverDispatchType(receiver);
 
+                Type collectionBuiltin = builtinCollectionMember(receiver, member.member());
+                if (collectionBuiltin != null) {
+                    if (!(collectionBuiltin instanceof Function builtin)) {
+                        throw new IllegalArgumentException(
+                                "collection member '" + member.member() + "' is not callable");
+                    }
+                    if (call.typeArgumentsPresent()) {
+                        throw new IllegalArgumentException(
+                                "collection member '" + member.member()
+                                        + "' does not accept call-site type arguments");
+                    }
+                    if (builtin.parameters().size() != call.arguments().size()) {
+                        throw new IllegalArgumentException(
+                                "collection member '" + member.member() + "' call arity mismatch");
+                    }
+                    for (int i = 0; i < builtin.parameters().size(); i++) {
+                        requireAssignable(
+                                typeOf(call.arguments().get(i), env, generics, self),
+                                builtin.parameters().get(i),
+                                "collection member argument " + (i + 1));
+                    }
+                    return builtin.result();
+                }
+                if (receiver instanceof ListType || receiver instanceof Tuple) {
+                    throw new IllegalArgumentException(
+                            "unknown collection member '" + member.member() + "'");
+                }
+
                 if (receiver instanceof Named guard
                         && guard.name().equals("MutexGuard")
                         && guard.arguments().size() == 1) {
@@ -1997,6 +2025,12 @@ public final class TypeChecker {
             Type sumReceiver = receiverDispatchType(deref(receiver));
             Type futureMember = builtinFutureMember(sumReceiver, member.member());
             if (futureMember != null) return futureMember;
+            Type collectionMember = builtinCollectionMember(sumReceiver, member.member());
+            if (collectionMember != null) return collectionMember;
+            if (sumReceiver instanceof ListType || sumReceiver instanceof Tuple) {
+                throw new IllegalArgumentException(
+                        "unknown collection member '" + member.member() + "'");
+            }
             Type iteratorMember = builtinIteratorMember(sumReceiver, member.member());
             if (iteratorMember != null) return iteratorMember;
             Type sumMember = builtinOptionResultMember(sumReceiver, member.member());
@@ -3392,6 +3426,31 @@ public final class TypeChecker {
                 case "unwrap_safe" -> new Function(List.of(), named);
                 case "expect" -> new Function(List.of(Primitive.STRING), ok);
                 case "unwrap_or" -> new Function(List.of(ok), ok);
+                default -> null;
+            };
+        }
+        return null;
+    }
+
+    private Type builtinCollectionMember(Type receiver, String member) {
+        receiver = deref(receiver);
+        if (receiver instanceof ListType list) {
+            return switch (member) {
+                case "size" -> Primitive.INT;
+                case "get" -> new Function(List.of(Primitive.INT), list.element());
+                case "add" -> new Function(List.of(list.element()), Primitive.VOID);
+                case "set" -> new Function(
+                        List.of(Primitive.INT, list.element()),
+                        Primitive.VOID);
+                default -> null;
+            };
+        }
+        if (receiver instanceof Tuple tuple) {
+            Type element = tuple.elements().stream()
+                    .reduce(Unknown.INSTANCE, this::commonType);
+            return switch (member) {
+                case "size" -> Primitive.INT;
+                case "get" -> new Function(List.of(Primitive.INT), element);
                 default -> null;
             };
         }
