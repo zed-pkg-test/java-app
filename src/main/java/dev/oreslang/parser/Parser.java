@@ -209,27 +209,24 @@ public final class Parser {
         if (match(ACTOR, ISOACTOR)) {
             Token actorToken = previous();
             boolean isolated = actorToken.type() == ISOACTOR;
-            if (isolated && modifiers.shared) {
-                throw error(actorToken, "'shared isoactor' is contradictory; use either actor/shared actor or isoactor");
-            }
-            Ast.ActorKind actorKind = isolated ? Ast.ActorKind.PRIVATE : Ast.ActorKind.SHARED;
+            modifiers = mergeModifiers(modifiers, parseModifiers());
             if (isLegacyFnSpelling()) {
                 throw error(peek(), "actor functions are declared with 'actor fnc', not 'actor fn'");
             }
             if (match(FNC)) {
-                Modifiers trailing = parseModifiers();
-                if (trailing.shared) throw error(previous(), "'shared' must appear before the actor keyword");
-                modifiers = mergeModifiers(modifiers, trailing);
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
                 return parseFunction(annotations, modifiers, Ast.CallableKind.FNC, actorKind);
             }
             if (match(ROUTINE)) {
-                Modifiers trailing = parseModifiers();
-                if (trailing.shared) throw error(previous(), "'shared' must appear before the actor keyword");
-                modifiers = mergeModifiers(modifiers, trailing);
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
                 return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE, actorKind);
             }
-            if (modifiers.async || modifiers.generator || modifiers.hasCallableOnlyModifiers() || modifiers.isStatic || modifiers.isAbstract) {
-                throw error(actorToken, "actor declarations do not accept async, generator, nlex, pure, trap, static, or abstract modifiers");
+            Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
+            if (modifiers.async || modifiers.generator || modifiers.hasCallableOnlyModifiers()
+                    || modifiers.isStatic || modifiers.isAbstract) {
+                throw error(actorToken, "actor class declarations accept only visibility and actor-kind modifiers");
             }
             return parseActorClass(actorKind);
         }
@@ -257,6 +254,13 @@ public final class Parser {
             return parseModuleBinding(annotations, modifiers.visibility);
         }
         return null;
+    }
+
+    private Ast.ActorKind resolveActorKind(Token actorToken, boolean isolated, Modifiers modifiers) {
+        if (isolated && modifiers.shared) {
+            throw error(actorToken, "'shared isoactor' is contradictory; use either actor/shared actor or isoactor");
+        }
+        return isolated ? Ast.ActorKind.PRIVATE : Ast.ActorKind.SHARED;
     }
 
     private Ast.FunctionDecl parseFunction(List<Ast.Annotation> annotations, Modifiers modifiers, Ast.CallableKind kind) {
