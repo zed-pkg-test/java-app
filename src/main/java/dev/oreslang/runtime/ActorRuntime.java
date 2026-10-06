@@ -796,11 +796,12 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Explicit synchronized shared-memory cell.
+     * Legacy host/runtime synchronized shared-memory cell.
      *
-     * Actor fields do not use this: a mailbox turn already provides exclusive
-     * mutation of actor-owned state. SyncCell is for state intentionally shared
-     * by multiple SHARED actors.
+     * <p>Actor code cannot access this capability. Actor fields are owned by
+     * their actor domain and cross-actor mutation uses messages/channels or the
+     * narrower explicit rt Proxy capability. SyncCell remains for embedding and
+     * runtime-internal compatibility code that holds SHARED_MEMORY.</p>
      */
     public final class SyncCell<T> implements AutoCloseable {
         private final ReentrantLock lock = new ReentrantLock(true);
@@ -841,7 +842,6 @@ public final class ActorRuntime implements AutoCloseable {
         public <R> R read(Function<? super T, ? extends R> reader) {
             Objects.requireNonNull(reader);
             requireSharedMemoryAuthority("SyncCell.read");
-            requireSharedActorTurn();
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -861,7 +861,6 @@ public final class ActorRuntime implements AutoCloseable {
         public T update(UnaryOperator<T> updater) {
             Objects.requireNonNull(updater);
             requireSharedMemoryAuthority("SyncCell.update");
-            requireSharedActorTurn();
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -3225,13 +3224,7 @@ public final class ActorRuntime implements AutoCloseable {
     public <T> SyncCell<T> syncCell(T initialValue) {
         requireCallerRuntimeAffinity("create shared SyncCell values");
         if (closed.get()) throw new IllegalStateException("actor runtime is closed");
-        IsolatePolicy callerPolicy = currentActorPolicy();
-        if (callerPolicy != null) {
-            callerPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SyncCell");
-        } else {
-            policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, "SyncCell");
-        }
-        rejectPrivateActorSharedMemoryAccess("SyncCell creation");
+        requireSharedMemoryAuthority("SyncCell creation");
         SyncCell<T> cell = new SyncCell<>(initialValue);
         syncCells.add(cell);
         if (closed.get()) {
@@ -3260,12 +3253,13 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private void requireSharedMemoryAuthority(String operation) {
-        IsolatePolicy callerPolicy = currentActorPolicy();
-        if (callerPolicy != null) {
-            callerPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, operation);
-        } else {
-            policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, operation);
+        if (currentActorKind() != null) {
+            throw new SecurityException(
+                    operation + " is host/runtime-only legacy shared memory; "
+                            + "actors must use ownership/messages, immutable publication, "
+                            + "or ACTOR_SHARED_PROXY");
         }
+        policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, operation);
     }
 
     private void rejectPrivateActorSharedMemoryAccess(String operation) {
@@ -3273,17 +3267,6 @@ public final class ActorRuntime implements AutoCloseable {
         if (current != null && isPrivateKind(current.kind)) {
             throw new IllegalStateException("private actors cannot access synchronized shared memory via " + operation);
         }
-    }
-
-    private void requireSharedActorTurn() {
-        ActorCell<?> cell = currentActor.get();
-        if (cell == null || cell.kind != ActorKind.SHARED) {
-            throw new IllegalStateException(
-                    "legacy synchronized shared-memory mutation requires a SHARED actor mailbox turn");
-        }
-        cell.policy.require(
-                IsolatePolicy.Capability.SHARED_MEMORY,
-                "legacy synchronized shared-memory mutation");
     }
 
     private void reservePrivateRuntimeBytes(long bytes, ActorId owner, String purpose) {

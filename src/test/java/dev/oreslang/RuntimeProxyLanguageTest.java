@@ -170,43 +170,21 @@ final class RuntimeProxyLanguageTest {
     }
 
     @Test
-    void proxyDoesNotLeakMoveOnlyDynamicStructValues() {
-        IllegalArgumentException member = assertThrows(
-                IllegalArgumentException.class,
-                () -> check("""
-                        define class Inner as
-                          pub let int value = 1;
-                        end
+    void proxyDynamicStructNestedClassValuesRemainSynchronizedProxyViews() {
+        assertDoesNotThrow(() -> check("""
+                define class Inner as
+                  pub let int value = 1;
+                end
 
-                        fnc bad(): void {
-                          let DynamicStruct<Inner> bag = new DynamicStruct<Inner>();
-                          bag["child"] = new Inner();
-                          val guarded = rt proxy bag;
-                          val escaped = guarded.child;
-                          return;
-                        }
-                        """));
-        assertTrue(member.getMessage().contains("DynamicStruct")
-                        || member.getMessage().contains("move-only"),
-                member.getMessage());
-
-        IllegalArgumentException indexed = assertThrows(
-                IllegalArgumentException.class,
-                () -> check("""
-                        define class Inner as
-                          pub let int value = 1;
-                        end
-
-                        fnc bad(): void {
-                          let DynamicStruct<Inner> bag = new DynamicStruct<Inner>();
-                          bag["child"] = new Inner();
-                          val guarded = rt proxy bag;
-                          val escaped = guarded["child"];
-                          return;
-                        }
-                        """));
-        assertTrue(indexed.getMessage().contains("move-only"),
-                indexed.getMessage());
+                fnc good(): void {
+                  let DynamicStruct<Inner> bag = new DynamicStruct<Inner>();
+                  bag["child"] = new Inner();
+                  val guarded = rt proxy bag;
+                  val Proxy<Inner> by_member = guarded.child;
+                  val Proxy<Inner> by_index = guarded["child"];
+                  return;
+                }
+                """));
     }
 
     @Test
@@ -368,7 +346,7 @@ final class RuntimeProxyLanguageTest {
                 define class Inner as
                   pub let int value = 1;
 
-                  pub bump(mut self): int {
+                  pub fnc bump(mut self): int {
                     self.value = self.value + 1;
                     return self.value;
                   }
