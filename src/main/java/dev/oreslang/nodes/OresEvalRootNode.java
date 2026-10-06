@@ -826,6 +826,110 @@ public final class OresEvalRootNode extends RootNode {
             return future;
         }
 
+        private OresFuture<Object> startFutureChainTask(
+                OresScheduler.Task<Object> task) {
+            if (ActorRuntime.inActorExecution()) {
+                OresFuture<Object> future = context.actors().startActorTask(task);
+                context.actors().ownCurrentActorFuture(future);
+                return future;
+            }
+            OresScheduler current = OresScheduler.current();
+            return (current != null
+                    ? current
+                    : context.vm().rootScheduler()).start(task);
+        }
+
+        private OresFuture<Object> chainFuture(
+                OresFuture<?> source,
+                Invokable callback,
+                boolean flatten,
+                boolean observeSuccess) {
+            Objects.requireNonNull(source, "source");
+            Objects.requireNonNull(callback, "callback");
+            return startFutureChainTask(new OresScheduler.Task<>() {
+                private int pc;
+
+                @Override
+                public OresScheduler.Step<Object> resume(
+                        OresScheduler.Resume resume) {
+                    if (pc == 0) {
+                        if (!resume.initial()) {
+                            throw new IllegalStateException(
+                                    "Future chain started with a non-initial resume");
+                        }
+                        pc = 1;
+                        return OresScheduler.await(source);
+                    }
+
+                    if (pc == 1) {
+                        if (resume.failure() != null) {
+                            throw sourceFailure(resume.failure());
+                        }
+                        Object value = resume.value();
+                        Object mapped = invoke(
+                                invokableInvocation(callback, List.of(value)));
+
+                        if (observeSuccess) {
+                            if (mapped != null) {
+                                throw new IllegalArgumentException(
+                                        "Future.onSuccess callback must return void");
+                            }
+                            pc = 3;
+                            return OresScheduler.done(value);
+                        }
+
+                        if (!flatten) {
+                            pc = 3;
+                            return OresScheduler.done(mapped);
+                        }
+
+                        if (!(mapped instanceof OresFuture<?> nested)) {
+                            throw new IllegalArgumentException(
+                                    "Future.compose/flatMap callback must return Future<T>");
+                        }
+                        pc = 2;
+                        return OresScheduler.await(nested);
+                    }
+
+                    if (pc == 2) {
+                        if (resume.failure() != null) {
+                            throw sourceFailure(resume.failure());
+                        }
+                        pc = 3;
+                        return OresScheduler.done(resume.value());
+                    }
+
+                    throw new IllegalStateException(
+                            "Future chain resumed after completion");
+                }
+            });
+        }
+
+        private OresFuture<Object> wrapFutureSome(OresFuture<?> source) {
+            Objects.requireNonNull(source, "source");
+            return startFutureChainTask(new OresScheduler.Task<>() {
+                private boolean waiting;
+
+                @Override
+                public OresScheduler.Step<Object> resume(
+                        OresScheduler.Resume resume) {
+                    if (!waiting) {
+                        if (!resume.initial()) {
+                            throw new IllegalStateException(
+                                    "optional Future wrapper started with a non-initial resume");
+                        }
+                        waiting = true;
+                        return OresScheduler.await(source);
+                    }
+                    if (resume.failure() != null) {
+                        throw sourceFailure(resume.failure());
+                    }
+                    return OresScheduler.done(
+                            new OptionValue(true, resume.value()));
+                }
+            });
+        }
+
         private boolean functionContainsPotentialSuspension(
                 Ast.FunctionDecl function) {
             return functionContainsPotentialSuspension(
@@ -2453,20 +2557,18 @@ public final class OresEvalRootNode extends RootNode {
                                             set.selectAsync(policy);
                                     if (selected.mode()
                                             == Ast.WaitMode.NONBLOCKING) {
-                                        if (ActorRuntime.inActorExecution()) {
-                                            context.actors().ownCurrentActorFuture(
-                                                    future);
-                                        }
                                         continuation.accept(
                                                 t,
-                                                future,
+                                                wrapFutureSome(future),
                                                 null);
                                         return;
                                     }
                                     if (future.isDone()) {
                                         continuation.accept(
                                                 t,
-                                                future.join(),
+                                                new OptionValue(
+                                                        true,
+                                                        future.join()),
                                                 null);
                                         return;
                                     }
@@ -2475,7 +2577,11 @@ public final class OresEvalRootNode extends RootNode {
                                             (t2, value, failure2) ->
                                                     continuation.accept(
                                                             t2,
-                                                            value,
+                                                            failure2 == null
+                                                                    ? new OptionValue(
+                                                                            true,
+                                                                            value)
+                                                                    : null,
                                                             failure2));
                                 } catch (RuntimeException | Error failure2) {
                                     continuation.accept(
@@ -5109,9 +5215,13 @@ public final class OresEvalRootNode extends RootNode {
                 OresFuture<ChannelRuntime.SelectResult> future =
                         set.selectAsync(policy);
                 if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
-                    return context.actors().ownCurrentActorFuture(future);
+                    return wrapFutureSome(future);
                 }
-                return awaitBlockingChannelFuture(future, "dynamic select");
+                return new OptionValue(
+                        true,
+                        awaitBlockingChannelFuture(
+                                future,
+                                "dynamic select"));
             }
             if (expr instanceof Ast.ListExpr list) {
                 ArrayList<Object> result = new ArrayList<>(list.elements().size());
@@ -5314,6 +5424,36 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof MutexFactory factory) {
                 if (!name.equals("new")) throw new IllegalArgumentException("unknown mutex factory member " + name);
                 return (Invokable) factory::create;
+            }
+            if (receiver instanceof OresFuture<?> future) {
+                return switch (name) {
+                    case "map" -> (Invokable) args -> {
+                        requireOne(args, "Future.map");
+                        if (!(args.getFirst() instanceof Invokable callback)) {
+                            throw new IllegalArgumentException(
+                                    "Future.map expects one callable");
+                        }
+                        return chainFuture(future, callback, false, false);
+                    };
+                    case "compose", "flatMap" -> (Invokable) args -> {
+                        requireOne(args, "Future." + name);
+                        if (!(args.getFirst() instanceof Invokable callback)) {
+                            throw new IllegalArgumentException(
+                                    "Future." + name + " expects one callable");
+                        }
+                        return chainFuture(future, callback, true, false);
+                    };
+                    case "onSuccess" -> (Invokable) args -> {
+                        requireOne(args, "Future.onSuccess");
+                        if (!(args.getFirst() instanceof Invokable callback)) {
+                            throw new IllegalArgumentException(
+                                    "Future.onSuccess expects one callable");
+                        }
+                        return chainFuture(future, callback, false, true);
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown Future instance member " + name);
+                };
             }
             if (receiver instanceof FutureFactory) {
                 return switch (name) {
