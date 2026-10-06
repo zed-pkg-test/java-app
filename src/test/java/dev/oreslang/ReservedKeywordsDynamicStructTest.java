@@ -16,10 +16,11 @@ import static org.junit.jupiter.api.Assertions.*;
 final class ReservedKeywordsDynamicStructTest {
     @Test
     void reservedWordsRemainCallableNamesAndMapKeysOnly() {
-        var tokens = new Lexer("stop do done").scan();
+        var tokens = new Lexer("stop do done tuple").scan();
         assertEquals(Token.Type.STOP, tokens.get(0).type());
         assertEquals(Token.Type.DO, tokens.get(1).type());
         assertEquals(Token.Type.DONE, tokens.get(2).type());
+        assertEquals(Token.Type.TUPLE, tokens.get(3).type());
 
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
@@ -53,6 +54,24 @@ final class ReservedKeywordsDynamicStructTest {
                   }
                 end
                 """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define module app
+                  fnc main(): void {
+                    val tuple = 1;
+                    return;
+                  }
+                end
+                """));
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  pub fnc main(): int {
+                    val values = obj{tuple: 4};
+                    return values.tuple;
+                  }
+                end
+                """)));
     }
 
     @Test
