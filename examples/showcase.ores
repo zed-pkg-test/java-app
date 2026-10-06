@@ -1,11 +1,10 @@
 define module contracts
-  define interface MathApi
+  define contract MathApi as
     fnc add(int a, int b) => int;
   end
 end
 
-@AdheresTo(contracts.MathApi)
-define module math
+define module math conforms contracts.MathApi as
   pub fnc add(int a, int b): int {
     return a + b;
   }
