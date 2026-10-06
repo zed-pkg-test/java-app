@@ -6,6 +6,8 @@ This directory documents the executable formal-methods layer for Oreslang runtim
 
 `FormalActorProtocolModelCheckTest` is a bounded explicit-state model checker for the actor protocol/Future hand-off lifecycle. It enumerates every legal transition in the small-state model rather than sampling thread schedules.
 
+`FormalSelectModelCheckTest` separately enumerates three-case select readiness, arbitration, loser detachment, and cancellation.
+
 The checked invariants are:
 
 1. **At-most-once protocol settlement.** A reply is completed or cancelled, never both and never twice.
@@ -13,7 +15,10 @@ The checked invariants are:
 3. **No completion-thread guest execution.** Future completion is notification-only. Guest continuation code can run only after mailbox re-entry.
 4. **No resurrection after teardown.** Stop/runtime-close transitions cancel outstanding protocol work and late Future completion cannot revive it.
 5. **Serialized actor execution.** A protocol request has one initial guest turn and at most one resumed continuation turn.
-6. **Weak progress.** Every reachable live non-terminal state has a path to a terminal reply when progress actions are scheduled.
+6. **Weak progress.** Every reachable live non-terminal actor-protocol state has a path to a terminal reply when progress actions are scheduled.
+7. **Exactly-one select commit.** One select consumes at most one ready case and records the same case as its winner.
+8. **Atomic loser detachment.** Once a case wins, every losing select registration is detached.
+9. **Cancellation is non-consuming.** Cancelling an uncommitted select detaches every registration without consuming any case.
 
 ## Relationship to runtime tests
 
@@ -33,7 +38,7 @@ No additional model-checking dependency is required; the finite-state explorer i
 
 The next models should cover:
 
-- Channel/select registration, exactly-one arbitration, cancellation, and waiter detachment.
+- Channel close/rendezvous details beyond select arbitration, including waiter ownership and wakeup ordering.
 - ActorGroup Mailman sequencing and CONTROL-carrier fairness.
 - Allocation-domain provenance and `rt copy/share/take/borrow/proxy` authority transitions.
 - GC lifecycle: actor/process roots, ReferenceQueue retry, context shutdown, and domain-local collection.
