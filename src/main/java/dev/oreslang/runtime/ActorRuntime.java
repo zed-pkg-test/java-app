@@ -258,6 +258,12 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum CarrierBackend { NATIVE_PTHREAD, JVM_THREAD_POOL }
 
+    public record CarrierAffinityDiagnostics(
+            long preferredHits,
+            long steals,
+            long globalSpills,
+            int bindingFailures) { }
+
     private static final String CARRIER_BACKEND_PROPERTY = "ores.runtime.carriers";
 
     public record DispatcherConfig(
@@ -445,6 +451,26 @@ public final class ActorRuntime implements AutoCloseable {
                 && untrustedDispatcher instanceof NativeCarrierExecutor
                 ? CarrierBackend.NATIVE_PTHREAD
                 : CarrierBackend.JVM_THREAD_POOL;
+    }
+
+    public CarrierAffinityDiagnostics carrierAffinityDiagnostics() {
+        long preferredHits = 0L;
+        long steals = 0L;
+        long globalSpills = 0L;
+        int bindingFailures = 0;
+
+        for (ExecutorService dispatcher :
+                List.of(privateDispatcher, sharedDispatcher, untrustedDispatcher)) {
+            if (dispatcher instanceof NativeCarrierExecutor nativeDispatcher) {
+                preferredHits += nativeDispatcher.getAffinityPreferredHitCount();
+                steals += nativeDispatcher.getAffinityStealCount();
+                globalSpills += nativeDispatcher.getAffinityGlobalSpillCount();
+                bindingFailures += nativeDispatcher.getAffinityBindingFailureCount();
+            }
+        }
+
+        return new CarrierAffinityDiagnostics(
+                preferredHits, steals, globalSpills, bindingFailures);
     }
 
     /**
@@ -4514,6 +4540,20 @@ public final class ActorRuntime implements AutoCloseable {
         };
     }
 
+    private void executeActorBatch(ActorCell<?> cell) {
+        ExecutorService dispatcher = dispatcherFor(cell.kind);
+        if (dispatcher instanceof NativeCarrierExecutor nativeDispatcher) {
+            /*
+             * ActorId is the semantic identity; the affinity key only chooses a
+             * preferred carrier/core lane. Correctness never depends on the
+             * chosen lane and NativeCarrierExecutor may spill under pressure.
+             */
+            nativeDispatcher.executeAffinity(cell.ref.id().value().hashCode(), cell::runBatch);
+        } else {
+            dispatcher.execute(cell::runBatch);
+        }
+    }
+
     private static ExecutorService newDispatcher(
             int parallelism,
             int readyQueueCapacity,
@@ -4828,7 +4868,7 @@ public final class ActorRuntime implements AutoCloseable {
             if (stopped.get() || forceKillFenced || closed.get()) return;
             if (!scheduled.compareAndSet(false, true)) return;
             try {
-                dispatcherFor(kind).execute(this::runBatch);
+                executeActorBatch(this);
             } catch (RejectedExecutionException rejected) {
                 scheduled.set(false);
                 stop();
