@@ -3,6 +3,7 @@ package dev.oreslang.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -22,6 +23,14 @@ final class ActorAllocationDomainTest {
             assertFalse(root.actorOwned());
             assertFalse(shared.actorOwned());
             assertFalse(root.equals(shared));
+            assertEquals(
+                    0,
+                    ActorRuntime.AllocationDomain.class.getConstructors().length,
+                    "allocation domains must be runtime-minted, not publicly forgeable");
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> ActorRuntime.freeze(root),
+                    "allocation-domain metadata must not become an actor-message capability");
 
             ActorRuntime.Shared<List<Integer>> frozen = runtime.shareReadonly(List.of(1, 2, 3));
             assertEquals(shared, frozen.allocationDomain());

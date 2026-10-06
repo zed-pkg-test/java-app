@@ -184,13 +184,17 @@ public final class ActorRuntime implements AutoCloseable {
      * change ownership. ROOT and RUNTIME_SHARED belong to the ActorRuntime as a
      * whole and therefore have no actor id.</p>
      */
-    public record AllocationDomain(
-            UUID runtimeId,
-            AllocationDomainKind kind,
-            ActorId actorId) {
-        public AllocationDomain {
-            Objects.requireNonNull(runtimeId, "runtimeId");
-            Objects.requireNonNull(kind, "kind");
+    public static final class AllocationDomain {
+        private final UUID runtimeId;
+        private final AllocationDomainKind kind;
+        private final ActorId actorId;
+
+        private AllocationDomain(
+                UUID runtimeId,
+                AllocationDomainKind kind,
+                ActorId actorId) {
+            this.runtimeId = Objects.requireNonNull(runtimeId, "runtimeId");
+            this.kind = Objects.requireNonNull(kind, "kind");
             boolean actorOwned = switch (kind) {
                 case ACTOR_LOCAL, ACTOR_PRIVATE, UNTRUSTED_ISOLATE -> true;
                 case ROOT, RUNTIME_SHARED -> false;
@@ -203,10 +207,37 @@ public final class ActorRuntime implements AutoCloseable {
                 throw new IllegalArgumentException(
                         kind + " allocation domain cannot carry an ActorId");
             }
+            this.actorId = actorId;
         }
+
+        public UUID runtimeId() { return runtimeId; }
+        public AllocationDomainKind kind() { return kind; }
+        public ActorId actorId() { return actorId; }
 
         public boolean actorOwned() {
             return actorId != null;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof AllocationDomain domain)) return false;
+            return runtimeId.equals(domain.runtimeId)
+                    && kind == domain.kind
+                    && Objects.equals(actorId, domain.actorId);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(runtimeId, kind, actorId);
+        }
+
+        @Override
+        public String toString() {
+            return actorId == null
+                    ? "AllocationDomain[" + kind + ", runtime=" + runtimeId + "]"
+                    : "AllocationDomain[" + kind + ", runtime=" + runtimeId
+                            + ", actor=" + actorId + "]";
         }
     }
 
