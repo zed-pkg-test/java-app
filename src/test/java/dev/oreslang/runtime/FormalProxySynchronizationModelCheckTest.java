@@ -15,7 +15,9 @@ import org.junit.jupiter.api.Test;
  *
  * <p>It models one actor/task using two proxies. The safety contract is:
  * no read-to-write upgrade, no cross-proxy nested locking, no suspension while
- * any proxy lock is held, and disposal only while unlocked.</p>
+ * any proxy lock is held, and disposal only while unlocked. Suspension is
+ * tracked as a boolean witness rather than an unbounded counter because the
+ * count does not affect transition legality; this keeps the model finite.</p>
  */
 final class FormalProxySynchronizationModelCheckTest {
     private enum ProxyId { A, B }
@@ -43,10 +45,10 @@ final class FormalProxySynchronizationModelCheckTest {
             LockMode mode,
             boolean disposedA,
             boolean disposedB,
-            int suspensions) {
+            boolean suspensionObserved) {
 
         static State initial() {
-            return new State(null, LockMode.NONE, false, false, 0);
+            return new State(null, LockMode.NONE, false, false, false);
         }
 
         boolean disposed(ProxyId id) {
@@ -90,7 +92,7 @@ final class FormalProxySynchronizationModelCheckTest {
 
         State released = step(locked, Action.release(ProxyId.A)).orElseThrow();
         State suspended = step(released, Action.suspend()).orElseThrow();
-        assertEquals(1, suspended.suspensions());
+        assertTrue(suspended.suspensionObserved());
     }
 
     @Test
@@ -142,12 +144,12 @@ final class FormalProxySynchronizationModelCheckTest {
                     yield Optional.empty();
                 }
                 yield Optional.of(new State(
-                        null, LockMode.NONE, s.disposedA(), s.disposedB(), s.suspensions()));
+                        null, LockMode.NONE, s.disposedA(), s.disposedB(), s.suspensionObserved()));
             }
             case SUSPEND -> {
                 if (s.mode() != LockMode.NONE) yield Optional.empty();
                 yield Optional.of(new State(
-                        null, LockMode.NONE, s.disposedA(), s.disposedB(), s.suspensions() + 1));
+                        null, LockMode.NONE, s.disposedA(), s.disposedB(), s.suspensionObserved() + 1));
             }
             case DISPOSE -> {
                 if (s.mode() != LockMode.NONE || s.disposed(action.proxy())) {
@@ -158,7 +160,7 @@ final class FormalProxySynchronizationModelCheckTest {
                         LockMode.NONE,
                         s.disposedA() || action.proxy() == ProxyId.A,
                         s.disposedB() || action.proxy() == ProxyId.B,
-                        s.suspensions()));
+                        s.suspensionObserved()));
             }
         };
     }
@@ -171,6 +173,6 @@ final class FormalProxySynchronizationModelCheckTest {
         if (s.mode() != LockMode.NONE) return Optional.empty();
 
         return Optional.of(new State(
-                proxy, requested, s.disposedA(), s.disposedB(), s.suspensions()));
+                proxy, requested, s.disposedA(), s.disposedB(), s.suspensionObserved()));
     }
 }
