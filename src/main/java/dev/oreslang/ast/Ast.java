@@ -477,7 +477,11 @@ public final class Ast {
     }
 
     public record ReturnStmt(Expr value) implements Stmt { }
-    public record YieldStmt(Expr value) implements Stmt {
+    public record YieldStmt(Expr value, boolean delegated) implements Stmt {
+        public YieldStmt(Expr value) {
+            this(value, false);
+        }
+
         public YieldStmt {
             if (value == null) throw new IllegalArgumentException("yield requires a value");
         }

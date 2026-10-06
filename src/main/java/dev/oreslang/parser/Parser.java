@@ -810,15 +810,25 @@ public final class Parser {
 
         Ast.TypeRef receiverType = null;
         List<Ast.Param> params;
-        if (mods.isStatic && check(SELF)) throw error(peek(), "static class functions do not have a self receiver");
+        boolean mutableReceiver = check(MUT) && checkNext(SELF);
+        if (mods.isStatic && (check(SELF) || mutableReceiver)) {
+            throw error(peek(), "static class functions do not have a self receiver");
+        }
 
         // `self` is both the receiver keyword and a receiver-polymorphic type.
-        // Disambiguate by the explicit-receiver form's second parameter list:
-        //   method(self Foo)(int x)  -> explicit receiver
-        //   method(self other)       -> ordinary parameter typed `self`
+        // Canonical pointerless mutation uses:
+        //   method(mut self)(params)
+        // The older explicit read-receiver form remains:
+        //   method(self Foo)(params)
         int parameterStart = current;
         boolean explicitReceiver = false;
-        if (check(SELF)) {
+        if (mutableReceiver) {
+            advance(); // mut
+            consume(SELF, "mutable receiver syntax is 'mut self'");
+            Ast.TypeRef target = check(RPAREN) ? Ast.TypeRef.simple("self") : parseTypeRef();
+            receiverType = Ast.TypeRef.borrowed(target, true);
+            explicitReceiver = true;
+        } else if (check(SELF)) {
             advance();
             Ast.TypeRef candidateReceiver = parseTypeRef();
             if (check(RPAREN) && checkNext(LPAREN)) {
@@ -831,7 +841,9 @@ public final class Parser {
 
         if (explicitReceiver) {
             consume(RPAREN, "expected ')' after explicit self receiver");
-            consume(LPAREN, "explicit receiver form is method(self Type)(params)");
+            consume(LPAREN, mutableReceiver
+                    ? "explicit mutable receiver form is method(mut self)(params)"
+                    : "explicit receiver form is method(self Type)(params)");
             params = parseParametersUntil(RPAREN);
             consume(RPAREN, "expected ')' after method parameters");
         } else {
@@ -934,6 +946,14 @@ public final class Parser {
                 async = true;
             } else if (match(GENERATOR)) {
                 if (generatorSeen) throw error(previous(), "duplicate 'generator' modifier");
+                generatorSeen = true;
+                generator = true;
+                // generator* is declaration sugar; plain generator remains accepted.
+                match(STAR);
+            } else if (check(IDENT) && peek().lexeme().equals("gen") && checkNext(STAR)) {
+                Token gen = advance();
+                advance(); // '*'
+                if (generatorSeen) throw error(gen, "duplicate generator modifier");
                 generatorSeen = true;
                 generator = true;
             } else if (matchContextualStructuralModifier()) {
@@ -1426,10 +1446,17 @@ public final class Parser {
             return new Ast.ReturnStmt(value);
         }
         if (match(YIELD)) {
-            if (check(SEMICOLON) || isSafeStatementBoundary()) throw error(previous(), "yield requires a value");
+            boolean delegated = match(STAR);
+            if (check(SEMICOLON) || isSafeStatementBoundary()) {
+                throw error(previous(), delegated ? "yield* requires an iterable value" : "yield requires a value");
+            }
             Ast.Expr value = parseExpression();
-            consumeExpressionStatementTerminator(value, "yield statement should end with ';'");
-            return new Ast.YieldStmt(value);
+            consumeExpressionStatementTerminator(
+                    value,
+                    delegated
+                            ? "yield* statement should end with ';'"
+                            : "yield statement should end with ';'");
+            return new Ast.YieldStmt(value, delegated);
         }
         if (match(DEFER)) {
             Ast.Expr expression = parseExpression();
@@ -2482,17 +2509,37 @@ public final class Parser {
     }
 
     private Ast.Expr parseRuntimeExpression() {
-        Token operation = consume(IDENT, "expected runtime operation after 'rt'");
+        Token operation;
+        if (match(YIELD)) {
+            operation = previous(); // compatibility spelling: rt yield
+        } else {
+            operation = consume(IDENT, "expected runtime operation after 'rt'");
+        }
+
         String name = operation.lexeme();
+        if (operation.type() == YIELD || name.equals("yield") || name.equals("cooperate")) {
+            if (match(LPAREN)) {
+                if (!check(RPAREN)) {
+                    throw error(peek(),
+                            "rt cooperate currently takes no arguments; scheduling policy hints are not enabled yet");
+                }
+                consume(RPAREN, "expected ')' after rt cooperate");
+            }
+            return new Ast.RuntimeCallExpr("cooperate", List.of());
+        }
+
         if (!name.equals("copy") && !name.equals("take")
                 && !name.equals("borrow") && !name.equals("share")) {
             throw error(operation,
                     "unknown rt operation '" + name
-                            + "'; supported ownership operations are copy, take, borrow, and share");
+                            + "'; supported operations are cooperate, copy, take, borrow, and share");
         }
 
         Ast.Expr argument;
         if (match(LPAREN)) {
+            if (check(RPAREN)) {
+                throw error(peek(), "rt " + name + " expects exactly one argument");
+            }
             argument = parseExpression();
             consume(RPAREN, "expected ')' after rt " + name + " argument");
         } else {
