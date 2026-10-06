@@ -1,0 +1,117 @@
+import fnc require_true, require_int from './assert';
+
+import class ProtoField, ProtoMessage, ProtoError, ProtoDecodeOptions from '../src/protobuf/wire';
+import fnc proto_varint, proto_bytes, default_proto_decode_options, default_proto_encode_options from '../src/protobuf/wire';
+import fnc encode_message, decode_message, fields_with_number from '../src/protobuf/wire';
+
+pub fnc run_protobuf_tests(): void {
+  let List<ProtoField> fields = new List<ProtoField>();
+  fields.push(proto_varint(1, 150));
+  fields.push(proto_bytes(2, new List<int>(104, 105)));
+
+  val ProtoMessage message = new ProtoMessage(fields);
+
+  val Result<List<int>, ProtoError> encoded = encode_message(
+    message,
+    default_proto_encode_options()
+  );
+  require_true(encoded.is_err() == false, "Protobuf message must encode");
+
+  val List<int> expected = new List<int>(8, 150, 1, 18, 2, 104, 105);
+  val List<int> actual = encoded.unwrap();
+
+  require_int(actual.length, expected.length, "Protobuf encoded length");
+  let int i = 0;
+  loop do
+    if i >= expected.length then
+      break;
+    fi
+    require_int(actual[i], expected[i], "Protobuf encoded byte mismatch");
+    i = i + 1;
+  done
+
+  val Result<ProtoMessage, ProtoError> decoded = decode_message(
+    actual,
+    default_proto_decode_options()
+  );
+  require_true(decoded.is_err() == false, "Protobuf message must decode");
+
+  val ProtoMessage roundtrip = decoded.unwrap();
+  require_int(roundtrip.fields.length, 2, "Protobuf field count");
+  require_int(roundtrip.fields[0].field_number, 1, "Protobuf field 1 number");
+  require_int(roundtrip.fields[0].varint_value, 150, "Protobuf field 1 value");
+
+  val List<ProtoField> field_two = fields_with_number(roundtrip, 2);
+  require_int(field_two.length, 1, "Protobuf field lookup");
+  require_int(field_two[0].payload.length, 2, "Protobuf length-delimited payload");
+
+  // field 1 = uint64 max, encoded as ten varint bytes. It exceeds signed int,
+  // so the raw wire bytes must be preserved exactly.
+  val List<int> uint64_max = new List<int>(
+    8,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 1
+  );
+
+  val Result<ProtoMessage, ProtoError> raw_decoded = decode_message(
+    uint64_max,
+    default_proto_decode_options()
+  );
+  require_true(raw_decoded.is_err() == false, "Protobuf uint64 max must decode as preserved raw varint");
+
+  val ProtoField raw_field = raw_decoded.unwrap().fields[0];
+  require_true(!raw_field.varint_fits_int, "uint64 max must not be narrowed into signed int");
+  require_int(raw_field.payload.length, 10, "uint64 max raw varint byte count");
+
+  val Result<List<int>, ProtoError> raw_reencoded = encode_message(
+    raw_decoded.unwrap(),
+    default_proto_encode_options()
+  );
+  require_true(raw_reencoded.is_err() == false, "preserved uint64 max must re-encode");
+
+  val List<int> raw_bytes = raw_reencoded.unwrap();
+  require_int(raw_bytes.length, uint64_max.length, "preserved uint64 max encoded length");
+
+  let int j = 0;
+  loop do
+    if j >= uint64_max.length then
+      break;
+    fi
+    require_int(raw_bytes[j], uint64_max[j], "preserved uint64 max byte mismatch");
+    j = j + 1;
+  done
+
+  val Result<ProtoMessage, ProtoError> zero_field = decode_message(
+    new List<int>(0),
+    default_proto_decode_options()
+  );
+  require_true(zero_field.is_err(), "Protobuf field number zero must reject");
+
+  val Result<ProtoMessage, ProtoError> overlong_varint = decode_message(
+    new List<int>(
+      8,
+      128, 128, 128, 128, 128,
+      128, 128, 128, 128, 128
+    ),
+    default_proto_decode_options()
+  );
+  require_true(overlong_varint.is_err(), "Protobuf varint continuation beyond ten bytes must reject");
+
+  val Result<ProtoMessage, ProtoError> length_range = decode_message(
+    new List<int>(
+      18,
+      255, 255, 255, 255, 255,
+      255, 255, 255, 255, 1
+    ),
+    default_proto_decode_options()
+  );
+  require_true(length_range.is_err(), "Protobuf uint64 length above signed range must reject");
+
+  val ProtoDecodeOptions tiny_input = new ProtoDecodeOptions(1, 16, 16);
+  val Result<ProtoMessage, ProtoError> input_limited = decode_message(
+    new List<int>(8, 1),
+    tiny_input
+  );
+  require_true(input_limited.is_err(), "Protobuf max_input_bytes must fail closed");
+
+  return;
+}
