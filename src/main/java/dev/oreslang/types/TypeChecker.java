@@ -1976,6 +1976,8 @@ public final class TypeChecker {
             }
             Type receiver = typeOf(member.receiver(), env, generics, self);
             Type sumReceiver = receiverDispatchType(deref(receiver));
+            Type futureMember = builtinFutureMember(sumReceiver, member.member());
+            if (futureMember != null) return futureMember;
             Type iteratorMember = builtinIteratorMember(sumReceiver, member.member());
             if (iteratorMember != null) return iteratorMember;
             Type sumMember = builtinOptionResultMember(sumReceiver, member.member());
@@ -2257,10 +2259,10 @@ public final class TypeChecker {
             // remain Unknown until collection generic constraints are richer.
             typeOf(selected.cases(), env, generics, self);
             Type result = new Named("SelectResult", List.of());
+            Type optional = new Named("Option", List.of(result));
             return switch (selected.mode()) {
-                case BLOCKING -> result;
-                case NONBLOCKING -> new Named("Future", List.of(result));
-                case IMMEDIATE -> new Named("Option", List.of(result));
+                case BLOCKING, IMMEDIATE -> optional;
+                case NONBLOCKING -> new Named("Future", List.of(optional));
             };
         }
         if (expr instanceof Ast.ListExpr list) {
@@ -3323,6 +3325,29 @@ public final class TypeChecker {
             return new Record(members);
         }
         return type;
+    }
+
+    private Type builtinFutureMember(Type receiver, String member) {
+        if (!(receiver instanceof Named named)
+                || !named.name().equals("Future")
+                || named.arguments().size() != 1) {
+            return null;
+        }
+
+        Type element = named.arguments().getFirst();
+        Type unknownFuture = new Named("Future", List.of(Unknown.INSTANCE));
+        return switch (member) {
+            case "map" -> new Function(
+                    List.of(new Function(List.of(element), Unknown.INSTANCE)),
+                    unknownFuture);
+            case "compose", "flatMap" -> new Function(
+                    List.of(new Function(List.of(element), unknownFuture)),
+                    unknownFuture);
+            case "onSuccess" -> new Function(
+                    List.of(new Function(List.of(element), Primitive.VOID)),
+                    named);
+            default -> null;
+        };
     }
 
     private Type builtinOptionResultMember(Type receiver, String member) {
