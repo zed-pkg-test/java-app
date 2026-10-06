@@ -14,6 +14,282 @@ import static org.junit.jupiter.api.Assertions.*;
 
 final class ParserTest {
     @Test
+    void classDefineAndVisibilityKeywordsMayAppearInCompatibilityOrder() {
+        Ast.Program program = Parser.parse("""
+                define module app as
+                  class pub define A as
+                  end
+
+                  pub class define B as
+                  end
+
+                  define class pub C as
+                  end
+
+                  define pub class D as
+                  end
+
+                  pub define class E as
+                  end
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        assertEquals(5, module.declarations().size());
+        for (Ast.Decl declaration : module.declarations()) {
+            Ast.ClassDecl klass = assertInstanceOf(Ast.ClassDecl.class, declaration);
+            assertEquals(Ast.Visibility.PUBLIC, klass.visibility());
+        }
+    }
+
+    @Test
+    void interfaceAndContractDefineKeywordsMayAppearInCompatibilityOrder() {
+        Ast.Program program = Parser.parse("""
+                define module app as
+                  interface pub define ApiA {
+                  }
+
+                  pub interface define ApiB {
+                  }
+
+                  define interface pub ApiC {
+                  }
+
+                  contract pub define ContractA {
+                  }
+
+                  pub contract define ContractB {
+                  }
+
+                  define contract pub ContractC {
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        assertEquals(6, module.declarations().size());
+        for (int i = 0; i < 3; i++) {
+            Ast.InterfaceDecl iface = assertInstanceOf(Ast.InterfaceDecl.class, module.declarations().get(i));
+            assertEquals(Ast.Visibility.PUBLIC, iface.visibility());
+            assertFalse(iface.moduleContract());
+        }
+        for (int i = 3; i < 6; i++) {
+            Ast.InterfaceDecl contract = assertInstanceOf(Ast.InterfaceDecl.class, module.declarations().get(i));
+            assertEquals(Ast.Visibility.PUBLIC, contract.visibility());
+            assertTrue(contract.moduleContract());
+        }
+    }
+
+    @Test
+    void modifiersAfterFncWorkAcrossCallableContexts() {
+        Ast.Program program = Parser.parse("""
+                define module app as
+                  fnc pub async module_work(): int {
+                    return 1;
+                  }
+
+                  define pub class Box as {
+                    fnc pub static helper(): int {
+                      return 2;
+                    }
+                  }
+
+                  actor pub Worker {
+                    fnc pub async handle(int value): int {
+                      return value;
+                    }
+                  }
+
+                  define interface Api {
+                    fnc structural render() => String;
+                  }
+
+                  actor pub fnc untrusted async worker(int value): int {
+                    return value;
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        Ast.FunctionDecl moduleWork = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(0));
+        Ast.ClassDecl box = assertInstanceOf(Ast.ClassDecl.class, module.declarations().get(1));
+        Ast.ClassDecl actor = assertInstanceOf(Ast.ClassDecl.class, module.declarations().get(2));
+        Ast.InterfaceDecl api = assertInstanceOf(Ast.InterfaceDecl.class, module.declarations().get(3));
+        Ast.FunctionDecl actorFunction = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(4));
+
+        assertEquals(Ast.Visibility.PUBLIC, moduleWork.visibility());
+        assertTrue(moduleWork.async());
+
+        Ast.MethodDecl helper = box.methods().getFirst();
+        assertTrue(helper.isStatic());
+        assertEquals(Ast.Visibility.PUBLIC, helper.visibility());
+
+        assertEquals(Ast.Visibility.PUBLIC, actor.visibility());
+        Ast.MethodDecl handle = actor.methods().getFirst();
+        assertTrue(handle.async());
+        assertEquals(Ast.Visibility.PUBLIC, handle.visibility());
+
+        Ast.InterfaceFunctionDecl render =
+                assertInstanceOf(Ast.InterfaceFunctionDecl.class, api.members().getFirst());
+        assertTrue(render.structural());
+
+        assertEquals(Ast.ActorKind.UNTRUSTED, actorFunction.actorKind());
+        assertEquals(Ast.Visibility.PUBLIC, actorFunction.visibility());
+        assertTrue(actorFunction.async());
+    }
+
+    @Test
+    void unsupportedModifiersAreNeverSilentlyDiscarded() {
+        List<String> invalid = List.of(
+                """
+                private define module app as
+                end
+                """,
+                """
+                define module app as
+                  async type Alias = int;
+                end
+                """,
+                """
+                define module app as
+                  define class Box as
+                    async val int value = 1;
+                  end
+                end
+                """,
+                """
+                define module app as
+                  define class Box as
+                    structural constructor() {
+                      return;
+                    }
+                  end
+                end
+                """,
+                """
+                define module app as
+                  actor Worker {
+                    generator let value = 1;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  actor Worker {
+                    untrusted fnc work(): void {
+                      return;
+                    }
+                  }
+                end
+                """,
+                """
+                define module app as
+                  define interface Api {
+                    fnc generator render() => String;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  define interface Api {
+                    private fnc render() => String;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  define class Box as
+                    static fnc static helper(): int {
+                      return 1;
+                    }
+                  end
+                end
+                """,
+                """
+                define module app as
+                  isoactor fnc shared contradictory(): void {
+                    return;
+                  }
+                end
+                """
+        );
+
+        for (String source : invalid) {
+            assertThrows(IllegalArgumentException.class, () -> Parser.parse(source), source);
+        }
+    }
+
+    @Test
+    void declarationModifiersMayAppearOnEitherSideOfDefineAndCallableKind() {
+        Ast.Program program = Parser.parse("""
+                define module app as
+                  pub define class LegacyBox as
+                  end
+
+                  define pub abstract class CanonicalBox as
+                  end
+
+                  define pub class BracedBox as {
+                  }
+
+                  fnc pub async late_visibility(): void {
+                    return;
+                  }
+
+                  async nlex fnc pub mixed_order(): void {
+                    return;
+                  }
+
+                  pub async nlex fnc canonical_order(): void {
+                    return;
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        Ast.ClassDecl legacyClass = (Ast.ClassDecl) module.declarations().get(0);
+        Ast.ClassDecl canonicalClass = (Ast.ClassDecl) module.declarations().get(1);
+        Ast.ClassDecl bracedClass = (Ast.ClassDecl) module.declarations().get(2);
+        Ast.FunctionDecl lateVisibility = (Ast.FunctionDecl) module.declarations().get(3);
+        Ast.FunctionDecl mixedOrder = (Ast.FunctionDecl) module.declarations().get(4);
+        Ast.FunctionDecl canonicalOrder = (Ast.FunctionDecl) module.declarations().get(5);
+
+        assertEquals(Ast.Visibility.PUBLIC, legacyClass.visibility());
+        assertEquals(Ast.Visibility.PUBLIC, canonicalClass.visibility());
+        assertEquals(Ast.Visibility.PUBLIC, bracedClass.visibility());
+        assertTrue(canonicalClass.isAbstract());
+
+        assertEquals(Ast.Visibility.PUBLIC, lateVisibility.visibility());
+        assertTrue(lateVisibility.async());
+
+        assertEquals(Ast.Visibility.PUBLIC, mixedOrder.visibility());
+        assertTrue(mixedOrder.async());
+        assertTrue(mixedOrder.nonLexical());
+
+        assertEquals(canonicalOrder.visibility(), mixedOrder.visibility());
+        assertEquals(canonicalOrder.async(), mixedOrder.async());
+        assertEquals(canonicalOrder.nonLexical(), mixedOrder.nonLexical());
+    }
+
+    @Test
+    void duplicateModifiersRemainRejectedAcrossDeclarationKeywords() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define module app as
+                  pub fnc pub nope(): void {
+                    return;
+                  }
+                end
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define module app as
+                  pub define pub class Nope as
+                  end
+                end
+                """));
+    }
+
+    @Test
     void supportsMultipleModulesAndComplexNumbers() {
         String source = """
                 define module math
