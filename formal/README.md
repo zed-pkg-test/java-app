@@ -6,7 +6,9 @@ This directory documents the executable formal-methods layer for Oreslang runtim
 
 `FormalActorProtocolModelCheckTest` is a bounded explicit-state model checker for the actor protocol/Future hand-off lifecycle. It enumerates every legal transition in the small-state model rather than sampling thread schedules.
 
-`FormalSelectModelCheckTest` separately enumerates three-case select readiness, arbitration, loser detachment, and cancellation.\n\n`FormalControlPlaneLivenessModelCheckTest` models the ActorGroup Mailman/CONTROL-carrier boundary in both the known blocking design and the required cooperative design. It keeps the blocking model as an executable counterexample oracle: a callback that waits while retaining its carrier strands already-queued CONTROL work. The cooperative model proves that suspension returns the carrier and queues the Mailman continuation behind work that was already ready.
+`FormalSelectModelCheckTest` separately enumerates three-case select readiness, arbitration, loser detachment, and cancellation.
+
+`FormalControlPlaneLivenessModelCheckTest` models the ActorGroup Mailman/CONTROL-carrier boundary in both the known blocking design and the required cooperative design. It keeps the blocking model as an executable counterexample oracle: a callback that waits while retaining its carrier strands already-queued CONTROL work. The cooperative model proves that suspension returns the carrier and queues the Mailman continuation behind work that was already ready.
 
 `FormalOwnershipDomainModelCheckTest` exhaustively checks the ownership/provenance algebra across root, SHARED, PRIVATE, and UNTRUSTED contexts for primitive, struct, and class values. It is a refinement target for the in-flight allocator/ownership work rather than a claim that every lowering is already on `main`.
 
@@ -50,7 +52,7 @@ No additional model-checking dependency is required; the finite-state explorer i
 The next models should cover:
 
 - Channel close/rendezvous details beyond select arbitration, including waiter ownership and wakeup ordering.
-- ActorGroup Mailman sequencing and CONTROL-carrier fairness.
+- Concrete runtime refinement for the cooperative Mailman/CONTROL suspension model once #290 is redesigned to release carriers while waiting.
 - Concrete trace refinement for allocation-domain/ownership lowering once the #309/#328/#329/#332 stack is reconciled onto current `main`.
 - GC refinement for bounded actor-local sweep quanta and concurrent cleanup-slot ownership.
 - Structured actor failure propagation/restart policy beyond the already-modeled cancellation tree.
