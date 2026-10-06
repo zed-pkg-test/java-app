@@ -19,36 +19,25 @@ final class RxChannelsParityProbeTest {
     @TempDir Path temp;
 
     @Test
-    void sharedFutureSubscriberCancellationDoesNotCancelProducer() throws Exception {
+    void cancellingOneSharedFutureSubscriptionDoesNotCancelProducer() throws Exception {
         assertEquals("true\ntrue\n99", run("shared_future", """
 import module rx_channels from '../src/rx.ores';
 import class Observable, Subscription from '../src/rx.ores';
 
-async fnc delayed(Channel<int> gate): int {
-  return readch gate;
-}
-
-async fnc pull_one(Subscription<int> sub): Option<int> {
-  return sub.next();
-}
-
 pub async fnc main(): void {
   val Channel<int> gate = Channel.new<int>(0);
-  val Future<int> shared = delayed(gate);
+  val Future<int> shared = nb readch gate;
   val Observable<int> source = rx_channels.from_future(shared);
   val Subscription<int> one = source.subscribe();
   val Subscription<int> two = source.subscribe();
 
-  val Future<Option<int>> first_pull = pull_one(one);
-  val Future<Option<int>> second_pull = pull_one(two);
   stdio.println(one.cancel());
-
   val Future<void> release = nb writech gate, 99;
-  val Option<int> first = await first_pull;
-  val Option<int> second = await second_pull;
+  val Option<int> second = two.next();
   await release;
+  val Option<int> cancelled = one.next();
 
-  stdio.println(first.is_none());
+  stdio.println(cancelled.is_none());
   stdio.println(second.unwrap());
   return;
 }
@@ -56,38 +45,25 @@ pub async fnc main(): void {
     }
 
     @Test
-    void onlyOneNextMayBeOutstanding() throws Exception {
-        Throwable failure = assertThrows(Throwable.class, () -> run("one_outstanding", """
+    void subscriptionCannotBeAliasedAcrossAsyncTaskBoundary() throws Exception {
+        Throwable failure = assertThrows(Throwable.class, () -> run("task_safety", """
 import module rx_channels from '../src/rx.ores';
 import class Observable, Subscription from '../src/rx.ores';
-
-async fnc delayed(Channel<int> gate): int {
-  return readch gate;
-}
 
 async fnc pull_one(Subscription<int> sub): Option<int> {
   return sub.next();
 }
 
 pub async fnc main(): void {
-  val Channel<int> gate = Channel.new<int>(0);
-  val Future<int> shared = delayed(gate);
-  val Observable<int> source = rx_channels.from_future(shared);
+  val Observable<int> source = rx_channels.from_values([7]);
   val Subscription<int> sub = source.subscribe();
-
-  val Future<Option<int>> first_pull = pull_one(sub);
-  val Future<Option<int>> duplicate_pull = pull_one(sub);
-  val Future<void> release = nb writech gate, 7;
-
-  val Option<int> first = await first_pull;
-  stdio.println(first.unwrap());
-  await release;
-  val Option<int> duplicate = await duplicate_pull;
-  stdio.println(duplicate.unwrap());
+  val Future<Option<int>> pending = pull_one(sub);
+  val Option<int> value = await pending;
+  stdio.println(value.unwrap());
   return;
 }
 """));
-        assertTrue(messages(failure).contains("only one outstanding next() is allowed"), messages(failure));
+        assertTrue(messages(failure).contains("must be concrete owned task-safe data"), messages(failure));
     }
 
     @Test
