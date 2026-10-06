@@ -3536,6 +3536,7 @@ public final class OresEvalRootNode extends RootNode {
         private Object indexValue(Object receiver, Object index) {
             if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
                 return proxy.read(raw -> requireProxyBoundaryValue(
+                        proxy,
                         indexValue(raw, index),
                         "rt proxy indexed read"));
             }
@@ -3573,6 +3574,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object requireProxyBoundaryValue(
+                ActorRuntime.Proxy<?> proxy,
                 Object value,
                 String operation) {
             if (value == null
@@ -3598,6 +3600,7 @@ public final class OresEvalRootNode extends RootNode {
                 return new OptionValue(
                         true,
                         requireProxyBoundaryValue(
+                                proxy,
                                 option.value(),
                                 operation + " Option payload"));
             }
@@ -3605,13 +3608,19 @@ public final class OresEvalRootNode extends RootNode {
                 return new ResultValue(
                         result.ok(),
                         requireProxyBoundaryValue(
+                                proxy,
                                 result.value(),
                                 operation + " Result payload"));
+            }
+            if (value instanceof OresObject
+                    || value instanceof DynamicStructValue) {
+                return proxy.child(value);
             }
             throw new IllegalArgumentException(
                     operation
                             + " cannot expose mutable/capability state from behind rt Proxy<T>; "
-                            + "return a scalar/immutable value or publish an explicit snapshot");
+                            + "nested class/struct values remain proxied, while collections/callables/"
+                            + "host capabilities require an explicit snapshot or dedicated proxy adapter");
         }
 
         private Object unaryValue(String operator, Object value) {
@@ -4918,6 +4927,7 @@ public final class OresEvalRootNode extends RootNode {
             java.util.function.Function<Object, Object> body = ignored -> {
                 Object result = plan.inner().owner().invoke(plan.inner());
                 return requireProxyBoundaryValue(
+                        plan.proxy(),
                         result,
                         "rt proxy method '" + plan.label() + "' result");
             };
@@ -5416,6 +5426,7 @@ public final class OresEvalRootNode extends RootNode {
                                         + name + "(...)' instead of extracting the method");
                     }
                     return requireProxyBoundaryValue(
+                            proxy,
                             value,
                             "rt proxy member '" + name + "'");
                 });

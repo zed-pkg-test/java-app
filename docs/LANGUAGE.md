@@ -938,8 +938,9 @@ Proxy access is deliberately restrictive:
 - methods with a proven immutable-borrow receiver may use a read lock; other methods use a write lock conservatively;
 - a proxy method may not `await`, suspend, or be declared `async` while the lock is held;
 - bound methods cannot be extracted from a proxy;
-- move-only/mutable nested state cannot escape through a proxy read or method result; return a copy/immutable snapshot instead;
-- nested locking across different proxies is rejected to avoid ABBA lock-order deadlocks;
+- nested class and `DynamicStruct` state never escapes raw: it is returned as a child `Proxy<U>` view that shares the parent's lock domain and is interned by target identity;
+- raw mutable collections, callables, host capabilities, and other unsynchronized move-only values still cannot escape through a proxy read or method result; publish a snapshot or add a dedicated proxy adapter instead;
+- nested locking across different proxy lock domains is rejected to avoid ABBA lock-order deadlocks;
 - read-to-write lock upgrade on the same proxy is rejected rather than blocking forever;
 - `proxy.dispose()` explicitly revokes the proxy handle and releases its runtime quota/root; it is reserved on `Proxy<T>` and does not dispatch to a wrapped class method.
 
@@ -1367,7 +1368,7 @@ Security is layered. Oreslang uses a deny-by-default language capability policy 
 
 An isolate policy can independently allow or deny:
 
-`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
+`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `ACTOR_SHARED_PROXY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
 
 The trusted compiler API can reject forbidden API usage before execution:
 

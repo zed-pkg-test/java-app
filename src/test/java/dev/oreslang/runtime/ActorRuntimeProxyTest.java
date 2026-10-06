@@ -154,4 +154,30 @@ final class ActorRuntimeProxyTest {
             assertTrue(proxy.closed());
         }
     }
+
+    @Test
+    void nestedProxyViewsReuseIdentityAndQuotaWithinOneLockDomain() {
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            int[] nested = {4};
+            long before = runtime.sharedMemoryBytes();
+            ActorRuntime.Proxy<int[][]> parent = runtime.proxy(new int[][]{nested});
+            assertEquals(before + 96L, runtime.sharedMemoryBytes());
+
+            ActorRuntime.Proxy<int[]> first = parent.child(nested);
+            assertEquals(before + 192L, runtime.sharedMemoryBytes());
+            ActorRuntime.Proxy<int[]> second = parent.child(nested);
+
+            assertSame(first, second,
+                    "repeated nested projections must reuse one synchronized capability handle");
+            assertEquals(before + 192L, runtime.sharedMemoryBytes(),
+                    "repeated nested reads must not leak proxy-handle quota");
+
+            first.write(value -> {
+                value[0] = 9;
+                return null;
+            });
+            assertEquals(9, second.read(value -> value[0]).intValue());
+        }
+    }
+
 }

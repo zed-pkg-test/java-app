@@ -1718,6 +1718,7 @@ public final class TypeChecker {
             }
             if (call.callee() instanceof Ast.MemberExpr member) {
                 Type receiver = deref(typeOf(member.receiver(), env, generics, self));
+                boolean proxyReceiver = isProxyType(receiver);
                 if (receiver instanceof Named proxy
                         && proxy.name().equals("Proxy")
                         && proxy.arguments().size() == 1
@@ -1911,6 +1912,11 @@ public final class TypeChecker {
                                             "field '" + member.member() + "' on " + named.name()
                                                     + " is not callable");
                                 }
+                                if (proxyReceiver) {
+                                    throw new IllegalArgumentException(
+                                            "rt Proxy<T> callable fields are not directly invokable; "
+                                                    + "wrap the operation in a declared class method so lock effects are explicit");
+                                }
                                 if (fn.parameters().size() != call.arguments().size()) {
                                     throw new IllegalArgumentException(
                                             "function-valued field '" + member.member() + "' call arity mismatch");
@@ -1943,7 +1949,7 @@ public final class TypeChecker {
                         Type callableReceiver = receiverValueType instanceof SelfType
                                 ? receiverValueType
                                 : named;
-                        return checkGenericCallable(
+                        Type result = checkGenericCallable(
                                 callableGenerics,
                                 method.parameters(),
                                 method.returnType(),
@@ -1952,6 +1958,9 @@ public final class TypeChecker {
                                 callableReceiver,
                                 bindings,
                                 label);
+                        return proxyReceiver
+                                ? proxyBoundaryType(result, label + " result")
+                                : result;
                     }
 
                     Ast.InterfaceDecl iface = findInterface(named.name());
@@ -2039,6 +2048,7 @@ public final class TypeChecker {
                 if (member.member().equals("stdin")) return new Named("stdio.stdin", List.of());
             }
             Type receiver = typeOf(member.receiver(), env, generics, self);
+            boolean proxyReceiver = isProxyType(deref(receiver));
             Type sumReceiver = receiverDispatchType(deref(receiver));
             Type iteratorMember = builtinIteratorMember(sumReceiver, member.member());
             if (iteratorMember != null) return iteratorMember;
@@ -2113,7 +2123,11 @@ public final class TypeChecker {
 
             if (receiver instanceof Record record) {
                 Type result = record.members().get(member.member());
-                if (result != null) return result;
+                if (result != null) {
+                    return proxyReceiver
+                            ? proxyBoundaryType(result, "rt proxy member '" + member.member() + "'")
+                            : result;
+                }
 
                 String methodPrefix = CallableSelector.instance(member.member(), 0).mangledName().replace("$arity0", "$arity");
                 boolean structuralMethod = record.members().keySet().stream()
@@ -2130,7 +2144,10 @@ public final class TypeChecker {
                 if (dynamic.arguments().size() != 1) {
                     throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
                 }
-                return dynamic.arguments().getFirst();
+                Type result = dynamic.arguments().getFirst();
+                return proxyReceiver
+                        ? proxyBoundaryType(result, "rt proxy member '" + member.member() + "'")
+                        : result;
             }
             if (receiver instanceof Named named) {
                 Ast.ClassDecl klass = findClass(named.name());
@@ -2140,7 +2157,11 @@ public final class TypeChecker {
                         requireClassMemberVisible(
                                 field.field().visibility(), field.owner(), "field", field.field().name());
                         Type pattern = classFieldType(field.owner(), field.field());
-                        return substituteGenerics(pattern, classGenericBindings(field.owner(), field.ownerType()));
+                        Type result = substituteGenerics(
+                                pattern, classGenericBindings(field.owner(), field.ownerType()));
+                        return proxyReceiver
+                                ? proxyBoundaryType(result, "rt proxy member '" + member.member() + "'")
+                                : result;
                     }
                     List<Ast.MethodDecl> methods = findMethodsByName(klass, member.member(), new LinkedHashSet<>());
                     if (!methods.isEmpty()) {
@@ -2165,15 +2186,20 @@ public final class TypeChecker {
             return Unknown.INSTANCE;
         }
         if (expr instanceof Ast.IndexExpr indexed) {
-            Type receiver = unwrapProxy(deref(typeOf(
-                    indexed.receiver(), env, generics, self)));
+            Type rawReceiver = deref(typeOf(
+                    indexed.receiver(), env, generics, self));
+            boolean proxyReceiver = isProxyType(rawReceiver);
+            Type receiver = unwrapProxy(rawReceiver);
             Type index = typeOf(indexed.index(), env, generics, self);
             if (receiver instanceof Named dynamic && dynamic.name().equals("DynamicStruct")) {
                 if (dynamic.arguments().size() != 1) {
                     throw new IllegalArgumentException("DynamicStruct requires exactly one value type");
                 }
                 requireAssignable(index, Primitive.STRING, "DynamicStruct key");
-                return dynamic.arguments().getFirst();
+                Type result = dynamic.arguments().getFirst();
+                return proxyReceiver
+                        ? proxyBoundaryType(result, "rt proxy indexed read")
+                        : result;
             }
             if (receiver instanceof Record record) {
                 requireAssignable(index, Primitive.STRING, "object/map key");
@@ -2182,10 +2208,16 @@ public final class TypeChecker {
                     if (member == null) {
                         throw new IllegalArgumentException("unknown object/map key '" + key.value() + "'");
                     }
-                    return member;
+                    return proxyReceiver
+                            ? proxyBoundaryType(member, "rt proxy indexed read")
+                            : member;
                 }
                 if (record.members().isEmpty()) return Unknown.INSTANCE;
-                return record.members().values().stream().reduce(Unknown.INSTANCE, this::commonType);
+                Type result = record.members().values().stream()
+                        .reduce(Unknown.INSTANCE, this::commonType);
+                return proxyReceiver
+                        ? proxyBoundaryType(result, "rt proxy indexed read")
+                        : result;
             }
             requireAssignable(index, Primitive.INT, "array/list index");
             if (receiver instanceof ListType list) return list.element();
@@ -2799,6 +2831,51 @@ public final class TypeChecker {
 
     private Type deref(Type type) {
         return type instanceof Borrow borrow ? borrow.target() : type;
+    }
+
+
+    private boolean isProxyType(Type type) {
+        return type instanceof Named named
+                && named.name().equals("Proxy")
+                && named.arguments().size() == 1;
+    }
+
+    /**
+     * Static counterpart of the evaluator's proxy boundary. Scalars may leave
+     * directly. Nested class/DynamicStruct identities stay behind the same
+     * synchronization domain and therefore become Proxy<T> views. Containers,
+     * callables and opaque capabilities fail closed until they have dedicated
+     * synchronized adapters/snapshot semantics.
+     */
+    private Type proxyBoundaryType(Type type, String where) {
+        if (type instanceof Primitive primitive) {
+            if (primitive == Primitive.VOID) return Primitive.VOID;
+            return primitive;
+        }
+        if (type instanceof StringLiteral) return type;
+        if (type instanceof Named named) {
+            if (named.name().equals("OptionUnwrapError") && named.arguments().isEmpty()) {
+                return named;
+            }
+            if (named.name().equals("Option") && named.arguments().size() == 1) {
+                return new Named("Option", List.of(
+                        proxyBoundaryType(named.arguments().getFirst(), where + " Option payload")));
+            }
+            if (named.name().equals("Result") && named.arguments().size() == 2) {
+                return new Named("Result", List.of(
+                        proxyBoundaryType(named.arguments().get(0), where + " Result ok payload"),
+                        proxyBoundaryType(named.arguments().get(1), where + " Result err payload")));
+            }
+            boolean dynamicStruct = named.name().equals("DynamicStruct")
+                    && named.arguments().size() == 1;
+            boolean classInstance = findClass(named.name()) != null;
+            if (dynamicStruct || classInstance) {
+                return new Named("Proxy", List.of(type));
+            }
+        }
+        throw new IllegalArgumentException(
+                where + " cannot expose mutable/capability type " + type
+                        + " from behind rt Proxy<T>; publish a snapshot or add a dedicated proxy adapter");
     }
 
     private Type unwrapProxy(Type type) {
