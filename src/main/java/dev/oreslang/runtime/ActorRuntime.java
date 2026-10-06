@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -20,6 +21,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -769,10 +771,29 @@ public final class ActorRuntime implements AutoCloseable {
 
     private record ProtocolRequest(
             String method,
-            OresFuture<Object> reply) {
+            OresFuture<Object> reply,
+            AtomicBoolean replyHandedOff) {
+        private ProtocolRequest(
+                String method,
+                OresFuture<Object> reply) {
+            this(method, reply, new AtomicBoolean());
+        }
+
         private ProtocolRequest {
             Objects.requireNonNull(method, "method");
             Objects.requireNonNull(reply, "reply");
+            Objects.requireNonNull(replyHandedOff, "replyHandedOff");
+        }
+
+        private void handOffReply() {
+            if (!replyHandedOff.compareAndSet(false, true)) {
+                throw new IllegalStateException(
+                        "typed actor protocol reply ownership was already handed off");
+            }
+        }
+
+        private boolean ownsReply() {
+            return !replyHandedOff.get();
         }
     }
 
@@ -797,9 +818,15 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private static MessageEnvelope continuation(Runnable continuation) {
+            return continuation(continuation, null);
+        }
+
+        private static MessageEnvelope continuation(
+                Runnable continuation,
+                Runnable release) {
             return new MessageEnvelope(
                     null,
-                    null,
+                    release,
                     Objects.requireNonNull(continuation, "continuation"),
                     null);
         }
@@ -811,7 +838,9 @@ public final class ActorRuntime implements AutoCloseable {
         @Override
         public void close() {
             try {
-                if (protocolRequest != null && !protocolRequest.reply().isDone()) {
+                if (protocolRequest != null
+                        && protocolRequest.ownsReply()
+                        && !protocolRequest.reply().isDone()) {
                     protocolRequest.reply().cancel(false);
                 }
             } finally {
@@ -1086,12 +1115,13 @@ public final class ActorRuntime implements AutoCloseable {
             return false;
         }
 
-        cell.pendingOperations.add(future);
+        boolean newlyOwned = cell.pendingOperations.add(future);
         if (cell.stopped.get() || cell.finalized || closed.get()) {
-            cell.pendingOperations.remove(future);
+            if (newlyOwned) cell.pendingOperations.remove(future);
             future.cancel(false);
             return false;
         }
+        if (!newlyOwned) return true;
 
         future.whenCompleteRuntime(
                 (ignored, failure) ->
@@ -1114,34 +1144,99 @@ public final class ActorRuntime implements AutoCloseable {
 
         ActorCell<?> cell = actors.get(target.actorId());
         if (cell == null || !ownFuture(cell, future)) return;
+        if (!cell.acquireContinuationLease()) return;
 
-        future.whenCompleteRuntime(
-                (value, failure) ->
-                        target.enqueue(() -> continuation.accept(value, failure)));
+        boolean registered = false;
+        try {
+            future.whenCompleteRuntime(
+                    (value, failure) ->
+                            enqueueContinuation(
+                                    target.actorId(),
+                                    () -> continuation.accept(value, failure),
+                                    cell::releaseContinuationLease));
+            registered = true;
+        } finally {
+            if (!registered) cell.releaseContinuationLease();
+        }
+    }
+
+    /**
+     * Queue host-only publication work that must not become externally visible
+     * until the current actor carrier has crossed back out of TurnExecutor.
+     *
+     * <p>The action must never execute guest code. It is used for publishing
+     * already-frozen values/failures to Futures after the Truffle execution
+     * context has been left.</p>
+     */
+    private void afterCurrentActorTurn(Runnable action) {
+        Objects.requireNonNull(action, "action");
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null) {
+            throw new IllegalStateException(
+                    "post-turn publication requires an executing actor turn");
+        }
+        synchronized (cell.lifecycleLock) {
+            if (cell.finalized) {
+                throw new IllegalStateException(
+                        "cannot publish after finalized actor " + cell.ref.id());
+            }
+            cell.postTurnActions.addLast(action);
+        }
+    }
+
+    private void completeActorCallableWhenQuiescent(
+            Runnable publication,
+            Runnable abandonment) {
+        Objects.requireNonNull(publication, "publication");
+        Objects.requireNonNull(abandonment, "abandonment");
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null) {
+            throw new IllegalStateException(
+                    "actor callable completion requires an executing actor turn");
+        }
+        cell.requestQuiescentStop(publication, abandonment);
     }
 
     private boolean enqueueContinuation(ActorId actorId, Runnable continuation) {
+        return enqueueContinuation(actorId, continuation, null);
+    }
+
+    private boolean enqueueContinuation(
+            ActorId actorId,
+            Runnable continuation,
+            Runnable release) {
         Objects.requireNonNull(actorId, "actorId");
         Objects.requireNonNull(continuation, "continuation");
         ActorCell<?> cell = actors.get(actorId);
-        if (cell == null || cell.stopped.get() || closed.get()) return false;
+        if (cell == null || cell.stopped.get() || closed.get()) {
+            if (release != null) release.run();
+            return false;
+        }
         if (!cell.reserveContinuationSlot()) {
             cell.fail(new IllegalStateException(
                     "actor internal continuation queue overflow for " + actorId));
+            if (release != null) release.run();
             return false;
         }
 
+        MessageEnvelope envelope =
+                MessageEnvelope.continuation(continuation, release);
         boolean admitted = false;
         try {
             synchronized (cell.lifecycleLock) {
                 if (cell.stopped.get() || cell.finalized || closed.get()) return false;
-                admitted = cell.mailbox.tryWrite(
-                        MessageEnvelope.continuation(continuation));
+                admitted = cell.mailbox.tryWrite(envelope);
             }
             if (admitted) cell.schedule();
             return admitted;
         } finally {
-            if (!admitted) cell.releaseMailboxSlot(true);
+            if (!admitted) {
+                try {
+                    envelope.close();
+                } finally {
+                    cell.releaseMailboxSlot(true);
+                }
+            }
         }
     }
 
@@ -2881,13 +2976,15 @@ public final class ActorRuntime implements AutoCloseable {
                                             if (failure != null) {
                                                 completion.failFromRuntime(
                                                         OresFuture.unwrap(failure));
+                                                turnContext.self().stop();
                                             } else {
                                                 R frozen = (R) freeze(value);
-                                                completion.completeFromRuntime(frozen);
+                                                completeActorCallableWhenQuiescent(
+                                                        () -> completion.completeFromRuntime(frozen),
+                                                        () -> completion.cancel(false));
                                             }
                                         } catch (Throwable callbackFailure) {
                                             completion.failFromRuntime(callbackFailure);
-                                        } finally {
                                             turnContext.self().stop();
                                         }
                                     });
@@ -2895,8 +2992,9 @@ public final class ActorRuntime implements AutoCloseable {
                         }
 
                         R frozen = (R) freeze(result);
-                        completion.completeFromRuntime(frozen);
-                        turnContext.self().stop();
+                        completeActorCallableWhenQuiescent(
+                                () -> completion.completeFromRuntime(frozen),
+                                () -> completion.cancel(false));
                     } catch (VirtualMachineError fatal) {
                         completion.failFromRuntime(fatal);
                         throw fatal;
@@ -3412,6 +3510,97 @@ public final class ActorRuntime implements AutoCloseable {
         requireOwnedActorRefs(result, new IdentityHashMap<>(), 0);
         requireOwnedSharedHandles(result, new IdentityHashMap<>(), 0);
         return freezeForTransport(result);
+    }
+
+    private void publishSourceProtocolSuccessAfterTurn(
+            ProtocolRequest protocol,
+            Object preparedReply) {
+        if (protocol.ownsReply()) protocol.handOffReply();
+        afterCurrentActorTurn(() -> {
+            if (protocol.reply().isCancelled()) return;
+            if (!protocol.reply().completeFromRuntime(preparedReply)
+                    && !protocol.reply().isCancelled()) {
+                protocol.reply().failFromRuntime(
+                        new IllegalStateException(
+                                "typed actor protocol reply was already settled"));
+            }
+        });
+    }
+
+    private void publishSourceProtocolFailureAfterTurn(
+            ProtocolRequest protocol,
+            Throwable failure) {
+        Objects.requireNonNull(failure, "failure");
+        if (protocol.ownsReply()) protocol.handOffReply();
+        afterCurrentActorTurn(() -> {
+            if (!protocol.reply().isDone()) {
+                protocol.reply().failFromRuntime(failure);
+            }
+        });
+    }
+
+    /**
+     * Transfer a suspending source protocol reply from the request envelope to
+     * an actor-mailbox continuation. Future completion threads never execute
+     * guest code or serialize guest values directly.
+     */
+    @SuppressWarnings("unchecked")
+    private void handOffSourceProtocolReply(
+            ProtocolRequest protocol,
+            OresFuture<?> pending) {
+        Objects.requireNonNull(protocol, "protocol");
+        Objects.requireNonNull(pending, "pending");
+
+        OresFuture<Object> owned =
+                (OresFuture<Object>) ownCurrentActorFuture(
+                        (OresFuture<Object>) pending);
+        ContinuationTarget target = captureCurrentContinuationTarget();
+        protocol.handOffReply();
+
+        Runnable cancelAbandonedReply = () -> {
+            if (!protocol.reply().isDone()) {
+                protocol.reply().cancel(false);
+            }
+        };
+
+        owned.whenCompleteRuntime((value, failure) -> {
+            boolean admitted = enqueueContinuation(
+                    target.actorId(),
+                    () -> {
+                        if (failure != null) {
+                            Throwable terminal = OresFuture.unwrap(failure);
+                            publishSourceProtocolFailureAfterTurn(
+                                    protocol,
+                                    terminal);
+                            throw rethrowActorProtocolFailure(terminal);
+                        }
+                        if (protocol.reply().isCancelled()) return;
+
+                        try {
+                            Object preparedReply =
+                                    prepareSourceProtocolReply(value);
+                            publishSourceProtocolSuccessAfterTurn(
+                                    protocol,
+                                    preparedReply);
+                        } catch (Throwable callbackFailure) {
+                            publishSourceProtocolFailureAfterTurn(
+                                    protocol,
+                                    callbackFailure);
+                            throw rethrowActorProtocolFailure(callbackFailure);
+                        }
+                    },
+                    cancelAbandonedReply);
+            if (!admitted) {
+                cancelAbandonedReply.run();
+            }
+        });
+    }
+
+    private static RuntimeException rethrowActorProtocolFailure(
+            Throwable failure) {
+        if (failure instanceof RuntimeException runtime) return runtime;
+        if (failure instanceof Error error) throw error;
+        return new RuntimeException(failure);
     }
 
     /**
@@ -4759,6 +4948,21 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorCell<?> parent;
         private final Set<ActorCell<?>> children = ConcurrentHashMap.newKeySet();
         private final Set<OresFuture<?>> pendingOperations = ConcurrentHashMap.newKeySet();
+        /**
+         * Host-only publication callbacks drained after TurnExecutor returns.
+         * Guest code must never be placed here.
+         */
+        private final ArrayDeque<Runnable> postTurnActions = new ArrayDeque<>();
+        /**
+         * Future completion registrations that have promised an actor-mailbox
+         * continuation but whose continuation envelope has not yet been consumed
+         * or dropped.
+         */
+        private int continuationLeases;
+        private boolean quiescentStopRequested;
+        private boolean quiescentStopScheduled;
+        private Runnable quiescentPublication;
+        private Runnable quiescentAbandonment;
         /** Mailbox transport is a bounded Oreslang channel of runtime envelopes. */
         private final ChannelRuntime.Channel<MessageEnvelope> mailbox;
         private final ActorMemorySlice memorySlice;
@@ -4802,6 +5006,114 @@ public final class ActorRuntime implements AutoCloseable {
             this.memorySlice = isPrivateKind(kind)
                     ? new ActorMemorySlice(ref.id(), policy.maxHeapBytes())
                     : null;
+        }
+
+        private boolean acquireContinuationLease() {
+            boolean overflow = false;
+            synchronized (lifecycleLock) {
+                if (stopped.get() || finalized || closed.get()) return false;
+                if (continuationLeases == Integer.MAX_VALUE) {
+                    overflow = true;
+                } else {
+                    continuationLeases++;
+                }
+            }
+            if (overflow) {
+                fail(new IllegalStateException(
+                        "actor continuation lease overflow for " + ref.id()));
+                return false;
+            }
+            return true;
+        }
+
+        private void releaseContinuationLease() {
+            synchronized (lifecycleLock) {
+                if (continuationLeases <= 0) {
+                    throw new IllegalStateException(
+                            "actor continuation lease underflow for " + ref.id());
+                }
+                continuationLeases--;
+                maybeScheduleQuiescentStopLocked();
+            }
+        }
+
+        private void requestQuiescentStop(
+                Runnable publication,
+                Runnable abandonment) {
+            Objects.requireNonNull(publication, "publication");
+            Objects.requireNonNull(abandonment, "abandonment");
+            boolean abandonImmediately = false;
+            synchronized (lifecycleLock) {
+                if (stopped.get() || finalized || closed.get()) {
+                    abandonImmediately = true;
+                } else {
+                    if (quiescentStopRequested) {
+                        throw new IllegalStateException(
+                                "actor " + ref.id()
+                                        + " already has a pending quiescent completion");
+                    }
+                    quiescentStopRequested = true;
+                    quiescentPublication = publication;
+                    quiescentAbandonment = abandonment;
+                    maybeScheduleQuiescentStopLocked();
+                }
+            }
+            if (abandonImmediately) abandonment.run();
+        }
+
+        private void maybeScheduleQuiescentStopLocked() {
+            if (!quiescentStopRequested
+                    || quiescentStopScheduled
+                    || continuationLeases != 0
+                    || stopped.get()
+                    || finalized
+                    || closed.get()) {
+                return;
+            }
+            quiescentStopScheduled = true;
+            postTurnActions.addLast(this::finishQuiescentStop);
+        }
+
+        private void finishQuiescentStop() {
+            Runnable publication = null;
+            Runnable abandonment = null;
+            synchronized (lifecycleLock) {
+                quiescentStopScheduled = false;
+                if (!quiescentStopRequested) return;
+                if (continuationLeases != 0) {
+                    maybeScheduleQuiescentStopLocked();
+                    return;
+                }
+                if (stopped.get() || finalized || closed.get()) {
+                    abandonment = quiescentAbandonment;
+                } else {
+                    publication = quiescentPublication;
+                }
+                quiescentStopRequested = false;
+                quiescentPublication = null;
+                quiescentAbandonment = null;
+            }
+
+            if (abandonment != null) {
+                abandonment.run();
+                return;
+            }
+            if (publication != null) {
+                // Stop accepting guest work before the successful result is
+                // externally visible. We are already outside TurnExecutor here.
+                stop();
+                publication.run();
+            }
+        }
+
+        private Runnable abandonQuiescentStopLocked() {
+            if (!quiescentStopRequested) return null;
+            Runnable abandonment = quiescentAbandonment;
+            quiescentStopRequested = false;
+            quiescentStopScheduled = false;
+            quiescentPublication = null;
+            quiescentAbandonment = null;
+            return abandonment;
         }
 
         private int mailboxCapacityWithControlHeadroom() {
@@ -5007,6 +5319,24 @@ public final class ActorRuntime implements AutoCloseable {
             }
         }
 
+        private void drainPostTurnActions() {
+            while (true) {
+                Runnable action;
+                synchronized (lifecycleLock) {
+                    action = postTurnActions.pollFirst();
+                }
+                if (action == null) return;
+                try {
+                    action.run();
+                } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+                    fail(fatal);
+                    throw fatal;
+                } catch (Throwable failure) {
+                    fail(failure);
+                }
+            }
+        }
+
         private void runBatch() {
             ACTOR_CARRIER.set(Boolean.TRUE);
             boolean carrierEntered = false;
@@ -5031,11 +5361,15 @@ public final class ActorRuntime implements AutoCloseable {
 
                 turnExecutor.execute(this::runBatchEntered);
             } catch (Throwable failure) {
+                // TurnExecutor is required to leave its guest/Truffle execution
+                // context before propagating. Post-turn publications are drained
+                // from finally below after this boundary has been crossed.
                 fail(failure);
                 if (failure instanceof VirtualMachineError fatal) throw fatal;
                 if (failure instanceof ThreadDeath fatal) throw fatal;
                 if (failure instanceof LinkageError fatal) throw fatal;
             } finally {
+                drainPostTurnActions();
                 // The actor remains logically scheduled until the TurnExecutor
                 // returns. OresContext's executor leaves the TruffleContext in
                 // its own finally block, so clearing this bit any earlier lets
@@ -5138,19 +5472,24 @@ public final class ActorRuntime implements AutoCloseable {
                                             protocol.method(),
                                             arguments,
                                             protocolContext);
-                                    if (result instanceof OresFuture<?>
-                                            || result instanceof CompletionStage<?>) {
+                                    if (result instanceof OresFuture<?> pending) {
+                                        handOffSourceProtocolReply(
+                                                protocol,
+                                                pending);
+                                    } else if (result instanceof CompletionStage<?>) {
                                         throw new IllegalStateException(
-                                                "suspending source actor protocol methods are not linked to the current mailbox continuation ABI yet");
-                                    }
-                                    Object preparedReply = prepareSourceProtocolReply(result);
-                                    if (!protocol.reply().completeFromRuntime(preparedReply)
-                                            && !protocol.reply().isCancelled()) {
-                                        throw new IllegalStateException(
-                                                "typed actor protocol reply was already settled");
+                                                "host CompletionStage values cannot cross a source actor protocol boundary; use OresFuture");
+                                    } else {
+                                        Object preparedReply =
+                                                prepareSourceProtocolReply(result);
+                                        publishSourceProtocolSuccessAfterTurn(
+                                                protocol,
+                                                preparedReply);
                                     }
                                 } catch (Throwable failure) {
-                                    protocol.reply().failFromRuntime(failure);
+                                    publishSourceProtocolFailureAfterTurn(
+                                            protocol,
+                                            failure);
                                     throw failure;
                                 }
                             }
@@ -5213,6 +5552,7 @@ public final class ActorRuntime implements AutoCloseable {
         private void terminateTree(Throwable cause, boolean recordCause) {
             List<ActorCell<?>> descendants;
             List<OresFuture<?>> pending;
+            Runnable abandonedQuiescentCompletion;
             synchronized (lifecycleLock) {
                 if (finalized) return;
                 if (recordCause && cause != null) {
@@ -5225,6 +5565,7 @@ public final class ActorRuntime implements AutoCloseable {
                 descendants = List.copyOf(children);
                 pending = List.copyOf(pendingOperations);
                 pendingOperations.clear();
+                abandonedQuiescentCompletion = abandonQuiescentStopLocked();
                 finalizeStopLocked();
                 lifecycleLock.notifyAll();
             }
@@ -5232,6 +5573,9 @@ public final class ActorRuntime implements AutoCloseable {
             // Cancellation removes channel/select waiter registrations before
             // any future channel activity can revive work for this dead actor.
             for (OresFuture<?> future : pending) future.cancel(false);
+            if (abandonedQuiescentCompletion != null) {
+                abandonedQuiescentCompletion.run();
+            }
 
             for (ActorCell<?> child : descendants) {
                 child.cancel(new ActorCancelledException(
