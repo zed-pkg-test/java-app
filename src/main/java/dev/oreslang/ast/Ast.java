@@ -46,7 +46,11 @@ public final class Ast {
     }
 
     public record TypeRef(String name, List<TypeRef> arguments, boolean inferArguments) {
-        public TypeRef { arguments = List.copyOf(arguments); }
+        public TypeRef {
+            // Both source spellings denote one primitive throughout every compiler pass.
+            if (name.equals("boolean")) name = "bool";
+            arguments = List.copyOf(arguments);
+        }
         public static TypeRef simple(String name) { return new TypeRef(name, List.of(), false); }
         public static TypeRef inferred() { return new TypeRef("$infer$", List.of(), false); }
         public static TypeRef borrowed(TypeRef target, boolean mutable) {
