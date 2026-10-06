@@ -199,6 +199,34 @@ final class ChannelStreamingLanguageTest {
     }
 
     @Test
+    void channelHandlesAreAsyncTaskSafeButNotGeneralCapabilityEscapeHatches() {
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck("""
+                async fnc ok(Channel<int> input): void {
+                  return;
+                }
+                """));
+
+        IllegalArgumentException unsafePayload = assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        async fnc bad(Channel<Future<int>> input): void {
+                          return;
+                        }
+                        """));
+        assertTrue(unsafePayload.getMessage().contains("task-safe"), unsafePayload::getMessage);
+
+        IllegalArgumentException actorBoundary = assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck("""
+                        actor fnc bad(Channel<int> input): void {
+                          return;
+                        }
+                        """));
+        assertTrue(actorBoundary.getMessage().contains("Channel"), actorBoundary::getMessage);
+        assertTrue(actorBoundary.getMessage().contains("actor boundary"), actorBoundary::getMessage);
+    }
+
+    @Test
     void synchronousIterationRejectsChannels() {
         IllegalArgumentException loop = assertThrows(
                 IllegalArgumentException.class,
