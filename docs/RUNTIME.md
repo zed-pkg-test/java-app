@@ -172,7 +172,7 @@ The design intentionally mirrors the strongest C# async/await practices:
 - keep the execution scheduler out of the source-level future contract;
 - separate I/O/task concurrency from explicitly CPU-bound scheduling.
 
-Because the current interpreter has not yet lowered `await` into a resumable state machine, an ordinary async virtual carrier may block while awaiting another future. Actor carriers are different: an incomplete `await` from an actor turn is rejected rather than parking the dispatcher. Adversarial contexts also fail closed for ordinary async execution until continuation lowering can release the strict guest-turn serialization lock at suspension points.
+Actor dispatcher carriers must not park on pending future reads. Pending `OresFuture.get()`, positive-timeout `get(...)`, and `join()` host/runtime bridges are rejected before registering a waiter. Settled reads and zero-timeout polling remain available. Guest `await` uses the compiler continuation path where supported; host blocking bridges cannot substitute for that suspension/resumption protocol.
 
 Async callable arguments/results are detached at the evaluator boundary. This is stricter than C#'s shared managed heap and preserves Oreslang's ownership direction: mutable task state is owned by the task instead of becoming an implicit cross-thread alias. Generic async boundaries remain closed until a Send/task-safe generic contract exists.
 
@@ -191,29 +191,18 @@ Its invariants are:
 - `release()`/close relinquishes the carrier, with bounded shutdown observation;
 - it never consumes a private/shared ActorRuntime dispatcher worker.
 
-A HungryActor is intentionally expensive. It is appropriate when reserving a whole carrier is the requirement—not as the default way to obtain parallelism. Ordinary actors should remain multiplexed, and ordinary `async` should remain task/future based. Dedicated one-carrier executors receive distinct process-wide affinity ordinals, so multiple HungryActors do not all collapse onto the first allowed Linux CPU (or the same Mach affinity tag). The current class is a host/compiler runtime primitive; exposing a richer source-level constructor must preserve the same ownership and capability checks rather than becoming a raw guest thread API.
+A HungryActor is intentionally expensive. It is appropriate when reserving a whole carrier is the requirement—not as the default way to obtain parallelism. Ordinary actors should remain multiplexed, and ordinary `async` should remain task/future based. The current class is a host/compiler runtime primitive; exposing a richer source-level constructor must preserve the same ownership and capability checks rather than becoming a raw guest thread API.
 
 ## Actor dispatchers
 
 The host actor runtime follows the same scheduling shape as Akka's event-based dispatcher: many actors share an executor, each actor has its own mailbox, and a scheduled actor drains only a bounded number of messages before yielding back to the executor. The configured throughput bound prevents one hot mailbox from monopolizing a worker.
 
-Oreslang deliberately keeps three scheduling bulkheads:
+Oreslang deliberately uses two executors:
 
 - **private dispatcher** — private actors, isolation-copy message transport;
-- **shared dispatcher** — shared actors, immutable sharing plus explicit `SyncCell<T>` shared state;
-- **untrusted dispatcher** — untrusted actors, with their stricter policy/isolation path kept out of the trusted actor ready queues.
+- **shared dispatcher** — shared actors, immutable sharing plus explicit `SyncCell<T>` shared state.
 
-A per-actor atomic scheduling gate ensures only one drain task for that actor is active. Thread identity is never actor identity, but the production native dispatcher applies **soft ActorId-to-carrier affinity** for cache locality. Successive turns for one actor prefer the same native carrier lane and therefore the same CPU/cache-affinity target. The affinity lane is an optimization only: when its backlog crosses a bounded threshold, new turns spill to the global ready queue, and an otherwise-idle peer may steal affinity work only after a short locality grace period. Local lanes also probe the global queue after a bounded burst so a permanently hot preferred lane cannot starve spill/control work. Steal scans are bounded per idle probe rather than walking every CPU lane on large hosts.
-
-On Linux each native carrier is pinned to one **logical CPU** selected from the process's current allowed CPU set (`sched_getaffinity` + `pthread_setaffinity_np`), so container/cgroup cpusets are respected. The native binder uses dynamically sized CPU masks instead of assuming `CPU_SETSIZE`, and runtime diagnostics can compare the selected target with `sched_getcpu()`. A binding failure is observable rather than silently being reported as a successful affinity target. On macOS, where strict Linux-style CPU pinning is unavailable, each carrier installs a stable Mach thread-affinity tag so the kernel can preserve cache locality when practical.
-
-Logical-CPU pinning is the current baseline, not a claim that slot numbers already model physical cores, SMT sibling sets, LLC groups, or NUMA nodes. Issue #303 tracks that topology-aware layer; source semantics must remain independent of the mapping.
-
-This scheduler policy is deliberately aligned with actor-local heaps: an actor's mailbox turns, local allocation metadata, and hot state normally return to the same carrier/cache domain without making the heap thread-confined. If balancing pressure moves a turn, the actor retains the same ActorId, heap, mailbox, policy, and continuation state. Queue admission is globally bounded across local affinity lanes plus the spill queue; shutdown retracts a post-drain enqueue when possible so no accepted lane entry can be stranded solely by the shutdown race.
-
-The native executor exposes diagnostic counters for preferred-lane hits, delayed steals, global spills, and affinity-binding failures. `ActorRuntime.carrierAffinityDiagnostics()` aggregates them across the private/shared/untrusted bulkheads, and `process.descriptor.actor_carrier_affinity` publishes the aggregate for supervisors. These are runtime/control-plane diagnostics, not language semantics.
-
-The explicit `java` carrier backend remains a portability/debugging fallback and does not promise CPU affinity.
+A per-actor atomic scheduling gate ensures only one drain task for that actor is active. The executor may run different turns on different threads; thread identity is never actor identity.
 
 The runtime does not interrupt a carrier thread to stop one actor because that thread belongs to the dispatcher and may subsequently execute unrelated actors. Actor cancellation is observed at compiler-injected scheduler safepoints. Whole-runtime shutdown may interrupt the dispatcher executors.
 
