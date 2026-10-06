@@ -40,6 +40,111 @@ final class GpuKeywordTest {
     }
 
     @Test
+    void gpuActorCallablesAreAdmittedButPersistentGpuActorClassesAreNotYet() {
+        Ast.Program program = Parser.parse("""
+                pub gpu isoactor fnc crunch(int x) => int {
+                  return x;
+                }
+                """);
+        Ast.FunctionDecl crunch = (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
+        assertTrue(crunch.gpu());
+        assertEquals(Ast.ActorKind.PRIVATE, crunch.actorKind());
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                gpu actor Worker {
+                }
+                """));
+    }
+
+    @Test
+    void gpuActorDispatchPreservesActorIdentityAndDoesNotRunBodyOnCpu() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<GpuRuntime.DispatchContext> seen =
+                new java.util.concurrent.atomic.AtomicReference<>();
+
+        GpuRuntime.installBackend(new GpuRuntime.Backend() {
+            @Override public String name() { return "actor-mapper-test"; }
+
+            @Override
+            public Object invoke(GpuRuntime.Invocation invocation) {
+                assertEquals("__root__.crunch", invocation.callable());
+                assertEquals(GpuRuntime.ExecutionClass.ACTOR, invocation.dispatchContext().executionClass());
+                assertNotNull(invocation.dispatchContext().actorId());
+                assertEquals("PRIVATE", invocation.dispatchContext().actorKind());
+                assertNull(invocation.dispatchContext().placement().deviceOrdinal());
+                assertNull(invocation.dispatchContext().placement().partitionOrdinal());
+                seen.set(invocation.dispatchContext());
+                return 77L;
+            }
+        });
+
+        String output = run("""
+                pub gpu isoactor fnc crunch(int x) => int {
+                  return 999;
+                }
+
+                pub routine main() => void {
+                  stdio.stdout.write(crunch(7));
+                }
+                """);
+
+        assertEquals("77", output);
+        assertNotNull(seen.get());
+    }
+
+    @Test
+    void gpuPlacementModelsDevicesAndLogicalPartitionsNotPhysicalCores() {
+        assertEquals(2, GpuRuntime.Placement.device(2).deviceOrdinal());
+        assertEquals(5, GpuRuntime.Placement.partition(5).partitionOrdinal());
+        assertEquals("actor-42", GpuRuntime.Placement.partition(1).withAffinity("actor-42").affinityKey());
+        assertThrows(IllegalArgumentException.class, () -> GpuRuntime.Placement.device(-1));
+        assertThrows(IllegalArgumentException.class, () -> GpuRuntime.Placement.partition(-1));
+    }
+
+    @Test
+    void gpuDispatchEnvelopeRejectsMalformedMapperMetadata() {
+        assertThrows(NullPointerException.class,
+                () -> new GpuRuntime.Invocation("x", GpuRuntime.CallableKind.FNC, null));
+        assertThrows(IllegalArgumentException.class,
+                () -> new GpuRuntime.Invocation("   ", GpuRuntime.CallableKind.FNC, java.util.List.of()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new GpuRuntime.Placement(null, null, "x".repeat(257)));
+        assertThrows(NullPointerException.class,
+                () -> GpuRuntime.DispatchContext.actor(null, "PRIVATE", GpuRuntime.Placement.any()));
+        assertThrows(IllegalArgumentException.class,
+                () -> new GpuRuntime.DispatchContext(
+                        GpuRuntime.ExecutionClass.HOST,
+                        java.util.UUID.randomUUID(),
+                        null,
+                        GpuRuntime.Placement.any()));
+    }
+
+    @Test
+    void gpuActorCapabilityAdmissionComposesActorAndGpuPolicies() {
+        String privateGpu = """
+                pub gpu isoactor fnc crunch(int x) => int {
+                  return x;
+                }
+                """;
+        assertThrows(SecurityException.class,
+                () -> OresCompiler.validateForIsolate(privateGpu, IsolatePolicy.strictFaas()));
+        assertDoesNotThrow(() -> OresCompiler.validateForIsolate(
+                privateGpu,
+                IsolatePolicy.strictFaas().withCapabilities(IsolatePolicy.Capability.GPU)));
+
+        String sharedGpu = """
+                pub gpu actor fnc crunch(int x) => int {
+                  return x;
+                }
+                """;
+        IsolatePolicy gpuOnly = IsolatePolicy.strictFaas().withCapabilities(IsolatePolicy.Capability.GPU);
+        assertThrows(SecurityException.class,
+                () -> OresCompiler.validateForIsolate(sharedGpu, gpuOnly));
+        assertDoesNotThrow(() -> OresCompiler.validateForIsolate(
+                sharedGpu,
+                gpuOnly.withCapabilities(IsolatePolicy.Capability.SHARED_MEMORY)));
+    }
+
+    @Test
     void gpuModifierIsRestrictedToNamedTopLevelOrModuleCallables() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 gpu define class Bad
