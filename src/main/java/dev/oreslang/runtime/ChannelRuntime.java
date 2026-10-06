@@ -701,6 +701,9 @@ public final class ChannelRuntime {
     private static CaseRegistration findMutualPeerLocked(
             CaseRegistration registration,
             SelectOperation opposite) {
+        // Buffered values precede pending writers. Pairing a writer directly
+        // with a reader here would let a newer value overtake committed data.
+        if (!registration.channel().buffer.isEmpty()) return null;
         CaseRegistration best = null;
 
         for (CaseRegistration candidate :
