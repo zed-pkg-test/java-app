@@ -2730,9 +2730,6 @@ public final class TypeChecker {
     }
 
     private void validateMutexCallback(Ast.LambdaExpr lambda, Type expectedParameter, Env parent, Set<String> generics, Type self) {
-        if (lambda.expressionBody() != null) {
-            throw new IllegalArgumentException("mutex callbacks require a block body");
-        }
         if (lambda.parameters().size() != 1) {
             throw new IllegalArgumentException("mutex callback must accept exactly one protected-value parameter");
         }
@@ -2746,7 +2743,13 @@ public final class TypeChecker {
         Ast.ClassDecl previousClassOwner = currentClassOwner;
         if (nonLexical) currentClassOwner = null;
         try {
-            checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Primitive.VOID, self);
+            if (lambda.expressionBody() != null) {
+                Type actual = typeOfAgainstExpected(
+                        lambda.expressionBody(), Primitive.VOID, lambdaEnv, generics, self);
+                requireAssignable(actual, Primitive.VOID, "mutex callback expression body");
+            } else {
+                checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, Primitive.VOID, self);
+            }
         } finally {
             currentClassOwner = previousClassOwner;
         }
