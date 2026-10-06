@@ -451,7 +451,7 @@ final class CallableScopeEffectKeywordTest {
     }
 
     @Test
-    void pureAndTrapRejectAsyncAndActorBoundariesForNow() {
+    void pureAndTrapRejectAsyncGeneratorAndActorBoundariesForNow() {
         IllegalArgumentException pureAsync = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         pure async fnc work(): int {
@@ -468,6 +468,24 @@ final class CallableScopeEffectKeywordTest {
                         """)));
         assertTrue(trapAsync.getMessage().contains("cannot wrap async"));
 
+        IllegalArgumentException pureGenerator = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        pure generator fnc values(): int {
+                          yield 1;
+                          return;
+                        }
+                        """)));
+        assertTrue(pureGenerator.getMessage().contains("generator"), pureGenerator.getMessage());
+
+        IllegalArgumentException trapGenerator = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        trap generator fnc values(): int {
+                          yield 1;
+                          return;
+                        }
+                        """)));
+        assertTrue(trapGenerator.getMessage().contains("generator"), trapGenerator.getMessage());
+
         IllegalArgumentException actorPure = assertThrows(IllegalArgumentException.class,
                 () -> TypeChecker.check(Parser.parse("""
                         pure actor fnc work(): int {
@@ -475,6 +493,14 @@ final class CallableScopeEffectKeywordTest {
                         }
                         """)));
         assertTrue(actorPure.getMessage().contains("cannot be pure"));
+
+        IllegalArgumentException actorTrap = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        trap actor fnc work(): int {
+                          return 1;
+                        }
+                        """)));
+        assertTrue(actorTrap.getMessage().contains("actor"), actorTrap.getMessage());
     }
 
     private static String run(String program) throws Exception {
