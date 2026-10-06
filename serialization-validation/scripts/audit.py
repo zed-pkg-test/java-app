@@ -84,8 +84,9 @@ def main() -> int:
         for line_no, raw in enumerate(lines, 1):
             code = code_only(raw)
 
-            if re.search(r"}\s*(?:fi|elseif|elif)\b", code):
-                fail(errors, path, line_no, "mixed brace/fi conditional syntax")
+            # Conditional syntax is parser-owned. In current Oreslang, braced
+            # branches still use the structural `fi` terminator, so the static
+            # audit must not reject `} fi`, `} elif`, or `} elseif` forms.
 
             if re.search(r"&\s*mut\b", code):
                 fail(errors, path, line_no, "Rust-style &mut ownership syntax is forbidden")
