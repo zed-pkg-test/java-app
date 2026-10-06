@@ -8,11 +8,90 @@ import dev.oreslang.types.OwnershipChecker;
 import dev.oreslang.types.TypeChecker;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ParserTest {
+    @Test
+    void exhaustivelyAcceptsSupportedDeclarationModifierPermutations() {
+        for (List<String> order : permutations("define", "class", "pub", "abstract")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s Box as
+                      end
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        for (List<String> order : permutations("define", "interface", "pub")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s Api {
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        for (List<String> order : permutations("define", "contract", "pub")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s Contract {
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        for (List<String> order : permutations("pub", "async", "nlex", "fnc")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s work(): void {
+                        return;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        for (List<String> order : permutations("pub", "static", "fnc")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      define class Box as
+                        %s helper(): int {
+                          return 1;
+                        }
+                      end
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        int actorCases = 0;
+        for (List<String> order : permutations("pub", "async", "untrusted", "actor", "fnc")) {
+            actorCases++;
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s worker(int value): int {
+                        return value;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+        assertEquals(120, actorCases);
+
+        int actorRoutineCases = 0;
+        for (List<String> order : permutations("pub", "async", "shared", "actor", "routine")) {
+            actorRoutineCases++;
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s worker_routine(int value): int {
+                        return value;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+        assertEquals(120, actorRoutineCases);
+    }
+
     @Test
     void classDefineAndVisibilityKeywordsMayAppearInCompatibilityOrder() {
         Ast.Program program = Parser.parse("""
@@ -78,6 +157,37 @@ final class ParserTest {
             assertEquals(Ast.Visibility.PUBLIC, contract.visibility());
             assertTrue(contract.moduleContract());
         }
+    }
+
+    @Test
+    void actorMarkerMayAppearOnEitherSideOfCallableKind() {
+        Ast.Program program = Parser.parse("""
+                define module app as
+                  fnc pub actor untrusted async first(int value): int {
+                    return value;
+                  }
+
+                  routine shared pub actor async second(int value): int {
+                    return value;
+                  }
+
+                  fnc pub isoactor async third(int value): int {
+                    return value;
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        Ast.FunctionDecl first = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(0));
+        Ast.FunctionDecl second = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(1));
+        Ast.FunctionDecl third = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(2));
+
+        assertEquals(Ast.ActorKind.UNTRUSTED, first.actorKind());
+        assertEquals(Ast.ActorKind.SHARED, second.actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, third.actorKind());
+        assertTrue(first.async());
+        assertTrue(second.async());
+        assertTrue(third.async());
     }
 
     @Test
@@ -997,6 +1107,29 @@ final class ParserTest {
                         """));
 
         assertTrue(failure.getMessage().contains("expected 'as' after class header"));
+    }
+
+    private static List<List<String>> permutations(String... tokens) {
+        List<List<String>> out = new ArrayList<>();
+        permute(new ArrayList<>(List.of(tokens)), new ArrayList<>(), out);
+        return out;
+    }
+
+    private static void permute(
+            List<String> remaining,
+            List<String> prefix,
+            List<List<String>> out) {
+        if (remaining.isEmpty()) {
+            out.add(List.copyOf(prefix));
+            return;
+        }
+        for (int index = 0; index < remaining.size(); index++) {
+            List<String> nextRemaining = new ArrayList<>(remaining);
+            String token = nextRemaining.remove(index);
+            List<String> nextPrefix = new ArrayList<>(prefix);
+            nextPrefix.add(token);
+            permute(nextRemaining, nextPrefix, out);
+        }
     }
 
 }
