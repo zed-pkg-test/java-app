@@ -351,28 +351,17 @@ public final class OresContext implements AutoCloseable {
 
 
     public Map<String, Object> processDescriptor() {
-        ActorRuntime.CarrierAffinityDiagnostics affinity =
-                actors.carrierAffinityDiagnostics();
-        return Map.ofEntries(
-                Map.entry("context_id", contextId.toString()),
-                Map.entry("runtime", "graalvm-truffle"),
-                Map.entry("language", "oreslang"),
-                Map.entry("execution_mode", executionProfile.mode().name()),
-                Map.entry("platform", executionProfile.platform().name()),
-                Map.entry(
-                        "actor_carrier_backend",
-                        actors.carrierBackend().name().toLowerCase(java.util.Locale.ROOT)),
-                Map.entry(
-                        "actor_carrier_affinity",
-                        Map.of(
-                                "preferred_hits", affinity.preferredHits(),
-                                "steals", affinity.steals(),
-                                "global_spills", affinity.globalSpills(),
-                                "binding_failures", affinity.bindingFailures())),
-                Map.entry("root_scheduler", vm.rootScheduler().name()),
-                Map.entry("scheduler_started", vm.started()),
-                Map.entry("control_carriers_started", vm.controlCarrierCount()),
-                Map.entry("scheduler_safepoints", schedulerSafepoints.get()));
+        return Map.of(
+                "context_id", contextId.toString(),
+                "runtime", "graalvm-truffle",
+                "language", "oreslang",
+                "execution_mode", executionProfile.mode().name(),
+                "platform", executionProfile.platform().name(),
+                "actor_carrier_backend", actors.carrierBackend().name().toLowerCase(java.util.Locale.ROOT),
+                "root_scheduler", vm.rootScheduler().name(),
+                "scheduler_started", vm.started(),
+                "control_carriers_started", vm.controlCarrierCount(),
+                "scheduler_safepoints", schedulerSafepoints.get());
     }
 
     @Override
