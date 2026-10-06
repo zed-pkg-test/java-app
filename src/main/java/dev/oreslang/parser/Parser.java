@@ -251,7 +251,6 @@ public final class Parser {
             }
             return parseActorClass(actorKind);
         }
-        if (modifiers.shared) throw error(previous(), "'shared' must modify an actor declaration");
         if (match(FNC)) {
             modifiers = mergeModifiers(modifiers, parseModifiers());
             if (match(ACTOR, ISOACTOR)) {
