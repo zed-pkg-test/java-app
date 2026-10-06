@@ -90,6 +90,50 @@ final class BufferedChannelRefinementTest {
                 "refinement must cover the same non-trivial three-message state space");
     }
 
+    @Test
+    void closeFailsPendingBufferedWriterButPreservesCommittedFifoData() {
+        ChannelRuntime.Channel<Message> channel = new ChannelRuntime.Channel<>(2);
+        assertTrue(channel.tryWrite(Message.A));
+        assertTrue(channel.tryWrite(Message.B));
+
+        OresFuture<Void> pending = channel.writeAsync(Message.C);
+        assertFalse(pending.isDone());
+
+        channel.close();
+
+        CompletionException writeFailure = assertThrows(
+                CompletionException.class,
+                pending::join);
+        assertInstanceOf(
+                ChannelRuntime.ChannelClosedException.class,
+                writeFailure.getCause());
+
+        assertEquals(Message.A, channel.tryRead().orElseThrow());
+        assertEquals(Message.B, channel.tryRead().orElseThrow());
+
+        CompletionException readFailure = assertThrows(
+                CompletionException.class,
+                channel::tryRead);
+        assertInstanceOf(
+                ChannelRuntime.ChannelClosedException.class,
+                readFailure.getCause());
+    }
+
+    @Test
+    void cancelledPendingBufferedWriterCannotDeliverAfterCapacityFrees() {
+        ChannelRuntime.Channel<Message> channel = new ChannelRuntime.Channel<>(1);
+        assertTrue(channel.tryWrite(Message.A));
+
+        OresFuture<Void> pending = channel.writeAsync(Message.B);
+        assertFalse(pending.isDone());
+        assertTrue(pending.cancel(false));
+
+        assertEquals(Message.A, channel.tryRead().orElseThrow());
+        assertTrue(
+                channel.tryRead().isEmpty(),
+                "cancelled pending writer must be detached before later capacity becomes available");
+    }
+
     private static void assertConcreteStateAndNextOperations(Node node) {
         Replay baseline = replay(node.trace());
         State state = node.state();
