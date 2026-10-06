@@ -4,6 +4,7 @@ import dev.oreslang.compiler.BuildOptions;
 import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.compiler.TreeShaker;
 import dev.oreslang.config.OresProjectConfig;
+import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.LinkedProgramRunner;
@@ -92,6 +93,11 @@ public final class OresMain {
             throw new IllegalArgumentException("--check and --build-analysis are mutually exclusive");
         }
 
+        String directOresSource = filename.endsWith(".ores") ? Files.readString(path) : null;
+        if (directOresSource != null) {
+            formatSyntaxWarnings(path, directOresSource).forEach(System.err::println);
+        }
+
         if (buildAnalysis) {
             if (!filename.endsWith(".ores")) {
                 throw new IllegalArgumentException("--build-analysis currently requires a .ores source file");
@@ -99,7 +105,7 @@ public final class OresMain {
             Map<String, String> defines = BuildOptions.mergeDefines(System.getenv(), buildDefines);
             Set<String> entries = buildEntryPoints.isEmpty() ? Set.of("main") : Set.copyOf(buildEntryPoints);
             TreeShaker.Result result = OresCompiler.compileForBuild(
-                    Files.readString(path),
+                    directOresSource,
                     new BuildOptions(defines, entries, false));
 
             System.out.println("tree-shake retained:");
@@ -130,6 +136,22 @@ public final class OresMain {
         }
 
         LinkedProgramRunner.run(path, policy, profile, allowedHostClasses, System.out, System.err);
+    }
+
+    static List<String> formatSyntaxWarnings(Path path, String source) {
+        try {
+            Path normalized = path.toAbsolutePath().normalize();
+            return Parser.parseWithWarnings(source).warnings().stream()
+                    .map(warning -> normalized
+                            + ":" + warning.line()
+                            + ":" + warning.column()
+                            + ": warning: " + warning.message())
+                    .toList();
+        } catch (IllegalArgumentException ignored) {
+            // The normal compile/check path will report the authoritative parse
+            // error. Do not replace it with a secondary warning-scan failure.
+            return List.of();
+        }
     }
 
     static String formatCheckDiagnostic(Path path, Exception error) {

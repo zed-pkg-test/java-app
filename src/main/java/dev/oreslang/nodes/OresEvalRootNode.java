@@ -30,7 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionStage;
 
 /** Executable Truffle root. Parsing and static checks happen before this node is created. */
@@ -119,7 +118,8 @@ public final class OresEvalRootNode extends RootNode {
         private final Ast.Program program;
         private final OresContext context;
         private final String codeUnitId;
-        private final Map<String, Ast.FunctionDecl> functions = new HashMap<>();
+        private final Map<String, LinkedHashMap<Integer, Ast.FunctionDecl>> functions = new HashMap<>();
+        private final Map<String, String> unqualifiedFunctionOwners = new HashMap<>();
         private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
         private final Map<String, Ast.InterfaceDecl> interfaces = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> typeAliases = new HashMap<>();
@@ -256,7 +256,7 @@ public final class OresEvalRootNode extends RootNode {
             for (Ast.ModuleDecl module : program.modules()) {
                 modules.put(module.name(), module);
                 for (Ast.Decl decl : module.declarations()) {
-                    if (decl instanceof Ast.FunctionDecl fn) index(functions, ambiguousFunctions, module.name(), fn.name(), fn);
+                    if (decl instanceof Ast.FunctionDecl fn) indexFunction(module.name(), fn);
                     else if (decl instanceof Ast.ClassDecl klass) {
                         index(classes, ambiguousClasses, module.name(), klass.name(), klass);
                         for (Ast.MethodDecl method : klass.methods()) methodOwners.put(method, klass);
@@ -264,6 +264,30 @@ public final class OresEvalRootNode extends RootNode {
                         index(interfaces, ambiguousInterfaces, module.name(), iface.name(), iface);
                     } else if (decl instanceof Ast.TypeAliasDecl alias) index(typeAliases, ambiguousTypeAliases, module.name(), alias.name(), alias);
                 }
+            }
+        }
+
+        private void indexFunction(String module, Ast.FunctionDecl fn) {
+            String qualified = module + "." + fn.name();
+            indexFunctionSlot(qualified, fn);
+
+            String owner = unqualifiedFunctionOwners.putIfAbsent(fn.name(), module);
+            if (owner == null || owner.equals(module)) {
+                if (!ambiguousFunctions.contains(fn.name())) indexFunctionSlot(fn.name(), fn);
+            } else {
+                ambiguousFunctions.add(fn.name());
+                functions.remove(fn.name());
+            }
+        }
+
+        private void indexFunctionSlot(String key, Ast.FunctionDecl fn) {
+            LinkedHashMap<Integer, Ast.FunctionDecl> family =
+                    functions.computeIfAbsent(key, ignored -> new LinkedHashMap<>());
+            Ast.FunctionDecl previous = family.putIfAbsent(fn.parameters().size(), fn);
+            if (previous != null) {
+                throw new IllegalArgumentException(
+                        "callable '" + key + "' already has arity " + fn.parameters().size()
+                                + "; overload identity is name + arity only");
             }
         }
 
@@ -276,9 +300,46 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
-        private Ast.FunctionDecl findFunction(String name) {
-            if (ambiguousFunctions.contains(name)) throw new IllegalArgumentException("ambiguous function " + name + "; qualify it with its module");
-            return functions.get(name);
+        private boolean hasFunctionFamily(String name) {
+            if (ambiguousFunctions.contains(name)) {
+                throw new IllegalArgumentException(
+                        "ambiguous function " + name + "; qualify it with its module");
+            }
+            return functions.containsKey(name);
+        }
+
+        private Ast.FunctionDecl findFunction(String name, int arity) {
+            if (ambiguousFunctions.contains(name)) {
+                throw new IllegalArgumentException(
+                        "ambiguous function " + name + "; qualify it with its module");
+            }
+            LinkedHashMap<Integer, Ast.FunctionDecl> family = functions.get(name);
+            return family == null ? null : family.get(arity);
+        }
+
+        private Ast.FunctionDecl findSingleFunction(String name) {
+            if (ambiguousFunctions.contains(name)) {
+                throw new IllegalArgumentException(
+                        "ambiguous function " + name + "; qualify it with its module");
+            }
+            return singleFunction(functions.get(name), name);
+        }
+
+        private Ast.FunctionDecl findQualifiedFunction(String qualifiedName, int arity) {
+            LinkedHashMap<Integer, Ast.FunctionDecl> family = functions.get(qualifiedName);
+            return family == null ? null : family.get(arity);
+        }
+
+        private Ast.FunctionDecl singleFunction(
+                LinkedHashMap<Integer, Ast.FunctionDecl> family,
+                String displayName) {
+            if (family == null || family.isEmpty()) return null;
+            if (family.size() > 1) {
+                throw new IllegalArgumentException(
+                        "overloaded callable '" + displayName
+                                + "' must be called so name + arity can select a slot");
+            }
+            return family.values().iterator().next();
         }
 
         private Ast.ClassDecl findClass(String name) {
@@ -338,8 +399,8 @@ public final class OresEvalRootNode extends RootNode {
                         "main cannot run before successful initialization of code unit "
                                 + codeUnitId + "; current phase=" + startupPhase);
             }
-            Ast.FunctionDecl main = functions.get(Parser.ROOT_MODULE + ".main");
-            if (main == null) main = findFunction("main");
+            Ast.FunctionDecl main = findQualifiedFunction(Parser.ROOT_MODULE + ".main", 0);
+            if (main == null) main = findFunction("main", 0);
             if (main == null) return null;
             Object result = callFunction(main, List.of(arguments));
             if (result instanceof OresFuture<?> future) {
@@ -352,7 +413,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object invokePublic(String name, Object[] arguments) {
-            Ast.FunctionDecl fn = findFunction(name);
+            Ast.FunctionDecl fn = findFunction(name, arguments.length);
             if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
                 throw new IllegalArgumentException("code unit '" + codeUnitId
                         + "' does not export public function '" + name + "'");
@@ -471,7 +532,7 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             if (fn.actorKind() == Ast.ActorKind.NONE) {
-                if (!fn.async()) return callFunctionBody(fn, normalized);
+                if (!fn.async()) return callFunctionBodyRaw(fn, normalized);
 
                 List<?> detached = detachAsyncArguments(normalized);
                 return context.asyncRuntime().submit(() ->
@@ -619,28 +680,6 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
-        private Object callFunctionBody(Ast.FunctionDecl fn, List<?> args) {
-            if (!fn.trapped()) return callFunctionBodyRaw(fn, args);
-            try {
-                Object value = callFunctionBodyRaw(fn, args);
-                Object success = value == null ? List.of() : value;
-                return List.of(
-                        new OptionValue(true, success),
-                        new OptionValue(false, null));
-            } catch (OresPanic panic) {
-                // Panic is an invariant/recovery channel, not an ordinary throw.
-                throw panic;
-            } catch (CancellationException cancelled) {
-                // Cancellation is scheduler/lifetime control flow and must never
-                // be converted into an ordinary trapped guest error.
-                throw cancelled;
-            } catch (RuntimeException failure) {
-                return List.of(
-                        new OptionValue(false, null),
-                        new OptionValue(true, failure));
-            }
-        }
-
         private Object callFunctionBodyRaw(Ast.FunctionDecl fn, List<?> args) {
             Env env = new Env(null, fn.nonLexical());
             for (int i = 0; i < fn.parameters().size(); i++) {
@@ -648,9 +687,7 @@ public final class OresEvalRootNode extends RootNode {
                 env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
             try {
-                // Reuse the runtime's existing tail barrier so a tail call
-                // cannot erase the dynamic trap boundary.
-                executeBlock(fn.body(), env, fn.trapped());
+                executeBlock(fn.body(), env);
                 return null;
             } catch (TailCallSignal signal) {
                 return new TailCall(signal.invocation);
@@ -692,24 +729,6 @@ public final class OresEvalRootNode extends RootNode {
             } finally {
                 if (previous == null) activeGeneratorEmitter.remove();
                 else activeGeneratorEmitter.set(previous);
-            }
-        }
-
-        private Object trapFunctionExpression(Invokable body, List<Object> args) {
-            try {
-                Object value = body.call(args);
-                Object success = value == null ? List.of() : value;
-                return List.of(
-                        new OptionValue(true, success),
-                        new OptionValue(false, null));
-            } catch (OresPanic panic) {
-                throw panic;
-            } catch (CancellationException cancelled) {
-                throw cancelled;
-            } catch (RuntimeException failure) {
-                return List.of(
-                        new OptionValue(false, null),
-                        new OptionValue(true, failure));
             }
         }
 
@@ -1067,6 +1086,9 @@ public final class OresEvalRootNode extends RootNode {
 
             if (!tailBarrier) {
                 if (value instanceof Ast.CallExpr call) {
+                    if (isBooleanIntrinsicCall(call, env)) {
+                        throw new ReturnSignal(evalBooleanIntrinsic(call, env));
+                    }
                     Invocation invocation = prepareInvocation(call, env);
                     boolean localTailTarget = invocation.kind() == InvocationKind.INVOKABLE
                             ? invocation.target() instanceof TailCallable callable
@@ -1095,7 +1117,7 @@ public final class OresEvalRootNode extends RootNode {
         private Invocation prepareInvocation(Ast.CallExpr call, Env env) {
             if (call.callee() instanceof Ast.NameExpr directName
                     && env.lookup(directName.name()) == Env.MISSING) {
-                Ast.FunctionDecl direct = findFunction(directName.name());
+                Ast.FunctionDecl direct = findFunction(directName.name(), call.arguments().size());
                 if (direct != null) {
                     List<Object> args = evaluateArguments(call.arguments(), env);
                     return functionInvocation(direct, args);
@@ -1194,6 +1216,18 @@ public final class OresEvalRootNode extends RootNode {
                 return invokableInvocation(invokable, args);
             }
 
+            if (call.callee() instanceof Ast.NameExpr importedName) {
+                ImportedBinding directImport = namedImports.get(importedName.name());
+                if (directImport != null
+                        && directImport.declaration().kind() == Ast.ImportKind.FUNCTION) {
+                    List<Object> args = evaluateArguments(call.arguments(), env);
+                    return importedTarget(directImport.declaration()).prepareImportedInvocation(
+                            Ast.ImportKind.FUNCTION,
+                            directImport.sourceName(),
+                            args);
+                }
+            }
+
             Object callee = eval(call.callee(), env);
             List<Object> args = evaluateArguments(call.arguments(), env);
             if (!(callee instanceof Invokable invokable)) {
@@ -1204,8 +1238,117 @@ public final class OresEvalRootNode extends RootNode {
 
         private List<Object> evaluateArguments(List<Ast.Expr> arguments, Env env) {
             ArrayList<Object> values = new ArrayList<>(arguments.size());
-            for (Ast.Expr argument : arguments) values.add(eval(argument, env));
+            for (Ast.Expr argument : arguments) {
+                if (argument instanceof Ast.SpreadExpr spread) {
+                    values.addAll(expandArgumentSequence(eval(spread.expression(), env), "argument spread"));
+                } else {
+                    values.add(eval(argument, env));
+                }
+            }
             return List.copyOf(values);
+        }
+
+        private boolean isBooleanIntrinsicCall(Ast.CallExpr call, Env env) {
+            return booleanIntrinsicName(call, env) != null;
+        }
+
+        private String booleanIntrinsicName(Ast.CallExpr call, Env env) {
+            if (call.callee() instanceof Ast.NameExpr name
+                    && isBooleanIntrinsicName(name.name())
+                    && env.lookup(name.name()) == Env.MISSING
+                    && !hasFunctionFamily(name.name())) {
+                return name.name();
+            }
+            if (call.callee() instanceof Ast.MemberExpr member
+                    && member.receiver() instanceof Ast.NameExpr namespace
+                    && namespace.name().equals("BooleanOps")
+                    && isBooleanIntrinsicName(member.member())
+                    && env.lookup("BooleanOps") == Env.MISSING
+                    && !modules.containsKey("BooleanOps")) {
+                return member.member();
+            }
+            return null;
+        }
+
+        private static boolean isBooleanIntrinsicName(String name) {
+            return name.equals("And") || name.equals("Or") || name.equals("Xor");
+        }
+
+        private boolean evalBooleanIntrinsic(Ast.CallExpr call, Env env) {
+            String name = booleanIntrinsicName(call, env);
+            if (name == null) throw new IllegalStateException("not a boolean intrinsic call");
+            if (call.typeArgumentsPresent()) {
+                throw new IllegalArgumentException(name + " does not accept call-site type arguments");
+            }
+            List<Ast.Expr> arguments = call.arguments();
+
+            if (arguments.size() == 1) {
+                Object aggregate = eval(arguments.getFirst(), env);
+                if (aggregate instanceof List<?> list) return foldBooleanValues(name, list);
+                if (aggregate instanceof Object[] array) {
+                    return foldBooleanValues(name, java.util.Arrays.asList(array));
+                }
+                throw new IllegalArgumentException(name + " arity 1 selects the List<bool> overload");
+            }
+
+            if (arguments.size() < 2) {
+                throw new IllegalArgumentException(
+                        name + " expects either one List<bool> argument or at least two bool arguments");
+            }
+            return evalBooleanExpressions(name, arguments, env);
+        }
+
+        private boolean evalBooleanExpressions(String name, List<Ast.Expr> expressions, Env env) {
+            return switch (name) {
+                case "And" -> {
+                    for (Ast.Expr expression : expressions) {
+                        if (!booleanIntrinsicValue(name, eval(expression, env))) yield false;
+                    }
+                    yield true;
+                }
+                case "Or" -> {
+                    for (Ast.Expr expression : expressions) {
+                        if (booleanIntrinsicValue(name, eval(expression, env))) yield true;
+                    }
+                    yield false;
+                }
+                case "Xor" -> {
+                    boolean parity = false;
+                    for (Ast.Expr expression : expressions) {
+                        parity ^= booleanIntrinsicValue(name, eval(expression, env));
+                    }
+                    yield parity;
+                }
+                default -> throw new IllegalStateException("unknown boolean intrinsic " + name);
+            };
+        }
+
+        private boolean foldBooleanValues(String name, Iterable<?> values) {
+            return switch (name) {
+                case "And" -> {
+                    for (Object value : values) {
+                        if (!booleanIntrinsicValue(name, value)) yield false;
+                    }
+                    yield true;
+                }
+                case "Or" -> {
+                    for (Object value : values) {
+                        if (booleanIntrinsicValue(name, value)) yield true;
+                    }
+                    yield false;
+                }
+                case "Xor" -> {
+                    boolean parity = false;
+                    for (Object value : values) parity ^= booleanIntrinsicValue(name, value);
+                    yield parity;
+                }
+                default -> throw new IllegalStateException("unknown boolean intrinsic " + name);
+            };
+        }
+
+        private boolean booleanIntrinsicValue(String name, Object value) {
+            if (value instanceof Boolean bool) return bool;
+            throw new IllegalArgumentException(name + " operands must be bool");
         }
 
         private Object eval(Ast.Expr expr, Env env) {
@@ -1223,6 +1366,9 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
                 if (name.name().equals("Future")) return FutureFactory.INSTANCE;
+                if (name.name().equals("BooleanOps") && !modules.containsKey("BooleanOps")) {
+                    return BooleanOpsNamespace.INSTANCE;
+                }
                 if (name.name().equals("print")) return (Invokable) args -> {
                     context.requireCapability(IsolatePolicy.Capability.STDOUT, "print");
                     requireOne(args, "print"); context.output().print(display(args.getFirst())); context.output().flush(); return null;
@@ -1254,7 +1400,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (klass != null) return new ClassFacade(this, klass);
                 Object imported = importedValue(name.name());
                 if (imported != Env.MISSING) return imported;
-                Ast.FunctionDecl fn = findFunction(name.name());
+                Ast.FunctionDecl fn = findSingleFunction(name.name());
                 if (fn != null) {
                     if (fn.actorKind() != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException("actor callable " + fn.name()
@@ -1388,7 +1534,11 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 return value;
             }
+            if (expr instanceof Ast.SpreadExpr) {
+                throw new IllegalArgumentException("spread expressions are only valid inside call argument lists");
+            }
             if (expr instanceof Ast.CallExpr call) {
+                if (isBooleanIntrinsicCall(call, env)) return evalBooleanIntrinsic(call, env);
                 return invoke(prepareInvocation(call, env));
             }
             if (expr instanceof Ast.MemberExpr member) return member(eval(member.receiver(), env), member.member(), env);
@@ -1490,7 +1640,7 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.LambdaExpr lambda) {
                 boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
-                Invokable body = args -> {
+                return tailCallable(args -> {
                     if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
                     Env local = new Env(captured, nonLexical);
                     for (int i = 0; i < lambda.parameters().size(); i++) {
@@ -1499,10 +1649,14 @@ public final class OresEvalRootNode extends RootNode {
                     }
                     try {
                         if (lambda.expressionBody() != null) {
-                            returnFrom(lambda.expressionBody(), local, lambda.trapped());
+                            // An expression-bodied lambda's sole expression is
+                            // inherently in tail position. Route it through the
+                            // same tail-return lowering as an explicit
+                            // `return expr;` in a block-bodied lambda.
+                            returnFrom(lambda.expressionBody(), local, false);
                             throw new AssertionError("lambda expression return did not transfer control");
                         }
-                        executeBlock(lambda.blockBody(), local, lambda.trapped());
+                        executeBlock(lambda.blockBody(), local);
                         return null;
                     } catch (TailCallSignal signal) {
                         return new TailCall(signal.invocation);
@@ -1511,11 +1665,7 @@ public final class OresEvalRootNode extends RootNode {
                     } catch (BreakSignal | ContinueSignal signal) {
                         throw new IllegalStateException("loop control cannot cross a lambda boundary", signal);
                     }
-                };
-                Invokable effective = lambda.trapped()
-                        ? args -> trapFunctionExpression(body, args)
-                        : body;
-                return tailCallable(effective);
+                });
             }
             throw new IllegalArgumentException("unsupported expression " + expr);
         }
@@ -1543,6 +1693,8 @@ public final class OresEvalRootNode extends RootNode {
                 return switch (name) {
                     case "write" -> (Invokable) stdout::write;
                     case "println" -> (Invokable) stdout::println;
+                    case "log" -> (Invokable) stdout::log;
+                    case "logList" -> (Invokable) stdout::logList;
                     default -> throw new IllegalArgumentException("unknown stdout member " + name);
                 };
             }
@@ -1608,6 +1760,11 @@ public final class OresEvalRootNode extends RootNode {
                     case "is_released" -> (Invokable) args -> { requireZero(args, "MutexGuard.is_released"); return guard.released(); };
                     default -> member(guard.value(), name, env);
                 };
+            }
+            if (receiver == BooleanOpsNamespace.INSTANCE && isBooleanIntrinsicName(name)) {
+                throw new IllegalArgumentException(
+                        "overloaded builtin BooleanOps." + name
+                                + " must be called so arity can select the scalar or list overload");
             }
             if (receiver instanceof ImportedNamespace namespace) return namespace.owner().exportValue(namespace.kind(), name);
             if (receiver instanceof ModuleFacade namespace) return namespace.owner().moduleMember(namespace.module(), name);
@@ -1991,7 +2148,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Invocation prepareImportedInvocation(Ast.ImportKind kind, String name, List<Object> args) {
-            Ast.FunctionDecl fn = findFunction(name);
+            Ast.FunctionDecl fn = findFunction(name, args.size());
             if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
                 throw new IllegalArgumentException("code unit '" + codeUnitId
                         + "' does not export callable '" + name + "'");
@@ -2022,7 +2179,7 @@ public final class OresEvalRootNode extends RootNode {
         private Object exportValue(Ast.ImportKind kind, String name) {
             return switch (kind) {
                 case FUNCTION -> {
-                    Ast.FunctionDecl fn = findFunction(name);
+                    Ast.FunctionDecl fn = findSingleFunction(name);
                     if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
                         throw new IllegalArgumentException("code unit '" + codeUnitId + "' does not export function '" + name + "'");
                     }
@@ -2063,7 +2220,7 @@ public final class OresEvalRootNode extends RootNode {
             if (module != null && !module.name().equals(Parser.ROOT_MODULE)) return new ModuleFacade(this, module);
             Ast.ClassDecl klass = findClass(name);
             if (klass != null) return new ClassFacade(this, klass);
-            Ast.FunctionDecl fn = findFunction(name);
+            Ast.FunctionDecl fn = findSingleFunction(name);
             if (fn != null && fn.visibility() == Ast.Visibility.PUBLIC) {
                 if (fn.kind() == Ast.CallableKind.ROUTINE) {
                     throw new IllegalArgumentException(
@@ -2122,22 +2279,34 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object moduleMember(Ast.ModuleDecl module, String name) {
+            List<Ast.FunctionDecl> callableFamily = module.declarations().stream()
+                    .filter(Ast.FunctionDecl.class::isInstance)
+                    .map(Ast.FunctionDecl.class::cast)
+                    .filter(fn -> fn.name().equals(name) && fn.visibility() == Ast.Visibility.PUBLIC)
+                    .toList();
+            if (callableFamily.size() > 1) {
+                throw new IllegalArgumentException(
+                        "overloaded callable '" + module.name() + "." + name
+                                + "' must be called so name + arity can select a slot");
+            }
+            if (callableFamily.size() == 1) {
+                Ast.FunctionDecl fn = callableFamily.getFirst();
+                if (fn.kind() == Ast.CallableKind.ROUTINE || fn.actorKind() != Ast.ActorKind.NONE) {
+                    throw new IllegalArgumentException("callable '" + module.name() + "." + name
+                            + "' is direct-call-only and cannot be extracted as a value");
+                }
+                if (!fn.genericParameters().isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "generic fnc '" + module.name() + "." + name
+                                    + "' must be specialized by a direct call; "
+                                    + "polymorphic function values are not supported yet");
+                }
+                return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
+            }
+
             for (Ast.Decl decl : module.declarations()) {
                 if (decl instanceof Ast.ClassDecl klass && klass.name().equals(name)) {
                     return new ClassFacade(this, klass);
-                }
-                if (decl instanceof Ast.FunctionDecl fn && fn.name().equals(name) && fn.visibility() == Ast.Visibility.PUBLIC) {
-                    if (fn.kind() == Ast.CallableKind.ROUTINE || fn.actorKind() != Ast.ActorKind.NONE) {
-                        throw new IllegalArgumentException("callable '" + module.name() + "." + name
-                                + "' is direct-call-only and cannot be extracted as a value");
-                    }
-                    if (!fn.genericParameters().isEmpty()) {
-                        throw new IllegalArgumentException(
-                                "generic fnc '" + module.name() + "." + name
-                                        + "' must be specialized by a direct call; "
-                                        + "polymorphic function values are not supported yet");
-                    }
-                    return tailCallable(args -> callFunctionRaw(fn, objectArguments(args)));
                 }
                 if (decl instanceof Ast.FieldDecl field && field.name().equals(name) && field.visibility() == Ast.Visibility.PUBLIC) {
                     if (field.initializer() == null) throw new IllegalArgumentException("module field has no initializer: " + module.name() + "." + name);
@@ -2148,15 +2317,23 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Invocation prepareModuleInvocation(Ast.ModuleDecl module, String name, List<Object> args) {
+            Ast.FunctionDecl match = null;
             for (Ast.Decl decl : module.declarations()) {
                 if (decl instanceof Ast.FunctionDecl fn
                         && fn.name().equals(name)
+                        && fn.parameters().size() == args.size()
                         && fn.visibility() == Ast.Visibility.PUBLIC) {
-                    return functionInvocation(fn, args);
+                    if (match != null) {
+                        throw new IllegalArgumentException(
+                                "duplicate callable slot '" + module.name() + "." + name
+                                        + "' at arity " + args.size());
+                    }
+                    match = fn;
                 }
             }
+            if (match != null) return functionInvocation(match, args);
             throw new IllegalArgumentException("module '" + module.name()
-                    + "' does not export callable '" + name + "'");
+                    + "' does not export callable '" + name + "' at arity " + args.size());
         }
 
         private Object invokeModuleFunction(Ast.ModuleDecl module, String name, List<Object> args) {
@@ -3104,6 +3281,7 @@ public final class OresEvalRootNode extends RootNode {
         @Override public String toString() { return String.valueOf(value); }
     }
     private enum FutureFactory { INSTANCE }
+    private enum BooleanOpsNamespace { INSTANCE }
 
     private record MutexFactory(boolean shared, OresContext context) {
         private Object create(List<Object> args) {
@@ -3214,6 +3392,18 @@ public final class OresEvalRootNode extends RootNode {
     private record StdoutFacade(OresContext context) {
         private Object write(List<Object> args){context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.stdout.write");requireOne(args,"stdio.stdout.write");context.output().print(String.valueOf(args.getFirst()));context.output().flush();return null;}
         private Object println(List<Object> args){context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.stdout.println");requireOne(args,"stdio.stdout.println");context.output().println(String.valueOf(args.getFirst()));return null;}
+        private Object log(List<Object> args){
+            context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.stdout.log");
+            for(Object arg:args)context.output().print(String.valueOf(arg));
+            context.output().println();
+            context.output().flush();
+            return null;
+        }
+        private Object logList(List<Object> args){
+            context.requireCapability(IsolatePolicy.Capability.STDOUT,"stdio.stdout.logList");
+            requireOne(args,"stdio.stdout.logList");
+            return log(expandArgumentSequence(args.getFirst(),"stdio.stdout.logList"));
+        }
     }
     private record ProcessFacade(OresContext context) {
         private String contextId(){context.requireCapability(IsolatePolicy.Capability.PROCESS_INFO,"process.context_id");return context.contextId().toString();}
@@ -3223,6 +3413,11 @@ public final class OresEvalRootNode extends RootNode {
     }
     private record ActorFacade(OresContext context) {
         private Map<String,Object> gc(List<Object> args){requireZero(args,"actor.gc");return context.garbageCollector().collectCurrentActor().asMap();}
+    }
+    private static List<Object> expandArgumentSequence(Object value,String name){
+        if(value instanceof List<?> list)return new ArrayList<>(list);
+        if(value instanceof Object[] array)return new ArrayList<>(java.util.Arrays.asList(array));
+        throw new IllegalArgumentException(name+" requires an array/list/tuple value");
     }
     private static void requireZero(List<Object> args,String name){if(!args.isEmpty())throw new IllegalArgumentException(name+" expects no arguments");}
     private static void requireOne(List<Object> args,String name){if(args.size()!=1)throw new IllegalArgumentException(name+" expects one argument");}

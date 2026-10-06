@@ -72,7 +72,7 @@ final class RoutineAndLoopTest {
     }
 
     @Test
-    void methodsOverloadOnlyByArity() {
+    void callablesOverloadOnlyByArity() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module m
                   define class C as
@@ -91,9 +91,14 @@ final class RoutineAndLoopTest {
                 end
                 """)));
 
-        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 fnc find(): int { return 0; }
                 fnc find(int value): int { return value; }
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                fnc find(int value): int { return value; }
+                fnc find(String value): int { return 1; }
                 """)));
     }
 

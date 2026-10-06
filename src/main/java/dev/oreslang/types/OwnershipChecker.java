@@ -472,6 +472,9 @@ public final class OwnershipChecker {
                             : ValueKind.MOVE_ONLY,
                     null);
         }
+        if (expr instanceof Ast.SpreadExpr spread) {
+            return checkExpr(spread.expression(), scope, consuming);
+        }
         if (expr instanceof Ast.CallExpr call) {
             return checkCall(call, scope);
         }
@@ -614,6 +617,16 @@ public final class OwnershipChecker {
     }
 
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
+        if (isBuiltinStdoutCall(call, "log", scope) || isBuiltinStdoutCall(call, "logList", scope)) {
+            for (Ast.Expr argument : call.arguments()) {
+                Ast.Expr value = argument instanceof Ast.SpreadExpr spread ? spread.expression() : argument;
+                ValueInfo info = checkExpr(value, scope, false);
+                if (containsMutexGuardType(info.type)) {
+                    throw error("MutexGuard cannot be formatted or logged");
+                }
+            }
+            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
+        }
         if (call.callee() instanceof Ast.MemberExpr factoryCall
                 && factoryCall.receiver() instanceof Ast.NameExpr factory
                 && (factory.name().equals("Mutex") || factory.name().equals("SharedMutex"))
@@ -661,7 +674,6 @@ public final class OwnershipChecker {
                         fn.parameters(), fn.returnType(), call, scope, Map.of());
                 checkArguments(call.arguments(), signature.parameters(), scope, "function " + fn.name());
                 Ast.TypeRef callResult = callableResultType(signature.result(), fn.async(), fn.generator());
-                if (fn.trapped()) callResult = trapResultType(callResult);
                 return new ValueInfo(callResult, kindOfType(callResult), null);
             }
         }
@@ -679,7 +691,6 @@ public final class OwnershipChecker {
                         scope,
                         "function " + namespace.name() + "." + qualified.member());
                 Ast.TypeRef callResult = callableResultType(signature.result(), fn.async(), fn.generator());
-                if (fn.trapped()) callResult = trapResultType(callResult);
                 return new ValueInfo(callResult, kindOfType(callResult), null);
             }
         }
@@ -809,6 +820,14 @@ public final class OwnershipChecker {
             }
         }
         return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
+    }
+
+    private static boolean isBuiltinStdoutCall(Ast.CallExpr call, String memberName, Scope scope) {
+        if (!(call.callee() instanceof Ast.MemberExpr member) || !member.member().equals(memberName)) return false;
+        if (!(member.receiver() instanceof Ast.MemberExpr stdout) || !stdout.member().equals("stdout")) return false;
+        return stdout.receiver() instanceof Ast.NameExpr stdio
+                && stdio.name().equals("stdio")
+                && scope.lookup("stdio") == null;
     }
 
     private ValueInfo checkBuiltinSumCall(Ast.MemberExpr member, List<Ast.Expr> arguments, Scope scope) {
@@ -1145,6 +1164,8 @@ public final class OwnershipChecker {
         } else if (expr instanceof Ast.CallExpr e) {
             scanExpr(e.callee(), locals, outer, recursiveBinding, captures, false);
             for (Ast.Expr arg : e.arguments()) scanExpr(arg, locals, outer, recursiveBinding, captures, false);
+        } else if (expr instanceof Ast.SpreadExpr e) {
+            scanExpr(e.expression(), locals, outer, recursiveBinding, captures, false);
         } else if (expr instanceof Ast.MemberExpr e) scanExpr(e.receiver(), locals, outer, recursiveBinding, captures, write);
         else if (expr instanceof Ast.IndexExpr e) {
             scanExpr(e.receiver(), locals, outer, recursiveBinding, captures, write);
@@ -1641,15 +1662,6 @@ public final class OwnershipChecker {
             current = current.aliasSource != null ? current.aliasSource : current.borrowSource;
         }
         return false;
-    }
-
-    private Ast.TypeRef trapResultType(Ast.TypeRef successType) {
-        Ast.TypeRef success = successType.name().equals("void")
-                ? Ast.TypeRef.tupleType(List.of())
-                : successType;
-        return Ast.TypeRef.tupleType(List.of(
-                new Ast.TypeRef("Option", List.of(success), false),
-                new Ast.TypeRef("Option", List.of(Ast.TypeRef.simple("Exception")), false)));
     }
 
     private Ast.TypeRef collectionElementType(Ast.TypeRef type) {

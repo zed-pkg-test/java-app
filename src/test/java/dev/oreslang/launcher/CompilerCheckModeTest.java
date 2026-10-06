@@ -29,6 +29,22 @@ final class CompilerCheckModeTest {
     }
 
     @Test
+    void conditionalDoDeprecationUsesEditorDiagnosticShape() {
+        Path source = Path.of("demo.ores");
+        var warnings = OresMain.formatSyntaxWarnings(source, """
+                pub fnc main(): void {
+                  if true; do
+                    return;
+                  fi
+                }
+                """);
+
+        assertEquals(1, warnings.size());
+        assertTrue(warnings.getFirst().endsWith(
+                "demo.ores:2:12: warning: conditional 'do' is deprecated; use 'then'"));
+    }
+
+    @Test
     void positionedParserErrorsBecomeEditorDiagnostics() {
         Path source = Path.of("demo.ores");
         String diagnostic = OresMain.formatCheckDiagnostic(

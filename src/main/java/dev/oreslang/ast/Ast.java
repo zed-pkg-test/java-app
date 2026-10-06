@@ -125,8 +125,6 @@ public final class Ast {
             boolean async,
             boolean generator,
             boolean nonLexical,
-            boolean pure,
-            boolean trapped,
             ActorKind actorKind,
             List<String> genericParameters,
             List<Param> parameters,
@@ -140,50 +138,32 @@ public final class Ast {
             body = List.copyOf(body);
         }
 
-        /** Compatibility constructor for generator-aware passes without explicit effects. */
-        public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
-                            boolean generator, boolean nonLexical, ActorKind actorKind,
-                            List<String> genericParameters, List<Param> parameters,
-                            TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, generator, nonLexical, false, false, actorKind,
-                    genericParameters, parameters, returnType, annotations, body);
-        }
-
-        /** Compatibility constructor for non-generator callables without explicit effects. */
+        /** Compatibility constructor for non-generator callables. */
         public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
                             boolean nonLexical, ActorKind actorKind, List<String> genericParameters,
                             List<Param> parameters, TypeRef returnType, List<Annotation> annotations,
                             List<Stmt> body) {
-            this(name, kind, visibility, async, false, nonLexical, false, false, actorKind,
-                    genericParameters, parameters, returnType, annotations, body);
-        }
-
-        /** Full non-generator constructor with callable effects. */
-        public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
-                            boolean nonLexical, boolean pure, boolean trapped, ActorKind actorKind,
-                            List<String> genericParameters, List<Param> parameters,
-                            TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, false, nonLexical, pure, trapped, actorKind,
+            this(name, kind, visibility, async, false, nonLexical, actorKind,
                     genericParameters, parameters, returnType, annotations, body);
         }
 
         public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
                             ActorKind actorKind, List<String> genericParameters, List<Param> parameters,
                             TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, false, false, false, false, actorKind,
+            this(name, kind, visibility, async, false, false, actorKind,
                     genericParameters, parameters, returnType, annotations, body);
         }
 
         public FunctionDecl(String name, CallableKind kind, Visibility visibility, boolean async,
                             List<String> genericParameters, List<Param> parameters, TypeRef returnType,
                             List<Annotation> annotations, List<Stmt> body) {
-            this(name, kind, visibility, async, false, false, false, false, ActorKind.NONE,
+            this(name, kind, visibility, async, false, false, ActorKind.NONE,
                     genericParameters, parameters, returnType, annotations, body);
         }
 
         public FunctionDecl(String name, Visibility visibility, boolean async, List<String> genericParameters,
                             List<Param> parameters, TypeRef returnType, List<Annotation> annotations, List<Stmt> body) {
-            this(name, CallableKind.FNC, visibility, async, false, false, false, false, ActorKind.NONE,
+            this(name, CallableKind.FNC, visibility, async, false, false, ActorKind.NONE,
                     genericParameters, parameters, returnType, annotations, body);
         }
     }
@@ -447,7 +427,7 @@ public final class Ast {
     }
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
-            TypeTestExpr, PatternTestExpr, CastExpr,
+            TypeTestExpr, PatternTestExpr, CastExpr, SpreadExpr,
             CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
     public record LiteralExpr(Object value) implements Expr { }
@@ -468,6 +448,9 @@ public final class Ast {
 
     /** "value as Type" or "value as? Type". */
     public record CastExpr(Expr value, TypeRef targetType, CastMode mode) implements Expr { }
+
+    /** Argument-list spread. The parser only constructs this inside call argument lists. */
+    public record SpreadExpr(Expr expression) implements Expr { }
 
     public record CallExpr(
             Expr callee,
@@ -525,22 +508,13 @@ public final class Ast {
         public ObjectExpr { fields = List.copyOf(fields); }
     }
 
-    public record LambdaExpr(
-            List<Param> parameters,
-            Expr expressionBody,
-            List<Stmt> blockBody,
-            boolean nonLexical,
-            boolean pure,
-            boolean trapped) implements Expr {
+    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) implements Expr {
         public LambdaExpr {
             parameters = List.copyOf(parameters);
             blockBody = blockBody == null ? null : List.copyOf(blockBody);
         }
-        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) {
-            this(parameters, expressionBody, blockBody, nonLexical, false, false);
-        }
         public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody) {
-            this(parameters, expressionBody, blockBody, false, false, false);
+            this(parameters, expressionBody, blockBody, false);
         }
     }
 }

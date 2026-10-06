@@ -141,21 +141,15 @@ pub fnc run() -> (() => void) {
 }
 ```
 
-Function expressions are deliberately **not** an alternate named-declaration
-form. Inside executable code, bind them explicitly as local values:
+The equivalent lambda-style declaration also uses executable `->` syntax:
 
 ```ores
-pub fnc run() -> (() => void) {
-  let fnc callback = || -> {
+pub fnc run = || -> (() => void) {
+  return || -> {
     return;
   };
-  return callback;
 }
 ```
-
-`let fnc`, `val fnc`, and `const fnc` make the declaration/value
-distinction explicit. A nested declaration such as `fnc callback() { ... }`
-is a compile error.
 
 Here `() => void` is a function **type**, while `->` is executable syntax.
 The fat arrow `=>` is never the return separator for an executable
@@ -348,6 +342,65 @@ end
 
 Class interface satisfaction uses public members, including inherited public members.
 
+## Boolean combinator intrinsics
+
+`And`, `Or`, and `Xor` are compiler-provided overload families in the
+built-in `BooleanOps` namespace and are also available as globals, like
+`Some`, `None`, `Ok`, and `Err`.
+
+Conceptually, each family has these two arity-selected overloads:
+
+```ores
+define module BooleanOps as
+  pub fnc Or(bool first, bool second, ...bool rest): bool { /* intrinsic */ }
+  pub fnc Or(List<bool> values): bool { /* intrinsic */ }
+
+  pub fnc And(bool first, bool second, ...bool rest): bool { /* intrinsic */ }
+  pub fnc And(List<bool> values): bool { /* intrinsic */ }
+
+  pub fnc Xor(bool first, bool second, ...bool rest): bool { /* intrinsic */ }
+  pub fnc Xor(List<bool> values): bool { /* intrinsic */ }
+end
+```
+
+The overload decision is **name + caller-visible arity only**:
+
+- arity `1` selects the `List<bool>` overload;
+- arity `>= 2` selects the variadic scalar-bool overload;
+- arity `0` is invalid;
+- parameter types do not participate in overload selection.
+
+Therefore both global and qualified forms are equivalent:
+
+```ores
+if And(foo, bar) then
+  // ...
+fi
+
+if Or(foo, bar, And(x, y)) then
+  // ...
+fi
+
+val bool a = BooleanOps.And([foo, bar]);
+val bool b = BooleanOps.Or(foo, bar, x);
+```
+
+For the scalar overload, `And` and `Or` short-circuit left-to-right exactly
+like `&&` and `||`; `Xor` evaluates all scalar operands and returns true
+when an odd number are true. These calls are compiler intrinsics and bypass
+ordinary callable dispatch, so scalar forms can lower to the same boolean
+control-flow IR as the operators.
+
+The one-argument list overload has ordinary eager argument evaluation, then
+reduces the already-created list. Empty lists are valid: `And([])` is
+`true`, `Or([])` is `false`, and `Xor([])` is `false`.
+
+Module/top-level `fnc` and `routine` overload identity is also name + exact
+arity. Same-name/different-arity declarations are valid; same-name/same-arity
+declarations are rejected even when their parameter types differ. An overloaded
+callable family cannot be extracted as an untyped first-class function value;
+a direct call supplies the arity needed to select a slot.
+
 ## Option, Result, and null
 
 Oreslang does **not** have ambient nullable references. A bare `null` value is a compile-time error, and `null` is not a standalone variable/parameter/return type.
@@ -402,73 +455,26 @@ const complex z = 3 + 4i;
 
 Numeric widening is loss-aware; real values can widen toward complex values, but silent lossy narrowing is not performed.
 
-## Function expressions and nested callable values
+## Lambdas
 
-Function expressions are lexical closures by default and use `->`. The
-canonical block form keeps returns explicit:
+Lambdas are lexical closures by default and use `->`. The canonical block
+form keeps returns explicit:
 
 ```ores
-val fnc inc = |int x| -> {
+val Fnc<int, int> inc = |int x| -> {
   return x + 1;
 };
 ```
 
-They are **executable-scope-only**. They may appear inside a callable body,
-nested `block`, return expression, call argument, or another executable
-expression. They may not be used as package/file/module/class/actor
-declaration-time initializers. A field may still have a callable type such as
-`Fnc<int, int>`; constructing its function value happens from executable
-code.
-
-Declaration/member modifiers such as `pub`, `private`, `static`,
-`abstract`, `async`, and `generator` do not apply to a local callable
-value. Callable-expression effects instead prefix the expression:
-
-```ores
-let fnc no_capture = nlex || -> {
-  return;
-};
-
-let fnc inspect = pure |int x| -> {
-  let int y = x + 1;
-  return;
-};
-
-let fnc guarded = trap || -> {
-  risky();
-  return;
-};
-
-let fnc strict = pure nlex trap || -> {
-  return;
-};
-```
-
-A normal function expression may capture activation-local bindings from its
-enclosing function or block. `nlex`, `pure`, and `trap` are independent
-contracts and may be combined; duplicate modifiers are rejected.
-
-### Callable scope rules
-
-- File/package/module scope: named `fnc`/`routine` declarations are
-  allowed; function expressions are not declaration-time members.
-- Class/actor scope: methods/static functions and data fields are declarations;
-  function expressions are not member declarations or field initializers.
-- Function/routine/method/function-expression bodies: named nested
-  `fnc`/`routine` declarations are rejected. Use a local function
-  expression binding instead.
-- `pub` and other declaration/member-only modifiers are rejected in
-  executable/local scope.
-
-These rules keep the static declaration graph AOT-friendly while preserving
-first-class callable values where code is actually executing.
+A normal lambda may capture activation-local bindings from its enclosing
+function or block. Captured mutable state remains part of the closure.
 
 ## Non-lexical callables (`nlex`)
 
 `nlex` is an opt-in **capture barrier**, not a ban on global/module lookup.
 It prevents a callable from capturing bindings owned by an enclosing runtime
-activation, so an `nlex` function expression does not retain or snapshot an
-outer local environment.
+activation, so an `nlex` lambda does not retain or snapshot an outer local
+environment.
 
 Inside an `nlex` region:
 
@@ -477,68 +483,12 @@ Inside an `nlex` region:
 - module members, imports, top-level callables/classes, and built-ins remain
   statically resolvable;
 - enclosing activation-local bindings cannot be captured;
-- function expressions nested in an `nlex fnc`, `nlex routine`, or
-  `nlex` function expression inherit the barrier.
+- lambdas nested in an `nlex fnc`, `nlex routine`, or `nlex` lambda inherit
+  the barrier.
 
-Actor entry points remain governed by their actor isolation rules. `nlex`
-does not replace mailbox, private-slice, or shared-actor isolation.
-
-## Pure callables (`pure`)
-
-`pure` is a compiler-enforced **no-external-write** contract. A pure
-invocation may read parameters, captured/readable outer state, module state,
-and other visible data, but it may not mutate parameters, `self`, captured
-bindings, module/global state, or values reachable through aliases to those
-sources. Locally owned temporaries may be mutated.
-
-The contract is transitive: a pure callable may call only another callable
-whose effects are compiler-proven pure. A function expression created inside a
-pure callable is checked as an independent callable boundary, so it cannot
-launder mutation authority by capturing an outer local and mutating it later.
-
-An explicitly `pure || -> { ... }` function expression receives the same
-write-effect check even when created inside an otherwise impure callable.
-
-Construction with `new` currently fails closed in a pure callable because
-class field-initializer effects are not yet summarized. Literal/list/tuple/
-object construction remains available when its subexpressions satisfy the pure
-checker.
-
-The current compiler rejects `pure async`, `pure generator`, and pure actor
-entry points until their suspension/yield/scheduler effect contracts are
-modeled explicitly.
-
-## Trapped callables (`trap`)
-
-`trap` establishes a **dynamic invocation boundary** for ordinary synchronous
-runtime exceptions. A failure that reaches the active boundary is converted
-into the compiler-owned two-slot result:
-
-```text
-[Option<success>, Option<Exception>]
-```
-
-A successful `void` call uses an empty tuple/unit as its success payload.
-`OresPanic`, scheduler/lifetime cancellation, and fatal VM errors remain
-outside this ordinary trap channel.
-
-The boundary is dynamic, not inherited metadata. A normal nested callback
-invoked synchronously while an outer trap is active is covered by that outer
-boundary, but a callback returned from the trapped callable does not retain the
-old boundary. If the callback must own a boundary after it escapes, mark the
-function expression itself:
-
-```ores
-let fnc guarded = trap || -> {
-  risky();
-  return;
-};
-```
-
-A trap boundary is also a proper-tail-call barrier: optimization may not erase
-the activation that owns the exception boundary. The current compiler rejects
-`trap async`, `trap generator`, and trapped actor entry points until
-suspension/completion/supervision semantics are implemented.
+Actor entry points remain governed by their actor isolation rules. `nlex` may
+add a capture-free guarantee to an actor fnc, but it does not replace mailbox,
+private-slice, or shared-actor isolation.
 
 ## Conditionals
 
@@ -804,6 +754,35 @@ let Fnc<int, int> fact = |int n| -> {
 };
 ```
 
+Callable types also support a signature-inside-generics spelling:
+
+```ores
+val Fnc<int(int)> doubler = |int value| -> {
+  return value * 2;
+};
+
+val Fnc<String(int, bool)> describe = |int value, bool enabled| -> {
+  return enabled ? "enabled" : "disabled";
+};
+```
+
+The type before the inner parentheses is the result type, and the types inside
+the parentheses are the parameter types. Optional documentation-only parameter
+names are accepted, so `Fnc<String(int value, bool enabled)>` is equivalent.
+
+The existing comma form remains supported for compatibility, with parameter
+types first and the result type last:
+
+```ores
+Fnc<String(int, bool)>   // signature form: returns String
+Fnc<int, bool, String>   // comma form: exactly the same type
+(int, bool) => String    // ordinary function-type form: exactly the same type
+```
+
+`Function<...>` is an alias of `Fnc<...>` and accepts both generic spellings.
+All of these forms normalize to the same callable type; they do not create
+distinct overload, ABI, runtime, or closure representations.
+
 ## Semicolons
 
 Semicolons are strongly recommended. They remain the canonical formatter output.
@@ -871,7 +850,7 @@ Abstract methods use the same slot identity. Every caller-visible arity of an ab
 
 Special symbol methods such as `[Symbol.iterator]` are not exempt: they use the same name + arity identity, inheritance ambiguity checks, and override-contract rules as ordinary methods.
 
-Top-level/module `fnc` and `routine` declarations never overload.
+Top-level/module callables use the same **name + exact arity** overload rule. Same-name/different-arity `fnc` declarations are valid, and same-name/different-arity `routine` declarations are valid. A single name may not mix `fnc` and `routine` declarations, because those kinds have different reifiability/recursion semantics but occupy the same module value namespace.
 
 ## Ternary expressions
 
@@ -1039,8 +1018,16 @@ In addition to `stdio.print` and `stdio.println`, the stream-shaped form is avai
 ```ores
 stdio.stdout.write(value);
 stdio.stdout.println(value);
+stdio.stdout.log("ORES_TEST|", status, "|", full_name, "|", detail);
+
+val parts = arr["ORES_TEST|", status, "|", full_name, "|", detail];
+stdio.stdout.log(...parts);
+stdio.stdout.logList(parts);
 ```
 
+`stdout.log(...)` stringifies each argument, concatenates the values with no inserted separator, and appends one newline. This makes it a compact replacement for a run of `write(...)` calls followed by `println(...)`. `stdout.logList(sequence)` is exactly the sequence form of the same operation and is equivalent to `stdout.log(...sequence)`.
+
+The `...expression` syntax is an argument-list spread operator. In this initial variadic surface the spread value must be an Array/List/tuple. Oreslang keeps fixed-arity calls statically sound: dynamic spread is rejected for ordinary fixed-arity functions and methods until the language has an explicit variadic callable type.
 
 ## Execution profiles: JIT, AOT, and hybrid
 
@@ -1264,7 +1251,7 @@ Static data fields are intentionally not part of v0.5 yet; `static` on a class b
 The arrows have distinct jobs:
 
 - `:` declares the return type of a **named executable callable/method**.
-- `->` is executable syntax for function expressions and is also accepted as a return-type separator on named executable callables.
+- `->` is executable syntax for lambdas and lambda-style callable declarations.
 - `=>` is type-level syntax for function types and interface callable signatures.
 
 Function aliases can use `typeof fnc`:

@@ -871,15 +871,19 @@ final class MutexRuntimeTest {
         });
 
         IllegalStateException closedObserved = null;
-        for (int i = 0; i < 500 && closedObserved == null; i++) {
+        long shutdownDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (closedObserved == null && System.nanoTime() < shutdownDeadline) {
             try {
                 target.send("probe");
-                Thread.yield();
             } catch (IllegalStateException failure) {
                 if (failure.getMessage().contains("actor runtime is closed")) {
                     closedObserved = failure;
                 }
             }
+            // A fixed number of yields can finish before the closer is ever
+            // scheduled, especially on a shared CI runner. Wait for the actual
+            // shutdown condition within a wall-clock bound instead.
+            if (closedObserved == null) Thread.sleep(1);
         }
         assertNotNull(closedObserved);
 
