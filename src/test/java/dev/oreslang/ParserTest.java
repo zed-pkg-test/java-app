@@ -32,7 +32,7 @@ final class ParserTest {
                     }
                   }
 
-                  actor fnc pub nlex worker(int value): int {
+                  actor pub fnc shared nlex worker(int value): int {
                     return value;
                   }
                 end
@@ -95,6 +95,13 @@ final class ParserTest {
                       return 1;
                     }
                   end
+                end
+                """,
+                """
+                define module app
+                  isoactor fnc shared contradictory(): void {
+                    return;
+                  }
                 end
                 """
         );
