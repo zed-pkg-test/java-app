@@ -1087,6 +1087,11 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorId id;
         private final ActorKind kind;
         private final AtomicReference<Throwable> terminationCause = new AtomicReference<>();
+        /**
+         * Completes only after the actor has fully finalized and its carrier has
+         * crossed back out of the TurnExecutor/Truffle context boundary.
+         */
+        private final OresFuture<Void> finalizedFuture = new OresFuture<>();
 
         private ActorRef(ActorId id, ActorKind kind) {
             this.id = id;
@@ -2705,6 +2710,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         IsolatePolicy policy = defaultSpawnPolicy();
         OresFuture<R> completion = new OresFuture<>();
+        OresFuture<R> published = new OresFuture<>();
 
         ActorRef<M> ref = spawnInternal(
                 kind,
@@ -2758,6 +2764,31 @@ public final class ActorRuntime implements AutoCloseable {
                 },
                 true);
 
+        /*
+         * Do not publish the source-call result while guest code is still
+         * entered on the actor carrier. The actor may have produced its logical
+         * result, but a root/source continuation must not resume far enough to
+         * close the enclosing Polyglot Context until the one-shot actor has
+         * fully unwound and left TurnExecutor.
+         */
+        ref.finalizedFuture.whenCompleteRuntime((ignored, terminalFailure) -> {
+            if (!completion.isDone()) {
+                Throwable failure = ref.terminationCause.get();
+                completion.failFromRuntime(
+                        failure != null
+                                ? failure
+                                : new CancellationException(
+                                        "actor terminated before producing its result"));
+            }
+            completion.whenCompleteRuntime((value, failure) -> {
+                if (failure == null) {
+                    published.completeFromRuntime(value);
+                } else {
+                    published.failFromRuntime(OresFuture.unwrap(failure));
+                }
+            });
+        });
+
         try {
             send(ref, message);
         } catch (Throwable failure) {
@@ -2768,7 +2799,7 @@ public final class ActorRuntime implements AutoCloseable {
                 failure.addSuppressed(cleanup);
             }
         }
-        return completion;
+        return published;
     }
 
     private void reserveActorSlot() {
@@ -4755,6 +4786,9 @@ public final class ActorRuntime implements AutoCloseable {
             unregisterActor(this);
             if (parent != null) parent.childFinalized(this);
             lifecycleLock.notifyAll();
+            // Publication is deliberately last: observers of finalizedFuture
+            // may resume root/source execution and dispose the Polyglot Context.
+            ref.finalizedFuture.completeFromRuntime(null);
         }
 
         private void childFinalized(ActorCell<?> child) {
