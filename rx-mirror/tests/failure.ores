@@ -1,0 +1,14 @@
+import * as rx_channels from '../src/rx.ores';
+import class Observable, Subscription from '../src/rx.ores';
+async fnc failed(): int {
+  val Result<int, String> error = Err("boom");
+  return error.expect("source failed");
+}
+pub async fnc main(): void {
+  val Future<int> pending = failed();
+  val Observable<int> source = rx_channels.from_future(pending);
+  val Subscription<int> sub = source.subscribe();
+  val Option<int> value = sub.next();
+  stdio.println("unexpected success");
+  return;
+}
