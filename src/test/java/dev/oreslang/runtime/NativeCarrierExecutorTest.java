@@ -6,6 +6,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -86,6 +88,12 @@ final class NativeCarrierExecutorTest {
                     "a healthy preferred affinity lane must keep one actor key on one carrier");
             assertEquals(1, affinityTargets.size(),
                     "one carrier lane must expose one stable CPU/cache-affinity target");
+            if (os.contains("linux")) {
+                assertTrue(affinityTargets.stream().allMatch(target -> target >= 0),
+                        "Linux native carriers must prove a real allowed-CPU binding");
+                assertEquals(0, executor.getAffinityBindingFailureCount());
+            }
+            assertTrue(executor.getAffinityPreferredHitCount() >= 24);
 
             releasePeer.countDown();
             assertTrue(peerFinished.await(5, TimeUnit.SECONDS));
@@ -129,6 +137,8 @@ final class NativeCarrierExecutorTest {
             assertTrue(stolenRan.await(2, TimeUnit.SECONDS),
                     "an idle peer must rescue an actor lane whose preferred carrier is blocked");
             assertEquals(Set.of(1), stolenSlots);
+            assertTrue(executor.getAffinityStealCount() >= 1,
+                    "rescuing a blocked preferred lane must be observable as a steal");
 
             releasePreferred.countDown();
             assertTrue(preferredFinished.await(5, TimeUnit.SECONDS));
@@ -175,8 +185,169 @@ final class NativeCarrierExecutorTest {
                     "soft affinity must yield to throughput when the preferred lane backs up");
             assertEquals(Set.of(1), spillSlots,
                     "the idle carrier should execute globally spilled affinity work");
+            assertTrue(executor.getAffinityGlobalSpillCount() >= 1,
+                    "backlog escape must be observable as a global spill");
             releasePreferred.countDown();
             assertTrue(preferredFinished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+
+    @Test
+    void globalSpillQueueGetsBoundedServiceUnderContinuouslyHotAffinityLanes() throws Exception {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        assumeTrue(os.contains("linux") || os.contains("mac") || os.contains("darwin"));
+
+        try (NativeCarrierExecutor executor =
+                     new NativeCarrierExecutor(2, 2, 128, "ores-native-affinity-fair-")) {
+            CountDownLatch blockersStarted = new CountDownLatch(2);
+            CountDownLatch releaseBlockers = new CountDownLatch(1);
+            CountDownLatch blockersFinished = new CountDownLatch(2);
+
+            for (int key = 0; key < 2; key++) {
+                executor.executeAffinity(key, () -> {
+                    blockersStarted.countDown();
+                    try {
+                        assertTrue(releaseBlockers.await(5, TimeUnit.SECONDS));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        fail(interrupted);
+                    } finally {
+                        blockersFinished.countDown();
+                    }
+                });
+            }
+            assertTrue(blockersStarted.await(5, TimeUnit.SECONDS));
+
+            AtomicInteger localCompleted = new AtomicInteger();
+            CountDownLatch localDone = new CountDownLatch(48);
+            for (int i = 0; i < 24; i++) {
+                executor.executeAffinity(0, () -> {
+                    localCompleted.incrementAndGet();
+                    localDone.countDown();
+                });
+                executor.executeAffinity(1, () -> {
+                    localCompleted.incrementAndGet();
+                    localDone.countDown();
+                });
+            }
+
+            AtomicInteger localCompletedWhenGlobalRan = new AtomicInteger(Integer.MAX_VALUE);
+            CountDownLatch globalRan = new CountDownLatch(1);
+            executor.execute(() -> {
+                localCompletedWhenGlobalRan.set(localCompleted.get());
+                globalRan.countDown();
+            });
+
+            releaseBlockers.countDown();
+            assertTrue(globalRan.await(5, TimeUnit.SECONDS));
+            assertTrue(localCompletedWhenGlobalRan.get() <= 16,
+                    "global spill work must be probed after a bounded local-affinity burst; observed "
+                            + localCompletedWhenGlobalRan.get() + " local completions first");
+            assertTrue(localDone.await(5, TimeUnit.SECONDS));
+            assertTrue(blockersFinished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void shrinkingCarrierPoolRehomesDisabledAffinityLaneWork() throws Exception {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        assumeTrue(os.contains("linux") || os.contains("mac") || os.contains("darwin"));
+
+        try (NativeCarrierExecutor executor =
+                     new NativeCarrierExecutor(2, 2, 64, "ores-native-affinity-shrink-")) {
+            CountDownLatch slotOneStarted = new CountDownLatch(1);
+            CountDownLatch releaseSlotOne = new CountDownLatch(1);
+            CountDownLatch slotOneFinished = new CountDownLatch(1);
+            CountDownLatch migratedDone = new CountDownLatch(3);
+            Set<Integer> executionSlots = ConcurrentHashMap.newKeySet();
+
+            executor.executeAffinity(1, () -> {
+                assertEquals(1, NativeCarrierExecutor.currentCarrierSlot());
+                slotOneStarted.countDown();
+                try {
+                    assertTrue(releaseSlotOne.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    fail(interrupted);
+                } finally {
+                    slotOneFinished.countDown();
+                }
+            });
+            assertTrue(slotOneStarted.await(5, TimeUnit.SECONDS));
+
+            for (int i = 0; i < 3; i++) {
+                executor.executeAffinity(1, () -> {
+                    executionSlots.add(NativeCarrierExecutor.currentCarrierSlot());
+                    migratedDone.countDown();
+                });
+            }
+
+            executor.setCorePoolSize(1);
+            releaseSlotOne.countDown();
+
+            assertTrue(slotOneFinished.await(5, TimeUnit.SECONDS));
+            assertTrue(migratedDone.await(5, TimeUnit.SECONDS),
+                    "tasks from a disabled affinity lane must be rehomed to an enabled carrier");
+            assertEquals(Set.of(0), executionSlots);
+            assertEquals(0, executor.getQueueSize());
+        }
+    }
+
+    @Test
+    void shutdownRaceCannotLeaveTasksStrandedInAffinityLanes() throws Exception {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        assumeTrue(os.contains("linux") || os.contains("mac") || os.contains("darwin"));
+
+        NativeCarrierExecutor executor =
+                new NativeCarrierExecutor(2, 2, 4096, "ores-native-affinity-shutdown-");
+        CountDownLatch blockersStarted = new CountDownLatch(2);
+        CountDownLatch releaseBlockers = new CountDownLatch(1);
+        AtomicBoolean stopSubmitting = new AtomicBoolean();
+
+        try {
+            for (int key = 0; key < 2; key++) {
+                executor.executeAffinity(key, () -> {
+                    blockersStarted.countDown();
+                    while (releaseBlockers.getCount() != 0) {
+                        try {
+                            releaseBlockers.await(10, TimeUnit.MILLISECONDS);
+                        } catch (InterruptedException ignored) {
+                            Thread.interrupted();
+                        }
+                    }
+                });
+            }
+            assertTrue(blockersStarted.await(5, TimeUnit.SECONDS));
+
+            Thread[] submitters = new Thread[4];
+            for (int i = 0; i < submitters.length; i++) {
+                final int key = i & 1;
+                submitters[i] = Thread.ofPlatform().start(() -> {
+                    while (!stopSubmitting.get()) {
+                        try {
+                            executor.executeAffinity(key, () -> { });
+                        } catch (java.util.concurrent.RejectedExecutionException closed) {
+                            break;
+                        }
+                    }
+                });
+            }
+
+            Thread.sleep(20L);
+            executor.shutdownNow();
+            stopSubmitting.set(true);
+            releaseBlockers.countDown();
+
+            for (Thread submitter : submitters) submitter.join(5_000L);
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            assertEquals(0, executor.getQueueSize(),
+                    "shutdown must not permit a post-drain enqueue to strand work forever");
+            assertTrue(executor.isQueueEmpty());
+        } finally {
+            stopSubmitting.set(true);
+            releaseBlockers.countDown();
+            if (!executor.isShutdown()) executor.shutdownNow();
         }
     }
 

@@ -44,10 +44,19 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
 
     private static final long IDLE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
     private static final long AFFINITY_STEAL_GRACE_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
+    private static final int LOCAL_AFFINITY_BURST = 8;
+    private static final int MAX_STEAL_PROBES = 8;
 
     private final ArrayBlockingQueue<Runnable> queue;
     private final List<ArrayBlockingQueue<Runnable>> affinityQueues;
-    private final AtomicLongArray affinityLaneLastEnqueueNanos;
+    /**
+     * Approximate age of the oldest task in each affinity lane.
+     *
+     * <p>This is intentionally set only when a lane transitions from empty to
+     * non-empty. Resetting it on every enqueue would let a continuously-fed
+     * blocked lane postpone stealing forever.</p>
+     */
+    private final AtomicLongArray affinityLaneOldestEnqueueNanos;
     private final int queueCapacity;
     private final int maximumPoolSize;
     private final long nativeStackBytes;
@@ -56,7 +65,12 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private final AtomicInteger activeCount = new AtomicInteger();
     private final AtomicInteger queuedTaskCount = new AtomicInteger();
     private final AtomicInteger nextWakeSlot = new AtomicInteger();
+    private final AtomicInteger nextStealVictim = new AtomicInteger();
     private final AtomicLong completedTaskCount = new AtomicLong();
+    private final AtomicLong affinityPreferredHits = new AtomicLong();
+    private final AtomicLong affinitySteals = new AtomicLong();
+    private final AtomicLong affinityGlobalSpills = new AtomicLong();
+    private final AtomicInteger affinityBindingFailures = new AtomicInteger();
     private final AtomicReferenceArray<Thread> carrierThreads;
     private final AtomicBoolean shutdown = new AtomicBoolean();
     /** Serializes Java->native pool calls against asynchronous native retirement. */
@@ -83,7 +97,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
             lanes.add(new ArrayBlockingQueue<>(queueCapacity, true));
         }
         this.affinityQueues = List.copyOf(lanes);
-        this.affinityLaneLastEnqueueNanos = new AtomicLongArray(maximumPoolSize);
+        this.affinityLaneOldestEnqueueNanos = new AtomicLongArray(maximumPoolSize);
         this.queueCapacity = queueCapacity;
         this.maximumPoolSize = maximumPoolSize;
         this.nativeStackBytes = configuredCarrierStackBytes();
@@ -148,15 +162,35 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private void nativeCarrierLoop(int slot) {
         CURRENT_EXECUTOR.set(this);
         CURRENT_SLOT.set(slot);
-        CURRENT_AFFINITY_TARGET.set(nativeBindCurrentThreadToCarrierSlot(slot));
+        int affinityTarget = nativeBindCurrentThreadToCarrierSlot(slot);
+        CURRENT_AFFINITY_TARGET.set(affinityTarget);
+        if (affinityTarget < 0) affinityBindingFailures.incrementAndGet();
         CURRENT_NATIVE_THREAD_ID.set(nativeCurrentThreadId());
         carrierThreads.set(slot, Thread.currentThread());
+        int localAffinityBurst = 0;
         try {
             while (!shutdown.get()) {
                 nativeAwaitEnabled(nativeHandle, slot);
                 if (shutdown.get()) break;
 
-                Runnable task = pollReadyTask(slot);
+                Runnable task;
+                if (localAffinityBurst >= LOCAL_AFFINITY_BURST) {
+                    task = queue.poll();
+                    localAffinityBurst = 0;
+                    if (task == null) {
+                        task = pollAffinityLane(slot);
+                        if (task != null) localAffinityBurst = 1;
+                    }
+                } else {
+                    task = pollAffinityLane(slot);
+                    if (task != null) {
+                        localAffinityBurst++;
+                    } else {
+                        task = queue.poll();
+                        localAffinityBurst = 0;
+                    }
+                }
+
                 if (task == null) {
                     // Submission unparks the preferred carrier immediately.
                     // An idle peer waits through a short locality grace period
@@ -164,8 +198,20 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
                     LockSupport.parkNanos(this, IDLE_PARK_NANOS);
                     Thread.interrupted();
                     if (shutdown.get()) continue;
-                    task = pollReadyTask(slot);
-                    if (task == null) task = pollStealableTask(slot);
+
+                    task = queue.poll();
+                    if (task != null) {
+                        localAffinityBurst = 0;
+                    } else {
+                        task = pollAffinityLane(slot);
+                        if (task != null) {
+                            localAffinityBurst = Math.min(
+                                    LOCAL_AFFINITY_BURST, localAffinityBurst + 1);
+                        } else {
+                            task = pollStealableTask(slot);
+                            if (task != null) localAffinityBurst = 0;
+                        }
+                    }
                     if (task == null) continue;
                 }
                 releaseReadySlot();
@@ -193,24 +239,45 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
         }
     }
 
-    private Runnable pollReadyTask(int slot) {
-        Runnable task = affinityQueues.get(slot).poll();
-        if (task != null) return task;
-        return queue.poll();
+    private Runnable pollAffinityLane(int slot) {
+        ArrayBlockingQueue<Runnable> lane = affinityQueues.get(slot);
+        Runnable task = lane.poll();
+        if (task == null) return null;
+        affinityPreferredHits.incrementAndGet();
+        clearLaneAgeIfEmpty(slot, lane);
+        return task;
+    }
+
+    private void clearLaneAgeIfEmpty(int slot, ArrayBlockingQueue<Runnable> lane) {
+        if (lane.isEmpty()) affinityLaneOldestEnqueueNanos.set(slot, 0L);
     }
 
     private Runnable pollStealableTask(int thiefSlot) {
         long now = System.nanoTime();
         int enabled = Math.max(1, corePoolSize.get());
-        for (int offset = 1; offset < enabled; offset++) {
-            int victimSlot = (thiefSlot + offset) % enabled;
+        if (enabled <= 1) return null;
+
+        int maxProbes = Math.min(enabled - 1, MAX_STEAL_PROBES);
+        int start = Math.floorMod(nextStealVictim.getAndIncrement(), enabled);
+        int examined = 0;
+        int probes = 0;
+        while (examined < enabled && probes < maxProbes) {
+            int victimSlot = (start + examined++) % enabled;
+            if (victimSlot == thiefSlot) continue;
+            probes++;
+
             ArrayBlockingQueue<Runnable> victim = affinityQueues.get(victimSlot);
             if (victim.peek() == null) continue;
-            long lastEnqueue = affinityLaneLastEnqueueNanos.get(victimSlot);
-            if (lastEnqueue == 0L
-                    || now - lastEnqueue < AFFINITY_STEAL_GRACE_NANOS) continue;
+            long oldestEnqueue = affinityLaneOldestEnqueueNanos.get(victimSlot);
+            if (oldestEnqueue == 0L
+                    || now - oldestEnqueue < AFFINITY_STEAL_GRACE_NANOS) continue;
+
             Runnable stolen = victim.poll();
-            if (stolen != null) return stolen;
+            if (stolen != null) {
+                affinitySteals.incrementAndGet();
+                clearLaneAgeIfEmpty(victimSlot, victim);
+                return stolen;
+            }
         }
         return null;
     }
@@ -271,6 +338,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
 
         boolean offered = false;
         int slot = -1;
+        ArrayBlockingQueue<Runnable> destination = null;
         try {
             if (shutdown.get()) {
                 throw new RejectedExecutionException("native carrier executor is shut down");
@@ -280,19 +348,41 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
                 slot = preferredSlot(affinityKey);
                 ArrayBlockingQueue<Runnable> lane = affinityQueues.get(slot);
                 if (lane.size() < localBacklogEscapeThreshold()) {
+                    boolean wasEmpty = lane.isEmpty();
                     offered = lane.offer(task);
                     if (offered) {
-                        affinityLaneLastEnqueueNanos.set(slot, System.nanoTime());
+                        destination = lane;
+                        if (wasEmpty || lane.size() == 1) {
+                            affinityLaneOldestEnqueueNanos.compareAndSet(
+                                    slot, 0L, System.nanoTime());
+                        }
                     }
                 }
             }
             if (!offered) {
                 slot = -1;
                 offered = queue.offer(task);
+                if (offered) {
+                    destination = queue;
+                    if (affinityAware) affinityGlobalSpills.incrementAndGet();
+                }
             }
             if (!offered) {
                 throw new RejectedExecutionException("native carrier ready queue is full");
             }
+
+            /*
+             * Close the enqueue-vs-shutdown drain race. If shutdown already
+             * drained the queues before this offer became visible, retract the
+             * just-enqueued task. If a carrier already claimed it, execution is
+             * already active and follows ordinary shutdownNow race semantics.
+             */
+            if (shutdown.get() && destination != null && destination.remove(task)) {
+                offered = false;
+                if (slot >= 0) clearLaneAgeIfEmpty(slot, destination);
+                throw new RejectedExecutionException("native carrier executor is shut down");
+            }
+
             wakeCarrier(slot);
         } finally {
             if (!offered) releaseReadySlot();
@@ -378,7 +468,17 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
         for (ArrayBlockingQueue<Runnable> lane : affinityQueues) {
             lane.drainTo(abandoned);
         }
-        queuedTaskCount.addAndGet(-abandoned.size());
+        int remainingQueued = queuedTaskCount.addAndGet(-abandoned.size());
+        if (remainingQueued < 0) {
+            queuedTaskCount.set(0);
+            dispatchUncaught(new IllegalStateException(
+                    "native carrier ready-queue accounting underflow during shutdown"));
+        }
+        for (int slot = 0; slot < affinityQueues.size(); slot++) {
+            if (affinityQueues.get(slot).isEmpty()) {
+                affinityLaneOldestEnqueueNanos.set(slot, 0L);
+            }
+        }
 
         if (interruptActiveCarriers) {
             // Match ThreadPoolExecutor.shutdownNow(): signal any active carrier
@@ -437,6 +537,10 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     public int getActiveCount() { return activeCount.get(); }
     public int getQueueSize() { return queuedTaskCount.get(); }
     public long getCompletedTaskCount() { return completedTaskCount.get(); }
+    public long getAffinityPreferredHitCount() { return affinityPreferredHits.get(); }
+    public long getAffinityStealCount() { return affinitySteals.get(); }
+    public long getAffinityGlobalSpillCount() { return affinityGlobalSpills.get(); }
+    public int getAffinityBindingFailureCount() { return affinityBindingFailures.get(); }
     public int getLargestPoolSize() { return largestPoolSize.get(); }
     public int getMaximumPoolSize() { return maximumPoolSize; }
     public long getNativeStackBytes() { return nativeStackBytes; }
@@ -482,6 +586,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
                                     "failed to rebalance disabled native affinity lane");
                         }
                     }
+                    affinityLaneOldestEnqueueNanos.set(slot, 0L);
                 }
             }
             largestPoolSize.accumulateAndGet(value, Math::max);
