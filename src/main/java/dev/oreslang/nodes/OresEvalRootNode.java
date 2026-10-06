@@ -2194,6 +2194,9 @@ public final class OresEvalRootNode extends RootNode {
 
         private GeneratorRuntime.AsyncGenerator<?> sourceAsyncGenerator(Object value, Env env) {
             if (value instanceof GeneratorRuntime.AsyncGenerator<?> generator) return generator;
+            if (value instanceof ChannelRuntime.Channel<?> channel) {
+                return channelAsyncIterator(channel);
+            }
             if (value instanceof OresObject object) {
                 Ast.MethodDecl iterator = findMethod(object.klass,
                         CallableSelector.instance("Symbol.asyncIterator", 0), new LinkedHashSet<>());
@@ -5534,6 +5537,25 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 return (Invokable) factory::create;
             }
+            if (receiver instanceof ChannelRuntime.Channel<?> channel) {
+                return switch (name) {
+                    case "async_iter" -> (Invokable) args -> {
+                        requireZero(args, "Channel.async_iter");
+                        return channelAsyncIterator(channel);
+                    };
+                    case "close" -> (Invokable) args -> {
+                        requireZero(args, "Channel.close");
+                        channel.close();
+                        return null;
+                    };
+                    case "is_closed" -> (Invokable) args -> {
+                        requireZero(args, "Channel.is_closed");
+                        return channel.isClosed();
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown Channel member " + name);
+                };
+            }
             if (receiver instanceof SelectCaseFactory factory) {
                 return switch (name) {
                     case "read" -> (Invokable) factory::read;
@@ -6516,6 +6538,11 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Iterable<?> asyncIterableValues(Object value, Env env) {
+            if (value instanceof ChannelRuntime.Channel<?> channel) {
+                return asyncIterableValues(
+                        channelAsyncIterator(channel),
+                        env);
+            }
             if (value instanceof OresObject object) {
                 Ast.MethodDecl iterator =
                         findMethod(object.klass, CallableSelector.instance("Symbol.asyncIterator", 0), new LinkedHashSet<>());
@@ -6564,6 +6591,14 @@ public final class OresEvalRootNode extends RootNode {
                 }
             }
             return new AsyncPullIterable();
+        }
+
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private GeneratorRuntime.AsyncGenerator<?> channelAsyncIterator(
+                ChannelRuntime.Channel<?> channel) {
+            return GeneratorRuntime.channelAsyncIterator(
+                    context.asyncRuntime(),
+                    (ChannelRuntime.Channel) channel);
         }
 
         private Iterable<?> asyncSynchronousIterableValues(Object value, Env env) {
