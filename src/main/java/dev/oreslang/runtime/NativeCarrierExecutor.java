@@ -41,7 +41,22 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private static final Object NATIVE_LIBRARY_LOCK = new Object();
     private static volatile boolean nativeLibraryLoaded;
 
-    private static final long IDLE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
+    private static final long IDLE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
+    private static final long AFFINITY_STEAL_GRACE_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
+
+    private record AffinityTask(
+            Runnable delegate,
+            long enqueuedNanos,
+            int preferredSlot) implements Runnable {
+        private AffinityTask {
+            Objects.requireNonNull(delegate, "delegate");
+        }
+
+        @Override
+        public void run() {
+            delegate.run();
+        }
+    }
 
     private final ArrayBlockingQueue<Runnable> queue;
     private final List<ArrayBlockingQueue<Runnable>> affinityQueues;
@@ -155,10 +170,14 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
                 Runnable task = pollReadyTask(slot);
                 if (task == null) {
                     // Submission unparks the preferred carrier immediately.
-                    // The bounded park is only a lost-wakeup/shutdown safety net.
+                    // An idle peer waits through a short locality grace period
+                    // before it is allowed to steal another carrier's lane.
                     LockSupport.parkNanos(this, IDLE_PARK_NANOS);
                     Thread.interrupted();
-                    continue;
+                    if (shutdown.get()) continue;
+                    task = pollReadyTask(slot);
+                    if (task == null) task = pollStealableTask(slot);
+                    if (task == null) continue;
                 }
                 releaseReadySlot();
 
@@ -189,6 +208,21 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
         Runnable task = affinityQueues.get(slot).poll();
         if (task != null) return task;
         return queue.poll();
+    }
+
+    private Runnable pollStealableTask(int thiefSlot) {
+        long now = System.nanoTime();
+        int enabled = Math.max(1, corePoolSize.get());
+        for (int offset = 1; offset < enabled; offset++) {
+            int victimSlot = (thiefSlot + offset) % enabled;
+            ArrayBlockingQueue<Runnable> victim = affinityQueues.get(victimSlot);
+            Runnable candidate = victim.peek();
+            if (!(candidate instanceof AffinityTask affinityTask)) continue;
+            if (now - affinityTask.enqueuedNanos() < AFFINITY_STEAL_GRACE_NANOS) continue;
+            Runnable stolen = victim.poll();
+            if (stolen != null) return stolen;
+        }
+        return null;
     }
 
     private boolean reserveReadySlot() {
@@ -256,7 +290,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
                 slot = preferredSlot(affinityKey);
                 ArrayBlockingQueue<Runnable> lane = affinityQueues.get(slot);
                 if (lane.size() < localBacklogEscapeThreshold()) {
-                    offered = lane.offer(task);
+                    offered = lane.offer(new AffinityTask(task, System.nanoTime(), slot));
                 }
             }
             if (!offered) {
@@ -309,9 +343,14 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
             return true;
         }
         for (ArrayBlockingQueue<Runnable> lane : affinityQueues) {
-            if (lane.remove(task)) {
-                releaseReadySlot();
-                return true;
+            for (Runnable queued : lane) {
+                boolean matches = queued == task
+                        || (queued instanceof AffinityTask affinityTask
+                            && affinityTask.delegate() == task);
+                if (matches && lane.remove(queued)) {
+                    releaseReadySlot();
+                    return true;
+                }
             }
         }
         return false;

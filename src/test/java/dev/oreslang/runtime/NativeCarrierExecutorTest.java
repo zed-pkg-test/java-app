@@ -82,6 +82,7 @@ final class NativeCarrierExecutorTest {
                      new NativeCarrierExecutor(2, 2, 8, "ores-native-affinity-spill-")) {
             CountDownLatch preferredStarted = new CountDownLatch(1);
             CountDownLatch releasePreferred = new CountDownLatch(1);
+            CountDownLatch preferredFinished = new CountDownLatch(1);
             CountDownLatch spillRan = new CountDownLatch(1);
             Set<Integer> spillSlots = ConcurrentHashMap.newKeySet();
 
@@ -92,6 +93,8 @@ final class NativeCarrierExecutorTest {
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                     fail(interrupted);
+                } finally {
+                    preferredFinished.countDown();
                 }
             });
             assertTrue(preferredStarted.await(5, TimeUnit.SECONDS));
@@ -111,6 +114,7 @@ final class NativeCarrierExecutorTest {
             assertEquals(Set.of(1), spillSlots,
                     "the idle carrier should execute globally spilled affinity work");
             releasePreferred.countDown();
+            assertTrue(preferredFinished.await(5, TimeUnit.SECONDS));
         }
     }
 
