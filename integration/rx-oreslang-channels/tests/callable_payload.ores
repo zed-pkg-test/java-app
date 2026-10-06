@@ -1,0 +1,3 @@
+fnc bad(Channel<Fnc<int, int>> callbacks): void {
+  return;
+}
