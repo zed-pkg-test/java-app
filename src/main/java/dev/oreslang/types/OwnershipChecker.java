@@ -540,10 +540,20 @@ public final class OwnershipChecker {
             return checkExpr(unary.operand(), scope, false);
         }
         if (expr instanceof Ast.AssignExpr assignment) {
+            boolean proxyTarget = assignment.target() instanceof Ast.MemberExpr member
+                    && isProxyReceiver(member.receiver(), scope)
+                    || assignment.target() instanceof Ast.IndexExpr indexed
+                    && isProxyReceiver(indexed.receiver(), scope);
             checkAssignmentTarget(assignment.target(), scope);
             ValueInfo assigned = checkExpr(assignment.value(), scope, true);
             if (containsMutexGuardType(assigned.type)) {
                 throw error("guard-bearing values cannot be assigned or overwritten; bind them once with val");
+            }
+            if (proxyTarget) {
+                // The moved value now lives behind the proxy lock. Returning
+                // it from the assignment expression would manufacture a raw
+                // second owner outside the synchronized domain.
+                return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
             }
             return assigned;
         }
@@ -636,7 +646,12 @@ public final class OwnershipChecker {
                     && concreteReceiver.name().equals("DynamicStruct")
                     && concreteReceiver.arguments().size() == 1) {
                 Ast.TypeRef valueType = concreteReceiver.arguments().getFirst();
-                return new ValueInfo(valueType, kindOfType(valueType), null);
+                ValueKind valueKind = kindOfType(valueType);
+                if (isProxyReceiver(member.receiver(), scope) && valueKind != ValueKind.COPY) {
+                    throw error("cannot extract move-only DynamicStruct value through rt Proxy<T>; "
+                            + "return a copy/immutable snapshot or keep mutation behind the proxy");
+                }
+                return new ValueInfo(valueType, valueKind, null);
             }
             Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
             if (klass != null) {
@@ -670,6 +685,10 @@ public final class OwnershipChecker {
             checkExpr(indexed.index(), scope, false);
             Ast.TypeRef elementType = collectionElementType(receiver.type);
             ValueKind elementKind = elementType.name().equals("$infer$") ? ValueKind.MOVE_ONLY : kindOfType(elementType);
+            if (isProxyReceiver(indexed.receiver(), scope) && elementKind != ValueKind.COPY) {
+                throw error("cannot extract move-only indexed state through rt Proxy<T>; "
+                        + "return a copy/immutable snapshot or keep mutation behind the proxy");
+            }
             if (consuming && isRootedAtActorSelf(indexed.receiver(), scope) && elementKind != ValueKind.COPY) {
                 throw error("cannot move actor-owned indexed state out of its mailbox turn");
             }
@@ -985,6 +1004,15 @@ public final class OwnershipChecker {
             if (concreteReceiver == null) {
                 concreteReceiver = receiverValue.type.isBorrow()
                         ? receiverValue.type.borrowedTarget() : receiverValue.type;
+            }
+            if (concreteReceiver != null
+                    && concreteReceiver.name().equals("Proxy")
+                    && concreteReceiver.arguments().size() == 1
+                    && member.member().equals("dispose")) {
+                if (call.typeArgumentsPresent() || !call.arguments().isEmpty()) {
+                    throw error("Proxy<T>.dispose() takes no arguments or type arguments");
+                }
+                return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
             }
             Ast.ClassDecl klass = concreteReceiver == null ? null : findClass(concreteReceiver.name());
             ResolvedMethod target = klass == null ? null
@@ -2039,6 +2067,7 @@ public final class OwnershipChecker {
     private Ast.TypeRef collectionElementType(Ast.TypeRef type) {
         if (type == null) return Ast.TypeRef.inferred();
         Ast.TypeRef concrete = type.isBorrow() ? type.borrowedTarget() : type;
+        if (isProxyType(concrete)) concrete = concrete.arguments().getFirst();
         if ((concrete.name().equals("Array") || concrete.name().equals("List")
                 || concrete.name().equals("DynamicStruct")) && concrete.arguments().size() == 1) {
             return concrete.arguments().getFirst();
@@ -2258,7 +2287,9 @@ public final class OwnershipChecker {
             VarState state = scope.lookup(name.name());
             return state != null && isProxyType(state.type);
         }
-        return false;
+        return receiver instanceof Ast.CallExpr call
+                && call.callee() instanceof Ast.NameExpr intrinsic
+                && intrinsic.name().equals("$rt$proxy");
     }
 
     private static boolean isMutexGuardType(Ast.TypeRef type) {
