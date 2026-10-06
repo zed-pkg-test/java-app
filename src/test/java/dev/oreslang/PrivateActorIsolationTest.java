@@ -295,7 +295,7 @@ final class PrivateActorIsolationTest {
                             childContext -> (childMessage, childTurn) -> { });
                     throw new AssertionError("private actor spawned shared child");
                 } catch (SecurityException expected) {
-                    if (!expected.getMessage().contains("SHARED_MEMORY")) throw expected;
+                    if (!expected.getMessage().contains("ACTOR_SHARE_READONLY")) throw expected;
                 }
                 context.self().stop();
             });
