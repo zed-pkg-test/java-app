@@ -95,10 +95,12 @@ final class ActorAsyncFinalizationBarrierTest {
                 IsolatePolicy.developer(),
                 new ActorRuntime.DispatcherConfig(1, 1, 8, 64),
                 gated)) {
-            OresFuture<String> result = runtime.invokeAsync(
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            OresFuture<String> result = (OresFuture<String>) (OresFuture) runtime.invokeAsync(
                     ActorRuntime.ActorKind.SHARED,
                     "request",
-                    (message, context) -> OresFuture.completed("future:" + message));
+                    (ActorRuntime.Invocation<String, Object>)
+                            (message, context) -> OresFuture.completed("future:" + message));
 
             assertTrue(guestTurnFinished.await(2, TimeUnit.SECONDS));
             assertFalse(result.isDone());
