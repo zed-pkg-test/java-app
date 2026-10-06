@@ -41,6 +41,7 @@ public final class OwnershipChecker {
     private final Set<String> ambiguousClasses = new HashSet<>();
     private int mutexCriticalSectionDepth;
     private int loopDepth;
+    private boolean currentAsyncGenerator;
 
     private OwnershipChecker(Ast.Program program) {
         index(program);
@@ -85,8 +86,14 @@ public final class OwnershipChecker {
         for (Ast.Param param : fn.parameters()) {
             scope.define(param.name(), stateForParam(param));
         }
-        checkBlock(fn.body(), scope, fn.returnType());
-        scope.close();
+        boolean previousAsyncGenerator = currentAsyncGenerator;
+        currentAsyncGenerator = fn.generator() && fn.async();
+        try {
+            checkBlock(fn.body(), scope, fn.returnType());
+        } finally {
+            currentAsyncGenerator = previousAsyncGenerator;
+            scope.close();
+        }
     }
 
     private Ast.ClassDecl initializingClass;
@@ -122,10 +129,19 @@ public final class OwnershipChecker {
                             ValueKind.MUT_BORROW,
                             Origin.PARAM));
                 } else {
+                    Ast.TypeRef explicit = method.explicitReceiverType();
+                    boolean explicitMutableReceiver = explicit != null
+                            && explicit.isBorrow()
+                            && explicit.mutableBorrow();
                     ValueKind receiverKind = AnnotationExpander.isGeneratedFromJsonSetter(method)
+                            || explicitMutableReceiver
                             ? ValueKind.MUT_BORROW
                             : ValueKind.IMM_BORROW;
-                    scope.define("self", new VarState(Ast.TypeRef.simple(klass.name()), false, receiverKind, Origin.PARAM));
+                    scope.define("self", new VarState(
+                            Ast.TypeRef.simple(klass.name()),
+                            false,
+                            receiverKind,
+                            Origin.PARAM));
                 }
             }
             for (Ast.Param param : method.parameters()) scope.define(param.name(), stateForParam(param));
@@ -225,8 +241,13 @@ public final class OwnershipChecker {
                 throw error("cannot yield while a borrow is live; suspended generator frames currently require owned locals");
             }
             ValueInfo value = checkExpr(yielded.value(), scope, true);
-            if (containsMutexGuardType(value.type)) {
-                throw error("MutexGuard values cannot be yielded from a generator");
+            Ast.TypeRef exposed = yielded.delegated()
+                    ? iterableElementType(value.type, currentAsyncGenerator)
+                    : value.type;
+            if (containsMutexGuardType(exposed)) {
+                throw error(yielded.delegated()
+                        ? "MutexGuard values cannot cross a yield* delegation boundary"
+                        : "MutexGuard values cannot be yielded from a generator");
             }
             return;
         }
@@ -552,6 +573,12 @@ public final class OwnershipChecker {
             return checkExpr(unary.operand(), scope, false);
         }
         if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (runtime.operation().equals("cooperate")) {
+                if (!runtime.arguments().isEmpty()) {
+                    throw error("rt cooperate takes no arguments");
+                }
+                return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
+            }
             if (runtime.arguments().size() != 1) {
                 throw error("rt " + runtime.operation() + " expects exactly one argument");
             }
@@ -591,7 +618,7 @@ public final class OwnershipChecker {
                     }
                     yield source;
                 }
-                default -> throw error("unknown runtime ownership operation 'rt " + runtime.operation() + "'");
+                default -> throw error("unknown runtime operation 'rt " + runtime.operation() + "'");
             };
         }
         if (expr instanceof Ast.AssignExpr assignment) {
@@ -1239,13 +1266,21 @@ public final class OwnershipChecker {
     }
 
     private void ensureMutableReceiver(Ast.Expr receiver, Scope scope, String what) {
+        if (receiver instanceof Ast.MemberExpr member) {
+            ensureMutableReceiver(member.receiver(), scope, what);
+            return;
+        }
+        if (receiver instanceof Ast.IndexExpr indexed) {
+            ensureMutableReceiver(indexed.receiver(), scope, what);
+            return;
+        }
         if (receiver instanceof Ast.NameExpr name) {
             VarState state = requireState(scope, name.name());
             requireUsable(state, name.name(), true);
             if (isMutexGuardType(state.type)) return;
             boolean mutableBorrow = state.kind == ValueKind.MUT_BORROW || (state.type.isBorrow() && state.type.mutableBorrow());
             if (!state.mutable && !mutableBorrow) {
-                throw error("cannot mutate " + what + " through immutable parameter/binding '" + name.name() + "'; declare the owned parameter as 'mut' or pass '&mut'");
+                throw error("cannot mutate " + what + " through immutable parameter/binding '" + name.name() + "'; use a mutable owner or canonical 'mut self'/'Type mut name' access");
             }
             if (state.kind == ValueKind.IMM_BORROW || (state.type.isBorrow() && !state.type.mutableBorrow())) {
                 throw error("cannot mutate " + what + " through immutable borrow '" + name.name() + "'");
@@ -1260,7 +1295,7 @@ public final class OwnershipChecker {
             validateBorrow(owner, true);
             return;
         }
-        throw error("mutation target must be rooted in a mutable local/parameter or &mut borrow");
+        throw error("mutation target must be rooted in a mutable owner or pointerless mutable receiver/reference");
     }
 
     private VarState borrowOwner(Ast.Expr operand, Scope scope) {
@@ -2238,12 +2273,26 @@ public final class OwnershipChecker {
             boolean async,
             boolean generator) {
         if (generator) {
+            Ast.TypeRef element = generatorYieldType(result, async);
             return new Ast.TypeRef(
                     async ? "AsyncIterator" : "Iterator",
-                    List.of(result),
+                    List.of(element),
                     false);
         }
         if (async) return new Ast.TypeRef("Future", List.of(result), false);
+        return result;
+    }
+
+    private Ast.TypeRef generatorYieldType(Ast.TypeRef result, boolean async) {
+        if (result != null && result.arguments().size() == 1) {
+            boolean syncProtocol =
+                    result.name().equals("Iterator") || result.name().equals("Generator");
+            boolean asyncProtocol =
+                    result.name().equals("AsyncIterator") || result.name().equals("AsyncGenerator");
+            if ((async && asyncProtocol) || (!async && syncProtocol)) {
+                return result.arguments().getFirst();
+            }
+        }
         return result;
     }
 
