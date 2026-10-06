@@ -2,6 +2,7 @@ package dev.oreslang.compiler;
 
 import dev.oreslang.ast.AnnotationExpander;
 import dev.oreslang.ast.Ast;
+import dev.oreslang.imports.ImportRules;
 import dev.oreslang.parser.Parser;
 
 import java.nio.charset.StandardCharsets;
@@ -104,7 +105,14 @@ public final class IncrementalCompiler {
                 continue;
             }
 
-            Ast.Program checked = OresCompiler.parseAndTypeCheck(normalized.get(id));
+            Set<String> importedAsyncCallables = linkedAsyncCallablesForUnit(
+                    id,
+                    parsed.get(id),
+                    parsed,
+                    normalizedImportResolutions);
+            Ast.Program checked = OresCompiler.parseAndTypeCheck(
+                    normalized.get(id),
+                    importedAsyncCallables);
             CompiledUnit unit = new CompiledUnit(
                     id,
                     packageId(id, checked),
@@ -125,6 +133,75 @@ public final class IncrementalCompiler {
                 Set.copyOf(rebuilt),
                 Set.copyOf(reused),
                 initializationGroups);
+    }
+
+    private static Set<String> linkedAsyncCallablesForUnit(
+            String unitId,
+            Ast.Program program,
+            Map<String, Ast.Program> programs,
+            Map<String, Map<String, String>> importResolutions) {
+        LinkedHashSet<String> async = new LinkedHashSet<>();
+        for (Ast.ImportDecl imported : program.imports()) {
+            String targetId = ImportGraph.resolveImportUnitId(
+                    unitId,
+                    imported,
+                    programs.keySet(),
+                    importResolutions);
+            if (targetId == null) continue;
+
+            Ast.Program target = programs.get(targetId);
+            if (target == null) continue;
+
+            if (!imported.wildcard() && imported.kind() == Ast.ImportKind.FUNCTION) {
+                for (String sourceName : imported.names()) {
+                    String localName = ImportRules.localName(imported, sourceName);
+                    for (Ast.ModuleDecl module : target.modules()) {
+                        for (Ast.Decl declaration : module.declarations()) {
+                            if (declaration instanceof Ast.FunctionDecl fn
+                                    && linkableNamedFunction(fn)
+                                    && fn.name().equals(sourceName)
+                                    && fn.async()) {
+                                async.add(linkedCallableKey(localName, fn.parameters().size()));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (imported.wildcard()) {
+                String namespace = imported.namespace();
+                for (Ast.ModuleDecl module : target.modules()) {
+                    for (Ast.Decl declaration : module.declarations()) {
+                        if (declaration instanceof Ast.FunctionDecl fn
+                                && linkableNamespaceFunction(fn)
+                                && fn.async()) {
+                            async.add(linkedCallableKey(
+                                    namespace + "." + fn.name(),
+                                    fn.parameters().size()));
+                        }
+                    }
+                }
+            }
+        }
+        return Set.copyOf(async);
+    }
+
+    private static boolean linkableNamedFunction(Ast.FunctionDecl fn) {
+        return fn.visibility() == Ast.Visibility.PUBLIC
+                && fn.kind() == Ast.CallableKind.FNC
+                && fn.actorKind() == Ast.ActorKind.NONE
+                && fn.genericParameters().isEmpty();
+    }
+
+    private static boolean linkableNamespaceFunction(Ast.FunctionDecl fn) {
+        return fn.visibility() == Ast.Visibility.PUBLIC
+                && fn.actorKind() == Ast.ActorKind.NONE
+                && fn.genericParameters().isEmpty();
+    }
+
+    private static String linkedCallableKey(String localName, int arity) {
+        return localName + "/" + arity;
     }
 
     public synchronized void clear() {

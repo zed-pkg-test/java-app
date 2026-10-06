@@ -56,6 +56,9 @@ public final class TypeChecker {
     private final Set<String> ambiguousInterfaces = new HashSet<>();
     private final Set<String> ambiguousTypeAliases = new HashSet<>();
     private final Set<String> importedValues = new HashSet<>();
+    // Linked compilation may prove that an otherwise opaque imported callable is async.
+    // Keys are local call identities: `name/arity` or `namespace.name/arity`.
+    private final Set<String> importedAsyncCallables = new HashSet<>();
     private final Set<Ast.TypeAliasDecl> resolvingAliases = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private Ast.ActorKind currentActorKind = Ast.ActorKind.NONE;
     private Ast.ClassDecl currentClassOwner;
@@ -71,8 +74,24 @@ public final class TypeChecker {
 
     /** Type analysis only; executable admission must use OresCompiler.analyze. */
     public static Ast.Program checkTypes(Ast.Program program) {
+        return checkTypes(program, Set.of());
+    }
+
+    /**
+     * Linked-unit type analysis with the minimum cross-file callable effect metadata
+     * needed to type suspension points safely. Imported parameter/result shapes remain
+     * opaque in this pass, but a linker-proven async callable is known to return
+     * Future<T>, with T intentionally unknown until full cross-unit signature typing.
+     */
+    public static Ast.Program checkTypes(
+            Ast.Program program,
+            Set<String> importedAsyncCallables) {
+        if (importedAsyncCallables == null) {
+            throw new IllegalArgumentException("imported async callable set cannot be null");
+        }
         program = AnnotationExpander.expand(program);
         TypeChecker checker = new TypeChecker();
+        checker.importedAsyncCallables.addAll(importedAsyncCallables);
         checker.validateImports(program);
         checker.collect(program);
         checker.validate(program);
@@ -118,6 +137,10 @@ public final class TypeChecker {
                 }
             }
         }
+    }
+
+    private static String linkedCallableKey(String localName, int arity) {
+        return localName + "/" + arity;
     }
 
     private void collect(Ast.Program program) {
@@ -1514,6 +1537,18 @@ public final class TypeChecker {
                             label);
                     return trapResult(target.trapped(), callableResult(target.async(), target.generator(), result));
                 }
+
+                if (importedAsyncCallables.contains(
+                        linkedCallableKey(functionName.name(), call.arguments().size()))) {
+                    if (call.typeArgumentsPresent()) {
+                        throw new IllegalArgumentException(
+                                "opaque imported async callables do not accept call-site type arguments");
+                    }
+                    for (Ast.Expr argument : call.arguments()) {
+                        typeOf(argument, env, generics, self);
+                    }
+                    return new Named("Future", List.of(Unknown.INSTANCE));
+                }
             }
             String booleanIntrinsic = booleanIntrinsicName(call, env);
             if (booleanIntrinsic != null) {
@@ -1547,7 +1582,39 @@ public final class TypeChecker {
                             label);
                     return trapResult(target.trapped(), callableResult(target.async(), target.generator(), result));
                 }
+
+                if (importedAsyncCallables.contains(
+                        linkedCallableKey(
+                                namespace.name() + "." + qualifiedCall.member(),
+                                call.arguments().size()))) {
+                    if (call.typeArgumentsPresent()) {
+                        throw new IllegalArgumentException(
+                                "opaque imported async callables do not accept call-site type arguments");
+                    }
+                    for (Ast.Expr argument : call.arguments()) {
+                        typeOf(argument, env, generics, self);
+                    }
+                    return new Named("Future", List.of(Unknown.INSTANCE));
+                }
             }
+            if (call.callee() instanceof Ast.MemberExpr importedQualified
+                    && importedQualified.receiver() instanceof Ast.NameExpr importedNamespace
+                    && env.lookup(importedNamespace.name()) == null
+                    && importedValues.contains(importedNamespace.name())
+                    && importedAsyncCallables.contains(
+                            linkedCallableKey(
+                                    importedNamespace.name() + "." + importedQualified.member(),
+                                    call.arguments().size()))) {
+                if (call.typeArgumentsPresent()) {
+                    throw new IllegalArgumentException(
+                            "opaque imported async callables do not accept call-site type arguments");
+                }
+                for (Ast.Expr argument : call.arguments()) {
+                    typeOf(argument, env, generics, self);
+                }
+                return new Named("Future", List.of(Unknown.INSTANCE));
+            }
+
             if (call.callee() instanceof Ast.MemberExpr channelCall
                     && channelCall.receiver() instanceof Ast.NameExpr factory
                     && factory.name().equals("Channel")
