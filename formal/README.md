@@ -18,6 +18,8 @@ This directory documents the executable formal-methods layer for Oreslang runtim
 
 `FormalStructuredCancellationModelCheckTest` models a three-level structured actor tree and proves downward-only lifecycle authority, cancellation cascade, bottom-up termination, and atomic whole-subtree force kill.
 
+`FormalForceRevocationModelCheckTest` models hard kill as a two-phase protocol: fence, external revocation, then logical termination. It also explores failed/throwing revokers, mailbox rejection while fenced, overlapping hard-kill rejection, and fence clearing after failure.
+
 The checked invariants are:
 
 1. **At-most-once protocol settlement.** A reply is completed or cancelled, never both and never twice.
@@ -36,6 +38,8 @@ The checked invariants are:
 14. **No structured actor orphans.** Parent teardown fences/cancels descendants before parent termination, and lifecycle authority never propagates upward from child to parent.
 15. **Rendezvous is exactly one handoff.** A zero-capacity channel completes read and write together; the second arrival cannot leave both waiters pending.
 16. **Cancelled channel waiters are withdrawn.** Cancellation cannot consume later traffic, and channel close fails every remaining pending waiter without inventing a delivery.
+17. **Hard kill publishes only after revocation.** Logical cancelled termination is unreachable until external revocation succeeds.
+18. **Force-kill fences fail closed.** While external revocation is in flight, new mailbox admission and overlapping hard-kill attempts are rejected; false/throwing revokers clear the fence and restore actor progress.
 
 ## Relationship to runtime tests
 
