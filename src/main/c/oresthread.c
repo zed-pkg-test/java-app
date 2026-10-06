@@ -7,7 +7,6 @@
 
 #include <jni.h>
 #include <pthread.h>
-#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,12 +14,10 @@
 #include <time.h>
 #include <sched.h>
 #include <stdatomic.h>
-#include <unistd.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/thread_info.h>
 #include <mach/thread_act.h>
-#include <mach/thread_policy.h>
 #endif
 
 typedef struct ores_carrier_pool ores_carrier_pool;
@@ -312,103 +309,6 @@ static void *carrier_reaper_main(void *raw) {
     return NULL;
 }
 
-JNIEXPORT jint JNICALL
-Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeBindCurrentThreadToAffinityOrdinal(
-        JNIEnv *env, jclass cls, jlong affinity_ordinal) {
-    (void)env;
-    (void)cls;
-    if (affinity_ordinal < 0) return -1;
-
-#if defined(__linux__)
-    long configured_cpus = sysconf(_SC_NPROCESSORS_CONF);
-    int cpu_capacity = configured_cpus > 0 && configured_cpus <= INT32_MAX
-            ? (int)configured_cpus
-            : CPU_SETSIZE;
-    if (cpu_capacity < CPU_SETSIZE) cpu_capacity = CPU_SETSIZE;
-
-    cpu_set_t *allowed = NULL;
-    size_t set_size = 0;
-    int affinity_loaded = 0;
-
-    /*
-     * Linux returns EINVAL when cpusetsize is smaller than the kernel's CPU
-     * mask. CPU IDs may be sparse after hotplug, so _SC_NPROCESSORS_CONF is
-     * not by itself a safe upper bound on the highest possible CPU id.
-     */
-    for (int attempt = 0; attempt < 8; attempt++) {
-        set_size = CPU_ALLOC_SIZE(cpu_capacity);
-        allowed = CPU_ALLOC(cpu_capacity);
-        if (allowed == NULL) return -1;
-        CPU_ZERO_S(set_size, allowed);
-
-        errno = 0;
-        if (sched_getaffinity(0, set_size, allowed) == 0) {
-            affinity_loaded = 1;
-            break;
-        }
-
-        int error = errno;
-        CPU_FREE(allowed);
-        allowed = NULL;
-        if (error != EINVAL || cpu_capacity > INT32_MAX / 2) return -1;
-        cpu_capacity *= 2;
-    }
-
-    if (!affinity_loaded || allowed == NULL) return -1;
-
-    int allowed_count = CPU_COUNT_S(set_size, allowed);
-    if (allowed_count <= 0) {
-        CPU_FREE(allowed);
-        return -1;
-    }
-
-    int ordinal = (int)((uint64_t)affinity_ordinal % (uint64_t)allowed_count);
-    int selected = -1;
-    for (int cpu = 0; cpu < cpu_capacity; cpu++) {
-        if (!CPU_ISSET_S(cpu, set_size, allowed)) continue;
-        if (ordinal-- == 0) {
-            selected = cpu;
-            break;
-        }
-    }
-    if (selected < 0) {
-        CPU_FREE(allowed);
-        return -1;
-    }
-
-    cpu_set_t *target = CPU_ALLOC(cpu_capacity);
-    if (target == NULL) {
-        CPU_FREE(allowed);
-        return -1;
-    }
-    CPU_ZERO_S(set_size, target);
-    CPU_SET_S(selected, set_size, target);
-    int bind_status = pthread_setaffinity_np(
-            pthread_self(), set_size, target);
-    CPU_FREE(allowed);
-    CPU_FREE(target);
-    return bind_status == 0 ? (jint)selected : -1;
-#elif defined(__APPLE__)
-    /*
-     * Darwin does not expose Linux-style strict CPU pinning. An affinity tag
-     * asks Mach to co-schedule equal tags with cache locality when practical.
-     * The actor scheduler still keeps a stable carrier lane above this hint.
-     */
-    thread_affinity_policy_data_t policy;
-    uint64_t tag = ((uint64_t)affinity_ordinal % (uint64_t)INT32_MAX) + 1ULL;
-    policy.affinity_tag = (integer_t)tag;
-    mach_port_t thread = pthread_mach_thread_np(pthread_self());
-    kern_return_t status = thread_policy_set(
-            thread,
-            THREAD_AFFINITY_POLICY,
-            (thread_policy_t)&policy,
-            THREAD_AFFINITY_POLICY_COUNT);
-    return status == KERN_SUCCESS ? (jint)tag : -1;
-#else
-    return -1;
-#endif
-}
-
 JNIEXPORT void JNICALL
 Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeShutdown(
         JNIEnv *env, jclass cls, jlong handle) {
@@ -436,19 +336,6 @@ Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeShutdown(
      * Leave this retired pool rooted until process teardown. Actor admission is
      * already closed and every parked/cooperative carrier has been woken.
      */
-}
-
-JNIEXPORT jint JNICALL
-Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeCurrentCpu(
-        JNIEnv *env, jclass cls) {
-    (void)env;
-    (void)cls;
-#if defined(__linux__)
-    int cpu = sched_getcpu();
-    return cpu >= 0 ? (jint)cpu : -1;
-#else
-    return -1;
-#endif
 }
 
 JNIEXPORT jlong JNICALL
