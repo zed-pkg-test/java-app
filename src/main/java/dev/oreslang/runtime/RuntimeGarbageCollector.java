@@ -78,6 +78,9 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
         private boolean tryClean() {
             if (cleaned.get() || !cleaning.compareAndSet(false, true)) return false;
             try {
+                // Another caller may have completed between the initial check
+                // and our acquisition of the cleanup slot.
+                if (cleaned.get()) return false;
                 cleanup.run();
                 cleaned.set(true);
                 return true;
@@ -97,8 +100,21 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                 removeTracked(entry);
                 return;
             }
-            boolean cleanedNow = entry.tryClean();
-            if (cleanedNow) removeTracked(entry);
+            try {
+                boolean cleanedNow = entry.tryClean();
+                if (cleanedNow) {
+                    removeTracked(entry);
+                } else if (!entry.cleaned.get()) {
+                    // A concurrent cleanup owns the slot. If it later fails,
+                    // retain an independent retry path even without a queue event.
+                    retryableFailures.add(entry);
+                }
+            } catch (VirtualMachineError | ThreadDeath fatal) {
+                throw fatal;
+            } catch (RuntimeException | Error cleanupFailure) {
+                retryableFailures.add(entry);
+                throw cleanupFailure;
+            }
         }
     }
 
@@ -297,6 +313,11 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                     if (entry.tryClean()) {
                         cleanedCount++;
                         removeTracked(entry);
+                    } else if (!entry.cleaned.get()) {
+                        // Polling consumes the only queue notification. A
+                        // concurrent explicit release can still fail, so keep
+                        // this entry eligible for a later sweep.
+                        retryableFailures.add(entry);
                     }
                 } catch (VirtualMachineError | ThreadDeath fatal) {
                     throw fatal;
