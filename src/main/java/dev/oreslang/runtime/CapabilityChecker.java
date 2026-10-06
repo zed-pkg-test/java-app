@@ -384,6 +384,12 @@ public final class CapabilityChecker {
             if (referenced != null) checkReferencedFunction(referenced, policy);
         }
         else if (expr instanceof Ast.CallExpr c) {
+            if (c.callee() instanceof Ast.NameExpr runtimeIntrinsic
+                    && runtimeIntrinsic.name().equals("$rt$yield")
+                    && isZeroAuthorityAdversarial(policy)) {
+                throw new SecurityException(
+                        "untrusted actor cannot use rt yield until continuation quota state survives scheduler handoffs");
+            }
             String target = memberPath(c.callee());
             if (isZeroAuthorityAdversarial(policy) && target != null) {
                 String root = target.contains(".")

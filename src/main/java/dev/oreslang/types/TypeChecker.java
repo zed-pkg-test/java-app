@@ -1419,6 +1419,17 @@ public final class TypeChecker {
                     "spread expressions are only valid as arguments to a variadic callable");
         }
         if (expr instanceof Ast.CallExpr call) {
+            if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
+                    && runtimeIntrinsic.name().equals("$rt$yield")) {
+                if (!call.arguments().isEmpty()) {
+                    throw new IllegalArgumentException("rt yield takes no arguments");
+                }
+                if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
+                    throw new IllegalArgumentException(
+                            "rt yield is not enabled for untrusted actors until continuation quotas preserve fuel/deadline state across scheduler handoffs");
+                }
+                return Primitive.VOID;
+            }
             if (isBuiltinStdoutCall(call, "log", env)) {
                 if (call.typeArgumentsPresent()) {
                     throw new IllegalArgumentException("stdio.stdout.log does not accept call-site type arguments");

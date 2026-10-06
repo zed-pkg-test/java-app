@@ -713,6 +713,17 @@ public final class OresEvalRootNode extends RootNode {
                 nextStep = OresScheduler.await(future);
             }
 
+            private void yieldToScheduler(
+                    SourceValueCont continuation) {
+                Objects.requireNonNull(continuation, "continuation");
+                if (nextStep != null) {
+                    throw new IllegalStateException(
+                            "source continuation attempted two terminal steps in one turn");
+                }
+                awaitingContinuation = continuation;
+                nextStep = OresScheduler.yieldNow();
+            }
+
             private void done(Object value) {
                 if (nextStep != null) {
                     throw new IllegalStateException(
@@ -983,6 +994,10 @@ public final class OresEvalRootNode extends RootNode {
                 return true;
             }
             if (expr instanceof Ast.CallExpr call) {
+                if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
+                        && runtimeIntrinsic.name().equals("$rt$yield")) {
+                    return true;
+                }
                 for (Ast.Expr argument : call.arguments()) {
                     if (expressionContainsPotentialSuspension(argument, seen)) return true;
                 }
@@ -3253,6 +3268,33 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.CallExpr call,
                 Env env,
                 SourceValueCont continuation) {
+            if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
+                    && runtimeIntrinsic.name().equals("$rt$yield")) {
+                if (!call.arguments().isEmpty()) {
+                    continuation.accept(
+                            task,
+                            null,
+                            new IllegalArgumentException(
+                                    "rt yield takes no arguments"));
+                    return;
+                }
+                if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+                    continuation.accept(
+                            task,
+                            null,
+                            new SecurityException(
+                                    "rt yield is disabled for untrusted actors until continuation quota state survives scheduler handoffs"));
+                    return;
+                }
+                task.yieldToScheduler(
+                        (t, ignored, failure) ->
+                                continuation.accept(
+                                        t,
+                                        null,
+                                        failure));
+                return;
+            }
+
             if (call.callee() instanceof Ast.NameExpr name
                     && env.lookup(name.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(name.name(), call.arguments().size());
@@ -5017,6 +5059,11 @@ public final class OresEvalRootNode extends RootNode {
                 throw new IllegalArgumentException("spread expressions are only valid inside call argument lists");
             }
             if (expr instanceof Ast.CallExpr call) {
+                if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
+                        && runtimeIntrinsic.name().equals("$rt$yield")) {
+                    throw new IllegalStateException(
+                            "rt yield reached synchronous evaluation; source suspension lowering was not applied");
+                }
                 if (isBooleanIntrinsicCall(call, env)) return evalBooleanIntrinsic(call, env);
                 return invoke(prepareInvocation(call, env));
             }
