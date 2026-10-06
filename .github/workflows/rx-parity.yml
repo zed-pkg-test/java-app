@@ -1,0 +1,25 @@
+name: rx-parity
+
+on:
+  push:
+    branches: ["feat/rx-oreslang-channels-parity-20261006"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Run rx-oreslang-channels parity probes
+        run: mvn -B -ntp -Dores.runtime.carriers=native -Dtest=RxChannelsParityProbeTest test
