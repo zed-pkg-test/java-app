@@ -654,7 +654,7 @@ public final class Ast {
 
     public sealed interface Expr permits LiteralExpr, NameExpr, BinaryExpr, UnaryExpr, AssignExpr, ConditionalExpr,
             TypeTestExpr, PatternTestExpr, CastExpr, SpreadExpr,
-            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, ChannelOpExpr, DynamicSelectExpr,
+            CallExpr, MemberExpr, IndexExpr, NewExpr, AwaitExpr, SpawnExpr, ChannelOpExpr, DynamicSelectExpr,
             ListExpr, TupleExpr, ObjectExpr, LambdaExpr { }
 
     public record LiteralExpr(Object value) implements Expr { }
@@ -707,6 +707,9 @@ public final class Ast {
     }
 
     public record AwaitExpr(Expr expression) implements Expr { }
+
+    /** Explicit boundary for persistent actor-class construction. */
+    public record SpawnExpr(CallExpr call) implements Expr { }
 
     public record ChannelOpExpr(
             ChannelOperation operation,
