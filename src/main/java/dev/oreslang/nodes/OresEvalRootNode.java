@@ -3947,6 +3947,24 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callFunctionBodyRaw(Ast.FunctionDecl fn, List<?> args) {
+            if (!fn.trapped()) {
+                return callFunctionBodyUnchecked(fn, args);
+            }
+            try {
+                return new OptionValue(true, callFunctionBodyUnchecked(fn, args));
+            } catch (OresPanic panic) {
+                throw panic;
+            } catch (java.util.concurrent.CancellationException cancelled) {
+                throw cancelled;
+            } catch (RuntimeException ordinaryFailure) {
+                // trap is deliberately lossy: ordinary guest/runtime failure
+                // becomes None. Panic and scheduler cancellation remain distinct
+                // non-trappable control channels.
+                return new OptionValue(false, null);
+            }
+        }
+
+        private Object callFunctionBodyUnchecked(Ast.FunctionDecl fn, List<?> args) {
             if (fn.async() || functionContainsPotentialSuspension(fn)) {
                 OresFuture<Object> future =
                         startSourceFunctionTask(
@@ -3963,7 +3981,10 @@ public final class OresEvalRootNode extends RootNode {
                 env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
             try {
-                executeBlock(fn.body(), env);
+                // A trap boundary must survive tail-call lowering. Treat it as a
+                // tail barrier so a callee failure cannot escape by replacing
+                // this function's dynamic boundary.
+                executeBlock(fn.body(), env, fn.trapped());
                 return null;
             } catch (TailCallSignal signal) {
                 return new TailCall(signal.invocation);
