@@ -1,6 +1,6 @@
 import fnc require_true, require_int from './assert';
 
-import class DecodeError, DecodedValue from '../src/core/options';
+import class DecodeOptions, DecodeError, DecodedValue from '../src/core/options';
 import fnc default_decode_options from '../src/core/options';
 import fnc decode_one_from_channel from '../src/json/channel';
 
@@ -13,8 +13,9 @@ pub async fnc run_json_channel_tests(): void {
   val Option<List<int>> eof = None;
   writech input, eof;
 
-  val Result<DecodedValue, DecodeError> decoded =
-    await decode_one_from_channel(input, default_decode_options());
+  val Future<Result<DecodedValue, DecodeError>> decode_task =
+    decode_one_from_channel(input, default_decode_options());
+  val Result<DecodedValue, DecodeError> decoded = await decode_task;
 
   require_true(decoded.is_err() == false, "channel JSON should decode");
   require_int(decoded.unwrap().value.kind, 3, "channel JSON string kind");
@@ -27,9 +28,52 @@ pub async fnc run_json_channel_tests(): void {
   val Option<List<int>> truncated_eof = None;
   writech truncated, truncated_eof;
 
-  val Result<DecodedValue, DecodeError> failed =
-    await decode_one_from_channel(truncated, default_decode_options());
+  val Future<Result<DecodedValue, DecodeError>> failed_task =
+    decode_one_from_channel(truncated, default_decode_options());
+  val Result<DecodedValue, DecodeError> failed = await failed_task;
   require_true(failed.is_err(), "EOF must reject truncated channel JSON");
+
+  // A complete object must not succeed until EOF; reject another frame.
+  val Channel<Option<List<int>>> smuggled = Channel.new<Option<List<int>>>(3);
+  writech smuggled, Some(new List<int>(123, 125));
+  writech smuggled, Some(new List<int>(116, 114, 117, 101));
+  writech smuggled, eof;
+  val Future<Result<DecodedValue, DecodeError>> smuggled_task =
+    decode_one_from_channel(smuggled, default_decode_options());
+  val Result<DecodedValue, DecodeError> smuggled_result = await smuggled_task;
+  require_true(smuggled_result.is_err(), "second JSON frame must reject rather than be silently dropped");
+
+  // ASCII whitespace in later frames is permitted for a single JSON text.
+  val Channel<Option<List<int>>> padded = Channel.new<Option<List<int>>>(3);
+  writech padded, Some(new List<int>(123, 125));
+  writech padded, Some(new List<int>(32, 10, 13, 9));
+  writech padded, eof;
+  val Future<Result<DecodedValue, DecodeError>> padded_task =
+    decode_one_from_channel(padded, default_decode_options());
+  val Result<DecodedValue, DecodeError> padded_result = await padded_task;
+  require_true(!padded_result.is_err(), "trailing JSON whitespace through EOF is valid");
+
+  // A terminal root number can complete only at whitespace or EOF.
+  val Channel<Option<List<int>>> root_number = Channel.new<Option<List<int>>>(3);
+  writech root_number, Some(new List<int>(49));
+  writech root_number, Some(new List<int>(50));
+  writech root_number, eof;
+  val Future<Result<DecodedValue, DecodeError>> number_task =
+    decode_one_from_channel(root_number, default_decode_options());
+  val Result<DecodedValue, DecodeError> number_result = await number_task;
+  require_true(!number_result.is_err(), "terminal JSON root number must decode at EOF");
+
+  val DecodeOptions trailing_allowed = new DecodeOptions(
+    0, true, 128, 64, 64, 64, 64, 16, 16
+  );
+  val Channel<Option<List<int>>> unframed = Channel.new<Option<List<int>>>(1);
+  val Future<Result<DecodedValue, DecodeError>> framing_task =
+    decode_one_from_channel(unframed, trailing_allowed);
+  val Result<DecodedValue, DecodeError> framing_rejected = await framing_task;
+  require_true(
+    framing_rejected.is_err(),
+    "one-value JSON channel decode must reject allow_trailing_data without explicit framing"
+  );
 
   return;
 }

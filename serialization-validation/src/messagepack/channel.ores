@@ -12,8 +12,13 @@ pub async fnc decode_messagepack_from_channel(
     return Err(decode_error("invalid_options", 0, "invalid or unsafe decode options"));
   fi
 
-  val ByteStreamResult collected =
-    await collect_bytes_from_channel(input, options.max_input_bytes);
+  if options.allow_trailing_data then
+    return Err(decode_error("framing_required", 0, "EOF-framed MessagePack channel decode cannot allow trailing data; use an explicit framed/sequence decoder"));
+  fi
+
+  val Future<ByteStreamResult> collecting =
+    collect_bytes_from_channel(input, options.max_input_bytes);
+  val ByteStreamResult collected = await collecting;
 
   if !collected.ok then
     val ByteStreamError error = collected.error;

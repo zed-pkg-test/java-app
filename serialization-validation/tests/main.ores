@@ -18,8 +18,12 @@ pub async fnc main(): void {
   run_metadata_tests();
   run_object_codec_tests();
   run_generated_typed_codec_tests();
-  await run_json_channel_tests();
-  await run_channel_codec_tests();
+
+  val Future<void> json_channel_tests = run_json_channel_tests();
+  await json_channel_tests;
+
+  val Future<void> binary_channel_tests = run_channel_codec_tests();
+  await binary_channel_tests;
 
   stdio.stdout.println("serialization/validation native tests passed");
   return;
