@@ -1,0 +1,27 @@
+import * as rx_channels from '../src/rx.ores';
+import class Observable, Subscription from '../src/rx.ores';
+pub async fnc main(): void {
+  val Channel<Option<int>> input = Channel.new<Option<int>>(2);
+  writech input, Some(7);
+  writech input, Some(8);
+  val Observable<int> source = rx_channels.from_channel(input);
+  val Subscription<int> sub = source.subscribe();
+  stdio.println(sub.cancel());
+  stdio.println(sub.cancel());
+  val Option<int> terminal = sub.next();
+  stdio.println(terminal.is_none());
+  val Option<int> untouched = readch input;
+  stdio.println(untouched.unwrap());
+  val Observable<int> again = rx_channels.from_channel(input);
+  val Observable<int> limited = rx_channels.take(again, 1);
+  val Subscription<int> one = limited.subscribe();
+  val Option<int> value = one.next();
+  stdio.println(value.unwrap());
+  // take(1) cancels immediately after yielding one value, without another pull.
+  writech input, Some(9);
+  val Option<int> done_frame = one.next();
+  stdio.println(done_frame.is_none());
+  val Option<int> remaining = readch input;
+  stdio.println(remaining.unwrap());
+  return;
+}

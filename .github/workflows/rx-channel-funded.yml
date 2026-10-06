@@ -1,0 +1,22 @@
+name: Funded channel Rx exact mirror
+on:
+  push:
+  pull_request:
+jobs:
+  rx-channel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build local mirrored compiler
+        run: |
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
+      - name: Run exact mirrored channel Rx suite
+        run: |
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat target/classpath.txt)"
+          python3 rx-mirror/scripts/test.py
