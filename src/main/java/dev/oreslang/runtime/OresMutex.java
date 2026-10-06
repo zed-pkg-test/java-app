@@ -602,7 +602,6 @@ public final class OresMutex {
 
         @Override
         public Guard<T> lock() {
-            rejectBlockingActorAcquisition();
             Object ownerDomain = reserveDomain(false);
             try {
                 beginWait(ownerDomain);
@@ -642,7 +641,6 @@ public final class OresMutex {
         public Optional<Guard<T>> lockFor(Duration timeout) {
             Objects.requireNonNull(timeout, "timeout");
             if (timeout.isNegative()) throw new IllegalArgumentException("timeout must not be negative");
-            rejectBlockingActorAcquisition();
             if (timeout.isZero()) return tryLock();
             Object ownerDomain = reserveDomain(true);
             if (ownerDomain == null) return Optional.empty();
