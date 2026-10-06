@@ -338,20 +338,27 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     }
 
     public boolean remove(Runnable task) {
-        if (queue.remove(task)) {
+        if (removeQueuedTask(queue, task)) {
             releaseReadySlot();
             return true;
         }
         for (ArrayBlockingQueue<Runnable> lane : affinityQueues) {
-            for (Runnable queued : lane) {
-                boolean matches = queued == task
-                        || (queued instanceof AffinityTask affinityTask
-                            && affinityTask.delegate() == task);
-                if (matches && lane.remove(queued)) {
-                    releaseReadySlot();
-                    return true;
-                }
+            if (removeQueuedTask(lane, task)) {
+                releaseReadySlot();
+                return true;
             }
+        }
+        return false;
+    }
+
+    private static boolean removeQueuedTask(
+            ArrayBlockingQueue<Runnable> source,
+            Runnable task) {
+        for (Runnable queued : source) {
+            boolean matches = queued == task
+                    || (queued instanceof AffinityTask affinityTask
+                        && affinityTask.delegate() == task);
+            if (matches && source.remove(queued)) return true;
         }
         return false;
     }

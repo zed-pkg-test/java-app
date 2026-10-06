@@ -53,9 +53,25 @@ final class NativeCarrierExecutorTest {
 
         try (NativeCarrierExecutor executor =
                      new NativeCarrierExecutor(2, 2, 64, "ores-native-affinity-")) {
+            CountDownLatch peerStarted = new CountDownLatch(1);
+            CountDownLatch releasePeer = new CountDownLatch(1);
+            CountDownLatch peerFinished = new CountDownLatch(1);
             CountDownLatch done = new CountDownLatch(24);
             Set<Integer> slots = ConcurrentHashMap.newKeySet();
             Set<Integer> affinityTargets = ConcurrentHashMap.newKeySet();
+
+            executor.executeAffinity(1, () -> {
+                peerStarted.countDown();
+                try {
+                    assertTrue(releasePeer.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    fail(interrupted);
+                } finally {
+                    peerFinished.countDown();
+                }
+            });
+            assertTrue(peerStarted.await(5, TimeUnit.SECONDS));
 
             for (int i = 0; i < 24; i++) {
                 executor.executeAffinity(0, () -> {
@@ -70,6 +86,52 @@ final class NativeCarrierExecutorTest {
                     "a healthy preferred affinity lane must keep one actor key on one carrier");
             assertEquals(1, affinityTargets.size(),
                     "one carrier lane must expose one stable CPU/cache-affinity target");
+
+            releasePeer.countDown();
+            assertTrue(peerFinished.await(5, TimeUnit.SECONDS));
+        }
+    }
+
+
+    @Test
+    void blockedPreferredCarrierAllowsIdlePeerToStealAfterGrace() throws Exception {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        assumeTrue(os.contains("linux") || os.contains("mac") || os.contains("darwin"));
+
+        try (NativeCarrierExecutor executor =
+                     new NativeCarrierExecutor(2, 2, 64, "ores-native-affinity-steal-")) {
+            CountDownLatch preferredStarted = new CountDownLatch(1);
+            CountDownLatch releasePreferred = new CountDownLatch(1);
+            CountDownLatch preferredFinished = new CountDownLatch(1);
+            CountDownLatch stolenRan = new CountDownLatch(1);
+            Set<Integer> stolenSlots = ConcurrentHashMap.newKeySet();
+
+            executor.executeAffinity(0, () -> {
+                preferredStarted.countDown();
+                try {
+                    assertTrue(releasePreferred.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    fail(interrupted);
+                } finally {
+                    preferredFinished.countDown();
+                }
+            });
+            assertTrue(preferredStarted.await(5, TimeUnit.SECONDS));
+
+            // This remains below the backlog-spill threshold, so the only way
+            // to make progress is delayed stealing from carrier 0's local lane.
+            executor.executeAffinity(0, () -> {
+                stolenSlots.add(NativeCarrierExecutor.currentCarrierSlot());
+                stolenRan.countDown();
+            });
+
+            assertTrue(stolenRan.await(2, TimeUnit.SECONDS),
+                    "an idle peer must rescue an actor lane whose preferred carrier is blocked");
+            assertEquals(Set.of(1), stolenSlots);
+
+            releasePreferred.countDown();
+            assertTrue(preferredFinished.await(5, TimeUnit.SECONDS));
         }
     }
 
