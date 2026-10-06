@@ -1579,8 +1579,37 @@ public final class OwnershipChecker {
                 scanExpr(field.value(), locals, outer, recursiveBinding, captures, false);
             }
         }
-        else if (expr instanceof Ast.LambdaExpr) {
-            // Nested lambda performs its own capture analysis when checked.
+        else if (expr instanceof Ast.LambdaExpr lambda) {
+            // A lexical nested closure can reference values that belong to an
+            // activation outside the current lambda. Those are transitive
+            // captures of the current closure: it must keep/move them alive so
+            // the nested closure can subsequently capture them from its parent.
+            //
+            // Parameters and locals of the current lambda are deliberately kept
+            // in nestedLocals so references such as |x| -> |y| -> x + y do not
+            // become captures of the outer activation. An explicit nlex nested
+            // lambda is a capture barrier and therefore contributes nothing.
+            if (lambda.nonLexical()) return;
+            Set<String> nestedLocals = new HashSet<>(locals);
+            for (Ast.Param parameter : lambda.parameters()) {
+                nestedLocals.add(parameter.name());
+            }
+            if (lambda.expressionBody() != null) {
+                scanExpr(
+                        lambda.expressionBody(),
+                        nestedLocals,
+                        outer,
+                        recursiveBinding,
+                        captures,
+                        false);
+            } else {
+                scanStatements(
+                        lambda.blockBody(),
+                        nestedLocals,
+                        outer,
+                        recursiveBinding,
+                        captures);
+            }
         }
     }
 
