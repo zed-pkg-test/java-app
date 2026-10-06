@@ -43,6 +43,44 @@ final class ParserTest {
     }
 
     @Test
+    void interfaceAndContractDefineKeywordsMayAppearInCompatibilityOrder() {
+        Ast.Program program = Parser.parse("""
+                define module app as
+                  interface pub define ApiA {
+                  }
+
+                  pub interface define ApiB {
+                  }
+
+                  define interface pub ApiC {
+                  }
+
+                  contract pub define ContractA {
+                  }
+
+                  pub contract define ContractB {
+                  }
+
+                  define contract pub ContractC {
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        assertEquals(6, module.declarations().size());
+        for (int i = 0; i < 3; i++) {
+            Ast.InterfaceDecl iface = assertInstanceOf(Ast.InterfaceDecl.class, module.declarations().get(i));
+            assertEquals(Ast.Visibility.PUBLIC, iface.visibility());
+            assertFalse(iface.moduleContract());
+        }
+        for (int i = 3; i < 6; i++) {
+            Ast.InterfaceDecl contract = assertInstanceOf(Ast.InterfaceDecl.class, module.declarations().get(i));
+            assertEquals(Ast.Visibility.PUBLIC, contract.visibility());
+            assertTrue(contract.moduleContract());
+        }
+    }
+
+    @Test
     void modifiersAfterFncWorkAcrossCallableContexts() {
         Ast.Program program = Parser.parse("""
                 define module app as
