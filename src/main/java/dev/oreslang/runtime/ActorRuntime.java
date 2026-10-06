@@ -162,6 +162,85 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum ActorKind { PRIVATE, SHARED, UNTRUSTED }
 
+    /**
+     * Semantic allocation domains used by compiler/runtime lowering.
+     *
+     * <p>These are logical ownership/allocation identities, never carrier-thread
+     * identities. Backends may map them to JVM accounting domains, native
+     * arenas, or hard isolates without changing source semantics.</p>
+     */
+    public enum AllocationDomainKind {
+        ROOT,
+        ACTOR_LOCAL,
+        ACTOR_PRIVATE,
+        UNTRUSTED_ISOLATE,
+        RUNTIME_SHARED
+    }
+
+    /**
+     * Opaque logical allocation-domain identity.
+     *
+     * <p>Actor-owned domains are keyed by ActorId so carrier migration does not
+     * change ownership. ROOT and RUNTIME_SHARED belong to the ActorRuntime as a
+     * whole and therefore have no actor id.</p>
+     */
+    public static final class AllocationDomain {
+        private final UUID runtimeId;
+        private final AllocationDomainKind kind;
+        private final ActorId actorId;
+
+        private AllocationDomain(
+                UUID runtimeId,
+                AllocationDomainKind kind,
+                ActorId actorId) {
+            this.runtimeId = Objects.requireNonNull(runtimeId, "runtimeId");
+            this.kind = Objects.requireNonNull(kind, "kind");
+            boolean actorOwned = switch (kind) {
+                case ACTOR_LOCAL, ACTOR_PRIVATE, UNTRUSTED_ISOLATE -> true;
+                case ROOT, RUNTIME_SHARED -> false;
+            };
+            if (actorOwned && actorId == null) {
+                throw new IllegalArgumentException(
+                        kind + " allocation domain requires an ActorId");
+            }
+            if (!actorOwned && actorId != null) {
+                throw new IllegalArgumentException(
+                        kind + " allocation domain cannot carry an ActorId");
+            }
+            this.actorId = actorId;
+        }
+
+        public UUID runtimeId() { return runtimeId; }
+        public AllocationDomainKind kind() { return kind; }
+        public ActorId actorId() { return actorId; }
+
+        public boolean actorOwned() {
+            return actorId != null;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof AllocationDomain domain)) return false;
+            return runtimeId.equals(domain.runtimeId)
+                    && kind == domain.kind
+                    && Objects.equals(actorId, domain.actorId);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(runtimeId, kind, actorId);
+        }
+
+        @Override
+        public String toString() {
+            return actorId == null
+                    ? "AllocationDomain[" + kind + ", runtime=" + runtimeId + "]"
+                    : "AllocationDomain[" + kind + ", runtime=" + runtimeId
+                            + ", actor=" + actorId + "]";
+        }
+    }
+
     public static final class UntrustedActorQuotaExceededException extends SecurityException {
         public enum Resource { FUEL, WALL_TIME, CPU_TIME }
         private final Resource resource;
@@ -326,6 +405,11 @@ public final class ActorRuntime implements AutoCloseable {
             return value;
         }
 
+        /** Allocation provenance for this explicit runtime-shared value. */
+        public AllocationDomain allocationDomain() {
+            return runtimeSharedAllocationDomain();
+        }
+
         private boolean ownedBy(ActorRuntime runtime) {
             return ActorRuntime.this == runtime;
         }
@@ -340,6 +424,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
     }
 
+    private final UUID allocationRuntimeId = UUID.randomUUID();
     private final Map<ActorId, ActorCell<?>> actors = new ConcurrentHashMap<>();
     private final Map<ActorGroupId, ActorGroup> actorGroups = new ConcurrentHashMap<>();
     private final AtomicInteger actorCount = new AtomicInteger();
@@ -430,6 +515,59 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     public IsolatePolicy policyCeiling() { return policyCeiling; }
+
+    /** Stable identity for every logical allocation domain owned by this runtime. */
+    public UUID allocationRuntimeId() { return allocationRuntimeId; }
+
+    /** Root/task allocation domain for code executing outside an actor turn. */
+    public AllocationDomain rootAllocationDomain() {
+        return new AllocationDomain(
+                allocationRuntimeId,
+                AllocationDomainKind.ROOT,
+                null);
+    }
+
+    /** Explicit process-local shared-memory domain owned by this ActorRuntime. */
+    public AllocationDomain runtimeSharedAllocationDomain() {
+        return new AllocationDomain(
+                allocationRuntimeId,
+                AllocationDomainKind.RUNTIME_SHARED,
+                null);
+    }
+
+    /**
+     * Allocation domain for the current semantic execution context.
+     *
+     * <p>This intentionally keys actor-local ownership by ActorId and never by
+     * the current carrier thread. Calling through a different ActorRuntime while
+     * an actor is executing fails closed instead of laundering ownership into a
+     * root domain. ActorGroup Mailman CONTROL callbacks are runtime plumbing,
+     * not guest allocation contexts, and also fail closed here.</p>
+     */
+    public AllocationDomain currentAllocationDomain() {
+        ActorExecutionContext current = CURRENT_ACTOR_EXECUTION.get();
+        if (current != null) {
+            if (current.runtime() != this) {
+                throw new SecurityException(
+                        "allocation-domain lookup crossed ActorRuntime boundary");
+            }
+            AllocationDomainKind kind = switch (current.kind()) {
+                case SHARED -> AllocationDomainKind.ACTOR_LOCAL;
+                case PRIVATE -> AllocationDomainKind.ACTOR_PRIVATE;
+                case UNTRUSTED -> AllocationDomainKind.UNTRUSTED_ISOLATE;
+            };
+            return new AllocationDomain(
+                    allocationRuntimeId,
+                    kind,
+                    current.actorId());
+        }
+        ActorGroupMailmanExecution mailman = CURRENT_ACTOR_GROUP_MAILMAN.get();
+        if (mailman != null) {
+            throw new SecurityException(
+                    "ActorGroup Mailman CONTROL execution has no guest allocation domain");
+        }
+        return rootAllocationDomain();
+    }
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
     public int maxActors() { return dispatcherConfig.maxActors(); }
 
@@ -817,6 +955,11 @@ public final class ActorRuntime implements AutoCloseable {
 
         public boolean closed() { return cellClosed.get(); }
 
+        /** Allocation provenance for this explicit synchronized shared value. */
+        public AllocationDomain allocationDomain() {
+            return runtimeSharedAllocationDomain();
+        }
+
         private boolean ownedBy(ActorRuntime runtime) {
             return ActorRuntime.this == runtime;
         }
@@ -942,6 +1085,14 @@ public final class ActorRuntime implements AutoCloseable {
         IsolatePolicy policy();
         ActorKind kind();
         Optional<ActorMemorySlice> privateMemory();
+
+        /**
+         * Semantic allocation domain for this actor. The result is stable across
+         * carrier migration and scheduler suspension/resume.
+         */
+        default AllocationDomain allocationDomain() {
+            return runtime().currentAllocationDomain();
+        }
 
         /**
          * Resolve a group the current actor has already joined. ActorGroupId is
