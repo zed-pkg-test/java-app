@@ -12,7 +12,7 @@ shared actor SharedCounter {
   let int local_count = 0;
   let CounterState state = new CounterState();
 
-  pub fnc increment(mut self)(): bool {
+  pub fnc increment(): bool {
     self.local_count = self.local_count + 1;
     self.state.value = self.state.value + 1;
     return true;
