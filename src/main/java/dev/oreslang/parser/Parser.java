@@ -2436,6 +2436,7 @@ public final class Parser {
             return new Ast.UnaryExpr(mutable ? "&mut" : "&", parseUnary());
         }
         if (match(AWAIT)) return new Ast.AwaitExpr(parseUnary());
+        if (match(RT)) return parseRuntimeExpression();
 
         if (match(NB)) {
             if (match(CB)) {
@@ -2478,6 +2479,27 @@ public final class Parser {
         if (match(SELECT)) return parseDynamicSelect(Ast.WaitMode.BLOCKING);
 
         return parsePostfix();
+    }
+
+    private Ast.Expr parseRuntimeExpression() {
+        Token operation = consume(IDENT, "expected runtime operation after 'rt'");
+        String name = operation.lexeme();
+        if (!name.equals("copy") && !name.equals("take")
+                && !name.equals("borrow") && !name.equals("share")) {
+            throw error(operation,
+                    "unknown rt operation '" + name
+                            + "'; supported ownership operations are copy, take, borrow, and share");
+        }
+
+        Ast.Expr argument;
+        if (match(LPAREN)) {
+            argument = parseExpression();
+            consume(RPAREN, "expected ')' after rt " + name + " argument");
+        } else {
+            // Command form has unary precedence: rt borrow value.member
+            argument = parseUnary();
+        }
+        return new Ast.RuntimeCallExpr(name, List.of(argument));
     }
 
     private Ast.Expr parseChannelOperation(

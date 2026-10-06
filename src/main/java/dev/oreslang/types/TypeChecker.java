@@ -1437,6 +1437,19 @@ public final class TypeChecker {
             throw new IllegalArgumentException(
                     "spread expressions are only valid as arguments to a variadic callable");
         }
+        if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (runtime.arguments().size() != 1) {
+                throw new IllegalArgumentException(
+                        "rt " + runtime.operation() + " expects exactly one argument");
+            }
+            Type operand = typeOf(runtime.arguments().getFirst(), env, generics, self);
+            return switch (runtime.operation()) {
+                case "borrow" -> new Borrow(operand, false);
+                case "copy", "take", "share" -> operand;
+                default -> throw new IllegalArgumentException(
+                        "unknown runtime ownership operation 'rt " + runtime.operation() + "'");
+            };
+        }
         if (expr instanceof Ast.CallExpr call) {
             if (isBuiltinStdoutCall(call, "log", env)) {
                 if (call.typeArgumentsPresent()) {
@@ -4419,6 +4432,10 @@ public final class TypeChecker {
             rejectStaticClassGenericReferences(conditional.whenFalse(), classGenerics, klass, method);
         } else if (expression instanceof Ast.SpreadExpr spread) {
             rejectStaticClassGenericReferences(spread.expression(), classGenerics, klass, method);
+        } else if (expression instanceof Ast.RuntimeCallExpr runtime) {
+            for (Ast.Expr argument : runtime.arguments()) {
+                rejectStaticClassGenericReferences(argument, classGenerics, klass, method);
+            }
         } else if (expression instanceof Ast.CallExpr call) {
             for (Ast.TypeRef argument : call.typeArguments()) {
                 rejectStaticClassGenericReference(argument, classGenerics, klass, method);
