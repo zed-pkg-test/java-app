@@ -90,9 +90,13 @@ final class GuestAllocationAccountingTest {
                     ActorRuntime.ActorKind.PRIVATE,
                     "allocate",
                     (message, context) -> {
+                        long before = context.localMemory().usedBytes();
                         ActorRuntime.AllocationDomain domain =
                                 context.runtime().accountGuestHeapAllocation(128);
-                        assertEquals(128L, context.localMemory().usedBytes());
+                        assertEquals(
+                                before + 128L,
+                                context.localMemory().usedBytes(),
+                                "guest allocation must charge exactly its requested bytes on top of existing actor-local state");
                         assertEquals(
                                 ActorRuntime.AllocationDomainKind.ACTOR_PRIVATE,
                                 domain.kind());
@@ -109,9 +113,13 @@ final class GuestAllocationAccountingTest {
                     ActorRuntime.ActorKind.UNTRUSTED,
                     "allocate",
                     (message, context) -> {
+                        long before = context.localMemory().usedBytes();
                         ActorRuntime.AllocationDomain domain =
                                 context.runtime().accountGuestHeapAllocation(128);
-                        assertEquals(128L, context.localMemory().usedBytes());
+                        assertEquals(
+                                before + 128L,
+                                context.localMemory().usedBytes(),
+                                "guest allocation must charge exactly its requested bytes on top of existing untrusted-local state");
                         assertEquals(
                                 ActorRuntime.AllocationDomainKind.UNTRUSTED_ISOLATE,
                                 domain.kind());
