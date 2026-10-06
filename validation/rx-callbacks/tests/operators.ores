@@ -1,0 +1,23 @@
+import * as rx_callbacks from '../src/rx.ores';
+import class Observable from '../src/rx.ores';
+
+pub fnc main(): void {
+  val Observable<int> source = rx_callbacks.from_values([1, 2, 3, 4, 5]);
+  val Fnc<int, int> twice = |value| -> {
+    val int item = value as int;
+    return item * 2;
+  };
+  val Observable<int> doubled = rx_callbacks.map(source, twice);
+  val Fnc<int, bool> large = |value| -> {
+    val int item = value as int;
+    return item > 4;
+  };
+  val Observable<int> selected = rx_callbacks.filter(doubled, large);
+  val Observable<int> limited = rx_callbacks.take(selected, 2);
+  val Fnc<int, bool> sink = |value| -> {
+    return true;
+  };
+
+  stdio.println(rx_callbacks.for_each(limited, sink));
+  return;
+}
