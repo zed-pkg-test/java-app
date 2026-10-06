@@ -16,6 +16,7 @@ import dev.oreslang.types.Types.Record;
 import dev.oreslang.types.Types.SelfType;
 import dev.oreslang.types.Types.StringLiteral;
 import dev.oreslang.types.Types.Tuple;
+import dev.oreslang.types.Types.TupleKind;
 import dev.oreslang.types.Types.Union;
 import dev.oreslang.types.Types.Type;
 import dev.oreslang.types.Types.Unknown;
@@ -2139,12 +2140,21 @@ public final class TypeChecker {
             if (contextual != null) return contextual;
         }
         if (expr instanceof Ast.ListExpr list) {
-            if (expected instanceof Tuple) {
-                return new Tuple(list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList());
+            if (expected instanceof Tuple tupleExpected) {
+                return new Tuple(list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList(),
+                        tupleExpected.kind());
             }
             if (expected instanceof Union union
                     && union.options().stream().allMatch(option -> option instanceof Tuple)) {
-                return new Tuple(list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList());
+                List<TupleKind> kinds = union.options().stream()
+                        .map(option -> ((Tuple) option).kind())
+                        .distinct()
+                        .toList();
+                if (kinds.size() == 1) {
+                    return new Tuple(
+                            list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList(),
+                            kinds.getFirst());
+                }
             }
         }
         return typeOf(expr, env, generics, self);
@@ -2263,7 +2273,7 @@ public final class TypeChecker {
             List<Type> result = new ArrayList<>(bindings.size());
             for (int i = 0; i < fixedArity; i++) result.add(tuple.elements().get(i));
             if (restIndex >= 0) {
-                result.add(new Tuple(tuple.elements().subList(fixedArity, tuple.elements().size())));
+                result.add(new Tuple(tuple.elements().subList(fixedArity, tuple.elements().size()), tuple.kind()));
             }
             return List.copyOf(result);
         }
@@ -2463,7 +2473,7 @@ public final class TypeChecker {
         if (type instanceof SelfType) return receiver;
         if (type instanceof Borrow borrow) return new Borrow(bindReceiverSelf(borrow.target(), receiver), borrow.mutable());
         if (type instanceof ListType list) return new ListType(bindReceiverSelf(list.element(), receiver));
-        if (type instanceof Tuple tuple) return new Tuple(tuple.elements().stream().map(t -> bindReceiverSelf(t, receiver)).toList());
+        if (type instanceof Tuple tuple) return new Tuple(tuple.elements().stream().map(t -> bindReceiverSelf(t, receiver)).toList(), tuple.kind());
         if (type instanceof Union union) return Types.unionOf(union.options().stream().map(t -> bindReceiverSelf(t, receiver)).toList());
         if (type instanceof Named named) return new Named(
                 named.name(), named.arguments().stream().map(t -> bindReceiverSelf(t, receiver)).toList());
@@ -2968,6 +2978,7 @@ public final class TypeChecker {
 
         if (a instanceof ListType && b instanceof ListType) return true;
         if (a instanceof Tuple at && b instanceof Tuple bt) {
+            if (at.kind() != bt.kind()) return false;
             if (at.elements().size() != bt.elements().size()) return false;
             for (int i = 0; i < at.elements().size(); i++) {
                 if (!typesMayOverlap(at.elements().get(i), bt.elements().get(i))) return false;
@@ -3008,7 +3019,7 @@ public final class TypeChecker {
         }
         if (type instanceof ListType list) return new ListType(resolveSharedGeneric(list.element(), bindings));
         if (type instanceof Tuple tuple) {
-            return new Tuple(tuple.elements().stream().map(element -> resolveSharedGeneric(element, bindings)).toList());
+            return new Tuple(tuple.elements().stream().map(element -> resolveSharedGeneric(element, bindings)).toList(), tuple.kind());
         }
         if (type instanceof Union union) {
             return Types.unionOf(union.options().stream()
@@ -4247,7 +4258,9 @@ public final class TypeChecker {
             inferGenericBindings(p.element(), a.element(), bindings, fixedBindings, label);
             return;
         }
-        if (pattern instanceof Tuple p && actual instanceof Tuple a && p.elements().size() == a.elements().size()) {
+        if (pattern instanceof Tuple p && actual instanceof Tuple a
+                && p.kind() == a.kind()
+                && p.elements().size() == a.elements().size()) {
             for (int i = 0; i < p.elements().size(); i++) inferGenericBindings(p.elements().get(i), a.elements().get(i), bindings, fixedBindings, label);
             return;
         }
@@ -4268,7 +4281,7 @@ public final class TypeChecker {
         if (type instanceof SelfType receiverSelf) return new SelfType(substituteGenerics(receiverSelf.bound(), bindings));
         if (type instanceof Borrow borrow) return new Borrow(substituteGenerics(borrow.target(), bindings), borrow.mutable());
         if (type instanceof ListType list) return new ListType(substituteGenerics(list.element(), bindings));
-        if (type instanceof Tuple tuple) return new Tuple(tuple.elements().stream().map(t -> substituteGenerics(t, bindings)).toList());
+        if (type instanceof Tuple tuple) return new Tuple(tuple.elements().stream().map(t -> substituteGenerics(t, bindings)).toList(), tuple.kind());
         if (type instanceof Union union) return Types.unionOf(union.options().stream().map(t -> substituteGenerics(t, bindings)).toList());
         if (type instanceof Named named) return new Named(named.name(), named.arguments().stream().map(t -> substituteGenerics(t, bindings)).toList());
         if (type instanceof Function fn) return new Function(
@@ -4349,13 +4362,13 @@ public final class TypeChecker {
         Map<String, Ast.TypeRef> metadata = namedTypeParameters(ref);
         validateCollectionMetadata(ref.name(), metadata);
 
-        boolean fixed = ref.name().equals("FixedArray") || ref.name().equals("FixedList");
+        boolean fixed = ref.name().equals("Tuple") || ref.name().equals("FixedArray") || ref.name().equals("FixedList");
 
         if (dimensions.isEmpty()) {
             if (fixed) {
                 throw new IllegalArgumentException(ref.name()
                         + " requires an explicit finite sequence shape, for example "
-                        + ref.name() + "[4 of int]");
+                        + (ref.name().equals("Tuple") ? "Tuple[int, string]" : ref.name() + "[4 of int]"));
             }
             if (ref.inferArguments()) return new ListType(Unknown.INSTANCE);
             if (positional.size() != 1) {
@@ -4372,6 +4385,14 @@ public final class TypeChecker {
         }
 
         Integer declaredRank = metadataRank(metadata);
+        if (fixed && dimensions.size() != 1) {
+            throw new IllegalArgumentException(ref.name()
+                    + " is a fixed one-dimensional sequence type; nested fixed layouts must be expressed through nested element types");
+        }
+        if (fixed && declaredRank != null && declaredRank != 1) {
+            throw new IllegalArgumentException(ref.name()
+                    + " has fixed arity and currently requires rank=1; use nested Tuple/FixedArray element types for exact multidimensional layout");
+        }
         if (declaredRank != null && declaredRank != dimensions.size()) {
             if (dimensions.size() != 1) {
                 throw new IllegalArgumentException("rank=" + declaredRank + " disagrees with "
@@ -4397,9 +4418,15 @@ public final class TypeChecker {
         Ast.TypeRef shape = dimensions.getFirst();
         if (fixed) {
             List<Ast.TypeRef> exact = expandFiniteSequencePatterns(shape.arguments(), ref.name());
+            validateFixedExtentMetadata(ref.name(), metadata, exact.size());
+            TupleKind kind = switch (ref.name()) {
+                case "FixedArray" -> TupleKind.FIXED_ARRAY;
+                case "FixedList" -> TupleKind.FIXED_LIST;
+                default -> TupleKind.TUPLE;
+            };
             return new Tuple(exact.stream()
                     .map(element -> resolve(element, generics, self, allowNullMarker))
-                    .toList());
+                    .toList(), kind);
         }
 
         if (shape.arguments().size() != 1) {
@@ -4487,15 +4514,21 @@ public final class TypeChecker {
         for (Map.Entry<String, Ast.TypeRef> entry : metadata.entrySet()) {
             String name = entry.getKey();
             Ast.TypeRef value = entry.getValue();
-            if (name.equals("size") || name.equals("capacity")) {
-                throw new IllegalArgumentException("'" + name
-                        + "' is runtime instance state; pass it to the constructor '(...)', not '<...>'");
+            if (name.equals("capacity")) {
+                throw new IllegalArgumentException("'capacity' is runtime instance state; pass it to the constructor '(...)', not '<...>'");
             }
-            if (!allowed.contains(name)) {
+            boolean fixedExtent = collectionName.equals("Tuple")
+                    || collectionName.equals("FixedArray")
+                    || collectionName.equals("FixedList");
+            if (name.equals("size") && !fixedExtent) {
+                throw new IllegalArgumentException("'size' is runtime instance state for resizable collections; "
+                        + "pass it to the constructor '(...)', not '<...>'");
+            }
+            if (!allowed.contains(name) && !name.equals("size")) {
                 throw new IllegalArgumentException("unknown named type parameter '" + name
                         + "' for " + collectionName);
             }
-            if (Set.of("align", "inline_capacity", "max_capacity", "rank").contains(name)) {
+            if (Set.of("align", "inline_capacity", "max_capacity", "rank", "size").contains(name)) {
                 if (!value.isIntLiteral()) {
                     throw new IllegalArgumentException("'" + name + "' requires an integer compile-time value");
                 }
@@ -4512,6 +4545,27 @@ public final class TypeChecker {
                     throw new IllegalArgumentException("'" + name + "' cannot be negative");
                 }
             }
+        }
+    }
+
+    private void validateFixedExtentMetadata(
+            String collectionName,
+            Map<String, Ast.TypeRef> metadata,
+            int exactSize) {
+        Ast.TypeRef size = metadata.get("size");
+        if (size != null && size.intLiteralValue() != exactSize) {
+            throw new IllegalArgumentException(collectionName + " size=" + size.intLiteralValue()
+                    + " disagrees with fixed sequence arity " + exactSize);
+        }
+        Ast.TypeRef inlineCapacity = metadata.get("inline_capacity");
+        if (inlineCapacity != null && inlineCapacity.intLiteralValue() < exactSize) {
+            throw new IllegalArgumentException(collectionName + " inline_capacity="
+                    + inlineCapacity.intLiteralValue() + " is smaller than fixed sequence arity " + exactSize);
+        }
+        Ast.TypeRef maxCapacity = metadata.get("max_capacity");
+        if (maxCapacity != null && maxCapacity.intLiteralValue() < exactSize) {
+            throw new IllegalArgumentException(collectionName + " max_capacity="
+                    + maxCapacity.intLiteralValue() + " is smaller than fixed sequence arity " + exactSize);
         }
     }
 
@@ -4607,7 +4661,13 @@ public final class TypeChecker {
             return Types.unionOf(ref.arguments().stream().map(option -> resolve(option, generics, self, allowNullMarker)).toList());
         }
         if (ref.isTupleType()) {
-            return new Tuple(ref.arguments().stream().map(element -> resolve(element, generics, self, allowNullMarker)).toList());
+            Map<String, Ast.TypeRef> metadata = namedTypeParameters(ref);
+            validateCollectionMetadata("Tuple", metadata);
+            List<Ast.TypeRef> elements = positionalTypeArguments(ref);
+            validateFixedExtentMetadata("Tuple", metadata, elements.size());
+            return new Tuple(elements.stream()
+                    .map(element -> resolve(element, generics, self, allowNullMarker))
+                    .toList(), TupleKind.TUPLE);
         }
         if (ref.isRecordType()) {
             Map<String, Type> members = new LinkedHashMap<>();
@@ -4644,7 +4704,7 @@ public final class TypeChecker {
             case "bool", "Bool" -> Primitive.BOOL;
             case "string", "String" -> Primitive.STRING;
             case "void" -> Primitive.VOID;
-            case "Array", "List", "Vector", "Slice", "FixedArray", "FixedList" -> {
+            case "Array", "List", "Vector", "Slice", "Tuple", "FixedArray", "FixedList" -> {
                 Ast.ClassDecl declared = findClass(ref.name());
                 if (!Set.of("Array", "List").contains(ref.name()) && declared != null
                         && ref.arguments().stream().noneMatch(argument ->

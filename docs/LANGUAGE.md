@@ -197,6 +197,24 @@ Collection syntax deliberately separates three concerns:
 - `(...)` carries runtime construction state such as an initial size or
   capacity.
 
+The core sequence families are intentionally distinct even when they share a
+runtime representation today:
+
+| Family | Extent | Element model | Core intent |
+| --- | --- | --- | --- |
+| `Tuple[T1, T2, ...]` / bare `[T1, T2, ...]` | compile-time fixed | positional / heterogeneous | product value; arity never grows |
+| `FixedArray[...]` | compile-time fixed | exact indexed sequence | fixed indexed storage |
+| `FixedList[...]` | compile-time fixed | exact sequence | fixed list API/storage |
+| `Array[T]`, `List[T]`, `Vector[T]` | runtime extent | homogeneous or explicit repeating pattern | owning runtime-extent sequence |
+| `Slice[T]` | runtime extent view | homogeneous | non-owning/view-style sequence |
+
+`Tuple`, `FixedArray`, and `FixedList` are distinct static kinds. A
+`FixedArray[int, string]` is therefore not silently assignable to
+`Tuple[int, string]`, even if both are currently list-backed in the
+interpreter. `ArrayList` is not a core Oreslang sequence spelling on current
+main; importing `java.util.ArrayList` remains explicit Java interop and does
+not define Oreslang collection semantics.
+
 For exact finite storage, counted repetition is part of the shape:
 
 ```ores
@@ -284,20 +302,35 @@ val xs: Vector[...(int, string, bool)] = [5, "foo", true];
 Conflicting inline and annotation metadata is an error; there is deliberately
 no precedence rule.
 
-Current size and capacity are not properties of a mutable collection's type.
-They belong to runtime construction:
+For runtime-extent collections, current `size` and `capacity` are not
+properties of the type. They belong to runtime construction. Fixed-extent
+sequences are different: `size=N` may be used as a compile-time layout
+assertion and must equal the statically expanded arity.
 
 ```ores
-// type/storage policy
+// runtime-extent policy: size/capacity are constructor state
 val xs: Vector<growth_policy=GP.Foo>[int] = [1, 2, 3];
 
-// size/capacity belong in constructor/runtime state, never:
+// invalid for a resizable vector:
 // Vector<size=3>[int]
 // Vector<capacity=32>[int]
+
+// fixed product/storage policy: size is a checked compile-time assertion
+val pair: Tuple<
+    growth_policy=GP.Fixed,
+    allocator=Arena,
+    align=64,
+    size=2
+>[int, string] = (7, "seven");
+
+val fixed: FixedArray<size=4, align=32>[4 of int] = [1, 2, 3, 4];
 ```
 
-This distinction ensures that a type cannot become false merely because a
-vector grows.
+`capacity=N` remains runtime state and is not accepted as type metadata.
+`growth_policy` on a tuple/fixed sequence describes backing-storage or
+construction policy only; it never makes the logical arity resizable.
+`inline_capacity` and `max_capacity`, when present on a fixed sequence,
+must be at least its exact arity.
 
 Repeated bracket suffixes provide homogeneous multidimensional shorthand:
 
@@ -518,7 +551,10 @@ val first = values[0];
 
 `arr[...]` is the canonical inline-array spelling. The original bare `[...]` literal remains accepted for source compatibility and destructuring migration.
 
-Tuples preserve per-position static types. Parenthesized tuple literals and list-backed values returned against a finite tuple type both retain the declared positional types:
+Tuples preserve per-position static types. Parenthesized tuple literals and
+list-backed values returned against a finite tuple type both retain the declared
+positional types. Bare finite tuple syntax remains the compact form; the named
+`Tuple<...>[...]` form is used when storage metadata is needed.
 
 ```ores
 val pair = (1, "one");
@@ -529,7 +565,16 @@ fnc result(): [int, bool, string] {
 }
 
 const [num, ok, answer] = result();
+
+val aligned: Tuple<align=64, size=2>[int, string] = (1, "one");
+
+@NamedParams<align=64, size=2>
+val sameShape: [int, string] = (1, "one");
 ```
+
+A tuple is a product value, not a growable array. Its `size` metadata is
+redundant by design but useful as an ABI/layout assertion; a mismatch with the
+declared positional arity is a compile-time error.
 
 ## Structural typing and interfaces
 

@@ -342,8 +342,10 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      '<name=value>' describes compile-time type/storage metadata, and '(...)'
      remains runtime construction/instance state. Named metadata parameters are
      order-independent after canonicalization.
-   - FixedArray/FixedList accept finite sequence shapes, including counted
-     repetition such as FixedArray[3 of int, 3 of string].
+   - Tuple/FixedArray/FixedList accept finite sequence shapes. Tuple[int,
+     string] is the named tuple spelling; bare [int, string] remains the compact
+     tuple spelling. Fixed arrays/lists also accept counted repetition such as
+     FixedArray[3 of int, 3 of string].
    - Runtime-extent collections use one homogeneous element pattern
      (Vector[int]) or explicit unbounded repetition
      (Vector[...(int, string, bool)]). A bare multi-item finite pattern such as
@@ -353,8 +355,14 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      so Vector[int][int] is the two-dimensional shorthand. The rank=N named
      parameter is an equivalent explicit rank declaration when one bracketed
      element shape is present.
-   - Runtime size/capacity are constructor state, not type metadata; size= and
-     capacity= are rejected inside '<...>'.
+   - For runtime-extent collections, size/capacity are constructor state and
+     are rejected inside '<...>'. Fixed Tuple/FixedArray/FixedList may carry
+     size=N as a compile-time extent assertion; N must equal the statically
+     expanded arity. capacity= remains runtime-only.
+   - Tuple/FixedArray/FixedList are distinct static kinds even when their
+     interpreter representation is list-backed. Fixed sequence rank is
+     currently 1; express exact multidimensional layouts with nested fixed
+     element types rather than repeated bracket rank shorthand.
    - "block" followed by "{" is a standalone lexical scope. It has no implicit
      scheduling behavior and declarations inside it do not escape the scope.
    - Unparenthesized C-style headers are distinguished by their semicolon

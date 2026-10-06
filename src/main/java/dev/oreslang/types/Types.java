@@ -66,8 +66,21 @@ public final class Types {
 
     public record ListType(Type element) implements Type { }
 
-    public record Tuple(List<Type> elements) implements Type {
-        public Tuple { elements = List.copyOf(elements); }
+    public enum TupleKind {
+        TUPLE,
+        FIXED_ARRAY,
+        FIXED_LIST
+    }
+
+    public record Tuple(List<Type> elements, TupleKind kind) implements Type {
+        public Tuple {
+            elements = List.copyOf(elements);
+            kind = Objects.requireNonNull(kind, "kind");
+        }
+
+        public Tuple(List<Type> elements) {
+            this(elements, TupleKind.TUPLE);
+        }
     }
 
     public record Union(List<Type> options) implements Type {
@@ -134,6 +147,7 @@ public final class Types {
         }
 
         if (from instanceof Tuple source && to instanceof Tuple target) {
+            if (source.kind() != target.kind()) return false;
             if (source.elements().size() != target.elements().size()) return false;
             for (int i = 0; i < source.elements().size(); i++) {
                 if (!isAssignable(source.elements().get(i), target.elements().get(i))) return false;

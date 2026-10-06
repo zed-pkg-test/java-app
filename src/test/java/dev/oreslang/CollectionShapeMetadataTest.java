@@ -217,6 +217,106 @@ final class CollectionShapeMetadataTest {
                 """)));
     }
 
+
+    @Test
+    void tupleSupportsNamedStorageMetadataAndFixedSizeAssertion() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                pub fnc main(): void {
+                  val pair: Tuple<
+                      growth_policy=GP.Fixed,
+                      allocator=Arena,
+                      align=64,
+                      size=2
+                  >[int, string] = (7, "seven");
+                  return;
+                }
+                """)));
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                pub fnc main(): void {
+                  @NamedParams<size=2, growth_policy=GP.Fixed, align=64>
+                  val pair: [int, string] = (7, "seven");
+                  return;
+                }
+                """)));
+
+        IllegalArgumentException mismatch = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        pub fnc main(): void {
+                          val pair: Tuple<size=3>[int, string] = (7, "seven");
+                          return;
+                        }
+                        """)));
+        assertTrue(mismatch.getMessage().contains("disagrees with fixed sequence arity 2"));
+    }
+
+    @Test
+    void tupleAndFixedArrayRemainNominallyDistinctFiniteSequences() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                pub fnc takesTuple(Tuple[int, string] value): void { return; }
+
+                pub fnc main(): void {
+                  val pair: Tuple[int, string] = (7, "seven");
+                  takesTuple(pair);
+                  return;
+                }
+                """)));
+
+        IllegalArgumentException fixedArrayIsNotTuple = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        pub fnc takesTuple(Tuple[int, string] value): void { return; }
+
+                        pub fnc main(): void {
+                          val pair: FixedArray[int, string] = [7, "seven"];
+                          takesTuple(pair);
+                          return;
+                        }
+                        """)));
+        assertTrue(fixedArrayIsNotTuple.getMessage().contains("argument"));
+
+        IllegalArgumentException tupleIsNotFixedArray = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        pub fnc takesFixed(FixedArray[int, string] value): void { return; }
+
+                        pub fnc main(): void {
+                          val pair: Tuple[int, string] = (7, "seven");
+                          takesFixed(pair);
+                          return;
+                        }
+                        """)));
+        assertTrue(tupleIsNotFixedArray.getMessage().contains("argument"));
+    }
+
+    @Test
+    void fixedSequenceMetadataRejectsImpossiblePhysicalLayout() {
+        IllegalArgumentException inlineCapacity = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        pub fnc main(): void {
+                          val pair: Tuple<inline_capacity=1>[int, string] = (7, "seven");
+                          return;
+                        }
+                        """)));
+        assertTrue(inlineCapacity.getMessage().contains("smaller than fixed sequence arity 2"));
+
+        IllegalArgumentException rank = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        pub fnc main(): void {
+                          val pair: Tuple<rank=2>[int, string] = (7, "seven");
+                          return;
+                        }
+                        """)));
+        assertTrue(rank.getMessage().contains("requires rank=1"));
+
+        IllegalArgumentException capacity = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        pub fnc main(): void {
+                          val pair: Tuple<capacity=2>[int, string] = (7, "seven");
+                          return;
+                        }
+                        """)));
+        assertTrue(capacity.getMessage().contains("runtime instance state"));
+    }
+
     private static Ast.TypeRef bindingType(Ast.Program program, String name) {
         for (Ast.ModuleDecl module : program.modules()) {
             for (Ast.Decl declaration : module.declarations()) {
