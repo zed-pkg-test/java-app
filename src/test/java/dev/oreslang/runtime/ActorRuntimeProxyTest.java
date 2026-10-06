@@ -117,25 +117,24 @@ final class ActorRuntimeProxyTest {
     void sharedActorMayReceiveProxyButPrivateActorCannot() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
             ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{3});
-            CountDownLatch sharedRead = new CountDownLatch(1);
-            AtomicInteger observed = new AtomicInteger();
 
-            var shared = runtime.<ActorRuntime.Proxy<int[]>>spawnShared(
+            var shared = runtime.<ActorRuntime.Proxy<int[]>>spawnSharedTrusted(
                     context -> (message, actorContext) -> {
-                        observed.set(message.read(value -> value[0]));
-                        sharedRead.countDown();
+                        message.write(value -> {
+                            value[0] = 7;
+                            return null;
+                        });
                         actorContext.self().stop();
                     });
 
-            var isolated = runtime.<ActorRuntime.Proxy<int[]>>spawnPrivate(
+            var isolated = runtime.<ActorRuntime.Proxy<int[]>>spawnPrivateTrusted(
                     context -> (message, actorContext) ->
                             actorContext.self().stop());
 
             shared.send(proxy);
-            assertTrue(sharedRead.await(2, TimeUnit.SECONDS));
-            assertEquals(3, observed.get());
             assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(shared.failure().isEmpty());
+            assertEquals(7, proxy.read(value -> value[0]).intValue());
 
             SecurityException denied = assertThrows(
                     SecurityException.class,
