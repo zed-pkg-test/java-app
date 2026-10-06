@@ -22,7 +22,7 @@ final class RuntimeProxyLanguageTest {
                 define class Counter as
                   pub let int value = 1;
 
-                  pub inc(mut self)(): int {
+                  pub inc(self &mut Counter)(): int {
                     self.value = self.value + 1;
                     return self.value;
                   }
@@ -133,6 +133,41 @@ final class RuntimeProxyLanguageTest {
         String message = failure.getMessage().toLowerCase();
         assertTrue(message.contains("void") || message.contains("return"),
                 failure.getMessage());
+    }
+
+    @Test
+    void rtProxyRejectsCapabilityLaunderingPayloadGraphs() {
+        IllegalArgumentException localMutex = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        define class Bag as
+                          pub let Mutex<int> lock = Mutex.new(1);
+                        end
+
+                        fnc bad(): void {
+                          val guarded = rt proxy new Bag();
+                          return;
+                        }
+                        """));
+        assertTrue(localMutex.getMessage().contains("transport-safe")
+                        || localMutex.getMessage().contains("capabilities"),
+                localMutex.getMessage());
+
+        IllegalArgumentException sharedMutex = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        define class Bag as
+                          pub let SharedMutex<int> lock = SharedMutex.new(1);
+                        end
+
+                        fnc bad(): void {
+                          val guarded = rt proxy new Bag();
+                          return;
+                        }
+                        """));
+        assertTrue(sharedMutex.getMessage().contains("transport-safe")
+                        || sharedMutex.getMessage().contains("capabilities"),
+                sharedMutex.getMessage());
     }
 
     @Test
