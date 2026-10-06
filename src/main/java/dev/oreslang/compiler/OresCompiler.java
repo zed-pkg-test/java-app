@@ -5,13 +5,21 @@ import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.types.TypeChecker;
+import dev.oreslang.types.OwnershipChecker;
 
 /** Trusted compiler front-end API for build systems and isolate admission. */
 public final class OresCompiler {
     private OresCompiler() { }
 
     public static Ast.Program parseAndTypeCheck(String source) {
-        return TypeChecker.check(Parser.parse(source));
+        return analyze(Parser.parse(source));
+    }
+
+    /** Runs the complete front-end admission policy on an already parsed program. */
+    public static Ast.Program analyze(Ast.Program program) {
+        program = TypeChecker.checkTypes(program);
+        OwnershipChecker.check(program);
+        return program;
     }
 
     /**
