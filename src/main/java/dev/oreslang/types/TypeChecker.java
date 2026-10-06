@@ -1465,6 +1465,11 @@ public final class TypeChecker {
                             "rt proxy currently accepts class instances or DynamicStruct<T>; got "
                                     + operand);
                 }
+                if (!isSharedSafe(operand, new LinkedHashSet<>(), Map.of())) {
+                    throw new IllegalArgumentException(
+                            "rt proxy payload must be transport-safe data; "
+                                    + "actor-local/suspending/shared-mutable capabilities cannot be hidden behind Proxy<T>");
+                }
                 return new Named("Proxy", List.of(operand));
             }
 
@@ -5190,6 +5195,11 @@ public final class TypeChecker {
                 if (!dynamicStruct && !classInstance) {
                     throw new IllegalArgumentException(
                             "Proxy<T> currently requires a class or DynamicStruct<T> payload");
+                }
+                if (!isSharedSafe(element, new LinkedHashSet<>(), Map.of())) {
+                    throw new IllegalArgumentException(
+                            "Proxy<T> payload must be transport-safe data; "
+                                    + "actor-local/suspending/shared-mutable capabilities are forbidden");
                 }
                 yield new Named("Proxy", List.of(element));
             }
