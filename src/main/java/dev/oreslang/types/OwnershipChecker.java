@@ -784,6 +784,13 @@ public final class OwnershipChecker {
     }
 
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
+        if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
+                && runtimeIntrinsic.name().equals("$rt$yield")) {
+            if (!call.arguments().isEmpty()) {
+                throw error("rt yield takes no arguments");
+            }
+            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
+        }
         if (isBooleanIntrinsicCall(call, scope)) {
             for (Ast.Expr argument : call.arguments()) {
                 checkExpr(argument, scope, false);
