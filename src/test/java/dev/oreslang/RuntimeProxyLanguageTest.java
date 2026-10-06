@@ -417,4 +417,32 @@ final class RuntimeProxyLanguageTest {
                 failure.getMessage());
     }
 
+
+    @Test
+    void optionWrappedNestedClassIsRewrappedAsChildProxy() throws Exception {
+        String output = run("""
+                define class Inner as
+                  pub let int value = 3;
+                end
+
+                define class Outer as
+                  pub val Inner inner = new Inner();
+
+                  pub maybe_inner(): Option<Inner> {
+                    return Some(self.inner);
+                  }
+                end
+
+                pub routine main(): void {
+                  val guarded = rt proxy new Outer();
+                  val nested = guarded.maybe_inner().unwrap();
+                  nested.value = 8;
+                  stdio.stdout.write(nested.value);
+                  return;
+                }
+                """);
+
+        assertEquals("8", output);
+    }
+
 }
