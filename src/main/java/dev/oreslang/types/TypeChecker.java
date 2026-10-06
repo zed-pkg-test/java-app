@@ -228,22 +228,87 @@ public final class TypeChecker {
 
     private void checkModuleAdherence(Ast.ModuleDecl module) {
         for (Ast.Annotation annotation : module.annotations()) {
-            if (!annotation.name().equals("AdheresTo")) continue;
-            if (annotation.arguments().isEmpty()) throw new IllegalArgumentException("@AdheresTo requires at least one interface");
-            Record actual = moduleShape(module);
-            for (Ast.TypeRef ref : annotation.arguments()) {
-                Ast.InterfaceDecl iface = findInterface(ref.name());
-                if (iface == null) throw new IllegalArgumentException("unknown module interface '" + ref.name() + "'");
-                Type resolvedRef = resolve(ref, Set.of(), null);
-                if (!(resolvedRef instanceof Named namedRef)) throw new IllegalArgumentException("@AdheresTo target must be a named interface type");
-                Record expectedTemplate = interfaceShape(iface, Set.copyOf(iface.genericParameters()), new LinkedHashSet<>());
-                Record expected = (Record) substituteGenerics(expectedTemplate,
-                        genericBindings(iface.genericParameters(), namedRef.arguments(), "interface " + iface.name()));
-                if (!assignable(actual, expected)) {
-                    throw new IllegalArgumentException("module '" + module.name() + "' does not adhere to interface '" + ref.name() + "': expected " + expected + " but got " + actual);
-                }
+            if (annotation.name().equals("AdheresTo")) {
+                throw new IllegalArgumentException("@AdheresTo is no longer valid for modules; use 'conforms <Contract>'");
             }
         }
+        if (module.contracts().isEmpty()) return;
+        Record actual = moduleShape(module);
+        Set<String> seenContracts = new HashSet<>();
+        for (Ast.TypeRef ref : module.contracts()) {
+            if (!seenContracts.add(ref.name())) {
+                throw new IllegalArgumentException("module '" + module.name() + "' lists contract '" + ref.name() + "' more than once");
+            }
+            Ast.InterfaceDecl contract = findInterface(ref.name());
+            if (contract == null || !contract.moduleContract()) {
+                throw new IllegalArgumentException("unknown module contract '" + ref.name() + "'");
+            }
+            Type resolvedRef = resolveModuleContractRef(ref, contract);
+            if (!(resolvedRef instanceof Named namedRef)) {
+                throw new IllegalArgumentException("module contract target must be a named contract type");
+            }
+            Record expectedTemplate = interfaceShape(contract, Set.copyOf(contract.genericParameters()), new LinkedHashSet<>());
+            Record expected = (Record) substituteGenerics(expectedTemplate,
+                    genericBindings(contract.genericParameters(), namedRef.arguments(), "contract " + contract.name()));
+            if (!assignable(actual, expected)) {
+                throw new IllegalArgumentException("module '" + module.name() + "' does not conform to contract '" + ref.name()
+                        + "': expected " + expected + " but got " + actual);
+            }
+            validateModuleContractFields(module, contract, new LinkedHashSet<>());
+        }
+    }
+
+    private void validateModuleContractFields(
+            Ast.ModuleDecl module,
+            Ast.InterfaceDecl contract,
+            Set<Ast.InterfaceDecl> stack) {
+        if (!stack.add(contract)) {
+            throw new IllegalArgumentException("module contract inheritance cycle involving '" + contract.name() + "'");
+        }
+
+        for (Ast.TypeRef parentRef : contract.parents()) {
+            Ast.InterfaceDecl parent = findInterface(parentRef.name());
+            if (parent == null || !parent.moduleContract()) {
+                throw new IllegalArgumentException(
+                        "module contract '" + contract.name() + "' has invalid parent '" + parentRef.name() + "'");
+            }
+            validateModuleContractFields(module, parent, stack);
+        }
+
+        Map<String, Ast.FieldDecl> actualFields = new LinkedHashMap<>();
+        for (Ast.Decl decl : module.declarations()) {
+            if (decl instanceof Ast.FieldDecl field && field.visibility() == Ast.Visibility.PUBLIC) {
+                actualFields.put(field.name(), field);
+            }
+        }
+
+        for (Ast.InterfaceMember member : contract.members()) {
+            if (!(member instanceof Ast.InterfaceFieldDecl required)) continue;
+            Ast.FieldDecl actual = actualFields.get(required.name());
+            if (actual == null) {
+                throw new IllegalArgumentException(
+                        "module '" + module.name() + "' is missing required contract field '" + contract.name()
+                                + "." + required.name() + "'");
+            }
+            if (actual.bindingKind() != required.bindingKind()) {
+                throw new IllegalArgumentException(
+                        "module '" + module.name() + "." + actual.name() + "' has binding kind "
+                                + actual.bindingKind() + " but contract '" + contract.name() + "' requires "
+                                + required.bindingKind());
+            }
+        }
+
+        stack.remove(contract);
+    }
+
+    private Type resolveModuleContractRef(Ast.TypeRef ref, Ast.InterfaceDecl contract) {
+        return resolveModuleContractRef(ref, contract, Set.of());
+    }
+
+    private Type resolveModuleContractRef(Ast.TypeRef ref, Ast.InterfaceDecl contract, Set<String> generics) {
+        validateGenericArity(ref, contract.genericParameters(), "contract " + contract.name());
+        return new Named(qualifiedInterfaceName(contract),
+                ref.arguments().stream().map(arg -> resolve(arg, generics, null)).toList());
     }
 
     private Record moduleShape(Ast.ModuleDecl module) {
@@ -286,7 +351,7 @@ public final class TypeChecker {
 
     private void checkInterface(Ast.InterfaceDecl iface) {
         Set<String> generics = uniqueGenerics(iface.genericParameters(), "interface " + iface.name());
-        Type interfaceSelf = new SelfType(nominalInterfaceType(iface));
+        Type interfaceSelf = iface.moduleContract() ? null : new SelfType(nominalInterfaceType(iface));
 
         Set<String> interfaceFieldNames = new LinkedHashSet<>();
         collectInterfaceFieldNames(iface, interfaceFieldNames, new LinkedHashSet<>());
@@ -303,8 +368,13 @@ public final class TypeChecker {
 
         Set<String> memberKeys = new HashSet<>();
         for (Ast.TypeRef parentRef : iface.parents()) {
-            if (findInterface(parentRef.name()) == null) throw new IllegalArgumentException("unknown parent interface '" + parentRef.name() + "' for " + iface.name());
-            resolve(parentRef, generics, null);
+            Ast.InterfaceDecl parent = findInterface(parentRef.name());
+            if (parent == null) throw new IllegalArgumentException("unknown parent interface '" + parentRef.name() + "' for " + iface.name());
+            if (iface.moduleContract() != parent.moduleContract()) {
+                throw new IllegalArgumentException("interfaces and module contracts cannot extend each other");
+            }
+            if (iface.moduleContract()) resolveModuleContractRef(parentRef, parent, generics);
+            else resolve(parentRef, generics, null);
         }
 
         for (Ast.InterfaceMember member : iface.members()) {
@@ -881,6 +951,7 @@ public final class TypeChecker {
             if (!implemented.add(interfaceRef.name())) throw new IllegalArgumentException("duplicate implemented interface '" + interfaceRef.name() + "' on " + klass.name());
             Ast.InterfaceDecl iface = findInterface(interfaceRef.name());
             if (iface == null) throw new IllegalArgumentException("unknown interface '" + interfaceRef.name() + "' implemented by " + klass.name());
+            if (iface.moduleContract()) throw new IllegalArgumentException("module contract '" + interfaceRef.name() + "' cannot be implemented by class '" + klass.name() + "'");
             Type resolvedInterface = resolve(interfaceRef, classGenerics, self);
             if (!(resolvedInterface instanceof Named interfaceType)) throw new IllegalArgumentException("implemented interface must resolve to a named type");
             Record expectedTemplate = interfaceShape(iface, Set.copyOf(iface.genericParameters()), new LinkedHashSet<>());
@@ -2144,6 +2215,23 @@ public final class TypeChecker {
                         typeOf(channelOp.value(), env, generics, self),
                         element,
                         "writech value");
+                if (channelOp.callback()) {
+                    if (channelOp.mode() != Ast.WaitMode.NONBLOCKING) {
+                        throw new IllegalArgumentException(
+                                "channel callbacks require nonblocking writech");
+                    }
+                    if (currentActorKind == Ast.ActorKind.NONE) {
+                        throw new IllegalArgumentException(
+                                "nb cb writech requires an actor execution domain because its callback runs later");
+                    }
+                    checkBlock(
+                            channelOp.callbackBody(),
+                            new Env(env),
+                            generics,
+                            Primitive.VOID,
+                            self);
+                    return Primitive.VOID;
+                }
                 return switch (channelOp.mode()) {
                     case BLOCKING -> Primitive.VOID;
                     case NONBLOCKING -> new Named("Future", List.of(Primitive.VOID));
@@ -2774,7 +2862,7 @@ public final class TypeChecker {
             return;
         }
         if (named.name().equals("SharedMutex")) {
-            if (actorKind == Ast.ActorKind.PRIVATE) {
+            if (actorKind == Ast.ActorKind.PRIVATE || actorKind == Ast.ActorKind.UNTRUSTED) {
                 throw new IllegalArgumentException(
                         where + " cannot use SharedMutex<T> with isoactor/private actors");
             }
@@ -3548,7 +3636,13 @@ public final class TypeChecker {
         for (Ast.TypeRef parentRef : iface.parents()) {
             Ast.InterfaceDecl parent = findInterface(parentRef.name());
             if (parent == null) throw new IllegalArgumentException("unknown parent interface '" + parentRef.name() + "' for " + iface.name());
-            Type resolvedParent = resolve(parentRef, generics, null);
+            if (iface.moduleContract() != parent.moduleContract()) {
+                throw new IllegalArgumentException(
+                        (iface.moduleContract() ? "module contract '" : "interface '") + iface.name()
+                                + "' cannot extend " + (parent.moduleContract() ? "module contract '" : "interface '")
+                                + parent.name() + "' across the interface/contract boundary");
+            }
+            Type resolvedParent = iface.moduleContract() ? resolveModuleContractRef(parentRef, parent, generics) : resolve(parentRef, generics, null);
             if (!(resolvedParent instanceof Named parentType)) {
                 throw new IllegalArgumentException("parent interface must resolve to a named type");
             }
@@ -4954,7 +5048,8 @@ public final class TypeChecker {
             case "Future" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Future requires exactly one explicit type argument");
                 Type element = resolve(ref.arguments().getFirst(), generics, self);
-                if (element == Primitive.VOID) throw new IllegalArgumentException("Future<void> is invalid");
+                // Future<void> is the canonical completion type for nb writech.
+                // OresFuture supports a null terminal payload, so void is valid here.
                 yield new Named("Future", List.of(element));
             }
             case "Generator", "AsyncGenerator", "Iterator", "AsyncIterator", "IteratorResult" -> {
@@ -4993,6 +5088,7 @@ public final class TypeChecker {
                 }
                 Ast.InterfaceDecl knownInterface = findInterface(ref.name());
                 if (knownInterface != null) {
+                    if (knownInterface.moduleContract()) throw new IllegalArgumentException("module contract '" + knownInterface.name() + "' is only valid in module 'conforms' clauses");
                     validateGenericArity(ref, knownInterface.genericParameters(), "interface " + knownInterface.name());
                     yield new Named(qualifiedInterfaceName(knownInterface),
                             ref.arguments().stream().map(arg -> resolve(arg, generics, self)).toList());
@@ -5077,6 +5173,8 @@ public final class TypeChecker {
         if (Types.isAssignable(actual, expected)) return true;
 
         if (actual instanceof Named actualNamed && expected instanceof Record targetShape) {
+            Ast.InterfaceDecl actualContract = findInterface(actualNamed.name());
+            if (actualContract != null && actualContract.moduleContract()) return false;
             Ast.ClassDecl klass = findClass(actualNamed.name());
             if (klass != null) {
                 // Actors are mailbox/capability identities, not ordinary
@@ -5104,6 +5202,12 @@ public final class TypeChecker {
         }
 
         if (actual instanceof Named actualNamed && expected instanceof Named expectedNamed) {
+            Ast.InterfaceDecl actualInterface = findInterface(actualNamed.name());
+            Ast.InterfaceDecl expectedInterface = findInterface(expectedNamed.name());
+            if ((actualInterface != null && actualInterface.moduleContract())
+                    || (expectedInterface != null && expectedInterface.moduleContract())) {
+                return false;
+            }
             if (findClass(actualNamed.name()) != null) {
                 if (findClass(expectedNamed.name()) != null
                         && classTypeExtends(actualNamed, expectedNamed, new LinkedHashSet<>())) {
