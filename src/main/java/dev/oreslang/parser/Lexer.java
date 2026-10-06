@@ -11,7 +11,7 @@ public final class Lexer {
     private static final Map<String, Token.Type> KEYWORDS = new HashMap<>();
 
     static {
-        KEYWORDS.put("define", DEFINE); KEYWORDS.put("class", CLASS); KEYWORDS.put("module", MODULE); KEYWORDS.put("namespace", NAMESPACE);
+        KEYWORDS.put("define", DEFINE); KEYWORDS.put("class", CLASS); KEYWORDS.put("module", MODULE); KEYWORDS.put("contract", CONTRACT); KEYWORDS.put("conforms", CONFORMS); KEYWORDS.put("namespace", NAMESPACE);
         KEYWORDS.put("import", IMPORT); KEYWORDS.put("from", FROM); KEYWORDS.put("as", AS);
         KEYWORDS.put("extends", EXTENDS); KEYWORDS.put("implements", IMPLEMENTS);
         KEYWORDS.put("try", TRY); KEYWORDS.put("catch", CATCH); KEYWORDS.put("finally", FINALLY);
@@ -21,6 +21,7 @@ public final class Lexer {
         KEYWORDS.put("for", FOR); KEYWORDS.put("of", OF); KEYWORDS.put("loop", LOOP); KEYWORDS.put("block", BLOCK); KEYWORDS.put("break", BREAK); KEYWORDS.put("continue", CONTINUE); KEYWORDS.put("yield", YIELD); KEYWORDS.put("super", SUPER); KEYWORDS.put("elseif", ELSEIF); KEYWORDS.put("elif", ELSEIF); KEYWORDS.put("switch", SWITCH); KEYWORDS.put("match", MATCH); KEYWORDS.put("matches", MATCHES); KEYWORDS.put("is", IS); KEYWORDS.put("when", WHEN); KEYWORDS.put("case", CASE); KEYWORDS.put("default", DEFAULT);
         KEYWORDS.put("eq", EQ); KEYWORDS.put("neq", NEQ);
         KEYWORDS.put("nb", NB); KEYWORDS.put("select", SELECT); KEYWORDS.put("readch", READCH); KEYWORDS.put("writech", WRITECH);
+        KEYWORDS.put("cb", CB); KEYWORDS.put("shared", SHARED); KEYWORDS.put("untrusted", UNTRUSTED);
         KEYWORDS.put("type", TYPE); KEYWORDS.put("types", TYPES); KEYWORDS.put("typeof", TYPEOF); KEYWORDS.put("interface", INTERFACE); KEYWORDS.put("trait", TRAIT); KEYWORDS.put("struct", STRUCT); KEYWORDS.put("impl", IMPL); KEYWORDS.put("abstract", ABSTRACT);
         KEYWORDS.put("void", VOID); KEYWORDS.put("static", STATIC); KEYWORDS.put("pub", PUB); KEYWORDS.put("private", PRIVATE);
         KEYWORDS.put("return", RETURN); KEYWORDS.put("defer", DEFER); KEYWORDS.put("val", VAL); KEYWORDS.put("const", CONST);

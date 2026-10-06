@@ -51,7 +51,7 @@ public final class ImportRules {
 
     public static boolean isTypeOnlyKind(Ast.ImportKind kind) {
         return switch (kind) {
-            case ACTOR, CLASS, INTERFACE, TRAIT, STRUCT, TYPE, TYPES -> true;
+            case ACTOR, CLASS, INTERFACE, CONTRACT, TRAIT, STRUCT, TYPE, TYPES -> true;
             case MODULE, FUNCTION, ALL -> false;
         };
     }
