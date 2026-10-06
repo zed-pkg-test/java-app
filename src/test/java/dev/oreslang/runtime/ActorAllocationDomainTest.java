@@ -123,6 +123,49 @@ final class ActorAllocationDomainTest {
         }
     }
 
+
+    @Test
+    void sharedMutexIsUnboundUntilRuntimeUseThenReportsRuntimeSharedDomain() throws Exception {
+        OresMutex.Shared<Integer> mutex = OresMutex.shared(1);
+        assertTrue(mutex.allocationDomain().isEmpty());
+
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var ref = runtime.<Integer>spawnSharedTrusted(factoryContext -> (message, context) -> {
+                var guard = mutex.tryLock().orElseThrow();
+                try {
+                    assertEquals(
+                            context.runtime().runtimeSharedAllocationDomain(),
+                            mutex.allocationDomain().orElseThrow());
+                } finally {
+                    guard.release();
+                    context.self().stop();
+                }
+            });
+
+            ref.send(1);
+            assertTrue(ref.awaitTermination(5, TimeUnit.SECONDS));
+            assertTrue(ref.failure().isEmpty());
+        }
+    }
+
+    @Test
+    void untrustedActorCannotConstructExplicitRuntimeSharedMutex() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var ref = runtime.<Integer>spawnUntrusted(factoryContext -> {
+                try {
+                    OresMutex.shared(1);
+                    throw new AssertionError("untrusted actor constructed SharedMutex");
+                } catch (SecurityException expected) {
+                    return (message, context) -> context.self().stop();
+                }
+            });
+
+            ref.send(1);
+            assertTrue(ref.awaitTermination(5, TimeUnit.SECONDS));
+            assertTrue(ref.failure().isEmpty());
+        }
+    }
+
     private static java.util.UUID runtimeId(ActorRuntime.ActorContext<?> context) {
         return context.runtime().allocationRuntimeId();
     }
