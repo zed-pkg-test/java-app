@@ -5,10 +5,11 @@
 //
 // The input channel carries Some(byte_chunk). None means EOF and is needed for
 // roots (notably numbers) whose completion can only be proven at end-of-stream.
-// A structurally complete JSON value may return before an EOF frame is consumed;
-// producer lifetime/cancellation remains owned by the caller.
+// This is a strict EOF-framed one-value decoder: even after a complete JSON
+// root, it drains through EOF and rejects trailing non-whitespace bytes.
+// Explicit sequence/framing APIs must retain unconsumed bytes separately.
 //
-// Ordinary Oreslang arguments are managed references. feed() reads a chunk and
+// Ordinary Oreslang arguments are managed references. JsonIncrementalDecoder.feed() reads a chunk and
 // copies only its bytes into the decoder's bounded accumulator. Do not introduce
 // C/Rust-style &/* syntax here. A future zero-copy chunk path may explicitly
 // consume storage with rt take once that ownership lowering is on the compiler
@@ -17,7 +18,7 @@
 import class DecodeOptions, DecodeError, DecodedValue, DecodeStep from '../core/options';
 import class JsonIncrementalDecoder from './json';
 import fnc decode_options_valid, decode_error from '../core/options';
-import fnc new_incremental_decoder, feed, finish from './json';
+import fnc new_incremental_decoder from './json';
 
 pub async fnc decode_one_from_channel(
   Channel<Option<List<int>>> input,
@@ -27,23 +28,64 @@ pub async fnc decode_one_from_channel(
     return Err(decode_error("invalid_options", 0, "invalid or unsafe decode options"));
   fi
 
+  if options.allow_trailing_data then
+    return Err(decode_error("framing_required", 0, "one-value channel decode cannot allow trailing data; use an explicit framed/sequence decoder"));
+  fi
+
   let JsonIncrementalDecoder decoder = new_incremental_decoder(options);
 
   loop do
-    val Option<List<int>> frame = await (nb readch input);
+    val Future<Option<List<int>>> pending = nb readch input;
+    val Option<List<int>> frame = await pending;
 
     if frame.is_none() then
-      val DecodeStep terminal = finish(decoder);
+      val DecodeStep terminal = decoder.finish();
       if terminal.status == 1 then
         return Ok(new DecodedValue(terminal.value, terminal.consumed));
       fi
       return Err(terminal.error);
     fi
 
-    val DecodeStep step = feed(decoder, frame.unwrap());
+    val DecodeStep step = decoder.feed(frame.unwrap());
 
     if step.status == 1 then
-      return Ok(new DecodedValue(step.value, step.consumed));
+      // A complete root is not proof of end-of-message. Without this drain,
+      // {"ok":true} followed by a second channel frame would be accepted
+      // and the second frame silently abandoned by this one-value API.
+      let int received = decoder.buffer.length;
+      loop do
+        val Future<Option<List<int>>> pending_tail = nb readch input;
+        val Option<List<int>> tail = await pending_tail;
+        if tail.is_none() then
+          return Ok(new DecodedValue(step.value, step.consumed));
+        fi
+
+        val List<int> bytes = tail.unwrap();
+        if bytes.length > options.max_input_bytes - received then
+          return Err(decode_error(
+            "input_limit",
+            received,
+            "JSON channel input exceeds max_input_bytes"
+          ));
+        fi
+
+        let int i = 0;
+        loop do
+          if i >= bytes.length then
+            break;
+          fi
+          let int byte = bytes[i];
+          if byte != 32 && byte != 9 && byte != 10 && byte != 13 then
+            return Err(decode_error(
+              "trailing_data",
+              received + i,
+              "non-whitespace after the completed JSON value"
+            ));
+          fi
+          i = i + 1;
+        done
+        received = received + bytes.length;
+      done
     fi
 
     if step.status == 2 then

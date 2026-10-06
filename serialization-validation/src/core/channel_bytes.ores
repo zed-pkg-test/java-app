@@ -10,6 +10,10 @@
 
 import fnc byte_list_valid from './bytes';
 
+pub fnc max_channel_bytes(): int {
+  return 256 * 1024 * 1024;
+}
+
 define class ByteStreamError as
   pub val String code;
   pub val int offset;
@@ -34,14 +38,19 @@ pub async fnc collect_bytes_from_channel(
   Channel<Option<List<int>>> input,
   int max_bytes
 ): ByteStreamResult {
-  if max_bytes < 0 then
-    return stream_error("invalid_limit", 0, "max_bytes cannot be negative");
+  if max_bytes < 0 || max_bytes > max_channel_bytes() then
+    return stream_error(
+      "invalid_limit",
+      0,
+      "max_bytes must be within the bounded channel byte limit"
+    );
   fi
 
   let List<int> output = new List<int>();
 
   loop do
-    val Option<List<int>> frame = await (nb readch input);
+    val Future<Option<List<int>>> pending = nb readch input;
+    val Option<List<int>> frame = await pending;
     if frame.is_none() then
       return new ByteStreamResult(
         true,
