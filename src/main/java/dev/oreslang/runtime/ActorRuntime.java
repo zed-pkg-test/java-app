@@ -570,6 +570,51 @@ public final class ActorRuntime implements AutoCloseable {
         }
         return rootAllocationDomain();
     }
+
+
+    /**
+     * Actor-local allocator for the currently executing semantic actor.
+     *
+     * <p>Returns empty outside actor execution. Cross-runtime lookups and
+     * ActorGroup Mailman CONTROL execution fail closed; a carrier thread by
+     * itself never grants allocator authority.</p>
+     */
+    public Optional<ActorMemorySlice> currentActorLocalMemory() {
+        requireCallerRuntimeAffinity("resolve actor-local allocation memory");
+        requireNotActorGroupMailman("resolve actor-local allocation memory");
+
+        ActorExecutionContext execution = CURRENT_ACTOR_EXECUTION.get();
+        if (execution == null) return Optional.empty();
+        if (execution.runtime() != this) {
+            throw new SecurityException(
+                    "actor-local allocator lookup crossed ActorRuntime boundary");
+        }
+
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null
+                || !cell.ref.id().equals(execution.actorId())
+                || cell.kind != execution.kind()) {
+            throw new IllegalStateException(
+                    "actor-local allocator provenance is not bound to the active actor cell");
+        }
+        return Optional.of(cell.memorySlice);
+    }
+
+    /**
+     * Conservative compiler/interpreter lowering hook for storage that is known
+     * to remain actor-owned. This first JVM lowering charges the allocation for
+     * the actor lifetime; later escape/drop lowering may release individual
+     * allocations earlier without changing the semantic domain contract.
+     */
+    public void accountCurrentActorPersistentAllocation(long bytes, String purpose) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("actor-local allocation size cannot be negative");
+        }
+        if (bytes == 0) return;
+        Optional<ActorMemorySlice> local = currentActorLocalMemory();
+        if (local.isEmpty()) return;
+        local.get().accountPersistentHeap(bytes, purpose);
+    }
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
     public int maxActors() { return dispatcherConfig.maxActors(); }
 
@@ -703,6 +748,18 @@ public final class ActorRuntime implements AutoCloseable {
         public boolean closed() { return sliceClosed.get(); }
 
         /**
+         * Charge actor-owned persistent storage without creating a guest-visible
+         * reservation handle. The slice itself is the lifetime owner and bulk
+         * releases this charge on actor teardown.
+         */
+        public void accountPersistentHeap(long bytes, String purpose) {
+            requireCurrentOwner();
+            reserveBytes(bytes, purpose == null || purpose.isBlank()
+                    ? "actor-local persistent allocation"
+                    : purpose);
+        }
+
+        /**
          * Reserve persistent actor-local heap. Compiler/interpreter lowering
          * retains the reservation for as long as the allocation is live.
          */
@@ -753,9 +810,14 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private synchronized MemoryReservation reserve(long bytes, String purpose) {
+            reserveBytes(bytes, purpose);
+            return new MemoryReservation(this, bytes);
+        }
+
+        private synchronized void reserveBytes(long bytes, String purpose) {
             if (bytes < 0) throw new IllegalArgumentException("memory reservation cannot be negative");
             if (sliceClosed.get()) throw new IllegalStateException("actor-local memory slice is closed");
-            if (bytes == 0) return new MemoryReservation(this, 0);
+            if (bytes == 0) return;
 
             long current = usedBytes.get();
             long next;
@@ -771,7 +833,6 @@ public final class ActorRuntime implements AutoCloseable {
 
             reserveActorLocalRuntimeBytes(bytes, owner, kind, purpose);
             usedBytes.set(next);
-            return new MemoryReservation(this, bytes);
         }
 
         private void requireCurrentOwner() {
