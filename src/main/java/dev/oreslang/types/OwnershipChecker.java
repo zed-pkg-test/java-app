@@ -599,6 +599,15 @@ public final class OwnershipChecker {
         if (expr instanceof Ast.SpreadExpr spread) {
             return checkExpr(spread.expression(), scope, consuming);
         }
+        if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (!runtime.operation().equals("yield")) {
+                throw error("runtime intrinsic 'rt " + runtime.operation() + "' is not available on this compiler head");
+            }
+            if (!runtime.arguments().isEmpty()) {
+                throw error("rt yield takes no arguments");
+            }
+            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
+        }
         if (expr instanceof Ast.CallExpr call) {
             return checkCall(call, scope);
         }
@@ -784,13 +793,6 @@ public final class OwnershipChecker {
     }
 
     private ValueInfo checkCall(Ast.CallExpr call, Scope scope) {
-        if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
-                && runtimeIntrinsic.name().equals("$rt$yield")) {
-            if (!call.arguments().isEmpty()) {
-                throw error("rt yield takes no arguments");
-            }
-            return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
-        }
         if (isBooleanIntrinsicCall(call, scope)) {
             for (Ast.Expr argument : call.arguments()) {
                 checkExpr(argument, scope, false);
@@ -1399,6 +1401,8 @@ public final class OwnershipChecker {
             scanExpr(e.condition(), locals, outer, recursiveBinding, captures, false);
             scanExpr(e.whenTrue(), locals, outer, recursiveBinding, captures, false);
             scanExpr(e.whenFalse(), locals, outer, recursiveBinding, captures, false);
+        } else if (expr instanceof Ast.RuntimeCallExpr e) {
+            for (Ast.Expr arg : e.arguments()) scanExpr(arg, locals, outer, recursiveBinding, captures, false);
         } else if (expr instanceof Ast.CallExpr e) {
             scanExpr(e.callee(), locals, outer, recursiveBinding, captures, false);
             for (Ast.Expr arg : e.arguments()) scanExpr(arg, locals, outer, recursiveBinding, captures, false);

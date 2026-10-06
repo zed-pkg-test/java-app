@@ -382,14 +382,19 @@ public final class CapabilityChecker {
             // enters the actor's value graph, not only for direct call syntax.
             Ast.FunctionDecl referenced = findFunction(n.name());
             if (referenced != null) checkReferencedFunction(referenced, policy);
-        }
-        else if (expr instanceof Ast.CallExpr c) {
-            if (c.callee() instanceof Ast.NameExpr runtimeIntrinsic
-                    && runtimeIntrinsic.name().equals("$rt$yield")
-                    && isZeroAuthorityAdversarial(policy)) {
+        } else if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (!runtime.operation().equals("yield")) {
+                throw new SecurityException(
+                        "runtime intrinsic 'rt " + runtime.operation()
+                                + "' is not admitted on this compiler head");
+            }
+            if (isZeroAuthorityAdversarial(policy)) {
                 throw new SecurityException(
                         "untrusted actor cannot use rt yield until continuation quota state survives scheduler handoffs");
             }
+            for (Ast.Expr argument : runtime.arguments()) checkExpr(argument, policy);
+        }
+        else if (expr instanceof Ast.CallExpr c) {
             String target = memberPath(c.callee());
             if (isZeroAuthorityAdversarial(policy) && target != null) {
                 String root = target.contains(".")

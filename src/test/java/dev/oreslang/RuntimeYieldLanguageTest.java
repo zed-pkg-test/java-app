@@ -3,7 +3,9 @@ package dev.oreslang;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
+import dev.oreslang.ast.Ast;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.ExecutionProfile;
@@ -62,6 +64,31 @@ final class RuntimeYieldLanguageTest {
                     return;
                   }
                 end
+                """));
+    }
+
+    @Test
+    void rtNamespaceUsesDedicatedAstAndCannotBeShadowed() {
+        Ast.Program program = Parser.parse("""
+                fnc handoff(): void {
+                  rt yield;
+                  return;
+                }
+                """);
+        Ast.FunctionDecl fn =
+                (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
+        Ast.ExprStmt statement = (Ast.ExprStmt) fn.body().getFirst();
+        Ast.RuntimeCallExpr runtime = assertInstanceOf(
+                Ast.RuntimeCallExpr.class,
+                statement.expression());
+        assertEquals("yield", runtime.operation());
+        assertTrue(runtime.arguments().isEmpty());
+
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                fnc bad(): void {
+                  val rt = 1;
+                  return;
+                }
                 """));
     }
 

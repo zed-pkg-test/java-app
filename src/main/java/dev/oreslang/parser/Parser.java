@@ -2291,7 +2291,7 @@ public final class Parser {
             consume(RPAREN, "expected ')' after rt yield");
         }
 
-        return new Ast.CallExpr(new Ast.NameExpr("$rt$yield"), List.of());
+        return new Ast.RuntimeCallExpr("yield", List.of());
     }
 
     private Ast.Expr parseChannelOperation(

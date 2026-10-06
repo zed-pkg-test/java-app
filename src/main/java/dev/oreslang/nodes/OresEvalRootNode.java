@@ -993,11 +993,12 @@ public final class OresEvalRootNode extends RootNode {
                         && selected.mode() == Ast.WaitMode.BLOCKING) {
                 return true;
             }
+            if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                if (runtime.operation().equals("yield")) return true;
+                return runtime.arguments().stream()
+                        .anyMatch(argument -> expressionContainsPotentialSuspension(argument, seen));
+            }
             if (expr instanceof Ast.CallExpr call) {
-                if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
-                        && runtimeIntrinsic.name().equals("$rt$yield")) {
-                    return true;
-                }
                 for (Ast.Expr argument : call.arguments()) {
                     if (expressionContainsPotentialSuspension(argument, seen)) return true;
                 }
@@ -2795,6 +2796,14 @@ public final class OresEvalRootNode extends RootNode {
                     return;
                 }
 
+                if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                    evalSuspendableRuntimeCall(
+                            task,
+                            runtime,
+                            continuation);
+                    return;
+                }
+
                 if (expr instanceof Ast.CallExpr call) {
                     evalSuspendableCall(
                             task,
@@ -3263,38 +3272,48 @@ public final class OresEvalRootNode extends RootNode {
                     });
         }
 
+        private void evalSuspendableRuntimeCall(
+                SourceTask task,
+                Ast.RuntimeCallExpr runtime,
+                SourceValueCont continuation) {
+            if (!runtime.operation().equals("yield")) {
+                continuation.accept(
+                        task,
+                        null,
+                        new IllegalStateException(
+                                "runtime intrinsic 'rt " + runtime.operation()
+                                        + "' is not implemented on this runtime head"));
+                return;
+            }
+            if (!runtime.arguments().isEmpty()) {
+                continuation.accept(
+                        task,
+                        null,
+                        new IllegalArgumentException(
+                                "rt yield takes no arguments"));
+                return;
+            }
+            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+                continuation.accept(
+                        task,
+                        null,
+                        new SecurityException(
+                                "rt yield is disabled for untrusted actors until continuation quota state survives scheduler handoffs"));
+                return;
+            }
+            task.yieldToScheduler(
+                    (t, ignored, failure) ->
+                            continuation.accept(
+                                    t,
+                                    null,
+                                    failure));
+        }
+
         private void evalSuspendableCall(
                 SourceTask task,
                 Ast.CallExpr call,
                 Env env,
                 SourceValueCont continuation) {
-            if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
-                    && runtimeIntrinsic.name().equals("$rt$yield")) {
-                if (!call.arguments().isEmpty()) {
-                    continuation.accept(
-                            task,
-                            null,
-                            new IllegalArgumentException(
-                                    "rt yield takes no arguments"));
-                    return;
-                }
-                if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
-                    continuation.accept(
-                            task,
-                            null,
-                            new SecurityException(
-                                    "rt yield is disabled for untrusted actors until continuation quota state survives scheduler handoffs"));
-                    return;
-                }
-                task.yieldToScheduler(
-                        (t, ignored, failure) ->
-                                continuation.accept(
-                                        t,
-                                        null,
-                                        failure));
-                return;
-            }
-
             if (call.callee() instanceof Ast.NameExpr name
                     && env.lookup(name.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(name.name(), call.arguments().size());
@@ -5058,12 +5077,16 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.SpreadExpr) {
                 throw new IllegalArgumentException("spread expressions are only valid inside call argument lists");
             }
-            if (expr instanceof Ast.CallExpr call) {
-                if (call.callee() instanceof Ast.NameExpr runtimeIntrinsic
-                        && runtimeIntrinsic.name().equals("$rt$yield")) {
+            if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                if (runtime.operation().equals("yield")) {
                     throw new IllegalStateException(
                             "rt yield reached synchronous evaluation; source suspension lowering was not applied");
                 }
+                throw new IllegalStateException(
+                        "runtime intrinsic 'rt " + runtime.operation()
+                                + "' is not implemented on this runtime head");
+            }
+            if (expr instanceof Ast.CallExpr call) {
                 if (isBooleanIntrinsicCall(call, env)) return evalBooleanIntrinsic(call, env);
                 return invoke(prepareInvocation(call, env));
             }
