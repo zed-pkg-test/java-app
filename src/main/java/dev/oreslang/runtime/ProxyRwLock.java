@@ -136,7 +136,11 @@ final class ProxyRwLock {
             }
         }
         for (Waiter waiter : failed) {
-            waiter.future.failFromRuntime(failure);
+            if (failure instanceof java.util.concurrent.CancellationException) {
+                waiter.future.cancel(false);
+            } else {
+                waiter.future.failFromRuntime(failure);
+            }
         }
         runIdleCallbacks(idle);
     }

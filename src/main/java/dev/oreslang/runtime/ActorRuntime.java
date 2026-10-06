@@ -1084,7 +1084,13 @@ public final class ActorRuntime implements AutoCloseable {
                     new OresFuture<>(() -> leaseFuture.cancel(false));
             leaseFuture.whenCompleteRuntime((lease, failure) -> {
                 if (failure != null) {
-                    result.failFromRuntime(OresFuture.unwrap(failure));
+                    Throwable terminal = OresFuture.unwrap(failure);
+                    if (leaseFuture.isCancelled()
+                            || terminal instanceof CancellationException) {
+                        result.cancel(false);
+                    } else {
+                        result.failFromRuntime(terminal);
+                    }
                     return;
                 }
                 if (lease == null) {
@@ -2935,6 +2941,9 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         ActorCell<?> parent = currentActor.get();
+        if (parent != null) {
+            requireChildKindWithinParentBoundary(parent.kind, kind);
+        }
         synchronized (runtimeLifecycleLock) {
             if (closed.get()) throw new IllegalStateException("actor runtime is closed");
             reserveActorSlot();
@@ -2974,6 +2983,23 @@ public final class ActorRuntime implements AutoCloseable {
                 actorCount.decrementAndGet();
                 throw failure;
             }
+        }
+    }
+
+    private static void requireChildKindWithinParentBoundary(
+            ActorKind parentKind,
+            ActorKind childKind) {
+        Objects.requireNonNull(parentKind, "parentKind");
+        Objects.requireNonNull(childKind, "childKind");
+
+        if (parentKind == ActorKind.PRIVATE && childKind == ActorKind.SHARED) {
+            throw new SecurityException(
+                    "PRIVATE actor cannot spawn SHARED child; actor isolation kind cannot be weakened");
+        }
+        if (parentKind == ActorKind.UNTRUSTED && childKind != ActorKind.UNTRUSTED) {
+            throw new SecurityException(
+                    "UNTRUSTED actor cannot spawn a less-isolated "
+                            + childKind + " child");
         }
     }
 
@@ -3927,55 +3953,19 @@ public final class ActorRuntime implements AutoCloseable {
                     "rt Proxy actor receive");
             return;
         }
-        if (value instanceof OresMutex.Shared<?> sharedMutex) {
-            if (target.kind != ActorKind.SHARED) {
-                throw new SecurityException("private actors cannot receive SharedMutex<T>");
-            }
-            ActorKind senderKind = currentActorKind();
-            if (senderKind != null && isPrivateKind(senderKind)) {
-                throw new SecurityException("private actors cannot send SharedMutex<T>");
-            }
-            IsolatePolicy senderPolicy = currentActorPolicy();
-            if (senderPolicy != null) {
-                senderPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex actor send");
-            } else {
-                policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex host send");
-            }
-            target.policy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex actor receive");
-            sharedMutex.inspectForTransport(payload ->
-                    requireSharedMutexPayloadSafe(
-                            payload,
-                            new IdentityHashMap<>(),
-                            depth + 1));
-            return;
+        if (value instanceof OresMutex.Shared<?>) {
+            throw new SecurityException(
+                    "SharedMutex<T> is legacy SHARED_MEMORY and cannot cross any actor mailbox; "
+                            + "route mutation through the owning actor or use explicit rt Proxy<T>");
         }
         if (value instanceof Shared<?> shared) {
             requireMutexTransport(target, shared.value(), visiting, depth + 1);
             return;
         }
-        if (value instanceof SyncCell<?> cell) {
-            if (!cell.ownedBy(this) || cell.closed()) {
-                throw new IllegalArgumentException(
-                        "SyncCell belongs to a different/closed ActorRuntime");
-            }
-            if (target.kind != ActorKind.SHARED) {
-                throw new SecurityException(
-                        "private/untrusted actors cannot receive SyncCell<T>");
-            }
-            IsolatePolicy senderPolicy = currentActorPolicy();
-            if (senderPolicy != null) {
-                senderPolicy.require(
-                        IsolatePolicy.Capability.SHARED_MEMORY,
-                        "SyncCell actor send");
-            } else {
-                policyCeiling.require(
-                        IsolatePolicy.Capability.SHARED_MEMORY,
-                        "SyncCell host send");
-            }
-            target.policy.require(
-                    IsolatePolicy.Capability.SHARED_MEMORY,
-                    "SyncCell actor receive");
-            return;
+        if (value instanceof SyncCell<?>) {
+            throw new SecurityException(
+                    "SyncCell<T> is legacy SHARED_MEMORY and cannot cross any actor mailbox; "
+                            + "route mutation through the owning actor or use explicit rt Proxy<T>");
         }
         if (visiting.put(value, Boolean.TRUE) != null) {
             throw new IllegalArgumentException("cyclic values cannot cross actor boundaries");
