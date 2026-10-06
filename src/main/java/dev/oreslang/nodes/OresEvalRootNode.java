@@ -713,6 +713,17 @@ public final class OresEvalRootNode extends RootNode {
                 nextStep = OresScheduler.await(future);
             }
 
+            private void yieldToScheduler(
+                    SourceValueCont continuation) {
+                Objects.requireNonNull(continuation, "continuation");
+                if (nextStep != null) {
+                    throw new IllegalStateException(
+                            "source continuation attempted two terminal steps in one turn");
+                }
+                awaitingContinuation = continuation;
+                nextStep = OresScheduler.yieldNow();
+            }
+
             private void done(Object value) {
                 if (nextStep != null) {
                     throw new IllegalStateException(
@@ -981,6 +992,11 @@ public final class OresEvalRootNode extends RootNode {
                     || expr instanceof Ast.DynamicSelectExpr selected
                         && selected.mode() == Ast.WaitMode.BLOCKING) {
                 return true;
+            }
+            if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                if (runtime.operation().equals("yield")) return true;
+                return runtime.arguments().stream()
+                        .anyMatch(argument -> expressionContainsPotentialSuspension(argument, seen));
             }
             if (expr instanceof Ast.CallExpr call) {
                 for (Ast.Expr argument : call.arguments()) {
@@ -2780,6 +2796,14 @@ public final class OresEvalRootNode extends RootNode {
                     return;
                 }
 
+                if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                    evalSuspendableRuntimeCall(
+                            task,
+                            runtime,
+                            continuation);
+                    return;
+                }
+
                 if (expr instanceof Ast.CallExpr call) {
                     evalSuspendableCall(
                             task,
@@ -3246,6 +3270,43 @@ public final class OresEvalRootNode extends RootNode {
                                     }
                                 });
                     });
+        }
+
+        private void evalSuspendableRuntimeCall(
+                SourceTask task,
+                Ast.RuntimeCallExpr runtime,
+                SourceValueCont continuation) {
+            if (!runtime.operation().equals("yield")) {
+                continuation.accept(
+                        task,
+                        null,
+                        new IllegalStateException(
+                                "runtime intrinsic 'rt " + runtime.operation()
+                                        + "' is not implemented on this runtime head"));
+                return;
+            }
+            if (!runtime.arguments().isEmpty()) {
+                continuation.accept(
+                        task,
+                        null,
+                        new IllegalArgumentException(
+                                "rt yield takes no arguments"));
+                return;
+            }
+            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+                continuation.accept(
+                        task,
+                        null,
+                        new SecurityException(
+                                "rt yield is disabled for untrusted actors until continuation quota state survives scheduler handoffs"));
+                return;
+            }
+            task.yieldToScheduler(
+                    (t, ignored, failure) ->
+                            continuation.accept(
+                                    t,
+                                    null,
+                                    failure));
         }
 
         private void evalSuspendableCall(
@@ -5015,6 +5076,15 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.SpreadExpr) {
                 throw new IllegalArgumentException("spread expressions are only valid inside call argument lists");
+            }
+            if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                if (runtime.operation().equals("yield")) {
+                    throw new IllegalStateException(
+                            "rt yield reached synchronous evaluation; source suspension lowering was not applied");
+                }
+                throw new IllegalStateException(
+                        "runtime intrinsic 'rt " + runtime.operation()
+                                + "' is not implemented on this runtime head");
             }
             if (expr instanceof Ast.CallExpr call) {
                 if (isBooleanIntrinsicCall(call, env)) return evalBooleanIntrinsic(call, env);

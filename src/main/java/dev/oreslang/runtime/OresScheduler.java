@@ -55,7 +55,7 @@ public final class OresScheduler implements AutoCloseable {
     }
 
     /** Result of one resumable task turn. */
-    public sealed interface Step<T> permits Done, Await { }
+    public sealed interface Step<T> permits Done, Await, Yield { }
 
     /** The async task has produced its final value. */
     public record Done<T>(T value) implements Step<T> { }
@@ -69,6 +69,16 @@ public final class OresScheduler implements AutoCloseable {
             Objects.requireNonNull(future, "future");
         }
     }
+
+    /**
+     * Cooperative scheduler handoff.
+     *
+     * <p>A Yield always unwinds the current logical turn and makes the same
+     * task runnable again only after the current carrier turn has exited. It
+     * does not complete a Future, sleep a carrier, or change the task's
+     * scheduler/allocation identity.</p>
+     */
+    public record Yield<T>() implements Step<T> { }
 
     /**
      * Input delivered to a compiler-generated state machine when it starts or
@@ -266,6 +276,14 @@ public final class OresScheduler implements AutoCloseable {
 
     public static <T> Step<T> await(OresFuture<?> future) {
         return new Await<>(Objects.requireNonNull(future, "future"));
+    }
+
+    /**
+     * End the current logical turn and resume this task on a fresh scheduler
+     * dispatch. This is the runtime primitive used by source-level `rt yield`.
+     */
+    public static <T> Step<T> yieldNow() {
+        return new Yield<>();
     }
 
     /**
@@ -487,6 +505,11 @@ public final class OresScheduler implements AutoCloseable {
                     return;
                 }
 
+                if (step instanceof Yield<?>) {
+                    armYield();
+                    return;
+                }
+
                 failTerminal(new IllegalStateException(
                         "unknown OresScheduler task step " + step.getClass().getName()));
             } finally {
@@ -508,6 +531,20 @@ public final class OresScheduler implements AutoCloseable {
             executing.set(false);
             publishTerminalIfReady();
             scheduleReadyResume();
+        }
+
+        private void armYield() {
+            Resume resume = Resume.completed(null, null);
+            if (!pendingResume.compareAndSet(null, resume)) {
+                failTerminal(new IllegalStateException(
+                        "yield attempted to publish more than one resume"));
+                return;
+            }
+            if (!phase.compareAndSet(RUNNING, WAITING)) {
+                pendingResume.compareAndSet(resume, null);
+            }
+            // afterCarrierTurn() owns requeueing so the current guest/context
+            // turn always unwinds before the yielded continuation can run.
         }
 
         private void armAwait(OresFuture<?> awaited) {

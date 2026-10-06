@@ -1418,6 +1418,20 @@ public final class TypeChecker {
             throw new IllegalArgumentException(
                     "spread expressions are only valid as arguments to a variadic callable");
         }
+        if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (!runtime.operation().equals("yield")) {
+                throw new IllegalArgumentException(
+                        "runtime intrinsic 'rt " + runtime.operation() + "' is not available on this compiler head");
+            }
+            if (!runtime.arguments().isEmpty()) {
+                throw new IllegalArgumentException("rt yield takes no arguments");
+            }
+            if (currentActorKind == Ast.ActorKind.UNTRUSTED) {
+                throw new IllegalArgumentException(
+                        "rt yield is not enabled for untrusted actors until continuation quotas preserve fuel/deadline state across scheduler handoffs");
+            }
+            return Primitive.VOID;
+        }
         if (expr instanceof Ast.CallExpr call) {
             if (isBuiltinStdoutCall(call, "log", env)) {
                 if (call.typeArgumentsPresent()) {
