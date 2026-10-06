@@ -808,6 +808,32 @@ final class ActorRuntimeTest {
     }
 
 
+
+    @Test
+    void actorsDoNotInheritProcessWideGcAuthority() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            CountDownLatch checked = new CountDownLatch(2);
+            AtomicReference<Boolean> privateGc = new AtomicReference<>();
+            AtomicReference<Boolean> sharedGc = new AtomicReference<>();
+
+            var privateActor = runtime.<String>spawnPrivate(() -> (message, context) -> {
+                privateGc.set(context.policy().allows(IsolatePolicy.Capability.GC_CONTROL));
+                checked.countDown();
+            });
+            var sharedActor = runtime.<String>spawnShared(() -> (message, context) -> {
+                sharedGc.set(context.policy().allows(IsolatePolicy.Capability.GC_CONTROL));
+                checked.countDown();
+            });
+
+            privateActor.send("check");
+            sharedActor.send("check");
+
+            assertTrue(checked.await(2, TimeUnit.SECONDS));
+            assertEquals(Boolean.FALSE, privateGc.get());
+            assertEquals(Boolean.FALSE, sharedGc.get());
+        }
+    }
+
     @Test
     void strictPolicyRejectsSharedActorMemoryAtRuntime() {
         IsolatePolicy strict = IsolatePolicy.strictFaas();
