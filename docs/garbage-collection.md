@@ -25,9 +25,19 @@ GC and reclamation follow **semantic ownership domains**, never carrier-thread i
 
 ### Shared actors
 
-Shared actors may reference explicitly synchronized/shared state. Their host backing objects can therefore participate in the context/JVM heap, but ordinary actor-owned mutable state is still mailbox-serialized and ownership checked.
+A SHARED actor now owns an **actor-local heap domain as well as access to the explicit shared region**. These are different allocation classes:
 
-Shared-actor reclamation should favor deterministic drop and incremental cleanup. A shared actor must not trigger a whole-process tracing pass merely because one actor requests `actor.gc()`.
+- ordinary actor-owned state and compiler-lowered temporaries belong in `context.localMemory()` / the actor-local heap;
+- `Shared<T>`, `SyncCell<T>`, `SharedMutex<T>`, and shared mailbox transport belong in the runtime shared region;
+- `context.privateMemory()` remains empty for SHARED actors, because a local heap does not imply private-actor capability isolation.
+
+This hybrid is intentional. We keep locality, bulk actor teardown, and small actor-local tracing sets without giving up the zero-copy shared-memory path where the program explicitly asks for sharing.
+
+The actor-local heap and its queued shared mailbox bytes consume **one combined per-actor heap ceiling**. A shared actor cannot evade a 16 MiB policy by using 10 MiB of local state plus another 10 MiB of queued shared messages.
+
+The current JVM backend exposes actor-local direct-memory blocks with semantic-owner checks. A native backend should map the same domain to a dedicated arena/slab/heap (for example an `mmap`/VirtualAlloc-backed region) and keep explicit shared allocations in a separate shared allocator.
+
+Shared-actor reclamation favors deterministic drop and bounded incremental cleanup. A shared actor must not trigger a whole-process tracing pass merely because one actor requests `actor.gc()`.
 
 ### Private / isoactors
 
