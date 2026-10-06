@@ -181,6 +181,46 @@ public final class OresEvalRootNode extends RootNode {
             indexDeclarations();
         }
 
+        private static long shallowAllocationBytes(long base, long perSlot, int slots) {
+            if (slots < 0) throw new IllegalArgumentException("allocation slot count cannot be negative");
+            return Math.addExact(base, Math.multiplyExact(perSlot, (long) slots));
+        }
+
+        /**
+         * Conservative first-pass JVM allocation lowering.
+         *
+         * <p>Only storage-bearing interpreter values call this hook. Primitive
+         * and other value-semantic scalars never do. The runtime currently
+         * retains these logical charges until actor teardown; future escape/drop
+         * lowering may shorten individual lifetimes without changing domain
+         * selection.</p>
+         */
+        private void accountActorPersistentAllocation(long bytes, String purpose) {
+            if (!ActorRuntime.inActorExecution()) return;
+            context.actors().accountCurrentActorPersistentAllocation(bytes, purpose);
+        }
+
+        private void accountListAllocation(int size, String purpose) {
+            accountActorPersistentAllocation(
+                    shallowAllocationBytes(24L, 8L, size),
+                    purpose);
+        }
+
+        private void accountMapAllocation(int size, String purpose) {
+            accountActorPersistentAllocation(
+                    shallowAllocationBytes(24L, 32L, size),
+                    purpose);
+        }
+
+        private void accountObjectAllocation(int fields, String purpose) {
+            // One interpreter object shell plus its field table.
+            accountActorPersistentAllocation(
+                    Math.addExact(
+                            64L,
+                            shallowAllocationBytes(24L, 32L, fields)),
+                    purpose);
+        }
+
         private void indexImports() {
             for (Ast.ImportDecl imported : program.imports()) {
                 ImportRules.validate(imported);
@@ -2819,13 +2859,14 @@ public final class OresEvalRootNode extends RootNode {
                             task,
                             list.elements(),
                             env,
-                            (t, values, failure) ->
-                                    continuation.accept(
-                                            t,
-                                            failure == null
-                                                    ? List.copyOf(values)
-                                                    : null,
-                                            failure));
+                            (t, values, failure) -> {
+                                if (failure != null) {
+                                    continuation.accept(t, null, failure);
+                                    return;
+                                }
+                                accountListAllocation(values.size(), "Ores suspendable list backing");
+                                continuation.accept(t, List.copyOf(values), null);
+                            });
                     return;
                 }
 
@@ -2834,13 +2875,14 @@ public final class OresEvalRootNode extends RootNode {
                             task,
                             tuple.elements(),
                             env,
-                            (t, values, failure) ->
-                                    continuation.accept(
-                                            t,
-                                            failure == null
-                                                    ? List.copyOf(values)
-                                                    : null,
-                                            failure));
+                            (t, values, failure) -> {
+                                if (failure != null) {
+                                    continuation.accept(t, null, failure);
+                                    return;
+                                }
+                                accountListAllocation(values.size(), "Ores suspendable tuple backing");
+                                continuation.accept(t, List.copyOf(values), null);
+                            });
                     return;
                 }
 
@@ -2942,6 +2984,7 @@ public final class OresEvalRootNode extends RootNode {
                                 "duplicate obj field " + entry.getKey());
                     }
                 }
+                accountMapAllocation(result.size(), "Ores suspendable object backing");
                 continuation.accept(task, result, null);
                 return;
             }
@@ -5116,9 +5159,14 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.ListExpr list) {
                 ArrayList<Object> result = new ArrayList<>(list.elements().size());
                 for (Ast.Expr item : list.elements()) result.add(eval(item, env));
+                accountListAllocation(result.size(), "Ores list backing");
                 return result;
             }
-            if (expr instanceof Ast.TupleExpr tuple) return tuple.elements().stream().map(item -> eval(item, env)).toList();
+            if (expr instanceof Ast.TupleExpr tuple) {
+                List<Object> result = tuple.elements().stream().map(item -> eval(item, env)).toList();
+                accountListAllocation(result.size(), "Ores tuple backing");
+                return result;
+            }
             if (expr instanceof Ast.ObjectExpr object) {
                 boolean dynamicKeys = object.fields().stream().anyMatch(Ast.ObjectField::isDynamic);
                 LinkedHashMap<String, Object> result = new LinkedHashMap<>();
@@ -5137,11 +5185,18 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalArgumentException("duplicate obj field " + key);
                     }
                 }
+                accountMapAllocation(
+                        result.size(),
+                        dynamicKeys ? "Ores dynamic-struct backing" : "Ores object-record backing");
                 return dynamicKeys ? new DynamicStructValue(result) : Map.copyOf(result);
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
                 boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
+                long capturedBytes = captured == null ? 0L : captured.allocationFootprintBytes();
+                accountActorPersistentAllocation(
+                        Math.addExact(64L, capturedBytes),
+                        "Ores closure environment");
                 return tailCallable(args -> {
                     if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
                     Env local = new Env(captured, nonLexical);
@@ -5269,6 +5324,7 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof ActorFacade actor) {
                 return switch (name) {
                     case "gc" -> (Invokable) actor::gc;
+                    case "local_memory_bytes" -> actor.localMemoryBytes();
                     default -> throw new IllegalArgumentException("unknown actor member " + name);
                 };
             }
@@ -5897,6 +5953,9 @@ public final class OresEvalRootNode extends RootNode {
                             "too many constructor arguments for " + klass.name());
                 }
                 LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
+                accountObjectAllocation(
+                        classFields.size(),
+                        "Ores class instance " + klass.name());
                 OresObject object = new OresObject(this, klass, fields);
                 for (int i = 0; i < classFields.size(); i++) {
                     Ast.FieldDecl field = classFields.get(i);
@@ -5933,6 +5992,9 @@ public final class OresEvalRootNode extends RootNode {
             for (Ast.FieldDecl field : classFields) {
                 fields.put(field.name(), UNINITIALIZED_FIELD);
             }
+            accountObjectAllocation(
+                    classFields.size(),
+                    "Ores class instance " + klass.name());
             OresObject object = new OresObject(this, klass, fields);
 
             // Field initializers run before the constructor body and with the
@@ -7029,6 +7091,10 @@ public final class OresEvalRootNode extends RootNode {
             cp.slots.putAll(slots);
             return cp;
         }
+        private long allocationFootprintBytes() {
+            long own = Math.addExact(48L, Math.multiplyExact(32L, (long) slots.size()));
+            return parent == null ? own : Math.addExact(own, parent.allocationFootprintBytes());
+        }
         private boolean hasLiveMutexGuards() {
             Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
             for (Slot slot : slots.values()) {
@@ -7500,6 +7566,12 @@ public final class OresEvalRootNode extends RootNode {
     }
     private record ActorFacade(OresContext context) {
         private Map<String,Object> gc(List<Object> args){requireZero(args,"actor.gc");return context.garbageCollector().collectCurrentActor().asMap();}
+        private long localMemoryBytes(){
+            return context.actors().currentActorLocalMemory()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "actor.local_memory_bytes requires actor execution"))
+                    .usedBytes();
+        }
     }
     private static List<Object> expandArgumentSequence(Object value,String name){
         if(value instanceof List<?> list)return new ArrayList<>(list);
