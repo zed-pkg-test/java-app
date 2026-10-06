@@ -1,3 +1,4 @@
 [workspace]
 members = ["source"]
+exclude = ["vendor/ores-forms-lib-core"]
 resolver = "2"
