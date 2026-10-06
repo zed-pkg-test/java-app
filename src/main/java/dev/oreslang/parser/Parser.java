@@ -2225,6 +2225,7 @@ public final class Parser {
             return new Ast.UnaryExpr(mutable ? "&mut" : "&", parseUnary());
         }
         if (match(AWAIT)) return new Ast.AwaitExpr(parseUnary());
+        if (match(RT)) return parseRuntimeExpression();
 
         if (match(NB)) {
             if (match(CB)) {
@@ -2267,6 +2268,25 @@ public final class Parser {
         if (match(SELECT)) return parseDynamicSelect(Ast.WaitMode.BLOCKING);
 
         return parsePostfix();
+    }
+
+    private Ast.Expr parseRuntimeExpression() {
+        Token operation = consume(IDENT, "expected runtime operation after 'rt'");
+        if (!operation.lexeme().equals("yield")) {
+            throw error(operation,
+                    "unknown rt operation '" + operation.lexeme()
+                            + "'; this runtime surface currently supports rt yield");
+        }
+
+        if (match(LPAREN)) {
+            if (!check(RPAREN)) {
+                throw error(peek(),
+                        "rt yield currently takes no arguments; scheduling policy hints are not enabled yet");
+            }
+            consume(RPAREN, "expected ')' after rt yield");
+        }
+
+        return new Ast.CallExpr(new Ast.NameExpr("$rt$yield"), List.of());
     }
 
     private Ast.Expr parseChannelOperation(

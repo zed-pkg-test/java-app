@@ -182,6 +182,99 @@ final class OresSchedulerTest {
     }
 
     @Test
+    void yieldAlwaysCreatesFreshDispatchWithoutAllocatingAFuture() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            AtomicInteger pc = new AtomicInteger();
+            AtomicReference<Thread> firstCarrier = new AtomicReference<>();
+            AtomicLong firstDispatch = new AtomicLong();
+            AtomicReference<Object> firstTaskDomain = new AtomicReference<>();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                int step = pc.getAndIncrement();
+                if (step == 0) {
+                    assertTrue(resume.initial());
+                    firstCarrier.set(Thread.currentThread());
+                    firstDispatch.set(OresScheduler.currentDispatchId());
+                    firstTaskDomain.set(OresScheduler.currentTaskDomain());
+                    return OresScheduler.yieldNow();
+                }
+
+                assertFalse(resume.initial());
+                assertNull(resume.value());
+                assertNull(resume.failure());
+                assertSame(firstCarrier.get(), Thread.currentThread(),
+                        "one-carrier scheduler may reuse the same physical carrier");
+                assertNotEquals(firstDispatch.get(), OresScheduler.currentDispatchId(),
+                        "yield must resume through a fresh logical dispatch");
+                assertSame(firstTaskDomain.get(), OresScheduler.currentTaskDomain(),
+                        "yield must preserve logical task identity");
+                return OresScheduler.done(42);
+            });
+
+            assertEquals(42, result.get(5, TimeUnit.SECONDS));
+            assertEquals(2, pc.get());
+        }
+    }
+
+    @Test
+    void manyYieldsRemainStacklessAndMakeProgress() throws Exception {
+        final int yields = 1024;
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            AtomicInteger pc = new AtomicInteger();
+            AtomicLong previousDispatch = new AtomicLong();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                long dispatch = OresScheduler.currentDispatchId();
+                long prior = previousDispatch.getAndSet(dispatch);
+                if (prior != 0L) {
+                    assertNotEquals(prior, dispatch,
+                            "every yield must establish a fresh dispatch");
+                }
+
+                int step = pc.getAndIncrement();
+                if (step < yields) return OresScheduler.yieldNow();
+                return OresScheduler.done(step);
+            });
+
+            assertEquals(yields, result.get(10, TimeUnit.SECONDS));
+            assertEquals(yields + 1, pc.get());
+        }
+    }
+
+    @Test
+    void cancellationAfterYieldAdmissionPreventsQueuedResumeFromRunning() throws Exception {
+        java.util.concurrent.BlockingQueue<Runnable> queued =
+                new java.util.concurrent.LinkedBlockingQueue<>();
+        try (OresScheduler scheduler = OresScheduler.runtimeOwned(
+                "controlled-yield",
+                1,
+                queued::add)) {
+            AtomicInteger turns = new AtomicInteger();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                int turn = turns.getAndIncrement();
+                if (turn == 0) return OresScheduler.yieldNow();
+                return OresScheduler.done(42);
+            });
+
+            Runnable first = queued.poll(5, TimeUnit.SECONDS);
+            assertNotNull(first);
+            first.run();
+
+            Runnable yieldedResume = queued.poll(5, TimeUnit.SECONDS);
+            assertNotNull(yieldedResume,
+                    "yield must enqueue a later turn after the first turn unwinds");
+
+            assertTrue(result.cancel(false));
+            yieldedResume.run();
+
+            assertTrue(result.isCancelled());
+            assertEquals(1, turns.get(),
+                    "a queued yield resume must become inert after task cancellation");
+        }
+    }
+
+    @Test
     void runtimeOwnedCompletionPublishesOnlyAfterGuestTurnAdmissionExits() throws Exception {
         ExecutorService carrier = Executors.newSingleThreadExecutor();
         AtomicBoolean insideGuestTurn = new AtomicBoolean();
