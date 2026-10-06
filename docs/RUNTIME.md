@@ -197,10 +197,13 @@ A HungryActor is intentionally expensive. It is appropriate when reserving a who
 
 The host actor runtime follows the same scheduling shape as Akka's event-based dispatcher: many actors share an executor, each actor has its own mailbox, and a scheduled actor drains only a bounded number of messages before yielding back to the executor. The configured throughput bound prevents one hot mailbox from monopolizing a worker.
 
-Oreslang deliberately uses two executors:
+Oreslang deliberately keeps three actor scheduling bulkheads:
 
 - **private dispatcher** — private actors, isolation-copy message transport;
-- **shared dispatcher** — shared actors with actor-owned mutable heaps, mailbox/channel mutation, immutable published reads, and optional explicit `Proxy<T>` capabilities. `SyncCell<T>` / `SharedMutex<T>` are legacy host/runtime compatibility primitives, not ambient actor state.
+- **shared dispatcher** — shared actors with actor-owned mutable heaps, mailbox/channel mutation, immutable published reads, and optional explicit `Proxy<T>` capabilities;
+- **untrusted dispatcher** — untrusted actors on their stricter policy/isolation path.
+
+`SyncCell<T>` / `SharedMutex<T>` are legacy host/runtime compatibility primitives, not ambient actor state.
 
 A per-actor atomic scheduling gate ensures only one drain task for that actor is active. The executor may run different turns on different threads; thread identity is never actor identity.
 
@@ -221,18 +224,18 @@ The evaluator keeps the raw target inaccessible to source code and maps operatio
 
 - scalar/immutable field/index read -> read lock;
 - field/index replacement -> write lock;
-- explicitly read-only receiver method -> read lock;
-- all other direct methods -> write lock;
+- ordinary class method (implicit immutable `self`) -> read lock;
+- explicit `mut self` method or generated setter -> write lock;
 - extracted/bound proxy methods -> rejected;
 - async or potentially suspending method -> rejected before executing under the lock;
 - nested class/`DynamicStruct` result -> interned child `Proxy<U>` sharing the same fair logical RW-lease domain; the raw nested reference never escapes;
 - raw mutable collection/callable/capability result -> rejected until a dedicated synchronized adapter or immutable snapshot boundary exists;
 - field/index assignment -> write lock and `void` result, so storing a move-only value cannot manufacture a second raw owner;
-- `Proxy<T>.dispose()` -> proxy lifecycle revocation; the handle releases its quota and strong runtime root.
+- `Proxy<T>.dispose()` -> proxy lifecycle revocation; queued waiters fail immediately, the handle releases its quota/root, and that revoked handle cannot mint new child views.
 
 Creating a proxy is also an allocation-provenance boundary. A value created inside a SHARED actor is semantically promoted from that actor's local allocation domain into a runtime-owned proxy domain before the capability can cross actors. The current JVM backend realizes that promotion as a strong `ActorRuntime` root and records the source ActorId/domain. Native/#289 arena lowering must perform a real move/promotion out of the actor-local arena before publishing the proxy; it must never leave a transportable proxy pointing into memory that actor teardown can retire.
 
-The lock domain is independent of native carrier identity, so an actor may migrate between carrier threads without changing proxy correctness. Contended actor/source acquisition registers a cancellable `OresFuture` waiter and yields the scheduler turn instead of parking the reusable carrier. FIFO grants batch readers only ahead of the first queued writer, bounding writer starvation; cancellation detaches waiters, and runtime close fails queued waiters. Repeated nested projections are interned by target identity within one lock domain, avoiding per-read handle/quota growth. Cross-lock-domain nested locking is rejected rather than attempting a global lock-order protocol, and read-to-write upgrade is rejected rather than parking forever. Runtime teardown revokes proxy access immediately and defers strong-root retirement until active logical leases drain, so an uncooperative holder cannot turn `ActorRuntime.close()` into an unbounded lock join.
+The lock domain is independent of native carrier identity, so an actor may migrate between carrier threads without changing proxy correctness. Contended actor/source acquisition registers a cancellable `OresFuture` waiter and yields the scheduler turn instead of parking the reusable carrier. FIFO grants batch readers only ahead of the first queued writer, bounding writer starvation; cancellation detaches waiters, and runtime close fails queued waiters. Repeated nested projections are O(1) identity-indexed within one lock domain, avoiding runtime-wide scans and per-read handle/quota growth. Cross-lock-domain nested locking is rejected rather than attempting a global lock-order protocol, and read-to-write upgrade is rejected rather than parking forever. Runtime teardown revokes proxy access immediately and defers strong-root retirement until active logical leases drain, so an uncooperative holder cannot turn `ActorRuntime.close()` into an unbounded lock join.
 
 A proxy may be transported only between SHARED actors in the same `ActorRuntime`, with `ACTOR_SHARED_PROXY` on both sides. PRIVATE/UNTRUSTED actors, data-only freezes, immutable `Shared<T>` wrappers, and ordinary async-task boundaries reject proxy handles.
 

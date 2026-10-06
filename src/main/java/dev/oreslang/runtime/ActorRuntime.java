@@ -48,9 +48,12 @@ import java.util.function.UnaryOperator;
  * multiplexed over dispatcher threads, but one actor processes its mailbox
  * serially. Carrier-thread identity is never actor identity.
  *
- * PRIVATE and SHARED actors are deliberately bulkheaded onto different
- * dispatchers. Private actors also receive a confined logical memory slice;
- * shared actors may coordinate through explicitly synchronized shared cells.
+ * PRIVATE, SHARED, and UNTRUSTED actors are deliberately bulkheaded onto
+ * separate dispatchers. Ordinary mutable state remains actor-owned and
+ * single-writer. SHARED actors may consume explicitly published immutable data;
+ * cross-actor mutation is message/channel based, with rt Proxy<T> as the
+ * explicit synchronized capability escape hatch rather than ambient writable
+ * shared memory.
  */
 public final class ActorRuntime implements AutoCloseable {
     private static final int MAX_MESSAGE_GRAPH_DEPTH = 256;
@@ -1015,6 +1018,12 @@ public final class ActorRuntime implements AutoCloseable {
 
         private final UUID id = UUID.randomUUID();
         private final ProxyRwLock lock;
+        /**
+         * Identity-indexed child facades for this one logical lock domain.
+         * Guarded by synchronized(lock); avoids scanning every runtime proxy
+         * on each nested class/struct projection.
+         */
+        private final IdentityHashMap<Object, Proxy<?>> views;
         private final TargetProvenance targetProvenance;
         private final ActorId sourceActorId;
         private final Object sourceExecutionDomain;
@@ -1027,11 +1036,13 @@ public final class ActorRuntime implements AutoCloseable {
         private Proxy(
                 T target,
                 ProxyRwLock lock,
+                IdentityHashMap<Object, Proxy<?>> views,
                 TargetProvenance targetProvenance,
                 ActorId sourceActorId,
                 Object sourceExecutionDomain) {
             this.target = Objects.requireNonNull(target, "proxy target");
             this.lock = Objects.requireNonNull(lock, "proxy lock");
+            this.views = Objects.requireNonNull(views, "proxy views");
             this.targetProvenance =
                     Objects.requireNonNull(targetProvenance, "targetProvenance");
             this.sourceActorId = sourceActorId;
@@ -1098,6 +1109,17 @@ public final class ActorRuntime implements AutoCloseable {
                             new IllegalStateException("rt Proxy lock produced a null lease"));
                     return;
                 }
+                /*
+                 * Revocation can race between requireOpenTarget() above and the
+                 * logical lease grant. Never publish an Access after the proxy
+                 * has become closed; return the lease immediately so the RW
+                 * state machine can continue draining.
+                 */
+                if (proxyClosed.get() || closed.get()) {
+                    lease.close();
+                    result.failFromRuntime(new IllegalStateException("rt proxy is closed"));
+                    return;
+                }
                 Access access = new Access(lease, write);
                 if (!result.completeFromRuntime(access)) {
                     access.close();
@@ -1139,28 +1161,35 @@ public final class ActorRuntime implements AutoCloseable {
         @SuppressWarnings("unchecked")
         public <R> Proxy<R> child(R nested) {
             requireProxyAccess("derive rt proxy view");
+            requireOpenTarget();
             if (nested == null) throw new IllegalArgumentException("cannot proxy a null nested value");
 
             synchronized (lock) {
-                for (Proxy<?> existing : sharedProxies) {
-                    if (existing.lock == lock
-                            && existing.target == nested
-                            && !existing.proxyClosed.get()) {
-                        return (Proxy<R>) existing;
-                    }
+                if (proxyClosed.get() || closed.get()) {
+                    throw new IllegalStateException("rt proxy is closed");
+                }
+
+                Proxy<?> existing = views.get(nested);
+                if (existing != null && !existing.proxyClosed.get()) {
+                    return (Proxy<R>) existing;
                 }
 
                 reserveSharedRuntimeBytes(HANDLE_BYTES, "shared proxy child handle");
                 Proxy<R> child = new Proxy<>(
                         nested,
                         lock,
+                        views,
                         targetProvenance,
                         sourceActorId,
                         sourceExecutionDomain);
+                views.put(nested, child);
                 sharedProxies.add(child);
-                if (closed.get()) {
-                    child.closeFromRuntime();
-                    throw new IllegalStateException("actor runtime is closed");
+                if (proxyClosed.get() || closed.get()) {
+                    unregisterProxyView(child);
+                    sharedProxies.remove(child);
+                    child.proxyClosed.set(true);
+                    child.retireTarget(true);
+                    throw new IllegalStateException("rt proxy is closed");
                 }
                 return child;
             }
@@ -1226,6 +1255,7 @@ public final class ActorRuntime implements AutoCloseable {
              * not subtract quota a second time.
              */
             if (!proxyClosed.compareAndSet(false, true)) return;
+            unregisterProxyView(this);
             sharedProxies.remove(this);
             lock.whenIdle(() -> retireTarget(false));
         }
@@ -1241,7 +1271,15 @@ public final class ActorRuntime implements AutoCloseable {
 
         private void closeUnderWriteLease() {
             if (!proxyClosed.compareAndSet(false, true)) return;
+            unregisterProxyView(this);
             sharedProxies.remove(this);
+            /*
+             * dispose() is a revocation boundary, not merely target cleanup.
+             * Any logical readers/writers already queued behind this write
+             * lease must settle now instead of being granted stale Access
+             * objects after the writer releases.
+             */
+            lock.failWaiters(new IllegalStateException("rt proxy was disposed while waiting"));
             retireTarget(true);
         }
 
@@ -1275,18 +1313,33 @@ public final class ActorRuntime implements AutoCloseable {
                 : Proxy.TargetProvenance.PROMOTED_FROM_SHARED_ACTOR;
 
         reserveSharedRuntimeBytes(Proxy.HANDLE_BYTES, "shared proxy handle");
+        ProxyRwLock proxyLock = new ProxyRwLock();
+        IdentityHashMap<Object, Proxy<?>> views = new IdentityHashMap<>();
         Proxy<T> proxy = new Proxy<>(
                 value,
-                new ProxyRwLock(),
+                proxyLock,
+                views,
                 provenance,
                 sourceActorId,
                 sourceExecutionDomain);
+        synchronized (proxyLock) {
+            views.put(value, proxy);
+        }
         sharedProxies.add(proxy);
         if (closed.get()) {
             proxy.closeFromRuntime();
             throw new IllegalStateException("actor runtime is closed");
         }
         return proxy;
+    }
+
+    private void unregisterProxyView(Proxy<?> proxy) {
+        Object live = proxy.target;
+        synchronized (proxy.lock) {
+            if (live != null && proxy.views.get(live) == proxy) {
+                proxy.views.remove(live);
+            }
+        }
     }
 
     private void validateProxyLockNesting(

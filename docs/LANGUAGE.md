@@ -917,7 +917,11 @@ The central invariant is:
 define class Cache as
   pub let int hits = 0;
 
-  pub inc(): int {
+  pub current(): int {
+    return self.hits;
+  }
+
+  pub inc(mut self)(): int {
     self.hits = self.hits + 1;
     return self.hits;
   }
@@ -925,8 +929,9 @@ end
 
 val cache = rt proxy new Cache();
 cache.hits = 10;       // write lease
-val n = cache.hits;    // read lease
-val m = cache.inc();   // conservative write lease
+val n = cache.hits;      // read lease
+val n2 = cache.current(); // read lease: ordinary self is immutable
+val m = cache.inc();      // write lease: explicit mut self
 ```
 
 Both `rt proxy value` and `rt proxy(value)` are accepted. The original move-only owner is consumed, so code cannot keep a raw mutable alias beside the proxy. A proxy can cross only SHARED actor boundaries and requires the explicit `ACTOR_SHARED_PROXY` capability; private/untrusted actors and ordinary async-task boundaries reject it.
@@ -939,14 +944,14 @@ Proxy access is deliberately restrictive:
 
 - scalar/immutable member or index reads use a read lock;
 - field/index mutation uses a write lock;
-- methods with a proven immutable-borrow receiver may use a read lock; other methods use a write lock conservatively;
+- ordinary class methods use a read lease because their implicit `self` is immutable; `mut self` methods and generated setters use a write lease;
 - a proxy method may not `await`, suspend, or be declared `async` while the lock is held;
 - bound methods cannot be extracted from a proxy;
-- nested class and `DynamicStruct` state never escapes raw: it is returned as a child `Proxy<U>` view that shares the parent's lock domain and is interned by target identity;
+- nested class and `DynamicStruct` state never escapes raw: it is returned as a child `Proxy<U>` view that shares the parent's lock domain and is O(1) identity-indexed within that domain;
 - raw mutable collections, callables, host capabilities, and other unsynchronized move-only values still cannot escape through a proxy read or method result; publish a snapshot or add a dedicated proxy adapter instead;
 - nested locking across different proxy lock domains is rejected to avoid ABBA lock-order deadlocks;
 - read-to-write lock upgrade on the same proxy is rejected rather than blocking forever;
-- `proxy.dispose()` explicitly revokes the proxy handle and releases its runtime quota/root; it is reserved on `Proxy<T>` and does not dispatch to a wrapped class method.
+- `proxy.dispose()` explicitly revokes the proxy handle, fails queued lease waiters, and releases its runtime quota/root; a revoked proxy cannot mint fresh child views.
 
 Proxy field/index assignment is statement-like: it returns `void`. A move-only value assigned into a proxy therefore cannot also escape as the value of the assignment expression.
 

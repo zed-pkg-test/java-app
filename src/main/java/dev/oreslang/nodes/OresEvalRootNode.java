@@ -5623,9 +5623,18 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             Ast.TypeRef receiverType = method.explicitReceiverType();
-            boolean readOnly = receiverType != null
-                    && receiverType.isBorrow()
-                    && !receiverType.mutableBorrow();
+            boolean mutableReceiver =
+                    AnnotationExpander.isGeneratedFromJsonSetter(method)
+                            || (receiverType != null
+                            && receiverType.isBorrow()
+                            && receiverType.mutableBorrow());
+            /*
+             * Ordinary class self is an immutable borrow in OwnershipChecker.
+             * Therefore a method without an explicit mutable receiver is safe
+             * to run under a shared/read lease. Canonical mut self methods and
+             * generated setters receive the exclusive/write lease.
+             */
+            boolean readOnly = !mutableReceiver;
 
             ProxyMethodPlan plan = new ProxyMethodPlan(
                     proxy, inner, readOnly, method.name());
