@@ -49,6 +49,16 @@ public final class Parser {
                 continue;
             }
 
+            if (check(INTERFACE) && defineFollowsAfterVisibilityModifiers()) {
+                advance();
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                consume(DEFINE, "compatibility interface declaration requires both 'interface' and 'define'");
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                validateOnlyVisibilityModifiers(modifiers, "interfaces");
+                rootDeclarations.add(parseInterface(modifiers.visibility));
+                continue;
+            }
+
             if (match(DEFINE)) {
                 modifiers = mergeModifiers(modifiers, parseModifiers());
                 if (modifiers.shared) {
@@ -66,6 +76,7 @@ public final class Parser {
                     continue;
                 }
                 if (match(INTERFACE)) {
+                    modifiers = mergeModifiers(modifiers, parseModifiers());
                     validateOnlyVisibilityModifiers(modifiers, "interfaces");
                     rootDeclarations.add(parseInterface(modifiers.visibility));
                     continue;
@@ -178,6 +189,15 @@ public final class Parser {
             modifiers = mergeModifiers(modifiers, parseModifiers());
             validateClassModifiers(modifiers);
             return parseClass(modifiers.isAbstract);
+        }
+
+        if (check(INTERFACE) && defineFollowsAfterVisibilityModifiers()) {
+            advance();
+            modifiers = mergeModifiers(modifiers, parseModifiers());
+            consume(DEFINE, "compatibility interface declaration requires both 'interface' and 'define'");
+            modifiers = mergeModifiers(modifiers, parseModifiers());
+            validateOnlyVisibilityModifiers(modifiers, "interfaces");
+            return parseInterface(modifiers.visibility);
         }
 
         if (match(DEFINE)) {
@@ -341,6 +361,19 @@ public final class Parser {
                         ? "expected '}' to close class " + name
                         : "expected 'end' to close class " + name);
         return new Ast.ClassDecl(name, isAbstract, Ast.ActorKind.NONE, generics, parents, interfaces, fields, methods);
+    }
+
+    private boolean defineFollowsAfterVisibilityModifiers() {
+        int lookahead = current + 1;
+        while (lookahead < tokens.size()) {
+            Token.Type type = tokens.get(lookahead).type();
+            if (type == PUB || type == PRIVATE) {
+                lookahead++;
+                continue;
+            }
+            return type == DEFINE;
+        }
+        return false;
     }
 
     private void validateClassModifiers(Modifiers modifiers) {
