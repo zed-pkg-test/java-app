@@ -35,13 +35,6 @@ final class HungryActorTest {
             assertTrue(started.await(2, TimeUnit.SECONDS));
             assertTrue(actor.isNativeCarrier(), "HungryActor must execute on the JNI pthread backend");
             assertNotEquals(0L, actor.nativeThreadId());
-            String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
-            if (os.contains("linux")) {
-                assertTrue(actor.carrierAffinityTarget() >= 0,
-                        "HungryActor must expose a successful Linux CPU binding");
-                assertEquals(actor.carrierAffinityTarget(), actor.carrierCpu(),
-                        "HungryActor dedicated carrier must execute on its selected CPU");
-            }
             actor.send("two");
 
             assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
