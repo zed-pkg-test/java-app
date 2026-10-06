@@ -8,6 +8,7 @@ import dev.oreslang.types.OwnershipChecker;
 import dev.oreslang.types.TypeChecker;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -109,6 +110,63 @@ final class ParserTest {
         for (String source : invalid) {
             assertThrows(IllegalArgumentException.class, () -> Parser.parse(source), source);
         }
+    }
+
+    @Test
+    void effectsBranchExhaustivelyAcceptsSupportedModifierPermutations() {
+        for (List<String> order : permutations("define", "class", "abstract")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app
+                      %s Box as
+                      end
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        for (List<String> order : permutations("define", "interface", "pub")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app
+                      %s Api {
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        for (List<String> order : permutations("pub", "nlex", "pure", "fnc")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app
+                      %s work(): int {
+                        return 1;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        for (List<String> order : permutations("pub", "static", "fnc")) {
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app
+                      define class Box as
+                        %s helper(): int {
+                          return 1;
+                        }
+                      end
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+
+        int actorCases = 0;
+        for (List<String> order : permutations("pub", "nlex", "shared", "actor", "fnc")) {
+            if (order.indexOf("actor") > order.indexOf("fnc")) continue;
+            actorCases++;
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app
+                      %s worker(int value): int {
+                        return value;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+        assertEquals(60, actorCases);
     }
 
     @Test
@@ -746,6 +804,29 @@ final class ParserTest {
                         """));
 
         assertTrue(failure.getMessage().contains("expected 'as' after class header"));
+    }
+
+    private static List<List<String>> permutations(String... tokens) {
+        List<List<String>> out = new ArrayList<>();
+        permute(new ArrayList<>(List.of(tokens)), new ArrayList<>(), out);
+        return out;
+    }
+
+    private static void permute(
+            List<String> remaining,
+            List<String> prefix,
+            List<List<String>> out) {
+        if (remaining.isEmpty()) {
+            out.add(List.copyOf(prefix));
+            return;
+        }
+        for (int index = 0; index < remaining.size(); index++) {
+            List<String> nextRemaining = new ArrayList<>(remaining);
+            String token = nextRemaining.remove(index);
+            List<String> nextPrefix = new ArrayList<>(prefix);
+            nextPrefix.add(token);
+            permute(nextRemaining, nextPrefix, out);
+        }
     }
 
 }
