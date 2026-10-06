@@ -13,13 +13,13 @@
 9. `self` cannot be rebound.
 10. An actor has one mailbox and never executes two mailbox turns concurrently.
 11. Private and shared actors use separate dispatcher thread pools.
-12. Private actor transport rejects synchronized shared-memory cells.
-13. Shared actor state is still actor-owned; ordinary actor field mutation is serialized by the mailbox, not by implicit locks.
-14. Actor `self` and move-only actor-owned state cannot escape a mailbox turn as ordinary mutable aliases.
-15. Synchronized shared memory requires `SHARED_MEMORY`; strict FaaS does not grant it by default.
-16. Private slices and synchronized shared cells compete for one parent actor-memory ceiling.
-17. Actor message graphs are cycle-checked and bounded by depth, node count, and logical byte quotas before transport.
-18. SharedMutex runtime ownership is reserved before mailbox visibility and committed only after successful admission; failed first publication rolls back.
+12. Every actor owns its mutable application state, and one logical turn is the only writer to that state at a time.
+13. A shared actor may read explicitly published immutable/runtime-shared data under `ACTOR_SHARE_READONLY`, but its effective policy never retains `SHARED_MEMORY`.
+14. `SyncCell` creation/update/close and every `SharedMutex` acquisition/recovery operation are supervisor/runtime-only; writable shared capabilities cannot cross actor mailboxes.
+15. Cross-actor mutation is expressed as mailbox/channel commands and is executed by the semantic owner of the mutable state.
+16. Actor `self` and move-only actor-owned state cannot escape a mailbox turn as ordinary mutable aliases.
+17. Private slices and runtime-owned shared allocations compete for the configured parent memory ceiling.
+18. Actor message graphs are cycle-checked and bounded by depth, node count, and logical byte quotas before transport.
 
 ## Deployment matrix
 
@@ -118,46 +118,41 @@ The guest `THREAD_CREATE` capability is separate from host/runtime dispatcher sc
 
 ## Mutex and shared-memory model
 
-Oreslang has two deliberately different mutex domains:
+Oreslang treats actor ownership as the primary synchronization model. A shared actor is not a writer into a common mutable heap: it owns its mutable state exactly like every other actor, executes at most one logical turn at a time, and communicates mutations through mailbox/channel commands.
 
-- `Mutex<T>` is actor/private-domain state. It owns the protected value, uses no JVM lock, is non-reentrant, and is confined to the creating semantic actor/execution domain. Shared actors may migrate between JVM workers without changing that domain.
-- `SharedMutex<T>` is an explicit same-OS-process shared-memory capability within one `ActorRuntime`. It is non-reentrant and uses acquire/release synchronization. Only shared actors may receive/use it; private actors reject it even when the parent runtime is otherwise trusted. Sender and receiver must have `SHARED_MEMORY`. It binds transactionally to the first runtime that successfully publishes it, and later cross-runtime transport is rejected. Publication validation is nonblocking and runs while the mutex's physical permit is held, so transport never races a legitimate protected mutation; publishing a currently locked/contended mutex fails fast and may be retried later.
-- The payload and declared type argument of `SharedMutex<T>` must be **SharedSafe**: concrete owned data whose reachable field graph contains no borrows, actor-local `Mutex`, `MutexGuard`, pending `Future`, closure/function values, or unresolved dynamic/generic state. This applies to signatures/fields/aliases as well as `SharedMutex.new(...)`. Until Oreslang has an explicit SharedSafe generic bound, unconstrained `SharedMutex<T>` is rejected conservatively. The type checker recursively validates class fields (including inherited generic substitutions), and the interpreter repeats runtime admission checks as defense in depth. Nested `SharedMutex` values are also rejected for now; recursive publication and lock-order semantics must be explicit before lock-containing-lock state is admitted.
-- `MutexGuard<T>` is a lexical linear capability. The runtime releases it on normal scope exit and poisons a shared mutex on abnormal scope exit. Guest code may call `guard.release()` for early release; there is intentionally no `mutex.unlock()`. A released guard can no longer expose its protected value.
-- Guard access is deliberately non-escaping. Copy-like fields may be read, mutable fields may be replaced, and methods may be invoked directly when they return `void` or a copy-like value. Move-only nested fields cannot be extracted through a guard, and instance methods are direct-call-only everywhere rather than becoming bound method values. For compound mutation, use `with_lock(|state| -> { ... })`.
-- `with_lock` and `recover` require an inline one-argument, `void` lambda. The callback parameter is treated as a lexical exclusive `&mut T`: it may mutate protected state but cannot move or return that state, escape it through a closure, or suspend with `await`.
-- `await` while a guard is live and closure capture of a guard are compile-time ownership errors. Guard-bearing results must be bound once with `val`; they cannot be discarded, reassigned, stored in aggregates, passed through arbitrary calls, or hidden inside another mutex.
-- Blocking `SharedMutex.lock()`/timed acquisition is rejected while executing an actor. `lock_async()` returns a runtime-owned, caller-cancellable `GuardFuture` and is the nonblocking acquisition primitive. Contended async acquisition is queued inside the mutex and receives the permit by direct guard handoff; it does **not** allocate one helper thread per waiter. Acquisitions reserve the semantic actor/execution domain before waiting, so recursive async acquisition fails instead of self-deadlocking even if an actor migrates JVM workers. Cancellation removes queued waiters and releases their domain reservation; poisoning drains queued async waiters with `PoisonedMutexException`. Admission is bounded by the current actor mailbox policy, an 8,192-waiter ceiling per mutex, and a 32,768-waiter JVM-process ceiling. When blocking host waiters and async waiters coexist, release alternates handoff preference so neither class monopolizes the mutex. The runtime also exposes `lockAsyncFor(Duration)`, using the same queue plus one shared daemon timeout scheduler; expiry completes with `LockTimeoutException` and removes the waiter immediately. This remains a backend/runtime API until source-level duration/timeout representation is finalized. Language `await` lowering must suspend/resume the actor turn rather than synchronously join an incomplete future; until continuation lowering is complete, actor-backed singleton/mailbox serialization is preferred over contended shared-memory locking from shared actors.
-- A poisoned `SharedMutex<T>` rejects ordinary acquisition until `recover(...)` repairs invariants and clears poison. `recover` is not an ordinary lock operation: it is rejected when the mutex is healthy. Inside actor execution recovery is nonblocking; if another recovery owns the permit, the actor must retry on a later mailbox turn rather than park.
+The runtime has four distinct concepts:
 
-Example:
+- `Mutex<T>` is actor/execution-domain-local state. It does not make data cross-actor shared; it is confined to the semantic execution domain that created it.
+- `Shared<T>` is deeply immutable runtime-owned data. A normal/shared actor may read it when its effective policy grants `ACTOR_SHARE_READONLY`. Isolated/private and untrusted actors do not directly dereference it.
+- `SyncCell<T>` is a supervisor/runtime-owned synchronized cell. Shared actors may call its read-only `snapshot()`/`read(...)` surfaces, but actor execution cannot create, update, or close a cell.
+- `SharedMutex<T>` remains a host/supervisor same-process synchronization primitive. Actor execution cannot create it, acquire it, recover it, use one of its guards, or receive it through an actor mailbox.
 
-```ores
-val state = Mutex.new(new Counter());
-val guard = state.lock();
-guard.count = guard.count + 1;
-guard.release();
+The capability split is intentional. `ACTOR_SHARE_READONLY` grants a shared actor the ability to observe approved immutable/shared state. `SHARED_MEMORY` is mutable shared-memory authority and is stripped from every actor's effective policy, including normal/shared actors. Root/supervisor code may retain `SHARED_MEMORY` for runtime implementation and embedding needs.
 
-val shared = SharedMutex.new(new Cache());
-val shared_guard = await shared.lock_async();
-shared_guard.increment_hits();
-shared_guard.release();
+This gives actor code the stronger invariant:
 
-shared.with_lock(|cache| -> {
-  cache.put("key", "value");
-  return;
-});
+> Mutable application state has one semantic actor owner. Other actors may observe approved immutable snapshots, but they request mutations by sending messages to the owner.
+
+For example, instead of sharing a writable cache object between actors, use an owner actor:
+
+```text
+Reader A ──read immutable snapshot──┐
+                                   ▼
+                              snapshot v42
+                                   ▲
+Reader B ──read immutable snapshot──┘
+
+Writer A ── Update(key, value) ──► CacheOwner actor
+Writer B ── Delete(key)        ──► CacheOwner actor
+                                      │
+                                      └── mutates CacheOwner's local state
 ```
 
-A process-wide `singleton module` is **not** raw shared memory. It is owned by one hidden singleton actor and accessed through its typed mailbox/proxy, so its mutable state is serialized by actor execution and normally requires no mutex. Do not wrap singleton-module state in `SharedMutex<T>` merely because multiple actors can call it. Use `SharedMutex<T>` only when code deliberately opts into a writable same-process memory object that multiple actor/execution domains may dereference directly.
+The host/runtime may still use `SyncCell<T>` or `SharedMutex<T>` for infrastructure that is outside actor application semantics. Those primitives remain bounded, ownership-checked runtime facilities, but they are not an escape hatch from the actor single-writer model.
 
-When the private-arena/`isoactor` runtime is stacked with this work, isolated actors must run without `SHARED_MEMORY` authority. An `isoactor` may receive copied/frozen messages, but it must not receive a `SharedMutex<T>` or any other writable JVM-heap alias; otherwise the language would no longer be able to claim true actor memory isolation.
+Actor transport enforces the distinction defensively. `SharedMutex<T>` is rejected before mailbox admission. Mutable actor-local references never become sendable merely because they are reachable in the same JVM. Immutable/frozen transport is copied or wrapped according to the target actor/isolate rules.
 
-The current reference runtime uses a one-permit JVM semaphore for `SharedMutex<T>`. Java semaphore release/acquire provides the required memory-ordering edge and, unlike a thread-owned `ReentrantLock`, allows an asynchronously acquired guard to be resumed and released by the actor execution context.
-
-Actor transport is independently hardened from mutex synchronization. Ordinary messages are recursively frozen with cycle detection and hard depth/node/byte budgets (256 levels, 100,000 nodes, 16 MiB estimated frozen size). Read-only shared wrappers are runtime-constructed and revalidated on every boundary. `ActorRef` capabilities may cross only inside their owning `ActorRuntime`; a wrapper cannot be used to smuggle a foreign actor reference into another runtime. Arbitrary host-controlled `Sendable` callbacks are not part of the transport boundary. Runtime-owned capabilities have explicit cases, while ordinary message graphs are recursively frozen/copied and validated.
-
-Compiler-generated/context-aware `BehaviorFactory` values are capture-free for both private and shared actors. This prevents a shared actor from bypassing mailbox/capability semantics by closing over an arbitrary mutable JVM object. `spawnPrivateTrusted(...)`, `spawnSharedTrusted(...)`, and trusted `Supplier` construction are host/supervisor escape hatches only; adversarial policies reject them.
+A process-wide `singleton module` follows the same ownership direction: its mutable state is owned by the hidden singleton actor and callers interact through its serialized proxy/mailbox rather than directly mutating shared storage.
 
 ## Async task runtime
 
@@ -209,13 +204,20 @@ The runtime does not interrupt a carrier thread to stop one actor because that t
 
 ## Shared actor memory
 
-Shared actors keep ordinary mutable fields actor-owned and mailbox-serialized. Cross-actor mutable memory is exceptional and represented by `SyncCell<T>`.
+A normal/shared actor has exclusive write authority over its own mutable state. The actor may migrate between physical carriers, but actor identity—not thread identity—defines the ownership domain, and at most one logical turn for that actor executes at once.
 
-`SyncCell<T>` is runtime-owned and closeable. Its frozen state consumes shared actor-memory quota; growth reserves quota before publishing a replacement value, shrink/close returns quota, and runtime teardown closes remaining cells. The combined private-slice plus shared-cell total cannot exceed the parent `IsolatePolicy.maxHeapBytes()`.
+The intended multi-heap lowering is:
 
-A private actor turn cannot create, snapshot, read, update, or close synchronized shared state even if trusted host code accidentally captured a cell handle. Source admission and runtime creation both require `SHARED_MEMORY`.
+- ordinary actor fields, objects, collections, closure environments, and persistent continuation state belong to the actor's local allocation domain;
+- short-lived non-escaping values may use a turn-local nursery/region;
+- explicitly published immutable data may live in a runtime-shared read-only region;
+- writable runtime-shared primitives remain supervisor/runtime-only.
 
-Actor failures are fail-stop in this layer. The actor ref retains the failure cause for diagnostics, queued reservations are drained, and later sends receive an `ActorTerminatedException` rather than silently targeting a dead mailbox.
+The current JVM reference backend already enforces the semantic authority boundary even where arbitrary Java objects are not yet physically allocated from a distinct actor arena. Automatic placement of ordinary Ores values into actor-local heaps is tracked separately; source semantics must not depend on whether the backend uses JVM accounting, pooled native arenas, slabs, or a stronger isolate.
+
+A shared actor can therefore read `Shared<T>` or read-only `SyncCell<T>` snapshots when policy allows it, but it cannot call `SyncCell.update`, create/close a cell, acquire a `SharedMutex<T>`, or smuggle a writable shared handle through a mailbox. To change state owned elsewhere, it sends a mailbox/channel command to that owner.
+
+This separation is useful for GC as well as race prevention: actor-owned regions can eventually be traced/retired independently, while immutable shared snapshots may outlive any one actor without granting additional writers.
 
 ## Private actor memory confinement
 
