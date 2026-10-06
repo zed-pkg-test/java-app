@@ -332,6 +332,13 @@ public final class TypeChecker {
                     && fn.actorKind() == Ast.ActorKind.NONE) {
                 Type signature = callableContractType(
                         fn.genericParameters(), fn.parameters(), fn.returnType(), fn.async(), fn.generator(), Set.of(), null);
+                if (fn.trapped() && signature instanceof Function trappedSignature) {
+                    signature = new Function(
+                            trappedSignature.parameters(),
+                            trappedSignature.mutableParameters(),
+                            trappedSignature.async(),
+                            trapResult(true, trappedSignature.result()));
+                }
 
                 // Only concretely reifiable fnc declarations become raw
                 // function-valued namespace members. Routines remain
@@ -401,6 +408,17 @@ public final class TypeChecker {
     }
 
     private void checkFunction(String module, Ast.FunctionDecl fn) {
+        if (fn.trapped()) {
+            if (fn.async()) {
+                throw new IllegalArgumentException("async trap callables are not enabled until the trap boundary spans every await");
+            }
+            if (fn.generator()) {
+                throw new IllegalArgumentException("trap generators are not enabled until the trap boundary spans generator suspension");
+            }
+            if (fn.actorKind() != Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException("trap actor callables are not enabled until actor supervision preserves the trap effect");
+            }
+        }
         if (fn.name().equals("init")) {
             Ast.TypeRef initReturn = fn.returnType();
             if (fn.visibility() != Ast.Visibility.PRIVATE
@@ -408,6 +426,7 @@ public final class TypeChecker {
                     || fn.generator()
                     || fn.structural()
                     || fn.nonLexical()
+                    || fn.trapped()
                     || fn.actorKind() != Ast.ActorKind.NONE
                     || !fn.genericParameters().isEmpty()
                     || !fn.parameters().isEmpty()
@@ -1293,7 +1312,7 @@ public final class TypeChecker {
                             "generic callable '" + fn.name()
                                     + "' must be specialized by a direct call; polymorphic function values are not supported yet");
                 }
-                return functionType(fn.parameters(), fn.returnType(), fn.async(), fn.generator(), Set.of(), null);
+                return trapFunctionType(fn, Set.of(), null);
             }
             throw new IllegalArgumentException("unknown name '" + name.name() + "'");
         }
@@ -1480,7 +1499,7 @@ public final class TypeChecker {
                             null,
                             explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
                             label);
-                    return callableResult(target.async(), target.generator(), result);
+                    return trapResult(target.trapped(), callableResult(target.async(), target.generator(), result));
                 }
             }
             String booleanIntrinsic = booleanIntrinsicName(call, env);
@@ -1513,7 +1532,7 @@ public final class TypeChecker {
                             null,
                             explicitGenericBindings(target.genericParameters(), call.typeArguments(), generics, self, label),
                             label);
-                    return callableResult(target.async(), target.generator(), result);
+                    return trapResult(target.trapped(), callableResult(target.async(), target.generator(), result));
                 }
             }
             if (call.callee() instanceof Ast.MemberExpr channelCall
@@ -1964,7 +1983,7 @@ public final class TypeChecker {
                                 "generic callable '" + namespace.name() + "." + member.member()
                                         + "' must be specialized by a direct call; polymorphic function values are not supported yet");
                     }
-                    return functionType(moduleFunction.parameters(), moduleFunction.returnType(), moduleFunction.async(), moduleFunction.generator(), Set.of(), null);
+                    return trapFunctionType(moduleFunction, Set.of(), null);
                 }
                 Ast.ClassDecl memberClass = classes.get(namespace.name() + "." + member.member());
                 if (memberClass != null) return new ClassNamespace(qualifiedClassName(memberClass));
@@ -4190,6 +4209,26 @@ public final class TypeChecker {
         members.put(name, type);
     }
 
+    private Type trapResult(boolean trapped, Type result) {
+        return trapped ? new Named("Option", List.of(result)) : result;
+    }
+
+    private Function trapFunctionType(Ast.FunctionDecl fn, Set<String> generics, Type self) {
+        Function raw = functionType(
+                fn.parameters(),
+                fn.returnType(),
+                fn.async(),
+                fn.generator(),
+                generics,
+                self);
+        if (!fn.trapped()) return raw;
+        return new Function(
+                raw.parameters(),
+                raw.mutableParameters(),
+                raw.async(),
+                trapResult(true, raw.result()));
+    }
+
     private Type callableResult(boolean async, boolean generator, Type result) {
         if (generator) {
             return new Named(async ? "AsyncIterator" : "Iterator", List.of(result));
@@ -5059,7 +5098,6 @@ public final class TypeChecker {
             case "Option" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Option requires exactly one explicit type argument");
                 Type element = resolve(ref.arguments().getFirst(), generics, self, true);
-                if (element == Primitive.VOID) throw new IllegalArgumentException("Option<void> is invalid; use void for no return value");
                 yield new Named("Option", List.of(element));
             }
             case "Result" -> {
