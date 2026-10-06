@@ -96,7 +96,12 @@ final class SharedActorLocalHeapTest {
 
             CountDownLatch observed = new CountDownLatch(1);
             var ref = runtime.<String>spawnSharedTrusted(factoryContext -> (message, context) -> {
+                long sharedBeforeLocalReserve = runtime.sharedMemoryBytes();
                 context.localMemory().reserveHeap(2048);
+                assertEquals(
+                        sharedBeforeLocalReserve,
+                        runtime.sharedMemoryBytes(),
+                        "ordinary shared-actor state must not add RUNTIME_SHARED bytes");
                 observed.countDown();
             });
 
@@ -104,8 +109,8 @@ final class SharedActorLocalHeapTest {
             assertTrue(observed.await(2, TimeUnit.SECONDS));
 
             assertTrue(runtime.sharedActorLocalMemoryBytes() >= 2048);
-            assertEquals(explicitSharedBytes, runtime.sharedMemoryBytes(),
-                    "ordinary shared-actor state must not be charged as RUNTIME_SHARED");
+            assertTrue(runtime.sharedMemoryBytes() >= explicitSharedBytes,
+                    "explicit shared state remains live while mailbox accounting may also be present");
             assertEquals(
                     runtime.actorLocalMemoryBytes() + runtime.sharedMemoryBytes(),
                     runtime.actorMemoryBytes());
