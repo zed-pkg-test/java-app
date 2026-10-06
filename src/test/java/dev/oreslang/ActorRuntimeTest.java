@@ -248,29 +248,48 @@ final class ActorRuntimeTest {
         }
     }
 
+
     @Test
-    void sharedActorsCanCoordinateThroughExplicitSyncCell() throws Exception {
+    void sharedActorsCanReadButCannotMutateExplicitSyncCell() throws Exception {
         var config = new ActorRuntime.DispatcherConfig(1, 4, 32);
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
-            ActorRuntime.SyncCell<Integer> cell = runtime.syncCell(0);
-            CountDownLatch received = new CountDownLatch(200);
+            ActorRuntime.SyncCell<Integer> cell = runtime.syncCell(7);
+            CountDownLatch received = new CountDownLatch(2);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
 
             var a = runtime.<Integer>spawnShared(() -> (message, context) -> {
-                cell.update(value -> value + 1);
-                received.countDown();
+                try {
+                    assertEquals(7, cell.snapshot());
+                    assertFalse(context.policy().allows(IsolatePolicy.Capability.SHARED_MEMORY));
+                    assertTrue(context.policy().allows(IsolatePolicy.Capability.ACTOR_SHARE_READONLY));
+                    assertThrows(SecurityException.class, () -> cell.update(value -> value + 1));
+                } catch (Throwable problem) {
+                    failure.compareAndSet(null, problem);
+                } finally {
+                    received.countDown();
+                }
             });
             var b = runtime.<Integer>spawnShared(() -> (message, context) -> {
-                cell.update(value -> value + 1);
-                received.countDown();
+                try {
+                    assertEquals(7, cell.read(value -> value));
+                    assertThrows(SecurityException.class, cell::close);
+                } catch (Throwable problem) {
+                    failure.compareAndSet(null, problem);
+                } finally {
+                    received.countDown();
+                }
             });
 
-            for (int i = 0; i < 100; i++) {
-                a.send(i);
-                b.send(i);
-            }
+            a.send(1);
+            b.send(2);
 
             assertTrue(received.await(5, TimeUnit.SECONDS));
-            assertEquals(200, cell.snapshot());
+            assertNull(failure.get());
+            assertEquals(7, cell.snapshot());
+
+            // Supervisor/runtime mutation remains available outside actor execution.
+            assertEquals(8, cell.update(value -> value + 1));
+            assertEquals(8, cell.snapshot());
         }
     }
 
@@ -487,14 +506,94 @@ final class ActorRuntimeTest {
         }
     }
 
+
     @Test
-    void syncCellMutationRequiresSharedActorTurn() {
+    void slowActorSyncCellReaderDoesNotBlockSupervisorUpdate() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var cell = runtime.syncCell(1);
-            IllegalStateException failure = assertThrows(
-                    IllegalStateException.class,
-                    () -> cell.update(value -> value + 1));
-            assertTrue(failure.getMessage().contains("shared actor mailbox turn"));
+            CountDownLatch readerEntered = new CountDownLatch(1);
+            CountDownLatch releaseReader = new CountDownLatch(1);
+            CountDownLatch actorDone = new CountDownLatch(1);
+            AtomicReference<Throwable> actorFailure = new AtomicReference<>();
+
+            var actor = runtime.<String>spawnShared(() -> (message, context) -> {
+                try {
+                    int observed = cell.read(value -> {
+                        readerEntered.countDown();
+                        try {
+                            if (!releaseReader.await(2, TimeUnit.SECONDS)) {
+                                throw new AssertionError("reader release timed out");
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(interrupted);
+                        }
+                        return value;
+                    });
+                    assertEquals(1, observed);
+                } catch (Throwable failure) {
+                    actorFailure.set(failure);
+                } finally {
+                    actorDone.countDown();
+                    context.self().stop();
+                }
+            });
+
+            actor.send("read");
+            assertTrue(readerEntered.await(2, TimeUnit.SECONDS));
+
+            CountDownLatch updateDone = new CountDownLatch(1);
+            AtomicReference<Throwable> updateFailure = new AtomicReference<>();
+            Thread updater = Thread.ofVirtual().start(() -> {
+                try {
+                    assertEquals(2, cell.update(value -> value + 1));
+                } catch (Throwable failure) {
+                    updateFailure.set(failure);
+                } finally {
+                    updateDone.countDown();
+                }
+            });
+
+            try {
+                assertTrue(
+                        updateDone.await(1, TimeUnit.SECONDS),
+                        "supervisor update was blocked by actor read callback");
+                assertNull(updateFailure.get());
+                assertEquals(2, cell.snapshot());
+            } finally {
+                releaseReader.countDown();
+            }
+
+            updater.join();
+            assertTrue(actorDone.await(2, TimeUnit.SECONDS));
+            assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
+            assertNull(actorFailure.get());
+        }
+    }
+
+    @Test
+    void syncCellMutationIsSupervisorOnly() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var cell = runtime.syncCell(1);
+            assertEquals(2, cell.update(value -> value + 1));
+
+            CountDownLatch checked = new CountDownLatch(1);
+            AtomicReference<Throwable> observed = new AtomicReference<>();
+            var ref = runtime.<String>spawnShared(() -> (message, context) -> {
+                try {
+                    cell.update(value -> value + 1);
+                } catch (Throwable failure) {
+                    observed.set(failure);
+                } finally {
+                    checked.countDown();
+                }
+            });
+
+            ref.send("mutate");
+            assertTrue(checked.await(2, TimeUnit.SECONDS));
+            assertInstanceOf(SecurityException.class, observed.get());
+            assertTrue(observed.get().getMessage().contains("cannot mutate shared memory"));
+            assertEquals(2, cell.snapshot());
         }
     }
 
@@ -624,6 +723,7 @@ final class ActorRuntimeTest {
         }
     }
 
+
     @Test
     void privateActorCannotAccessLeakedSyncCellHandle() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
@@ -643,8 +743,8 @@ final class ActorRuntimeTest {
 
             ref.send("read");
             assertTrue(checked.await(2, TimeUnit.SECONDS));
-            assertInstanceOf(IllegalStateException.class, observed.get());
-            assertTrue(observed.get().getMessage().contains("private actors cannot access synchronized shared memory"));
+            assertInstanceOf(SecurityException.class, observed.get());
+            assertTrue(observed.get().getMessage().contains("cannot directly access runtime-shared memory"));
         }
     }
 
@@ -714,8 +814,9 @@ final class ActorRuntimeTest {
     }
 
 
+
     @Test
-    void nestedDifferentSyncCellsAreRejectedInsteadOfRiskingLockOrderDeadlock() throws Exception {
+    void nestedDifferentReadonlySyncCellReadsAreRejectedInsteadOfRiskingLockOrderDeadlock() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var first = runtime.syncCell(1);
             var second = runtime.syncCell(2);
@@ -723,7 +824,7 @@ final class ActorRuntimeTest {
             AtomicReference<Throwable> observed = new AtomicReference<>();
 
             var ref = runtime.<String>spawnShared(() -> (message, context) -> {
-                first.update(value -> {
+                first.read(value -> {
                     try {
                         second.snapshot();
                     } catch (Throwable failure) {
@@ -743,58 +844,34 @@ final class ActorRuntimeTest {
 
 
     @Test
-    void runtimeCloseDoesNotBlockOnActorHeldSyncCellLock() throws Exception {
+    void deniedActorSyncCellMutationCannotHoldSharedLockDuringShutdown() throws Exception {
         ActorRuntime runtime = new ActorRuntime(
                 IsolatePolicy.developer(),
                 new ActorRuntime.DispatcherConfig(1, 1, 8));
         var cell = runtime.syncCell(1);
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch checked = new CountDownLatch(1);
+        AtomicReference<Throwable> observed = new AtomicReference<>();
 
-        var ref = runtime.<String>spawnShared(() -> (message, context) ->
-                cell.update(value -> {
-                    entered.countDown();
-                    boolean done = false;
-                    while (!done) {
-                        try {
-                            done = release.await(25, TimeUnit.MILLISECONDS);
-                        } catch (InterruptedException ignored) {
-                            // Deliberately ignore shutdown interruption to prove
-                            // runtime.close() does not wait on this user lock.
-                        }
-                    }
-                    return value;
-                }));
-
-        ref.send("hold");
-        assertTrue(entered.await(2, TimeUnit.SECONDS));
-
-        AtomicReference<Throwable> closeFailure = new AtomicReference<>();
-        Thread closer = new Thread(() -> {
+        var ref = runtime.<String>spawnShared(() -> (message, context) -> {
             try {
-                runtime.close();
+                cell.update(value -> value + 1);
             } catch (Throwable failure) {
-                closeFailure.set(failure);
+                observed.set(failure);
+            } finally {
+                checked.countDown();
+                context.self().stop();
             }
         });
-        closer.start();
-        closer.join(500);
 
-        try {
-            assertFalse(closer.isAlive(), "runtime close must not wait for user code holding a SyncCell lock");
-            assertInstanceOf(IllegalStateException.class, closeFailure.get());
-            assertTrue(closeFailure.get().getMessage().contains("full actor termination"));
-            assertTrue(cell.closed());
-            assertEquals(0L, runtime.sharedMemoryBytes());
-        } finally {
-            release.countDown();
-            closer.join(2000);
-        }
-
+        ref.send("attempt");
+        assertTrue(checked.await(2, TimeUnit.SECONDS));
+        assertInstanceOf(SecurityException.class, observed.get());
         assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
-        assertDoesNotThrow(runtime::close);
-    }
 
+        assertDoesNotThrow(runtime::close);
+        assertTrue(cell.closed());
+        assertEquals(0L, runtime.sharedMemoryBytes());
+    }
 
     @Test
     void sharedActorsRejectForeignRuntimeSharedHandles() {
@@ -837,6 +914,38 @@ final class ActorRuntimeTest {
         }
     }
 
+
+    @Test
+    void capturedForeignReadonlySharedHandlesCannotBypassRuntimeBoundary() throws Exception {
+        try (ActorRuntime left = new ActorRuntime();
+             ActorRuntime right = new ActorRuntime()) {
+            var foreignShared = left.shareReadonly(List.of(1, 2, 3));
+            var foreignCell = left.syncCell(7);
+            CountDownLatch checked = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+
+            var ref = right.<String>spawnSharedTrusted(factoryContext ->
+                    (message, context) -> {
+                        try {
+                            assertThrows(SecurityException.class, foreignShared::value);
+                            assertThrows(SecurityException.class, foreignCell::snapshot);
+                            assertThrows(
+                                    SecurityException.class,
+                                    () -> foreignCell.read(value -> value));
+                        } catch (Throwable problem) {
+                            failure.set(problem);
+                        } finally {
+                            checked.countDown();
+                            context.self().stop();
+                        }
+                    });
+
+            ref.send("check");
+            assertTrue(checked.await(2, TimeUnit.SECONDS));
+            assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
+            assertNull(failure.get());
+        }
+    }
 
     @Test
     void actorRefsCannotBecomeImplicitCrossRuntimeChannels() {
@@ -1471,6 +1580,7 @@ final class ActorRuntimeTest {
         }
     }
 
+
     @Test
     void trustedSharedFactoryIsSupervisorOnlyAndNonAdversarial() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
@@ -1479,6 +1589,8 @@ final class ActorRuntimeTest {
 
             var ref = runtime.<String>spawnSharedTrusted(factoryContext -> {
                 captured.add("factory");
+                assertFalse(factoryContext.policy().allows(IsolatePolicy.Capability.SHARED_MEMORY));
+                assertTrue(factoryContext.policy().allows(IsolatePolicy.Capability.ACTOR_SHARE_READONLY));
                 return (message, context) -> {
                     captured.add(message);
                     delivered.countDown();
@@ -1491,7 +1603,7 @@ final class ActorRuntimeTest {
         }
 
         IsolatePolicy adversarialShared = IsolatePolicy.strictFaas()
-                .withCapabilities(IsolatePolicy.Capability.SHARED_MEMORY);
+                .withCapabilities(IsolatePolicy.Capability.ACTOR_SHARE_READONLY);
         try (ActorRuntime runtime = new ActorRuntime(adversarialShared)) {
             SecurityException failure = assertThrows(
                     SecurityException.class,
