@@ -1532,10 +1532,7 @@ public final class TypeChecker {
                         Primitive.INT,
                         "Channel.new capacity");
                 Type element = resolve(call.typeArguments().getFirst(), generics, self);
-                if (element == Primitive.VOID) {
-                    throw new IllegalArgumentException(
-                            "Channel<void> cannot carry a value; use an explicit signal/unit type");
-                }
+                validateChannelElementType(element, "Channel.new");
                 return new Named("Channel", List.of(element));
             }
 
@@ -2330,10 +2327,119 @@ public final class TypeChecker {
         if (channel instanceof Named named
                 && named.name().equals("Channel")
                 && named.arguments().size() == 1) {
-            return named.arguments().getFirst();
+            Type element = named.arguments().getFirst();
+            validateChannelElementType(element, where);
+            return element;
         }
         throw new IllegalArgumentException(
                 where + " requires Channel<T>; got " + channel);
+    }
+
+    /**
+     * Channels are a data-transport primitive, not a code/authority transport.
+     *
+     * <p>A first-class fnc/lambda may close over mutable state, actor identity,
+     * borrows, capabilities, or an execution domain. Moving that callable
+     * through a channel would make the channel an implicit closure-transfer
+     * mechanism and bypass the ownership/scheduler boundary. Callables remain
+     * perfectly valid local operator arguments; only channel payload types are
+     * restricted.</p>
+     *
+     * <p>The check is structural through collection/record/union shapes and
+     * nominal class fields so wrapping a callable in Option, Array, a tuple, or
+     * a user class does not evade the boundary. Unresolved generic parameters
+     * are deferred until specialization supplies a concrete type.</p>
+     */
+    private void validateChannelElementType(Type element, String where) {
+        element = deref(element);
+        if (element == Primitive.VOID) {
+            throw new IllegalArgumentException(
+                    "Channel<void> cannot carry a value; use an explicit signal/unit type");
+        }
+        if (containsCallableAuthority(element, new LinkedHashSet<>(), Map.of())) {
+            throw new IllegalArgumentException(
+                    where + " payload types are data-only; Fnc/Function/closure values "
+                            + "cannot be transported through channels; pass data and resolve the callable locally");
+        }
+    }
+
+    private boolean containsCallableAuthority(
+            Type type,
+            Set<Ast.ClassDecl> seen,
+            Map<String, Type> genericBindings) {
+        type = deref(type);
+        if (type instanceof Function || type instanceof ClassNamespace) return true;
+        if (type == Unknown.INSTANCE || type instanceof Primitive || type instanceof StringLiteral) return false;
+        if (type instanceof SelfType selfType) {
+            return containsCallableAuthority(selfType.bound(), seen, genericBindings);
+        }
+        if (type instanceof Borrow borrow) {
+            return containsCallableAuthority(borrow.target(), seen, genericBindings);
+        }
+        if (type instanceof Generic generic) {
+            Type bound = genericBindings.get(generic.name());
+            return bound != null
+                    && bound != type
+                    && containsCallableAuthority(bound, seen, genericBindings);
+        }
+        if (type instanceof ListType list) {
+            return containsCallableAuthority(list.element(), seen, genericBindings);
+        }
+        if (type instanceof Tuple tuple) {
+            for (Type member : tuple.elements()) {
+                if (containsCallableAuthority(member, seen, genericBindings)) return true;
+            }
+            return false;
+        }
+        if (type instanceof Union union) {
+            for (Type option : union.options()) {
+                if (containsCallableAuthority(option, seen, genericBindings)) return true;
+            }
+            return false;
+        }
+        if (type instanceof Record record) {
+            for (Type member : record.members().values()) {
+                if (containsCallableAuthority(member, seen, genericBindings)) return true;
+            }
+            return false;
+        }
+        if (!(type instanceof Named named)) return false;
+
+        for (Type argument : named.arguments()) {
+            if (containsCallableAuthority(argument, seen, genericBindings)) return true;
+        }
+
+        Ast.ClassDecl klass = findClass(named.name());
+        if (klass == null || !seen.add(klass)) return false;
+        try {
+            if (named.arguments().size() != klass.genericParameters().size()) return false;
+
+            Map<String, Type> classBindings = new HashMap<>(genericBindings);
+            for (int i = 0; i < klass.genericParameters().size(); i++) {
+                classBindings.put(
+                        klass.genericParameters().get(i),
+                        resolveSharedGeneric(named.arguments().get(i), genericBindings));
+            }
+
+            Type nominal = nominalClassType(klass);
+            Set<String> classGenerics = Set.copyOf(klass.genericParameters());
+            for (Ast.FieldDecl field : klass.fields()) {
+                Type fieldType = resolveSharedGeneric(
+                        resolve(field.type(), classGenerics, nominal),
+                        classBindings);
+                if (containsCallableAuthority(fieldType, seen, classBindings)) return true;
+            }
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Type parentType = resolveSharedGeneric(
+                        resolve(parentRef, classGenerics, nominal),
+                        classBindings);
+                if (containsCallableAuthority(parentType, seen, classBindings)) return true;
+            }
+            return false;
+        } finally {
+            seen.remove(klass);
+        }
     }
 
     private static boolean isBuiltinStdoutCall(Ast.CallExpr call, String memberName, Env env) {
@@ -5055,6 +5161,14 @@ public final class TypeChecker {
                     throw new IllegalArgumentException("Mutex<T> requires an owned value type; borrowed payload types are invalid");
                 }
                 yield new Named("Mutex", List.of(element));
+            }
+            case "Channel" -> {
+                if (ref.inferArguments() || ref.arguments().size() != 1) {
+                    throw new IllegalArgumentException("Channel requires exactly one explicit type argument");
+                }
+                Type element = resolve(ref.arguments().getFirst(), generics, self);
+                validateChannelElementType(element, "Channel");
+                yield new Named("Channel", List.of(element));
             }
             case "Future" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Future requires exactly one explicit type argument");
