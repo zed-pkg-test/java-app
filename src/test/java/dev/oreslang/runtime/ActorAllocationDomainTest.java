@@ -6,7 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 final class ActorAllocationDomainTest {
@@ -132,6 +134,50 @@ final class ActorAllocationDomainTest {
         }
     }
 
+
+    @Test
+    void actorAllocationDomainSurvivesStacklessAwaitResume() throws Exception {
+        AtomicReference<OresFuture<Void>> gate = new AtomicReference<>();
+        AtomicReference<ActorRuntime.AllocationDomain> before = new AtomicReference<>();
+        AtomicReference<ActorRuntime.AllocationDomain> after = new AtomicReference<>();
+        CountDownLatch suspended = new CountDownLatch(1);
+
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var ref = runtime.<Integer>spawnSharedTrusted(factoryContext -> (message, context) -> {
+                OresFuture<Void> wait = new OresFuture<>();
+                gate.set(wait);
+
+                context.runtime().startActorTask(new OresScheduler.Task<Void>() {
+                    private boolean initial = true;
+
+                    @Override
+                    public OresScheduler.Step<Void> resume(OresScheduler.Resume resume) {
+                        if (initial) {
+                            initial = false;
+                            before.set(context.runtime().currentAllocationDomain());
+                            suspended.countDown();
+                            return OresScheduler.await(wait);
+                        }
+                        after.set(context.runtime().currentAllocationDomain());
+                        context.self().stop();
+                        return OresScheduler.done(null);
+                    }
+                });
+            });
+
+            ref.send(1);
+            assertTrue(suspended.await(5, TimeUnit.SECONDS));
+            assertTrue(gate.get().completeFromRuntime(null));
+            assertTrue(ref.awaitTermination(5, TimeUnit.SECONDS));
+            assertTrue(ref.failure().isEmpty());
+
+            assertEquals(before.get(), after.get(),
+                    "await/resume must preserve the actor allocation domain");
+            assertEquals(ref.id(), before.get().actorId());
+            assertEquals(ActorRuntime.AllocationDomainKind.ACTOR_LOCAL,
+                    after.get().kind());
+        }
+    }
 
     @Test
     void sharedMutexIsUnboundUntilRuntimeUseThenReportsRuntimeSharedDomain() throws Exception {
