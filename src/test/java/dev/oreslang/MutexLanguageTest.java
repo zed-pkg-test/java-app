@@ -42,7 +42,7 @@ final class MutexLanguageTest {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class, () -> TypeChecker.check(program));
         assertTrue(error.getMessage().contains(
-                "actor code cannot use blocking SharedMutex.lock"));
+                "cannot use SharedMutex<T> across any actor boundary"));
     }
 
     @Test
@@ -61,23 +61,28 @@ final class MutexLanguageTest {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class, () -> TypeChecker.check(program));
         assertTrue(error.getMessage().contains(
-                "actor code cannot use blocking SharedMutex.with_lock"));
+                "cannot use SharedMutex<T> across any actor boundary"));
     }
 
     @Test
-    void actorCodeMayUseNonblockingSharedMutexOperations() {
-        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                pub shared actor fnc try_worker(SharedMutex<int> mutex): void {
-                  val maybe_guard = mutex.try_lock();
-                  stdio.println(mutex.is_poisoned());
-                  return;
-                }
+    void actorCodeRejectsNonblockingSharedMutexOperationsToo() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        pub shared actor fnc try_worker(SharedMutex<int> mutex): void {
+                          val maybe_guard = mutex.try_lock();
+                          stdio.println(mutex.is_poisoned());
+                          return;
+                        }
 
-                pub shared actor fnc async_worker(SharedMutex<int> mutex): void {
-                  val future_guard = mutex.lock_async();
-                  return;
-                }
-                """)));
+                        pub shared actor fnc async_worker(SharedMutex<int> mutex): void {
+                          val future_guard = mutex.lock_async();
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains(
+                "cannot use SharedMutex<T> across any actor boundary"));
     }
 
     @Test
