@@ -1343,7 +1343,18 @@ public final class OwnershipChecker {
         int previousLoopDepth = loopDepth;
         loopDepth = 0;
         try {
-            for (Ast.Stmt stmt : lambda.blockBody()) checkStatement(stmt, closure, Ast.TypeRef.inferred());
+            if (lambda.expressionBody() != null) {
+                // An expression body has return-value ownership semantics even
+                // though it has no explicit return statement in source.
+                ValueInfo returned = checkExpr(lambda.expressionBody(), closure, true);
+                if (containsMutexGuardType(returned.type)) {
+                    throw error("MutexGuard values are lexical and cannot be returned from a lambda");
+                }
+            } else {
+                for (Ast.Stmt stmt : lambda.blockBody()) {
+                    checkStatement(stmt, closure, Ast.TypeRef.inferred());
+                }
+            }
         } finally {
             loopDepth = previousLoopDepth;
             closure.close();
@@ -1355,7 +1366,11 @@ public final class OwnershipChecker {
         CaptureSet captures = new CaptureSet();
         Set<String> locals = new HashSet<>();
         for (Ast.Param param : lambda.parameters()) locals.add(param.name());
-        scanStatements(lambda.blockBody(), locals, outer, recursiveBinding, captures);
+        if (lambda.expressionBody() != null) {
+            scanExpr(lambda.expressionBody(), locals, outer, recursiveBinding, captures, false);
+        } else {
+            scanStatements(lambda.blockBody(), locals, outer, recursiveBinding, captures);
+        }
         return captures;
     }
 
