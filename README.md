@@ -8,7 +8,7 @@ scheduling; it does **not** own the reactive library.
 
 ## Source model
 
-`src/rx.ores` is a file/code unit, not an implicit module or package:
+`src/rx.ores` is a file/code unit, not an implicit module or package. Its nominal classes are ordinary top-level file-scoped declarations and consumers select them explicitly with `import class`; the file is not wrapped in a synthetic module:
 
 ```ores
 import * as rx from './src/rx.ores';

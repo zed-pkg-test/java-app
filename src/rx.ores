@@ -4,7 +4,7 @@
 // a local namespace with a relative wildcard import and import nominal classes
 // explicitly when they want static type names.
 
-pub define class Subscription<T> as
+define class Subscription<T> as
   let bool cancelled = false;
   let bool finished = false;
   let bool pulling = false;
@@ -54,13 +54,13 @@ pub define class Subscription<T> as
   }
 end
 
-pub define class Observable<T> as
+define class Observable<T> as
   pub subscribe(): Subscription<T> {
     return new Subscription<T>();
   }
 end
 
-pub define class ValuesSubscription<T> extends Subscription<T> as
+define class ValuesSubscription<T> extends Subscription<T> as
   val Array<T> values;
   let int cursor = 0;
   val int size;
@@ -84,7 +84,7 @@ pub define class ValuesSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class ValuesObservable<T> extends Observable<T> as
+define class ValuesObservable<T> extends Observable<T> as
   val Array<T> values;
 
   pub constructor(Array<T> values) {
@@ -100,7 +100,7 @@ pub fnc from_values<T>(Array<T> values): Observable<T> {
   return new ValuesObservable<T>(values);
 }
 
-pub define class FutureSubscription<T> extends Subscription<T> as
+define class FutureSubscription<T> extends Subscription<T> as
   val Future<T> pending;
   let bool emitted = false;
 
@@ -118,7 +118,7 @@ pub define class FutureSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class FutureObservable<T> extends Observable<T> as
+define class FutureObservable<T> extends Observable<T> as
   val Future<T> pending;
 
   pub constructor(Future<T> pending) {
@@ -134,7 +134,7 @@ pub fnc from_future<T>(Future<T> pending): Observable<T> {
   return new FutureObservable<T>(pending);
 }
 
-pub define class MapSubscription<A, B> extends Subscription<B> as
+define class MapSubscription<A, B> extends Subscription<B> as
   val Subscription<A> upstream;
   val Fnc<A, B> transform;
 
@@ -157,7 +157,7 @@ pub define class MapSubscription<A, B> extends Subscription<B> as
   }
 end
 
-pub define class FilterSubscription<T> extends Subscription<T> as
+define class FilterSubscription<T> extends Subscription<T> as
   val Subscription<T> upstream;
   val Fnc<T, bool> predicate;
 
@@ -185,7 +185,7 @@ pub define class FilterSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class TakeSubscription<T> extends Subscription<T> as
+define class TakeSubscription<T> extends Subscription<T> as
   val Subscription<T> upstream;
   let int remaining;
 
@@ -223,7 +223,7 @@ pub define class TakeSubscription<T> extends Subscription<T> as
   }
 end
 
-pub define class MapObservable<A, B> extends Observable<B> as
+define class MapObservable<A, B> extends Observable<B> as
   val Observable<A> source;
   val Fnc<A, B> transform;
 
@@ -237,7 +237,7 @@ pub define class MapObservable<A, B> extends Observable<B> as
   }
 end
 
-pub define class FilterObservable<T> extends Observable<T> as
+define class FilterObservable<T> extends Observable<T> as
   val Observable<T> source;
   val Fnc<T, bool> predicate;
 
@@ -251,7 +251,7 @@ pub define class FilterObservable<T> extends Observable<T> as
   }
 end
 
-pub define class TakeObservable<T> extends Observable<T> as
+define class TakeObservable<T> extends Observable<T> as
   val Observable<T> source;
   val int count;
 
