@@ -879,6 +879,26 @@ pub async fnc consume(): void {
 
 A synchronous `for ... of ...` consumes `Generator<T>` or ordinary synchronous iterables. `for await ... of ...` consumes `AsyncGenerator<T>` or a class whose `[Symbol.asyncIterator]()` method returns an `AsyncGenerator<T>`. It also accepts synchronous generators, arrays, tuples, and `[Symbol.iterator]()` values through a runtime-owned asynchronous adapter: every pull crosses the OresFuture boundary, and closing the loop closes the suspended adapter and its source. An asynchronous iterable still cannot be consumed by a synchronous loop.
 
+`Channel<T>` is also an async iterable, but it is deliberately **not** an `AsyncIterator<T>` by identity. A channel is a hot MPMC communication primitive with rendezvous/buffering and producer backpressure; an async iterator is a pull activation owned by one consumer. `channel.async_iter()` creates a non-owning `AsyncIterator<T>` view. Each pull performs one destructive receive, so multiple views compete for channel values rather than broadcasting them. Closing a view cancels its pending receive but does not close the channel. `channel.close()` owns channel completion: buffered values drain first, normal close becomes iterator completion, and a runtime exceptional close becomes iterator failure after draining.
+
+This makes the two abstractions compose without collapsing their semantics:
+
+```ores
+val Channel<int> events = Channel.new<int>(16);
+val AsyncIterator<int> source = events.async_iter();
+
+for await const event of events {
+  handle(event);
+}
+
+async fnc gen* forwarded(Channel<int> input): AsyncIterator<int> {
+  yield* input;
+  return;
+}
+```
+
+The inverse direction is intentionally explicit rather than implicit: turning an iterator into a channel requires choosing capacity, producer-task ownership, cancellation, and who closes the channel. A future/std-lib `Channel.from_async_iter(source, capacity)`-style pump can define those policies without making every iterator secretly allocate a channel or background task.
+
 Generator activations are affine runtime state. They are not actor messages, shared values, or async-task payloads. `yield` is a suspension boundary: a live `MutexGuard` or borrow may not cross it in the current ownership model. Async iterator pulls are suspension boundaries as well.
 
 Actor callables cannot be generators. An actor mailbox turn may suspend only through the actor scheduler's continuation protocol; a generator activation must not escape a turn. Class methods and static class `fnc` are also non-generator declarations for now. A class can still implement `[Symbol.asyncIterator]()` by returning an async generator created by a top-level/module callable.
