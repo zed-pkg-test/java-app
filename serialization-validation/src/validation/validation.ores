@@ -518,22 +518,22 @@ pub fnc is_email(Utf8Text text): bool {
     let bool at_end = i == text.bytes.length;
     let int byte = at_end ? 46 : text.bytes[i];
 
-    if byte == 46 then
-      if i == label_start then
+    if byte == 46 {
+      if i == label_start {
         return false;
-      fi
-      if text.bytes[label_start] == 45 || text.bytes[i - 1] == 45 then
+      } fi
+      if text.bytes[label_start] == 45 || text.bytes[i - 1] == 45 {
         return false;
-      fi
-      if !at_end then
+      } fi
+      if !at_end {
         saw_dot = true;
-      fi
+      } fi
       label_start = i + 1;
-    else
-      if !is_ascii_letter_or_digit(byte) && byte != 45 then
+    } else {
+      if !is_ascii_letter_or_digit(byte) && byte != 45 {
         return false;
-      fi
-    fi
+      } fi
+    } fi
 
     if at_end then
       break;
@@ -875,33 +875,33 @@ fnc validate_rule_at(
       return;
     fi
 
-    if rule.has_min_number then
-      if rule.min_exclusive then
-        if parsed.value <= rule.min_number then
+    if rule.has_min_number {
+      if rule.min_exclusive {
+        if parsed.value <= rule.min_number {
           add_error(report, options, "exclusive_min", path, "number must be greater than the minimum");
-        fi
-      else
-        if parsed.value < rule.min_number then
+        } fi
+      } else {
+        if parsed.value < rule.min_number {
           add_error(report, options, "min", path, "number is below the minimum");
-        fi
-      fi
-    fi
+        } fi
+      } fi
+    } fi
 
     if should_stop(report, options) then
       return;
     fi
 
-    if rule.has_max_number then
-      if rule.max_exclusive then
-        if parsed.value >= rule.max_number then
+    if rule.has_max_number {
+      if rule.max_exclusive {
+        if parsed.value >= rule.max_number {
           add_error(report, options, "exclusive_max", path, "number must be less than the maximum");
-        fi
-      else
-        if parsed.value > rule.max_number then
+        } fi
+      } else {
+        if parsed.value > rule.max_number {
           add_error(report, options, "max", path, "number is above the maximum");
-        fi
-      fi
-    fi
+        } fi
+      } fi
+    } fi
   fi
 
   return;
