@@ -1,6 +1,6 @@
 namespace generics_demo;
 
-define module util
+define module util as
 
   pub fnc identity<T>(T value) -> T {
     return value;
@@ -8,9 +8,9 @@ define module util
 
 end
 
-define module model
+define module model as
 
-  define class Box<T>
+  define class Box<T> as
     pub val T value;
 
     pub get() -> T {

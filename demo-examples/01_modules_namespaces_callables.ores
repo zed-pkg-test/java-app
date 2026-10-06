@@ -2,7 +2,7 @@ namespace callable_demo;
 
 type IntFn = typeof fnc(int value) => int;
 
-define module math
+define module math as
 
   pub fnc factorial(int n) -> int {
     if n <= 1; then
@@ -14,7 +14,7 @@ define module math
 
 end
 
-define module closures
+define module closures as
 
   pub fnc makeAdder(int base) -> IntFn {
     return |value| -> {

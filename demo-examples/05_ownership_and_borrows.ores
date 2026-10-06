@@ -1,6 +1,6 @@
 namespace ownership_demo;
 
-define class Box
+define class Box as
   pub let String value = "start";
 end
 

@@ -1,8 +1,8 @@
 namespace class_demo;
 
-define module model
+define module model as
 
-  define class Answer
+  define class Answer as
 
     pub value() -> int {
       return 42;

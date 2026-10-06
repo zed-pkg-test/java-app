@@ -1,6 +1,6 @@
 namespace inheritance_demo;
 
-define module math
+define module math as
 
   pub fnc add(int a, int b) -> int {
     return a + b;
@@ -8,9 +8,9 @@ define module math
 
 end
 
-define module model
+define module model as
 
-  define class Parent
+  define class Parent as
 
     pub value() -> int {
       return 7;
@@ -18,7 +18,7 @@ define module model
 
   end
 
-  define class Child extends Parent
+  define class Child extends Parent as
   end
 
 end

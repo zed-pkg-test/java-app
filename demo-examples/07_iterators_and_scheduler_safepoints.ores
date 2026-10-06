@@ -1,8 +1,8 @@
 namespace iterator_demo;
 
-define module collections
+define module collections as
 
-  define class Bag
+  define class Bag as
 
     [Symbol.iterator]() -> Array<int> {
       return arr[4, 5];
