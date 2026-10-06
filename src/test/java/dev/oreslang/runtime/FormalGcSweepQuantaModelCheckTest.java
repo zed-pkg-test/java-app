@@ -19,7 +19,10 @@ import org.junit.jupiter.api.Test;
  * a bounded sweep advances a stable cursor, retired slots cannot be skipped
  * forever under repeated sweeps, at most one cleanup claimant owns a slot,
  * successful cleanup is terminal, and failed cleanup returns the slot to a
- * retryable state.</p>
+ * retryable state. Attempt counters are intentionally excluded from the state
+ * identity because they do not affect enabled transitions; including them
+ * would turn this finite safety model into an artificial infinite state
+ * space.</p>
  */
 final class FormalGcSweepQuantaModelCheckTest {
     private enum SlotState {
@@ -56,15 +59,11 @@ final class FormalGcSweepQuantaModelCheckTest {
 
     private record State(
             List<SlotState> slots,
-            int cursor,
-            int cleanupSuccesses,
-            int cleanupFailures) {
+            int cursor) {
 
         static State initial() {
             return new State(
                     List.of(SlotState.LIVE, SlotState.LIVE, SlotState.LIVE),
-                    0,
-                    0,
                     0);
         }
 
@@ -82,9 +81,6 @@ final class FormalGcSweepQuantaModelCheckTest {
 
         for (State state : states) {
             assertTrue(state.cursor() >= 0 && state.cursor() < state.slots().size());
-            assertTrue(state.cleanupSuccesses() >= 0);
-            assertTrue(state.cleanupFailures() >= 0);
-
             for (SlotState slot : state.slots()) {
                 if (slot == SlotState.CLEANED) {
                     assertFalse(slot == SlotState.CLAIMED);
@@ -207,9 +203,7 @@ final class FormalGcSweepQuantaModelCheckTest {
                         state,
                         action.slot(),
                         SlotState.RETIRED,
-                        state.cursor(),
-                        state.cleanupSuccesses(),
-                        state.cleanupFailures()));
+                        state.cursor()));
             }
 
             case SWEEP_ONE -> {
@@ -232,11 +226,7 @@ final class FormalGcSweepQuantaModelCheckTest {
                     cursor = (cursor + 1) % n;
                 }
 
-                yield Optional.of(new State(
-                        next,
-                        cursor,
-                        state.cleanupSuccesses(),
-                        state.cleanupFailures()));
+                yield Optional.of(new State(next, cursor));
             }
 
             case CLEANUP_SUCCESS -> {
@@ -247,9 +237,7 @@ final class FormalGcSweepQuantaModelCheckTest {
                         state,
                         action.slot(),
                         SlotState.CLEANED,
-                        state.cursor(),
-                        state.cleanupSuccesses() + 1,
-                        state.cleanupFailures()));
+                        state.cursor()));
             }
 
             case CLEANUP_FAILURE -> {
@@ -260,9 +248,7 @@ final class FormalGcSweepQuantaModelCheckTest {
                         state,
                         action.slot(),
                         SlotState.RETIRED,
-                        state.cursor(),
-                        state.cleanupSuccesses(),
-                        state.cleanupFailures() + 1));
+                        state.cursor()));
             }
         };
     }
@@ -271,13 +257,11 @@ final class FormalGcSweepQuantaModelCheckTest {
             State state,
             int slot,
             SlotState replacement,
-            int cursor,
-            int successes,
-            int failures) {
+            int cursor) {
 
         List<SlotState> next = new ArrayList<>(state.slots());
         next.set(slot, replacement);
-        return new State(next, cursor, successes, failures);
+        return new State(next, cursor);
     }
 
     private static int claimedSlot(State state) {
