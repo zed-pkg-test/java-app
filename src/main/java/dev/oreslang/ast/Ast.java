@@ -825,6 +825,10 @@ public final class Ast {
         public LambdaExpr {
             parameters = List.copyOf(parameters);
             blockBody = blockBody == null ? null : List.copyOf(blockBody);
+            if ((expressionBody == null) == (blockBody == null)) {
+                throw new IllegalArgumentException(
+                        "lambda requires exactly one expression body or block body");
+            }
         }
         public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody) {
             this(parameters, expressionBody, blockBody, false);
