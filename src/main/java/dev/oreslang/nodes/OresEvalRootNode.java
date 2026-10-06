@@ -713,6 +713,17 @@ public final class OresEvalRootNode extends RootNode {
                 nextStep = OresScheduler.await(future);
             }
 
+            private void cooperate(
+                    SourceValueCont continuation) {
+                Objects.requireNonNull(continuation, "continuation");
+                if (nextStep != null) {
+                    throw new IllegalStateException(
+                            "source continuation attempted two terminal steps in one turn");
+                }
+                awaitingContinuation = continuation;
+                nextStep = OresScheduler.cooperate();
+            }
+
             private void done(Object value) {
                 if (nextStep != null) {
                     throw new IllegalStateException(
@@ -1087,6 +1098,7 @@ public final class OresEvalRootNode extends RootNode {
                 return true;
             }
             if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                if (runtime.operation().equals("cooperate")) return true;
                 return runtime.arguments().stream()
                         .anyMatch(argument -> expressionContainsPotentialSuspension(argument, seen));
             }
@@ -2800,11 +2812,6 @@ public final class OresEvalRootNode extends RootNode {
                     return;
                 }
 
-                if (expr instanceof Ast.RuntimeCallExpr runtime) {
-                    evalSuspendableRuntimeOwnership(task, runtime, env, continuation);
-                    return;
-                }
-
                 if (expr instanceof Ast.MemberExpr member) {
                     evalSuspendableExpr(
                             task,
@@ -2892,6 +2899,14 @@ public final class OresEvalRootNode extends RootNode {
                                     continuation.accept(t, null, failure2);
                                 }
                             });
+                    return;
+                }
+
+                if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                    evalSuspendableRuntimeCall(
+                            task,
+                            runtime,
+                            continuation);
                     return;
                 }
 
@@ -3363,37 +3378,41 @@ public final class OresEvalRootNode extends RootNode {
                     });
         }
 
-        private void evalSuspendableRuntimeOwnership(
+        private void evalSuspendableRuntimeCall(
                 SourceTask task,
                 Ast.RuntimeCallExpr runtime,
-                Env env,
                 SourceValueCont continuation) {
-            if (runtime.arguments().size() != 1) {
+            if (!runtime.operation().equals("cooperate")) {
+                continuation.accept(
+                        task,
+                        null,
+                        new IllegalStateException(
+                                "runtime intrinsic 'rt " + runtime.operation()
+                                        + "' is not implemented on this runtime head"));
+                return;
+            }
+            if (!runtime.arguments().isEmpty()) {
                 continuation.accept(
                         task,
                         null,
                         new IllegalArgumentException(
-                                "rt " + runtime.operation() + " expects exactly one argument"));
+                                "rt cooperate takes no arguments"));
                 return;
             }
-            evalSuspendableExpr(
-                    task,
-                    runtime.arguments().getFirst(),
-                    env,
-                    (t, value, failure) -> {
-                        if (failure != null) {
-                            continuation.accept(t, null, failure);
-                            return;
-                        }
-                        try {
+            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+                continuation.accept(
+                        task,
+                        null,
+                        new SecurityException(
+                                "rt cooperate is disabled for untrusted actors until continuation quota state survives scheduler handoffs"));
+                return;
+            }
+            task.cooperate(
+                    (t, ignored, failure) ->
                             continuation.accept(
                                     t,
-                                    applyRuntimeOwnership(runtime.operation(), value),
-                                    null);
-                        } catch (RuntimeException | Error ownershipFailure) {
-                            continuation.accept(t, null, ownershipFailure);
-                        }
-                    });
+                                    null,
+                                    failure));
         }
 
         private void evalSuspendableCall(
@@ -4987,19 +5006,6 @@ public final class OresEvalRootNode extends RootNode {
             throw new IllegalArgumentException(name + " operands must be bool");
         }
 
-        private Object applyRuntimeOwnership(String operation, Object value) {
-            return switch (operation) {
-                // Borrow/take/share alter compiler ownership state, not the JVM handle.
-                case "borrow", "take", "share" -> value;
-                // Static ownership checking currently admits rt copy only for proven
-                // Copy values on this convergence branch, so returning the immutable
-                // scalar/value representation is an independent language-level copy.
-                case "copy" -> value;
-                default -> throw new IllegalArgumentException(
-                        "unknown runtime ownership operation 'rt " + operation + "'");
-            };
-        }
-
         private Object eval(Ast.Expr expr, Env env) {
             if (expr instanceof Ast.LiteralExpr literal) {
                 if (literal.value() == null) throw new IllegalArgumentException("standalone null values are forbidden");
@@ -5199,12 +5205,24 @@ public final class OresEvalRootNode extends RootNode {
                 throw new IllegalArgumentException("spread expressions are only valid inside call argument lists");
             }
             if (expr instanceof Ast.RuntimeCallExpr runtime) {
-                if (runtime.arguments().size() != 1) {
-                    throw new IllegalArgumentException(
-                            "rt " + runtime.operation() + " expects exactly one argument");
+                if (!runtime.operation().equals("cooperate")) {
+                    throw new IllegalStateException(
+                            "runtime intrinsic 'rt " + runtime.operation()
+                                    + "' is not implemented on this runtime head");
                 }
-                Object value = eval(runtime.arguments().getFirst(), env);
-                return applyRuntimeOwnership(runtime.operation(), value);
+                if (!runtime.arguments().isEmpty()) {
+                    throw new IllegalArgumentException("rt cooperate takes no arguments");
+                }
+                // Generator bodies use the compatibility generator engine rather
+                // than SourceTask lowering. Cooperating here yields its
+                // runtime-owned virtual producer without changing Iterator vs
+                // AsyncIterator semantics.
+                if (activeGeneratorEmitter.get() != null) {
+                    AsyncRuntime.cooperateCurrentCarrier();
+                    return null;
+                }
+                throw new IllegalStateException(
+                        "rt cooperate reached synchronous evaluation; source suspension lowering was not applied");
             }
             if (expr instanceof Ast.CallExpr call) {
                 if (isBooleanIntrinsicCall(call, env)) return evalBooleanIntrinsic(call, env);
