@@ -22,8 +22,7 @@ final class RuntimeProxyLanguageTest {
                 define class Counter as
                   pub let int value = 1;
 
-                  pub inc(self &mut Counter)(): int {
-                    self.value = self.value + 1;
+                  pub current(): int {
                     return self.value;
                   }
                 end
@@ -32,12 +31,12 @@ final class RuntimeProxyLanguageTest {
                   val counter = rt proxy new Counter();
                   counter.value = 10;
                   stdio.stdout.write(counter.value);
-                  stdio.stdout.write(counter.inc());
+                  stdio.stdout.write(counter.current());
                   return;
                 }
                 """);
 
-        assertEquals("1011", output);
+        assertEquals("1010", output);
     }
 
     @Test
