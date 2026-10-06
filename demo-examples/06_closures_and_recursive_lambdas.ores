@@ -1,0 +1,24 @@
+namespace closure_demo;
+
+fnc make_counter() => (() -> int) {
+  let int count = 0;
+
+  return || -> {
+    count = count + 1;
+    return count;
+  };
+}
+
+pub routine main() => void {
+  val (() -> int) counter = make_counter();
+
+  stdio.println(counter());
+  stdio.println(counter());
+
+  let Fnc<int, int> factorial = |int n| -> {
+    return n == 0 ? 1 : n * factorial(n - 1);
+  };
+
+  stdio.println(factorial(5));
+  return;
+}

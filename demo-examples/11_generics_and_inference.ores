@@ -1,0 +1,39 @@
+namespace generics_demo;
+
+define module util
+
+  pub fnc identity<T>(T value) => T {
+    return value;
+  }
+
+end
+
+define module model
+
+  define class Box<T>
+    pub val T value;
+
+    pub get() => T {
+      return self.value;
+    }
+  end
+
+end
+
+fnc keep_nested(Option<Array<int>> value) => Option<Array<int>> {
+  return value;
+}
+
+pub routine main() => void {
+  val explicit = util.identity<int>(42);
+  val inferred_marker = util.identity<>("ores");
+  val inferred_plain = util.identity(7);
+  val box = new model.Box<>(99);
+
+  stdio.println(explicit);
+  stdio.println(inferred_marker);
+  stdio.println(inferred_plain);
+  stdio.println(box.get());
+
+  return;
+}

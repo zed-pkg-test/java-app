@@ -1,0 +1,28 @@
+namespace iterator_demo;
+
+define module collections
+
+  define class Bag
+
+    [Symbol.iterator]() => Array<int> {
+      return arr[4, 5];
+    }
+
+  end
+
+end
+
+pub routine main() => void {
+  val bag = new collections.Bag();
+
+  for (val item of bag) {
+    stdio.println(item);
+  }
+
+  for (val item of arr[1, 2, 3]) {
+    stdio.println(item);
+  }
+
+  stdio.println(process.descriptor.scheduler_safepoints);
+  return;
+}

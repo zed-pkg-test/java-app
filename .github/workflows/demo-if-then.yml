@@ -1,0 +1,37 @@
+name: oreslang-demo-if-then
+
+on:
+  push:
+    branches:
+      - test/oreslang-demo-if-then-20261005
+
+permissions:
+  contents: read
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Verify exact compiler tree
+        run: mvn -B -ntp -Dores.runtime.carriers=native verify
+      - name: Run stable demo corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          for example in demo-examples/*.ores; do
+            echo "==> $example"
+            mvn -B -ntp -DskipTests exec:java -Dexec.args="$example"
+            count=$((count + 1))
+          done
+          test "$count" -eq 15
+          echo "$count/15 stable demos passed"

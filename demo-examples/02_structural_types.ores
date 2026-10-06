@@ -1,0 +1,22 @@
+namespace structural_demo;
+
+pub interface Named {
+  name: String;
+}
+
+fnc displayName(@Structural Named value) => String {
+  return value.name;
+}
+
+pub routine main() => void {
+  val user = obj{name: "Ada", age: 37};
+  val complex impedance = 3 + 4i;
+  val values = arr[10, 20, 30];
+  val pair = (values[0], "first");
+
+  stdio.println(displayName(user));
+  stdio.println(impedance);
+  stdio.println(pair);
+
+  return;
+}

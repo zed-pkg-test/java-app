@@ -1,0 +1,25 @@
+namespace returned_values_demo;
+
+type FixedResult = [int, bool, string];
+type NamedResult = {foo: int, bar: string};
+
+fnc fixed() => FixedResult {
+  return [3, true, "yes"];
+}
+
+fnc named() => NamedResult {
+  return obj{foo: 5, bar: "x"};
+}
+
+pub routine main() => void {
+  const [number, flag, answer] = fixed();
+  const {foo, bar} = named();
+
+  stdio.println(number);
+  stdio.println(flag);
+  stdio.println(answer);
+  stdio.println(foo);
+  stdio.println(bar);
+
+  return;
+}

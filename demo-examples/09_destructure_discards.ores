@@ -1,0 +1,10 @@
+namespace discard_demo;
+
+pub routine main() => void {
+  [const foo, _, let bar] = (1, 200, 3);
+  [const z, _, let y] = (4, 500, 6);
+  [_, _, const tail] = (700, 800, 9);
+
+  stdio.println(foo + bar + z + y + tail);
+  return;
+}

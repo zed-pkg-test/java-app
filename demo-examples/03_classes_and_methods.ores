@@ -1,0 +1,27 @@
+namespace class_demo;
+
+define module model
+
+  define class Answer
+
+    pub value() => int {
+      return 42;
+    }
+
+    @Ret<self>
+    pub identity() {
+      return self;
+    }
+
+  end
+
+end
+
+pub routine main() => void {
+  val answer = new model.Answer();
+
+  stdio.println(answer.value());
+  stdio.println(answer.identity());
+
+  return;
+}
