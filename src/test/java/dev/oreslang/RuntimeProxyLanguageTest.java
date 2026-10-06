@@ -41,6 +41,39 @@ final class RuntimeProxyLanguageTest {
     }
 
     @Test
+    void proxyDisposeIsExplicitAndRevokesGuestAccess() throws Exception {
+        String output = run("""
+                define class Box as
+                  pub let int value = 1;
+                end
+
+                pub routine main(): void {
+                  val guarded = rt proxy new Box();
+                  guarded.dispose();
+                  stdio.stdout.write("done");
+                  return;
+                }
+                """);
+
+        assertEquals("done", output);
+
+        IllegalArgumentException shape = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        define class Box as
+                          pub let int value = 1;
+                        end
+
+                        fnc bad(): void {
+                          val guarded = rt proxy new Box();
+                          guarded.dispose(1);
+                          return;
+                        }
+                        """));
+        assertTrue(shape.getMessage().contains("dispose"), shape.getMessage());
+    }
+
+    @Test
     void callFormAndCommandFormBothParseAndTypecheck() {
         assertDoesNotThrow(() -> check("""
                 define class Box as
@@ -76,6 +109,70 @@ final class RuntimeProxyLanguageTest {
                         """));
 
         assertTrue(failure.getMessage().contains("moved value 'box'"));
+    }
+
+    @Test
+    void proxyAssignmentCannotReturnMoveOnlyValueOutsideLock() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        define class Inner as
+                          pub let int value = 1;
+                        end
+
+                        define class Outer as
+                          pub let Inner inner = new Inner();
+                        end
+
+                        fnc bad(): Inner {
+                          val guarded = rt proxy new Outer();
+                          return guarded.inner = new Inner();
+                        }
+                        """));
+
+        String message = failure.getMessage().toLowerCase();
+        assertTrue(message.contains("void") || message.contains("return"),
+                failure.getMessage());
+    }
+
+    @Test
+    void proxyDoesNotLeakMoveOnlyDynamicStructValues() {
+        IllegalArgumentException member = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        define class Inner as
+                          pub let int value = 1;
+                        end
+
+                        fnc bad(): void {
+                          let DynamicStruct<Inner> bag = new DynamicStruct<Inner>();
+                          bag["child"] = new Inner();
+                          val guarded = rt proxy bag;
+                          val escaped = guarded.child;
+                          return;
+                        }
+                        """));
+        assertTrue(member.getMessage().contains("DynamicStruct")
+                        || member.getMessage().contains("move-only"),
+                member.getMessage());
+
+        IllegalArgumentException indexed = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        define class Inner as
+                          pub let int value = 1;
+                        end
+
+                        fnc bad(): void {
+                          let DynamicStruct<Inner> bag = new DynamicStruct<Inner>();
+                          bag["child"] = new Inner();
+                          val guarded = rt proxy bag;
+                          val escaped = guarded["child"];
+                          return;
+                        }
+                        """));
+        assertTrue(indexed.getMessage().contains("move-only"),
+                indexed.getMessage());
     }
 
     @Test
