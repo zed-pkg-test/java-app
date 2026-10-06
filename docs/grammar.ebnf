@@ -7,7 +7,7 @@ import_decl     = "import" import_spec "from" STRING_LITERAL ";" ;
 import_spec     = "*" "as" IDENT
                 | import_kind import_names ;
 import_kind     = "module" | "actor" | "class" | "fnc"
-                | "interface" | "trait" | "struct"
+                | "interface" | "contract" | "trait" | "struct"
                 | "type" | "types" ;
 import_names    = IDENT { "," IDENT } [ "as" IDENT ]
                 | "(" IDENT { "," IDENT } ")"
@@ -15,6 +15,7 @@ import_names    = IDENT { "," IDENT } [ "as" IDENT ]
                 | "*" "as" IDENT ;
 
 top_level_item  = annotated_module_decl
+                | contract_decl
                 | actor_decl
                 | actor_callable_decl
                 | callable_decl
@@ -23,10 +24,11 @@ top_level_item  = annotated_module_decl
                 | type_decl
                 | binding_decl ;
 
-annotated_module_decl = { annotation } "define" "module" IDENT
-                        { module_member } "end" ;
+annotated_module_decl = { annotation } "define" "module" IDENT [ "conforms" type_ref { "," type_ref } ]
+                        [ "as" ] { module_member } "end" ;
 
-module_member   = actor_decl
+module_member   = contract_decl
+                | actor_decl
                 | actor_callable_decl
                 | callable_decl
                 | class_decl
@@ -90,6 +92,9 @@ explicit_receiver = "self" type_ref ;
 static_function_decl
                 = { annotation } visibility "static" { "async" | "structural" } "fnc" callable_name [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
+
+contract_decl   = "define" "contract" IDENT [ generic_params ]
+                  [ "extends" type_ref { "," type_ref } ] interface_body ;
 
 interface_decl  = visibility "interface" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]

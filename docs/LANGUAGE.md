@@ -32,6 +32,7 @@ import actor Worker from "../xyz";
 import class Widget as ApiWidget from "../xyz";
 import fnc add as apiAdd from "../xyz";
 import interface ServiceApi from "../xyz";
+import contract StorageApi from "../xyz";
 import type UserId from "../xyz";
 import types ServiceApi, UserId from "../xyz";
 import types (ServiceApi, UserId) from "../xyz";
@@ -103,26 +104,25 @@ specific sequencing relationship *between* two init hooks in the same cycle,
 that relationship should be made explicit in application code rather than
 inferred from the import edges.
 
-## Module interfaces / OCaml-style module signatures
+## Module contracts
 
-Interfaces can describe the structural public shape required of a module. A module opts into checking with `@AdheresTo(...)`:
+Module shape is described by a dedicated `contract`, not by a trait or ordinary type interface. Traits are for structs, classes, actors, and other types; contracts are for modules.
 
 ```ores
-define module contracts
-  define interface MathApi
-    fnc add(int a, int b) => int;
-    String name;
-  end
+define contract MathApi as
+  fnc add(int a, int b) => int;
+  String name;
 end
 
-@AdheresTo(contracts.MathApi)
-define module math
+define module math conforms MathApi as
   pub fnc add(int a, int b): int { return a + b; }
   pub val String name = "math";
 end
 ```
 
-Only exported (`pub`) module members satisfy an adherence contract. `@AdheresTo(A, B)` may name more than one interface.
+Only exported (`pub`) module members satisfy a module contract. Contracts may require exported fields/constants as well as functions. A module may conform to multiple contracts with comma-separated names. The legacy module `@AdheresTo(...)` form is rejected; use `conforms` instead.
+
+A module contract is not a class/struct interface and cannot be implemented by a class or actor.
 
 ## Functions and returns
 
@@ -581,7 +581,7 @@ declared positional arity is a compile-time error.
 Interfaces define statically checkable contracts, but named class/interface values remain
 **nominal by default**. Structural comparison is entered only through an explicit
 structural boundary, an explicit `implements` proof, or module
-`@AdheresTo(...)` conformance.
+`conforms` conformance.
 
 ```ores
 define interface Named
@@ -1086,7 +1086,7 @@ pub interface Foo extends Bar {
 }
 ```
 
-Explicit `implements` and module `@AdheresTo(...)` checks remain structural
+Explicit `implements` and module `conforms` checks remain structural
 conformance proofs.
 
 ## Method overloads

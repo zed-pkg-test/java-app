@@ -249,3 +249,13 @@ The backend selector is `-Dores.runtime.carriers=auto|native|java`:
 `process.descriptor.actor_carrier_backend` reports the physical backend so tests and supervisors can verify that native execution is actually active.
 
 This does **not** mean the whole runtime is native yet. The current actor mailbox containers, shared-memory synchronization, async virtual-thread bridge, GC timer, and several host-integration data structures still use Java runtime primitives. Those are migration targets behind Oreslang-owned abstractions; Native Image compilation by itself is not considered proof that a primitive is natively implemented. New runtime features should avoid exposing Java concurrency types in language semantics and should prefer the JNI/native substrate where a physical scheduler, clock, thread, or memory primitive is required.
+
+### Strict isolate root admission
+
+The VM prestarts its CONTROL carriers before guest execution. In UNTRUSTED
+contexts, ROOT_TASK turns are queued to the calling thread that owns the isolate
+JNI scope, preserving the existing one-thread sandbox limit. Pending waits leave
+guest execution while the caller waits for queued continuations. Resuming a task
+retains its logical scheduler ownership without admitting another guest thread.
+A rejected context entry settles the owning task exceptionally rather than
+leaving a host waiting on an unresolved Future.
