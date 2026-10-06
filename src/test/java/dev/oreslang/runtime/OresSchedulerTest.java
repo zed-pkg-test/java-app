@@ -16,6 +16,38 @@ import static org.junit.jupiter.api.Assertions.*;
 final class OresSchedulerTest {
 
     @Test
+    void rejectedGuestContextAdmissionSettlesTheOwningTask() throws Exception {
+        IllegalStateException failure = new IllegalStateException("guest context entry rejected");
+        try (OresScheduler scheduler = OresScheduler.managed(1, runnable -> { throw failure; })) {
+            OresFuture<Integer> task = scheduler.start(resume -> OresScheduler.done(42));
+            var observed = assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> task.get(5, TimeUnit.SECONDS));
+            assertSame(failure, observed.getCause());
+        }
+    }
+
+    @Test
+    void mixedLinkageScopeSurvivesResumeWithoutLeakingToOtherTasks() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> gate = new OresFuture<>();
+            AtomicInteger state = new AtomicInteger();
+            OresFuture<Object> task;
+            try (var scope = dev.oreslang.interop.MixedInteropBridge.open(java.util.Map.of(
+                    "unit", (name, args) -> 42))) {
+                task = scheduler.start(resume -> {
+                    if (state.getAndIncrement() == 0) return OresScheduler.await(gate);
+                    return OresScheduler.done(dev.oreslang.interop.MixedInteropBridge.invoke("unit", "answer"));
+                });
+            }
+            gate.completeFromRuntime(1);
+            assertEquals(42, task.get(5, TimeUnit.SECONDS));
+            assertTrue(dev.oreslang.interop.MixedInteropBridge.capture().isEmpty());
+            assertTrue(scheduler.start(resume -> OresScheduler.done(
+                    dev.oreslang.interop.MixedInteropBridge.capture().isEmpty())).get(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void awaitResumesOnlyOnOwningSchedulerNotProducerThread() throws Exception {
         try (OresScheduler scheduler = new OresScheduler(2)) {
             OresFuture<Integer> source = new OresFuture<>();
