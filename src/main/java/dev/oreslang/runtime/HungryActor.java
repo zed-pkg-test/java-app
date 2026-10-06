@@ -8,6 +8,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -53,6 +54,8 @@ public final class HungryActor<M> implements AutoCloseable {
     private final NativeCarrierExecutor carrier;
     private final AtomicReference<Thread> worker = new AtomicReference<>();
     private final AtomicReference<Long> nativeThreadId = new AtomicReference<>(0L);
+    private final AtomicInteger carrierAffinityTarget = new AtomicInteger(-1);
+    private final AtomicInteger carrierCpu = new AtomicInteger(-1);
     private final String carrierThreadName;
     private final Context<M> context = new Context<>() {
         @Override
@@ -115,6 +118,14 @@ public final class HungryActor<M> implements AutoCloseable {
 
     public long nativeThreadId() {
         return nativeThreadId.get();
+    }
+
+    public int carrierAffinityTarget() {
+        return carrierAffinityTarget.get();
+    }
+
+    public int carrierCpu() {
+        return carrierCpu.get();
     }
 
     public boolean isNativeCarrier() {
@@ -204,6 +215,8 @@ public final class HungryActor<M> implements AutoCloseable {
     private void runLoop() {
         worker.set(Thread.currentThread());
         nativeThreadId.set(NativeCarrierExecutor.currentNativeThreadId());
+        carrierAffinityTarget.set(NativeCarrierExecutor.currentCarrierAffinityTarget());
+        carrierCpu.set(NativeCarrierExecutor.currentCarrierCpu());
         if (!carrier.isCurrentCarrierThread() || nativeThreadId.get() == 0L) {
             failure.compareAndSet(
                     null,
