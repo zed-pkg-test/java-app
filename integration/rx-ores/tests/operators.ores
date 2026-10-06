@@ -1,0 +1,22 @@
+import * as rx from '../src/rx.ores';
+import class Observable, Subscription from '../src/rx.ores';
+
+pub async fnc main(): void {
+  val Observable<int> source = rx.from_values([1, 2, 3, 4, 5]);
+  val Fnc<int, int> twice = |x| -> { return x * 2; };
+  val Observable<int> doubled = rx.map(source, twice);
+  val Fnc<&int, bool> large = |x| -> {
+    val int value = x as int;
+    return value > 4;
+  };
+  val Observable<int> selected = rx.filter(doubled, large);
+  val Observable<int> limited = rx.take(selected, 2);
+  val Subscription<int> sub = limited.subscribe();
+
+  stdio.println(sub.next().unwrap());
+  stdio.println(sub.next().unwrap());
+  stdio.println(sub.next().is_none());
+  sub.cancel();
+  stdio.println(sub.next().is_none());
+  return;
+}
