@@ -67,7 +67,6 @@ final class ParserTest {
 
         int actorCases = 0;
         for (List<String> order : permutations("pub", "async", "untrusted", "actor", "fnc")) {
-            if (order.indexOf("actor") > order.indexOf("fnc")) continue;
             actorCases++;
             assertDoesNotThrow(() -> Parser.parse("""
                     define module app as
@@ -77,7 +76,33 @@ final class ParserTest {
                     end
                     """.formatted(String.join(" ", order))), String.join(" ", order));
         }
-        assertEquals(60, actorCases);
+        assertEquals(120, actorCases);
+
+        int actorRoutineCases = 0;
+        for (List<String> order : permutations("pub", "async", "shared", "actor", "routine")) {
+            actorRoutineCases++;
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s worker_routine(int value): int {
+                        return value;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+        assertEquals(120, actorRoutineCases);
+
+        int isoActorCases = 0;
+        for (List<String> order : permutations("pub", "async", "isoactor", "fnc")) {
+            isoActorCases++;
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app as
+                      %s private_worker(int value): int {
+                        return value;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+        assertEquals(24, isoActorCases);
     }
 
     @Test
@@ -145,6 +170,37 @@ final class ParserTest {
             assertEquals(Ast.Visibility.PUBLIC, contract.visibility());
             assertTrue(contract.moduleContract());
         }
+    }
+
+    @Test
+    void actorMarkerMayAppearOnEitherSideOfCallableKind() {
+        Ast.Program program = Parser.parse("""
+                define module app as
+                  fnc pub actor untrusted async first(int value): int {
+                    return value;
+                  }
+
+                  routine shared pub actor async second(int value): int {
+                    return value;
+                  }
+
+                  fnc pub isoactor async third(int value): int {
+                    return value;
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        Ast.FunctionDecl first = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(0));
+        Ast.FunctionDecl second = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(1));
+        Ast.FunctionDecl third = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(2));
+
+        assertEquals(Ast.ActorKind.UNTRUSTED, first.actorKind());
+        assertEquals(Ast.ActorKind.SHARED, second.actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, third.actorKind());
+        assertTrue(first.async());
+        assertTrue(second.async());
+        assertTrue(third.async());
     }
 
     @Test
@@ -275,6 +331,27 @@ final class ParserTest {
                 """
                 define module app as
                   isoactor fnc shared contradictory(): void {
+                    return;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  shared fnc missing_actor(): void {
+                    return;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  fnc untrusted missing_actor_after_fnc(): void {
+                    return;
+                  }
+                end
+                """,
+                """
+                define module app as
+                  fnc shared isoactor contradictory_after_fnc(): void {
                     return;
                   }
                 end

@@ -887,43 +887,76 @@ shared actor Account {
 ```
 
 - an unqualified `actor` is **private**;
-- `shared actor` is a **shared-memory-capable** actor;
-- private and shared actors are scheduled on **different dispatcher pools** for bulkheading;
-- compiler-generated/context-aware actor factories are capture-free for **both** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
-- trusted host embedding has separately named supervisor-only construction escape hatches, and adversarial policies reject them;
-- both kinds still process their own mailbox serially;
-- actor-owned `let` fields may mutate during a mailbox turn because that turn is the exclusive mutation capability for `self`;
-- no lock is required around ordinary actor-owned fields, including fields of a shared actor;
-- actor `self` and move-only state rooted at `self` cannot escape the mailbox turn by value or returned borrow; copy-like values such as integers, booleans, and strings may be returned normally;
-- synchronized shared memory requires the host-granted `SHARED_MEMORY` capability.
+- a `shared actor` runs in the normal shared process/runtime, but **does not automatically receive writable shared-memory authority**;
+- private, shared, and untrusted actors remain separate scheduling/capability bulkheads;
+- compiler-generated/context-aware actor factories are capture-free; mutable host state must enter through messages or an explicit runtime-owned capability;
+- every actor remains the semantic owner and sole writer of its ordinary mutable state;
+- both private and shared actors process one mailbox turn at a time, so ordinary actor-owned fields require no mutex;
+- carrier-thread identity is never actor identity: an actor may migrate while keeping the same ActorId, heap/allocation domain, mailbox, and policy;
+- shared actors may efficiently consume explicitly published immutable/read-only data without thereby gaining permission to mutate a shared heap;
+- cross-actor application mutation is normally expressed as mailbox/channel commands and is performed by the actor that owns the state.
 
 Private actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
 
 The slice has two simultaneous limits:
 
 - a per-actor limit from that actor's `IsolatePolicy.maxHeapBytes()`;
-- an aggregate private-actor memory budget from the parent runtime policy.
+- an aggregate actor-memory budget from the parent runtime policy.
 
-This prevents many private actors from multiplying the parent's memory ceiling. Destroying the actor closes its slice and releases its accounting.
+The JVM backend's slice is currently an ownership/accounting boundary rather than a distinct Java GC heap. The target model extends actor-local allocation domains to shared actors as well: mutable fields, collections, closures, continuations, and turn-local temporaries belong to the ActorId, while immutable published data may live in a process-wide read-only region.
 
-The JVM backend's slice is a language/runtime ownership and accounting boundary, not a separate Java GC heap. The slice follows the actor id across dispatcher workers; it is not thread-local state. When physical heap separation is required for adversarial tenant code, the same private-actor semantics must be backed by a cross-thread-capable private region or a separate Graal polyglot/native isolate.
+The central invariant is:
 
-Shared actors may additionally receive:
+> **Every mutable object has one semantic actor-domain owner. Ordinary actors may share immutable data; cross-actor mutation is a message.**
 
-1. deeply immutable `Shared<T>` values; and
-2. explicit synchronized shared cells.
+### `rt proxy`: explicit synchronized escape hatch
 
-The runtime primitive for the second case is `SyncCell<T>`. A cell stores only frozen state and serializes replacement updates under a lock. Shared-cell state is quota-accounted against the same parent actor-memory ceiling as private actor slices. Private actor turns cannot create, inspect, mutate, or close a `SyncCell<T>`. This is the intended lowering target for a future `sync` language construct; `sync` is **not** an implicit lock around actor methods.
+`rt proxy` exists for the exceptional case where copying or actor-owner routing would be disproportionately expensive. It consumes an owned class instance or dynamic struct and returns a `Proxy<T>` backed by a runtime-owned **fair logical read/write lease queue**. Lock ownership is not JVM-thread/carrier identity:
 
-Actor message graphs are cyclicity-checked and bounded by nesting depth, node count, and logical byte quotas before admission so malicious container graphs cannot turn actor transport into unbounded recursion, CPU, or memory use.
+```ores
+define class Cache as
+  pub let int hits = 0;
 
-This preserves the central invariant:
+  pub inc(): int {
+    self.hits = self.hits + 1;
+    return self.hits;
+  }
+end
 
-> Actor state is mutated through mailbox ownership. Shared mutable state outside an actor is exceptional and must use an explicit synchronization abstraction.
+val cache = rt proxy new Cache();
+cache.hits = 10;       // write lease
+val n = cache.hits;    // read lease
+val m = cache.inc();   // conservative write lease
+```
 
-Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into a private or shared actor invalidates dependent compiled units.
+Both `rt proxy value` and `rt proxy(value)` are accepted. The original move-only owner is consumed, so code cannot keep a raw mutable alias beside the proxy. A proxy can cross only SHARED actor boundaries and requires the explicit `ACTOR_SHARED_PROXY` capability; private/untrusted actors and ordinary async-task boundaries reject it.
 
-Shared writable handles use transactional publication. A `SharedMutex<T>` is reserved to the destination runtime before mailbox visibility, committed only after queue admission, and unbound again when first publication fails. This prevents failed sends from accidentally claiming a writable capability for the wrong runtime.
+Proxy contention is scheduler-cooperative. An uncontended access receives a logical lease immediately. If a read/write lease is unavailable, source execution registers a runtime-owned `OresFuture` waiter, stores its continuation, and returns from the current scheduler turn so the physical actor/source carrier can run other work. The lock reserves the grant before settling that future; the continuation is resumed only by its owning scheduler. Future completion never executes guest Oreslang code directly. Cancellation detaches queued waiters, and runtime shutdown fails queued waiters instead of leaving suspended continuations retained. FIFO ordering admits consecutive readers at the head as a batch while a queued writer prevents later readers from barging, bounding writer starvation.
+
+The synchronous host/runtime convenience API may wait only outside actor/source scheduler execution. A contended synchronous access from an actor or scheduler turn fails closed rather than parking its carrier.
+
+Proxy access is deliberately restrictive:
+
+- scalar/immutable member or index reads use a read lock;
+- field/index mutation uses a write lock;
+- methods with a proven immutable-borrow receiver may use a read lock; other methods use a write lock conservatively;
+- a proxy method may not `await`, suspend, or be declared `async` while the lock is held;
+- bound methods cannot be extracted from a proxy;
+- nested class and `DynamicStruct` state never escapes raw: it is returned as a child `Proxy<U>` view that shares the parent's lock domain and is interned by target identity;
+- raw mutable collections, callables, host capabilities, and other unsynchronized move-only values still cannot escape through a proxy read or method result; publish a snapshot or add a dedicated proxy adapter instead;
+- nested locking across different proxy lock domains is rejected to avoid ABBA lock-order deadlocks;
+- read-to-write lock upgrade on the same proxy is rejected rather than blocking forever;
+- `proxy.dispose()` explicitly revokes the proxy handle and releases its runtime quota/root; it is reserved on `Proxy<T>` and does not dispatch to a wrapped class method.
+
+Proxy field/index assignment is statement-like: it returns `void`. A move-only value assigned into a proxy therefore cannot also escape as the value of the assignment expression.
+
+`rt proxy` is therefore **not** the ordinary meaning of `shared actor`. It is an explicit synchronized capability for large or awkward object graphs where the programmer knowingly chooses shared mutable access.
+
+The older `SyncCell<T>` / `SharedMutex<T>` runtime machinery remains available to host/runtime compatibility code while the ownership model is migrated, but **actors do not receive `SHARED_MEMORY` authority**, including trusted host-created shared actors. New application code should prefer owner actors/messages, immutable publication, or explicit `rt proxy` where synchronization is genuinely required.
+
+The other `rt` ownership operations are being converged separately with allocation-domain semantics. In particular, `rt share` must not silently publish a pointer from one actor heap into globally visible memory; global immutable publication requires a distinct checked boundary.
+
+Actor message graphs are cyclicity-checked and bounded by nesting depth, node count, and logical byte quotas before admission so malicious container graphs cannot turn actor transport into unbounded recursion, CPU, or memory use. Arbitrary mutable host objects remain invalid actor messages. Actor kind is part of the public ABI, so changing a normal callable/class into an actor invalidates dependent compiled units.
 
 ## Isolates
 
@@ -1339,7 +1372,7 @@ Security is layered. Oreslang uses a deny-by-default language capability policy 
 
 An isolate policy can independently allow or deny:
 
-`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
+`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `ACTOR_SHARED_PROXY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`. `SHARED_MEMORY` is a host/runtime compatibility authority; actor policy derivation strips it. `ACTOR_SHARED_PROXY` is the narrower actor-facing synchronized capability.
 
 The trusted compiler API can reject forbidden API usage before execution:
 
