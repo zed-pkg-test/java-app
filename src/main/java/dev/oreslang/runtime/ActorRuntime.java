@@ -162,6 +162,13 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum ActorKind { PRIVATE, SHARED, UNTRUSTED }
 
+    /** Stable allocation/provenance context for the actor executing on this runtime. */
+    public Optional<ActorMemoryDomain> currentActorMemoryDomain() {
+        requireCallerRuntimeAffinity("resolve actor memory domain");
+        ActorCell<?> cell = currentActor.get();
+        return cell == null ? Optional.empty() : Optional.of(cell.memoryDomain);
+    }
+
     public static final class UntrustedActorQuotaExceededException extends SecurityException {
         public enum Resource { FUEL, WALL_TIME, CPU_TIME }
         private final Resource resource;
@@ -942,6 +949,16 @@ public final class ActorRuntime implements AutoCloseable {
         IsolatePolicy policy();
         ActorKind kind();
         Optional<ActorMemorySlice> privateMemory();
+
+        /** Compiler-facing local ownership context, including for shared actors. */
+        default ActorMemoryDomain memoryDomain() {
+            ActorMemoryDomain domain = runtime().currentActorMemoryDomain().orElseThrow(() ->
+                    new IllegalStateException("actor memory domain requires an executing actor turn"));
+            if (!domain.owner().equals(self().id())) {
+                throw new SecurityException("ActorContext belongs to a different actor memory domain");
+            }
+            return domain;
+        }
 
         /**
          * Resolve a group the current actor has already joined. ActorGroupId is
@@ -2413,6 +2430,21 @@ public final class ActorRuntime implements AutoCloseable {
     private void validatePrivateBehaviorCapture(ActorId owner, String fieldName, Object value) {
         if (value == null || isScalar(value) || value instanceof Class<?>) return;
 
+        if (value instanceof ActorMemoryDomain domain) {
+            ActorCell<?> cell = actors.get(owner);
+            if (cell == null || cell.memoryDomain != domain) {
+                throw new SecurityException("private actor behavior captured a foreign memory domain in " + fieldName);
+            }
+            return;
+        }
+        if (value instanceof ActorMemoryDomain.Reservation reservation) {
+            ActorCell<?> cell = actors.get(owner);
+            if (cell == null || cell.memoryDomain != reservation.domain()) {
+                throw new SecurityException("private actor behavior captured a foreign allocation reservation in " + fieldName);
+            }
+            return;
+        }
+
         if (value instanceof PrivateMemoryBlock block) {
             if (!block.owner().equals(owner)) {
                 throw new SecurityException(
@@ -3157,7 +3189,8 @@ public final class ActorRuntime implements AutoCloseable {
         long runtimeRemaining = Math.max(0L, policyCeiling.maxHeapBytes() - actorMemoryBytes());
         if (cell.kind == ActorKind.SHARED) {
             requireOwnedSharedHandles(message, new IdentityHashMap<>(), 0);
-            long actorRemaining = Math.max(0L, cell.policy.maxHeapBytes() - cell.sharedMailboxBytes.get());
+            long actorRemaining = Math.max(0L, cell.policy.maxHeapBytes()
+                    - cell.sharedMailboxBytes.get() - cell.sharedHeapBytes.get());
             long allowed = Math.min(actorRemaining, runtimeRemaining);
             try {
                 estimateSharedTransportBytes(message, new IdentityHashMap<>(), 0, allowed);
@@ -4591,10 +4624,13 @@ public final class ActorRuntime implements AutoCloseable {
         /** Mailbox transport is a bounded Oreslang channel of runtime envelopes. */
         private final ChannelRuntime.Channel<MessageEnvelope> mailbox;
         private final ActorMemorySlice memorySlice;
+        private final ActorMemoryDomain memoryDomain;
         private final AtomicBoolean scheduled = new AtomicBoolean();
         private final AtomicBoolean stopped = new AtomicBoolean();
         private volatile boolean forceKillFenced;
         private final AtomicLong sharedMailboxBytes = new AtomicLong();
+        private final AtomicLong sharedHeapBytes = new AtomicLong();
+        private final Object heapAccountingLock = new Object();
         private final Object mailboxAccountingLock = new Object();
         private int queuedMessages;
         private int queuedUserMessages;
@@ -4631,6 +4667,45 @@ public final class ActorRuntime implements AutoCloseable {
             this.memorySlice = isPrivateKind(kind)
                     ? new ActorMemorySlice(ref.id(), policy.maxHeapBytes())
                     : null;
+            this.memoryDomain = new ActorMemoryDomain(
+                    ActorRuntime.this, ref.id(), kind, policy, executionDomain,
+                    () -> !closed.get() && !stopped.get() && !forceKillFenced,
+                    this::reserveOwnedHeap);
+        }
+
+        private Runnable reserveOwnedHeap(long bytes) {
+            synchronized (lifecycleLock) {
+                if (closed.get() || stopped.get() || forceKillFenced) throw terminated(ref);
+                if (memorySlice != null) {
+                    MemoryReservation reservation = memorySlice.reserveHeap(bytes);
+                    return reservation::close;
+                }
+                synchronized (heapAccountingLock) {
+                    long next;
+                    long total;
+                    try {
+                        next = Math.addExact(sharedHeapBytes.get(), bytes);
+                        total = Math.addExact(next, sharedMailboxBytes.get());
+                    } catch (ArithmeticException overflow) {
+                        throw new IllegalStateException("shared actor heap accounting overflow", overflow);
+                    }
+                    if (total > policy.maxHeapBytes()) {
+                        throw new IllegalStateException("shared actor heap limit exceeded for " + ref.id()
+                                + ": requested=" + bytes + " limit=" + policy.maxHeapBytes());
+                    }
+                    reserveSharedRuntimeBytes(bytes, "shared actor heap");
+                    sharedHeapBytes.set(next);
+                    return () -> {
+                        synchronized (heapAccountingLock) {
+                            if (bytes > sharedHeapBytes.get()) {
+                                throw new IllegalStateException("shared actor heap accounting underflow");
+                            }
+                            sharedHeapBytes.addAndGet(-bytes);
+                            releaseSharedRuntimeBytes(bytes);
+                        }
+                    };
+                }
+            }
         }
 
         private int mailboxCapacityWithControlHeadroom() {
@@ -4743,6 +4818,7 @@ public final class ActorRuntime implements AutoCloseable {
                 }
             }
             drainMailboxReservations();
+            memoryDomain.retireFromActor();
             if (memorySlice != null) memorySlice.close();
             try {
                 actorExitHook.accept(executionDomain);
@@ -4805,7 +4881,7 @@ public final class ActorRuntime implements AutoCloseable {
                 } catch (ArithmeticException overflow) {
                     throw new IllegalStateException("shared actor mailbox memory accounting overflow");
                 }
-                if (next > policy.maxHeapBytes()) {
+                if (next > policy.maxHeapBytes() - sharedHeapBytes.get()) {
                     throw new IllegalStateException("shared actor mailbox memory limit exceeded for " + ref.id()
                             + ": requested=" + bytes + " used=" + current + " limit=" + policy.maxHeapBytes());
                 }
