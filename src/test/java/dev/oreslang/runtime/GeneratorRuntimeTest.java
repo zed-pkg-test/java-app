@@ -86,6 +86,79 @@ final class GeneratorRuntimeTest {
     }
 
     @Test
+    void channelAsyncIteratorDrainsBufferedValuesThenCompletesOnNormalClose() throws Exception {
+        try (AsyncRuntime runtime = new AsyncRuntime()) {
+            ChannelRuntime.Channel<Integer> channel = new ChannelRuntime.Channel<>(2);
+            assertTrue(channel.tryWrite(1));
+            assertTrue(channel.tryWrite(2));
+            channel.close();
+
+            try (var iterator = GeneratorRuntime.channelAsyncIterator(runtime, channel)) {
+                assertEquals(1, iterator.nextStep().get(2, TimeUnit.SECONDS).value());
+                assertEquals(2, iterator.nextStep().get(2, TimeUnit.SECONDS).value());
+                assertTrue(iterator.nextStep().get(2, TimeUnit.SECONDS).done());
+            }
+        }
+    }
+
+    @Test
+    void channelAsyncIteratorPropagatesExceptionalCloseAfterDrain() throws Exception {
+        try (AsyncRuntime runtime = new AsyncRuntime()) {
+            ChannelRuntime.Channel<Integer> channel = new ChannelRuntime.Channel<>(1);
+            assertTrue(channel.tryWrite(7));
+            channel.close(new IllegalStateException("boom"));
+
+            try (var iterator = GeneratorRuntime.channelAsyncIterator(runtime, channel)) {
+                assertEquals(7, iterator.nextStep().get(2, TimeUnit.SECONDS).value());
+                java.util.concurrent.ExecutionException failure = assertThrows(
+                        java.util.concurrent.ExecutionException.class,
+                        () -> iterator.nextStep().get(2, TimeUnit.SECONDS));
+                Throwable cause = failure.getCause();
+                assertInstanceOf(ChannelRuntime.ChannelClosedException.class, cause);
+                assertNotNull(cause.getCause());
+                assertEquals("boom", cause.getCause().getMessage());
+            }
+        }
+    }
+
+    @Test
+    void closingChannelIteratorCancelsPendingReadWithoutClosingOrStealingFromChannel() throws Exception {
+        try (AsyncRuntime runtime = new AsyncRuntime()) {
+            ChannelRuntime.Channel<Integer> channel = new ChannelRuntime.Channel<>(1);
+            var iterator = GeneratorRuntime.channelAsyncIterator(runtime, channel);
+            OresFuture<GeneratorRuntime.Step<Integer>> pending = iterator.nextStep();
+
+            // Give the producer carrier a chance to arm the channel read.
+            Thread.sleep(25);
+            iterator.close();
+            assertTrue(pending.get(2, TimeUnit.SECONDS).done());
+            assertFalse(channel.isClosed());
+
+            assertTrue(channel.tryWrite(9));
+            assertEquals(9, channel.tryRead().orElseThrow());
+            channel.close();
+        }
+    }
+
+    @Test
+    void twoChannelIteratorViewsCompeteForValuesRatherThanBroadcasting() throws Exception {
+        try (AsyncRuntime runtime = new AsyncRuntime()) {
+            ChannelRuntime.Channel<Integer> channel = new ChannelRuntime.Channel<>(2);
+            assertTrue(channel.tryWrite(1));
+            assertTrue(channel.tryWrite(2));
+            channel.close();
+
+            try (var a = GeneratorRuntime.channelAsyncIterator(runtime, channel);
+                 var b = GeneratorRuntime.channelAsyncIterator(runtime, channel)) {
+                assertEquals(1, a.nextStep().get(2, TimeUnit.SECONDS).value());
+                assertEquals(2, b.nextStep().get(2, TimeUnit.SECONDS).value());
+                assertTrue(a.nextStep().get(2, TimeUnit.SECONDS).done());
+                assertTrue(b.nextStep().get(2, TimeUnit.SECONDS).done());
+            }
+        }
+    }
+
+    @Test
     void closeUnblocksAnInFlightPullAndInterruptsProducer() throws Exception {
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch interrupted = new CountDownLatch(1);
