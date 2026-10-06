@@ -570,6 +570,51 @@ public final class ActorRuntime implements AutoCloseable {
         }
         return rootAllocationDomain();
     }
+    /**
+     * Actor-local allocator for the currently executing semantic actor.
+     *
+     * <p>Returns empty outside actor execution. Cross-runtime lookups and
+     * ActorGroup Mailman CONTROL execution fail closed; carrier-thread identity
+     * alone never grants allocator authority.</p>
+     */
+    public Optional<ActorMemorySlice> currentActorLocalMemory() {
+        requireCallerRuntimeAffinity("resolve actor-local allocation memory");
+        requireNotActorGroupMailman("resolve actor-local allocation memory");
+
+        ActorExecutionContext execution = CURRENT_ACTOR_EXECUTION.get();
+        if (execution == null) return Optional.empty();
+        if (execution.runtime() != this) {
+            throw new SecurityException(
+                    "actor-local allocator lookup crossed ActorRuntime boundary");
+        }
+
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null
+                || !cell.ref.id().equals(execution.actorId())
+                || cell.kind != execution.kind()) {
+            throw new IllegalStateException(
+                    "actor-local allocator provenance is not bound to the active actor cell");
+        }
+        return Optional.of(cell.memorySlice);
+    }
+
+    /**
+     * Conservative compiler/interpreter lowering hook for storage known to
+     * remain actor-owned. The JVM reference backend currently retains this
+     * logical charge until actor teardown; future escape/drop lowering may
+     * shorten the lifetime without changing allocation-domain semantics.
+     */
+    public void accountCurrentActorPersistentAllocation(long bytes, String purpose) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException(
+                    "actor-local allocation size cannot be negative");
+        }
+        if (bytes == 0) return;
+        Optional<ActorMemorySlice> local = currentActorLocalMemory();
+        if (local.isEmpty()) return;
+        local.get().accountPersistentHeap(bytes, purpose);
+    }
+
     public DispatcherConfig dispatcherConfig() { return dispatcherConfig; }
     public int maxActors() { return dispatcherConfig.maxActors(); }
 
@@ -764,10 +809,35 @@ public final class ActorRuntime implements AutoCloseable {
                             : "private actor mailbox");
         }
 
+        /**
+         * Charge actor-owned persistent storage without exposing a reservation
+         * handle to guest code. Uses the same combined local+mailbox actor
+         * ceiling as explicit local-memory reservations.
+         */
+        public void accountPersistentHeap(long bytes, String purpose) {
+            requireCurrentOwner();
+            reserveBytes(
+                    bytes,
+                    purpose == null || purpose.isBlank()
+                            ? "actor-local persistent allocation"
+                            : purpose);
+        }
+
         private synchronized MemoryReservation reserve(long bytes, String purpose) {
-            if (bytes < 0) throw new IllegalArgumentException("memory reservation cannot be negative");
-            if (sliceClosed.get()) throw new IllegalStateException("actor-local memory slice is closed");
-            if (bytes == 0) return new MemoryReservation(this, 0);
+            reserveBytes(bytes, purpose);
+            return new MemoryReservation(this, bytes);
+        }
+
+        private synchronized void reserveBytes(long bytes, String purpose) {
+            if (bytes < 0) {
+                throw new IllegalArgumentException(
+                        "memory reservation cannot be negative");
+            }
+            if (sliceClosed.get()) {
+                throw new IllegalStateException(
+                        "actor-local memory slice is closed");
+            }
+            if (bytes == 0) return;
 
             synchronized (actorHeapBudgetLock) {
                 long current = usedBytes.get();
@@ -775,26 +845,30 @@ public final class ActorRuntime implements AutoCloseable {
                 try {
                     next = Math.addExact(current, bytes);
                 } catch (ArithmeticException overflow) {
-                    throw new IllegalStateException(purpose + " accounting overflow");
+                    throw new IllegalStateException(
+                            purpose + " accounting overflow");
                 }
-                long mailbox = kind == ActorKind.SHARED ? sharedMailboxBytes.get() : 0L;
+                long mailbox = kind == ActorKind.SHARED
+                        ? sharedMailboxBytes.get()
+                        : 0L;
                 long actorTotal;
                 try {
                     actorTotal = Math.addExact(next, mailbox);
                 } catch (ArithmeticException overflow) {
-                    throw new IllegalStateException(purpose + " actor heap accounting overflow");
+                    throw new IllegalStateException(
+                            purpose + " actor heap accounting overflow");
                 }
                 if (actorTotal > limitBytes) {
-                    throw new IllegalStateException(purpose + " limit exceeded for " + owner
-                            + ": requested=" + bytes
-                            + " localUsed=" + current
-                            + " mailboxUsed=" + mailbox
-                            + " limit=" + limitBytes);
+                    throw new IllegalStateException(
+                            purpose + " limit exceeded for " + owner
+                                    + ": requested=" + bytes
+                                    + " localUsed=" + current
+                                    + " mailboxUsed=" + mailbox
+                                    + " limit=" + limitBytes);
                 }
 
                 reserveActorLocalRuntimeBytes(bytes, owner, kind, purpose);
                 usedBytes.set(next);
-                return new MemoryReservation(this, bytes);
             }
         }
 
