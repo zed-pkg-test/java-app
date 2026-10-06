@@ -219,15 +219,26 @@ public final class ActorEventBus implements AutoCloseable {
         String topicName = normalizeTopicName(name);
         synchronized (definitionLock) {
             requireOpen();
-            defineTopic(topicName, DeliveryPolicy.LATEST, 1);
-            DoubleReductionState created =
-                    new DoubleReductionState(topicName, kind, initialValue);
-            DoubleReductionState existing =
-                    doubleReductions.putIfAbsent(topicName, created);
-            if (existing != null && !existing.sameDefinition(kind, initialValue)) {
-                throw new IllegalStateException(
-                        "double reduction already defined with different semantics: " + topicName);
+            DoubleReductionState existing = doubleReductions.get(topicName);
+            if (existing != null) {
+                if (!existing.sameDefinition(kind, initialValue)) {
+                    throw new IllegalStateException(
+                            "double reduction already defined with different semantics: " + topicName);
+                }
+                return;
             }
+            if (topics.containsKey(topicName)) {
+                throw new IllegalStateException(
+                        "ordinary event topic cannot become a reduction: " + topicName);
+            }
+            int topicLimit = group.eventTopicLimit();
+            if (topics.size() >= topicLimit) {
+                throw new IllegalStateException(
+                        "ActorGroup event topic limit exceeded: " + topicLimit);
+            }
+            doubleReductions.put(topicName,
+                    new DoubleReductionState(topicName, kind, initialValue));
+            topics.put(topicName, new TopicState(topicName, DeliveryPolicy.LATEST, 1, true));
         }
     }
 
@@ -293,7 +304,7 @@ public final class ActorEventBus implements AutoCloseable {
         requireOpen();
         ActorRuntime.ActorId publisher = group.currentMemberOrSystem("publish ActorGroup events");
         return publishFrozen(
-                requireTopic(name),
+                requirePublishableTopic(name),
                 runtime.freezeActorGroupEventPayload(value),
                 publisher);
     }
@@ -306,7 +317,7 @@ public final class ActorEventBus implements AutoCloseable {
         group.requireSupervisor("publish system ActorGroup events");
         requireOpen();
         return publishFrozen(
-                requireTopic(name),
+                requirePublishableTopic(name),
                 runtime.freezeActorGroupEventPayload(value),
                 null);
     }
@@ -345,8 +356,8 @@ public final class ActorEventBus implements AutoCloseable {
 
             ActorRuntime.FrozenActorGroupEventPayload frozen =
                     runtime.freezeActorGroupEventPayload(candidate);
-            reduction.set(candidate);
-            PublishReceipt receipt = publishFrozen(topic, frozen, publisher);
+            PublishReceipt receipt = publishFrozen(
+                    topic, frozen, publisher, () -> reduction.set(candidate));
             return new DoubleReductionResult(candidate, true, receipt);
         }
     }
@@ -397,6 +408,14 @@ public final class ActorEventBus implements AutoCloseable {
             TopicState topic,
             ActorRuntime.FrozenActorGroupEventPayload frozenPayload,
             ActorRuntime.ActorId publisher) {
+        return publishFrozen(topic, frozenPayload, publisher, () -> { });
+    }
+
+    private PublishReceipt publishFrozen(
+            TopicState topic,
+            ActorRuntime.FrozenActorGroupEventPayload frozenPayload,
+            ActorRuntime.ActorId publisher,
+            Runnable commitState) {
         Event<Object> event = null;
         try {
             synchronized (topic.deliveryLock) {
@@ -416,6 +435,9 @@ public final class ActorEventBus implements AutoCloseable {
                         frozenPayload.value(),
                         frozenPayload.reservation());
                 event = created;
+                // Commit only after the topic's admission/close fence, before readers
+                // can observe the notification. Reduction callers hold their state lock.
+                commitState.run();
 
                 List<Subscription<?>> snapshot =
                         List.copyOf(topic.subscriptions.values());
@@ -556,6 +578,15 @@ public final class ActorEventBus implements AutoCloseable {
         return topic;
     }
 
+    private TopicState requirePublishableTopic(String name) {
+        TopicState topic = requireTopic(name);
+        if (topic.reductionOwned) {
+            throw new IllegalStateException(
+                    "reduction notifications require reduceDouble: " + topic.name);
+        }
+        return topic;
+    }
+
     private DoubleReductionState requireDoubleReduction(String name) {
         String topicName = normalizeTopicName(name);
         DoubleReductionState reduction = doubleReductions.get(topicName);
@@ -590,6 +621,7 @@ public final class ActorEventBus implements AutoCloseable {
         private final String name;
         private final DeliveryPolicy policy;
         private final int capacity;
+        private final boolean reductionOwned;
         private final Map<ActorRuntime.ActorId, Subscription<?>> subscriptions =
                 new ConcurrentHashMap<>();
         private final Object deliveryLock = new Object();
@@ -599,9 +631,14 @@ public final class ActorEventBus implements AutoCloseable {
         private final AtomicLong coalesced = new AtomicLong();
 
         private TopicState(String name, DeliveryPolicy policy, int capacity) {
+            this(name, policy, capacity, false);
+        }
+
+        private TopicState(String name, DeliveryPolicy policy, int capacity, boolean reductionOwned) {
             this.name = name;
             this.policy = policy;
             this.capacity = capacity;
+            this.reductionOwned = reductionOwned;
         }
 
         private TopicInfo info() {
@@ -662,6 +699,8 @@ public final class ActorEventBus implements AutoCloseable {
         private final Object latestLock = new Object();
         private final AtomicInteger reliableOutstanding = new AtomicInteger();
         private final int reliableOutstandingLimit;
+        private final AtomicInteger pendingReads = new AtomicInteger();
+        private final int pendingReadLimit;
         private final AtomicBoolean subscriptionClosed = new AtomicBoolean();
 
         private Subscription(
@@ -671,6 +710,7 @@ public final class ActorEventBus implements AutoCloseable {
             this.topic = topic;
             this.subscriber = subscriber;
             this.channel = new ChannelRuntime.Channel<>(capacity);
+            this.pendingReadLimit = ActorRuntime.currentActorPolicy().maxMailboxMessages();
             long bounded = Math.max((long) capacity + 1L, (long) capacity * 2L);
             this.reliableOutstandingLimit = (int) Math.min(Integer.MAX_VALUE, bounded);
         }
@@ -713,8 +753,23 @@ public final class ActorEventBus implements AutoCloseable {
 
         public OresFuture<Event<T>> readAsync() {
             requireReadable();
-            OresFuture<Event<T>> read = channel.readAsync();
+            while (true) {
+                int current = pendingReads.get();
+                if (current >= pendingReadLimit) {
+                    throw new IllegalStateException("event subscription pending read limit exceeded: "
+                            + pendingReadLimit);
+                }
+                if (pendingReads.compareAndSet(current, current + 1)) break;
+            }
+            final OresFuture<Event<T>> read;
+            try {
+                read = channel.readAsync();
+            } catch (RuntimeException | Error failure) {
+                pendingReads.decrementAndGet();
+                throw failure;
+            }
             read.whenCompleteRuntime((value, failure) -> {
+                pendingReads.decrementAndGet();
                 if (failure == null) {
                     if (topic.policy == DeliveryPolicy.RELIABLE) {
                         releaseReliableEvent();
