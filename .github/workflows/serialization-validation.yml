@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Audit serialization source invariants
+        run: python3 serialization-validation/scripts/audit.py
       - name: Set up GraalVM
         uses: graalvm/setup-graalvm@v1
         with:
