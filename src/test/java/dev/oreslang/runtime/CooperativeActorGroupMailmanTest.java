@@ -197,6 +197,156 @@ final class CooperativeActorGroupMailmanTest {
         }
     }
 
+    @Test
+    void terminalAwaitDefersResumeAdmissionUntilPriorControlTurnReleasesLease()
+            throws Exception {
+        ExecutorService control = Executors.newFixedThreadPool(
+                2,
+                runnable -> Thread.ofPlatform()
+                        .daemon(true)
+                        .name("test-control-parallel")
+                        .unstarted(runnable));
+        AtomicInteger submissions = new AtomicInteger();
+        ActorRuntime.ControlDispatcher dispatcher = task -> {
+            submissions.incrementAndGet();
+            assertFalse(
+                    ActorRuntime.inActorGroupMailmanExecution(),
+                    "a cooperative resume must not be submitted while the prior Mailman turn is active");
+            OresFuture<Void> completion = new OresFuture<>();
+            control.execute(() -> {
+                try {
+                    task.run();
+                    completion.completeFromRuntime(null);
+                } catch (Throwable failure) {
+                    completion.failFromRuntime(failure);
+                }
+            });
+            return completion;
+        };
+
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8, 64),
+                ActorRuntime.TurnExecutor.direct(),
+                dispatcher)) {
+
+            ActorRuntime.ActorGroup group = runtime.createActorGroup();
+            ActorRuntime.ActorGroupJoinCapability join = group.joinCapability();
+            CountDownLatch joined = new CountDownLatch(1);
+            CountDownLatch delivered = new CountDownLatch(1);
+
+            ActorRuntime.ActorRef<Integer> sink = runtime.spawnShared(() -> (message, context) -> {
+                delivered.countDown();
+                context.self().stop();
+            });
+
+            group.installCooperativeMailman(4, (mail, context) -> new OresScheduler.Task<>() {
+                private int pc;
+
+                @Override
+                public OresScheduler.Step<Void> resume(OresScheduler.Resume resume) {
+                    if (pc == 0) {
+                        pc = 1;
+                        return OresScheduler.await(OresFuture.completed("already-ready"));
+                    }
+                    if (pc == 1) {
+                        assertEquals("already-ready", resume.value());
+                        context.send(sink, 1);
+                        pc = 2;
+                        return OresScheduler.done(null);
+                    }
+                    throw new IllegalStateException("terminal-await task resumed after completion");
+                }
+            });
+
+            ActorRuntime.ActorRef<Integer> emitter = runtime.spawnShared(() -> (message, context) -> {
+                if (message == 0) {
+                    group.joinCurrent(join);
+                    joined.countDown();
+                } else {
+                    group.emit(message);
+                    context.self().stop();
+                }
+            });
+
+            emitter.send(0);
+            assertTrue(joined.await(5, TimeUnit.SECONDS));
+            emitter.send(1);
+
+            assertTrue(delivered.await(5, TimeUnit.SECONDS));
+            assertTrue(emitter.awaitTermination(5, TimeUnit.SECONDS));
+            assertTrue(sink.awaitTermination(5, TimeUnit.SECONDS));
+            assertEquals(
+                    2,
+                    submissions.get(),
+                    "one initial CONTROL turn plus one post-lease resume should be admitted");
+        } finally {
+            control.shutdownNow();
+            assertTrue(control.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void taskFactoryFailureReleasesDequeuedPayloadReservation()
+            throws Exception {
+        ExecutorService control = Executors.newSingleThreadExecutor(
+                runnable -> Thread.ofPlatform()
+                        .daemon(true)
+                        .name("test-control-factory-failure")
+                        .unstarted(runnable));
+        ActorRuntime.ControlDispatcher dispatcher = controlDispatcher(control);
+
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8, 64),
+                ActorRuntime.TurnExecutor.direct(),
+                dispatcher)) {
+
+            ActorRuntime.ActorGroup group = runtime.createActorGroup();
+            ActorRuntime.ActorGroupJoinCapability join = group.joinCapability();
+            CountDownLatch joined = new CountDownLatch(1);
+            CountDownLatch factoryEntered = new CountDownLatch(1);
+            CountDownLatch peerRan = new CountDownLatch(1);
+
+            group.installCooperativeMailman(4, (mail, context) -> {
+                factoryEntered.countDown();
+                throw new IllegalArgumentException("factory boom");
+            });
+
+            ActorRuntime.ActorRef<Integer> emitter = runtime.spawnShared(() -> (message, context) -> {
+                if (message == 0) {
+                    group.joinCurrent(join);
+                    joined.countDown();
+                } else {
+                    group.emit(List.of(message, message + 1, message + 2));
+                    context.self().stop();
+                }
+            });
+
+            emitter.send(0);
+            assertTrue(joined.await(5, TimeUnit.SECONDS));
+            emitter.send(7);
+
+            assertTrue(factoryEntered.await(5, TimeUnit.SECONDS));
+
+            // FIFO on the same single CONTROL executor proves the failing
+            // Mailman turn has fully unwound and runQuantum's failure cleanup ran.
+            dispatcher.execute(peerRan::countDown);
+            assertTrue(peerRan.await(5, TimeUnit.SECONDS));
+            assertTrue(emitter.awaitTermination(5, TimeUnit.SECONDS));
+
+            assertFalse(group.hasMailman());
+            assertEquals(0, group.mailmanOutboxSize());
+            assertEquals(
+                    0L,
+                    runtime.sharedMemoryBytes(),
+                    "factory failure must release the dequeued envelope reservation");
+        } finally {
+            control.shutdownNow();
+            assertTrue(control.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     private static ActorRuntime.ControlDispatcher controlDispatcher(ExecutorService control) {
         return task -> {
             OresFuture<Void> completion = new OresFuture<>();
