@@ -1043,25 +1043,115 @@ public final class Parser {
                 while (match(COMMA)) args.add(parseTypeRef());
                 consume(GT, "expected '>' after type arguments");
             } else {
+                boolean intrinsicSequence = isIntrinsicSequenceTypeName(name);
+                boolean namedSeen = false;
                 do {
                     if (check(IDENT) && checkNext(EQUAL)) {
+                        namedSeen = true;
                         String parameterName = advance().lexeme();
                         consume(EQUAL, "expected '=' after named type parameter");
                         args.add(Ast.TypeRef.namedParameter(parameterName, parseMetaValue()));
                     } else {
-                        args.add(parseTypeRef());
+                        if (intrinsicSequence && namedSeen) {
+                            throw error(peek(),
+                                    "positional type parameters cannot follow named type parameters");
+                        }
+                        args.add(intrinsicSequence ? parseMetaValue() : parseTypeRef());
                     }
                 } while (match(COMMA));
                 consume(GT, "expected '>' after type arguments / named parameters");
             }
         }
 
-        args = canonicalizeNamedParameters(args);
+        args = isIntrinsicSequenceTypeName(name)
+                ? canonicalizeIntrinsicSequenceTypeParameters(name, args)
+                : canonicalizeNamedParameters(args);
         while (match(LBRACKET)) {
             args.add(parseSequenceShapeDimension());
             consume(RBRACKET, "expected ']' after sequence type shape");
         }
         return new Ast.TypeRef(name, args, infer);
+    }
+
+    private boolean isNamedTypeParameterStart() {
+        return (check(IDENT) || check(TYPE)) && checkNext(EQUAL);
+    }
+
+    private String consumeNamedTypeParameterName() {
+        if (check(IDENT) || check(TYPE)) return advance().lexeme();
+        throw error(peek(), "expected named type parameter name");
+    }
+
+    private boolean isIntrinsicSequenceTypeName(String name) {
+        return java.util.Set.of(
+                "Array", "List", "Vector", "Slice",
+                "Tuple", "FixedArray", "FixedList").contains(name);
+    }
+
+    /**
+     * Intrinsic collection angle parameters are a real parameter list, not a
+     * bag of unrelated generic values. Positional parameters bind to the same
+     * schema as named parameters, just like call-site named arguments.
+     *
+     * Current common schema:
+     *   type, size, align, allocator, growth_policy,
+     *   inline_capacity, max_capacity, storage, rank
+     */
+    private List<Ast.TypeRef> canonicalizeIntrinsicSequenceTypeParameters(
+            String typeName,
+            List<Ast.TypeRef> args) {
+        List<String> schema = List.of(
+                "type",
+                "size",
+                "align",
+                "allocator",
+                "growth_policy",
+                "inline_capacity",
+                "max_capacity",
+                "storage",
+                "rank");
+
+        List<Ast.TypeRef> normalized = new ArrayList<>();
+        java.util.Set<String> supplied = new java.util.HashSet<>();
+        int positionalIndex = 0;
+
+        for (Ast.TypeRef arg : args) {
+            if (arg.isNamedParameter()) {
+                String name = arg.namedParameterName();
+                if (!schema.contains(name)) {
+                    // Preserve the existing checker-level diagnostic for
+                    // unsupported named metadata, but still catch duplicates
+                    // and positional/name collisions here.
+                    if (!supplied.add(name)) {
+                        throw error(previous(), "duplicate named type parameter '" + name + "'");
+                    }
+                    normalized.add(arg);
+                    continue;
+                }
+                if (!supplied.add(name)) {
+                    throw error(previous(), "type parameter '" + name + "' is supplied more than once");
+                }
+                normalized.add(arg);
+                continue;
+            }
+
+            while (positionalIndex < schema.size()
+                    && supplied.contains(schema.get(positionalIndex))) {
+                positionalIndex++;
+            }
+            if (positionalIndex >= schema.size()) {
+                throw error(previous(),
+                        typeName + " received too many positional type parameters");
+            }
+            String parameterName = schema.get(positionalIndex++);
+            if (!supplied.add(parameterName)) {
+                throw error(previous(),
+                        "type parameter '" + parameterName + "' is supplied more than once");
+            }
+            normalized.add(Ast.TypeRef.namedParameter(parameterName, arg));
+        }
+
+        return canonicalizeNamedParameters(normalized);
     }
 
     private Ast.TypeRef parseMetaValue() {
@@ -1073,7 +1163,11 @@ public final class Parser {
     }
 
     private Ast.TypeRef parseSequenceShapeDimension() {
-        if (check(RBRACKET)) throw error(peek(), "sequence type shape cannot be empty");
+        if (check(RBRACKET)) {
+            throw error(peek(),
+                    "sequence type shape cannot be empty; Oreslang does not use suffix-array syntax T[]; "
+                            + "use Array[T] (or Array[ArrayList<T>] for an array of lists)");
+        }
         List<Ast.TypeRef> patterns = new ArrayList<>();
         do patterns.add(parseSequenceTypePattern()); while (match(COMMA));
         return Ast.TypeRef.sequenceShape(patterns);
@@ -2463,7 +2557,7 @@ public final class Parser {
         if (match(NEW)) {
             Ast.TypeRef type = parseTypeRef();
             consume(LPAREN, "expected '(' after new type");
-            List<Ast.Expr> args = parseArgumentsUntil(RPAREN);
+            List<Ast.Expr> args = parseCallArgumentsUntil(RPAREN);
             consume(RPAREN, "expected ')' after constructor arguments");
             return new Ast.NewExpr(type, args);
         }
@@ -2571,12 +2665,34 @@ public final class Parser {
     private List<Ast.Expr> parseCallArgumentsUntil(Token.Type terminator) {
         if (check(terminator)) return List.of();
         List<Ast.Expr> args = new ArrayList<>();
+        java.util.Set<String> named = new java.util.LinkedHashSet<>();
+        boolean namedSeen = false;
         do {
-            boolean spread = match(ELLIPSIS);
-            Ast.Expr argument = parseExpression();
-            args.add(spread ? new Ast.SpreadExpr(argument) : argument);
+            if (match(ELLIPSIS)) {
+                if (namedSeen) {
+                    throw error(previous(), "spread/positional arguments cannot follow named arguments");
+                }
+                args.add(new Ast.SpreadExpr(parseExpression()));
+                continue;
+            }
+
+            if (check(IDENT) && checkNext(COLON)) {
+                namedSeen = true;
+                String name = advance().lexeme();
+                consume(COLON, "expected ':' after named argument");
+                if (!named.add(name)) {
+                    throw error(previous(), "duplicate named argument '" + name + "'");
+                }
+                args.add(new Ast.NamedArgExpr(name, parseExpression()));
+                continue;
+            }
+
+            if (namedSeen) {
+                throw error(peek(), "positional arguments cannot follow named arguments");
+            }
+            args.add(parseExpression());
         } while (match(COMMA));
-        return args;
+        return List.copyOf(args);
     }
 
     private List<Ast.Expr> parseArgumentsUntil(Token.Type terminator) {

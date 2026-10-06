@@ -312,6 +312,7 @@ public final class TypeChecker {
     }
 
     private Type resolveModuleContractRef(Ast.TypeRef ref, Ast.InterfaceDecl contract, Set<String> generics) {
+        rejectShapeMetadataOnNominalType(ref, "contract " + contract.name());
         validateGenericArity(ref, contract.genericParameters(), "contract " + contract.name());
         return new Named(qualifiedInterfaceName(contract),
                 ref.arguments().stream().map(arg -> resolve(arg, generics, null)).toList());
@@ -1418,6 +1419,10 @@ public final class TypeChecker {
             throw new IllegalArgumentException(
                     "spread expressions are only valid as arguments to a variadic callable");
         }
+        if (expr instanceof Ast.NamedArgExpr) {
+            throw new IllegalArgumentException(
+                    "named arguments are only valid inside call/constructor argument lists");
+        }
         if (expr instanceof Ast.CallExpr call) {
             if (isBuiltinStdoutCall(call, "log", env)) {
                 if (call.typeArgumentsPresent()) {
@@ -1458,6 +1463,25 @@ public final class TypeChecker {
                 throw new IllegalArgumentException(
                         "module init is a lifecycle hook and cannot be called directly; startup invokes it exactly once");
             }
+            if (call.callee() instanceof Ast.NameExpr channelFactory
+                    && channelFactory.name().equals("Channel")
+                    && env.lookup("Channel") == null) {
+                if (!call.typeArgumentsPresent() || call.typeArguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "Channel<T>(capacity: N) requires exactly one explicit element type");
+                }
+                List<Ast.Expr> channelArgs = bindNamedArgumentsByNames(
+                        call.arguments(), List.of("capacity"), "Channel<T>", true);
+                Type capacity = typeOf(channelArgs.getFirst(), env, generics, self);
+                requireAssignable(capacity, Primitive.INT, "Channel capacity");
+                Type element = resolve(call.typeArguments().getFirst(), generics, self);
+                if (element == Primitive.VOID) {
+                    throw new IllegalArgumentException(
+                            "Channel<void> cannot carry a value; use an explicit signal/unit type");
+                }
+                return new Named("Channel", List.of(element));
+            }
+
             if (call.callee() instanceof Ast.NameExpr functionName
                     && env.lookup(functionName.name()) == null) {
                 Ast.FunctionDecl target = findFunction(functionName.name(), call.arguments().size());
@@ -1524,11 +1548,10 @@ public final class TypeChecker {
                     throw new IllegalArgumentException(
                             "Channel.new<T>(capacity) requires exactly one explicit element type");
                 }
-                if (call.arguments().size() != 1) {
-                    throw new IllegalArgumentException("Channel.new<T> expects exactly one capacity");
-                }
+                List<Ast.Expr> channelArgs = bindNamedArgumentsByNames(
+                        call.arguments(), List.of("capacity"), "Channel.new<T>", true);
                 requireAssignable(
-                        typeOf(call.arguments().getFirst(), env, generics, self),
+                        typeOf(channelArgs.getFirst(), env, generics, self),
                         Primitive.INT,
                         "Channel.new capacity");
                 Type element = resolve(call.typeArguments().getFirst(), generics, self);
@@ -2161,12 +2184,8 @@ public final class TypeChecker {
 
             Ast.ConstructorDecl constructor = klass.constructor();
             if (constructor != null) {
-                if (created.arguments().size() != constructor.arity()) {
-                    throw new IllegalArgumentException(
-                            "constructor for " + klass.name() + " expects "
-                                    + constructor.arity() + " argument(s), got "
-                                    + created.arguments().size());
-                }
+                List<Ast.Expr> constructorArgs = bindNamedArguments(
+                        created.arguments(), constructor.parameters(), "constructor " + klass.name());
                 Map<String, Type> classBindings = classGenericBindings(klass, nominal);
                 Set<String> classGenerics = Set.copyOf(klass.genericParameters());
                 Type constructorSelf = nominalClassType(klass);
@@ -2175,7 +2194,7 @@ public final class TypeChecker {
                     Type expectedPattern = resolveParam(param, classGenerics, constructorSelf);
                     Type expected = substituteGenerics(expectedPattern, classBindings);
                     requireAssignable(
-                            typeOf(created.arguments().get(i), env, generics, self),
+                            typeOf(constructorArgs.get(i), env, generics, self),
                             expected,
                             "constructor parameter " + param.name());
                 }
@@ -2186,14 +2205,28 @@ public final class TypeChecker {
             // constructor exists, positional arguments still initialize fields
             // in effective storage order and remaining fields use initializers.
             List<ResolvedField> fields = effectiveFieldTargets(klass, nominal, new LinkedHashSet<>());
-            if (created.arguments().size() > fields.size()) throw new IllegalArgumentException("constructor for " + klass.name() + " received too many positional fields");
+            if (created.arguments().size() > fields.size()) {
+                throw new IllegalArgumentException("constructor for " + klass.name() + " received too many fields");
+            }
+            boolean namedConstruction = created.arguments().stream()
+                    .anyMatch(Ast.NamedArgExpr.class::isInstance);
+            List<Ast.Expr> fieldArgs = namedConstruction
+                    ? bindNamedArgumentsByNames(
+                            created.arguments(),
+                            fields.stream().map(field -> field.field().name()).toList(),
+                            "constructor " + klass.name(),
+                            false)
+                    : created.arguments();
             for (int i = 0; i < fields.size(); i++) {
                 ResolvedField resolvedField = fields.get(i);
                 Ast.FieldDecl field = resolvedField.field();
-                if (i < created.arguments().size()) {
+                Ast.Expr supplied = namedConstruction
+                        ? fieldArgs.get(i)
+                        : (i < fieldArgs.size() ? fieldArgs.get(i) : null);
+                if (supplied != null) {
                     Type fieldPattern = classFieldType(resolvedField.owner(), field);
                     Type expected = substituteGenerics(fieldPattern, classGenericBindings(resolvedField.owner(), resolvedField.ownerType()));
-                    requireAssignable(typeOf(created.arguments().get(i), env, generics, self),
+                    requireAssignable(typeOf(supplied, env, generics, self),
                             expected, "constructor field " + field.name());
                 } else if (field.initializer() == null) {
                     throw new IllegalArgumentException("constructor for " + klass.name() + " is missing field '" + field.name() + "'");
@@ -2417,6 +2450,21 @@ public final class TypeChecker {
             if (contextual != null) return contextual;
         }
         if (expr instanceof Ast.ListExpr list) {
+            if (expected instanceof ListType sequenceExpected) {
+                for (int i = 0; i < list.elements().size(); i++) {
+                    Type actual = typeOfAgainstExpected(
+                            list.elements().get(i),
+                            sequenceExpected.element(),
+                            env,
+                            generics,
+                            self);
+                    requireAssignable(
+                            actual,
+                            sequenceExpected.element(),
+                            "sequence literal element " + i);
+                }
+                return sequenceExpected;
+            }
             if (expected instanceof Tuple tupleExpected) {
                 return new Tuple(list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList(),
                         tupleExpected.kind());
@@ -2558,7 +2606,7 @@ public final class TypeChecker {
         if (source instanceof ListType list) {
             List<Type> result = new ArrayList<>(bindings.size());
             for (int i = 0; i < fixedArity; i++) result.add(list.element());
-            if (restIndex >= 0) result.add(new ListType(list.element()));
+            if (restIndex >= 0) result.add(new ListType(list.element(), list.kind()));
             return List.copyOf(result);
         }
 
@@ -2749,7 +2797,7 @@ public final class TypeChecker {
     private Type bindReceiverSelf(Type type, Type receiver) {
         if (type instanceof SelfType) return receiver;
         if (type instanceof Borrow borrow) return new Borrow(bindReceiverSelf(borrow.target(), receiver), borrow.mutable());
-        if (type instanceof ListType list) return new ListType(bindReceiverSelf(list.element(), receiver));
+        if (type instanceof ListType list) return new ListType(bindReceiverSelf(list.element(), receiver), list.kind());
         if (type instanceof Tuple tuple) return new Tuple(tuple.elements().stream().map(t -> bindReceiverSelf(t, receiver)).toList(), tuple.kind());
         if (type instanceof Union union) return Types.unionOf(union.options().stream().map(t -> bindReceiverSelf(t, receiver)).toList());
         if (type instanceof Named named) return new Named(
@@ -3690,11 +3738,8 @@ public final class TypeChecker {
 
         Ast.ConstructorDecl constructor = klass.constructor();
         if (constructor != null) {
-            if (arguments.size() != constructor.arity()) {
-                throw new IllegalArgumentException(
-                        "constructor for " + klass.name() + " expects "
-                                + constructor.arity() + " argument(s), got " + arguments.size());
-            }
+            arguments = bindNamedArguments(
+                    arguments, constructor.parameters(), "constructor " + klass.name());
             for (int i = 0; i < arguments.size(); i++) {
                 Type parameterPattern = resolveParam(
                         constructor.parameters().get(i),
@@ -3713,9 +3758,19 @@ public final class TypeChecker {
                     effectiveFieldTargets(klass, patternType, new LinkedHashSet<>());
             if (arguments.size() > fields.size()) {
                 throw new IllegalArgumentException(
-                        "constructor for " + klass.name() + " received too many positional fields");
+                        "constructor for " + klass.name() + " received too many fields");
+            }
+            boolean namedConstruction = arguments.stream()
+                    .anyMatch(Ast.NamedArgExpr.class::isInstance);
+            if (namedConstruction) {
+                arguments = bindNamedArgumentsByNames(
+                        arguments,
+                        fields.stream().map(field -> field.field().name()).toList(),
+                        "constructor " + klass.name(),
+                        false);
             }
             for (int i = 0; i < arguments.size(); i++) {
+                if (arguments.get(i) == null) continue;
                 ResolvedField resolvedField = fields.get(i);
                 Type fieldPattern = resolve(
                         resolvedField.field().type(),
@@ -4444,6 +4499,23 @@ public final class TypeChecker {
         }
     }
 
+    private void rejectShapeMetadataOnNominalType(Ast.TypeRef ref, String label) {
+        boolean namedMetadata = ref.arguments().stream().anyMatch(Ast.TypeRef::isNamedParameter);
+        boolean sequenceShape = ref.arguments().stream().anyMatch(Ast.TypeRef::isSequenceShape);
+        if (namedMetadata) {
+            throw new IllegalArgumentException(
+                    label + " is a nominal generic type: '<...>' contains type arguments, not collection instance metadata; "
+                            + "keep the element/type argument (for example ArrayList<T>) and pass runtime size/capacity at construction "
+                            + "(for example new ArrayList<T>(capacity: 5))");
+        }
+        if (sequenceShape) {
+            throw new IllegalArgumentException(
+                    label + " is a nominal generic type and does not accept '[...]' sequence-shape suffixes; "
+                            + "use its ordinary generic arguments (for example ArrayList<T>) or use an intrinsic shape-aware type "
+                            + "such as Array[T], Vector[T], FixedArray[4 of T], or Tuple[T1, T2]");
+        }
+    }
+
     private void validateGenericArity(Ast.TypeRef ref, List<String> parameters, String owner) {
         if (ref.inferArguments()) {
             throw new IllegalArgumentException(owner + " does not permit unresolved <> here; provide explicit type arguments");
@@ -4490,6 +4562,74 @@ public final class TypeChecker {
         return bindings;
     }
 
+    private List<Ast.Expr> bindNamedArguments(
+            List<Ast.Expr> arguments,
+            List<Ast.Param> params,
+            String label) {
+        return bindNamedArgumentsByNames(
+                arguments,
+                params.stream().map(Ast.Param::name).toList(),
+                label,
+                true);
+    }
+
+    private List<Ast.Expr> bindNamedArgumentsByNames(
+            List<Ast.Expr> arguments,
+            List<String> parameterNames,
+            String label,
+            boolean requireAll) {
+        boolean hasNamed = arguments.stream().anyMatch(Ast.NamedArgExpr.class::isInstance);
+        if (!hasNamed) {
+            if (requireAll && arguments.size() != parameterNames.size()) {
+                throw new IllegalArgumentException(label + " arity mismatch");
+            }
+            return arguments;
+        }
+        if (arguments.stream().anyMatch(Ast.SpreadExpr.class::isInstance)) {
+            throw new IllegalArgumentException(
+                    label + " cannot mix named arguments with spread arguments");
+        }
+        if (arguments.size() > parameterNames.size()) {
+            throw new IllegalArgumentException(
+                    label + " received too many arguments");
+        }
+
+        List<Ast.Expr> ordered = new ArrayList<>(
+                java.util.Collections.nCopies(parameterNames.size(), null));
+        int positional = 0;
+        for (Ast.Expr argument : arguments) {
+            if (argument instanceof Ast.NamedArgExpr named) {
+                int index = parameterNames.indexOf(named.name());
+                if (index < 0) {
+                    throw new IllegalArgumentException(
+                            label + " has no parameter named '" + named.name() + "'");
+                }
+                if (ordered.get(index) != null) {
+                    throw new IllegalArgumentException(
+                            label + " parameter '" + named.name() + "' is supplied more than once");
+                }
+                ordered.set(index, named.value());
+                continue;
+            }
+
+            while (positional < ordered.size() && ordered.get(positional) != null) positional++;
+            if (positional >= ordered.size()) {
+                throw new IllegalArgumentException(label + " received too many positional arguments");
+            }
+            ordered.set(positional++, argument);
+        }
+
+        if (requireAll) {
+            for (int i = 0; i < ordered.size(); i++) {
+                if (ordered.get(i) == null) {
+                    throw new IllegalArgumentException(
+                            label + " is missing required parameter '" + parameterNames.get(i) + "'");
+                }
+            }
+        }
+        return java.util.Collections.unmodifiableList(ordered);
+    }
+
     private Type checkGenericCallable(
             List<String> genericNames,
             List<Ast.Param> params,
@@ -4501,6 +4641,7 @@ public final class TypeChecker {
             Type callableSelf,
             Map<String, Type> initialBindings,
             String label) {
+        arguments = bindNamedArguments(arguments, params, label);
         if (params.size() != arguments.size()) throw new IllegalArgumentException(label + " arity mismatch");
         Set<String> unique = uniqueGenerics(genericNames, label);
         Map<String, Type> bindings = new HashMap<>(initialBindings);
@@ -4558,6 +4699,7 @@ public final class TypeChecker {
             return;
         }
         if (pattern instanceof ListType p && actual instanceof ListType a) {
+            if (p.kind() != a.kind()) return;
             inferGenericBindings(p.element(), a.element(), bindings, fixedBindings, label);
             return;
         }
@@ -4583,7 +4725,7 @@ public final class TypeChecker {
         if (type instanceof Generic generic) return bindings.getOrDefault(generic.name(), type);
         if (type instanceof SelfType receiverSelf) return new SelfType(substituteGenerics(receiverSelf.bound(), bindings));
         if (type instanceof Borrow borrow) return new Borrow(substituteGenerics(borrow.target(), bindings), borrow.mutable());
-        if (type instanceof ListType list) return new ListType(substituteGenerics(list.element(), bindings));
+        if (type instanceof ListType list) return new ListType(substituteGenerics(list.element(), bindings), list.kind());
         if (type instanceof Tuple tuple) return new Tuple(tuple.elements().stream().map(t -> substituteGenerics(t, bindings)).toList(), tuple.kind());
         if (type instanceof Union union) return Types.unionOf(union.options().stream().map(t -> substituteGenerics(t, bindings)).toList());
         if (type instanceof Named named) return new Named(named.name(), named.arguments().stream().map(t -> substituteGenerics(t, bindings)).toList());
@@ -4673,13 +4815,19 @@ public final class TypeChecker {
                         + " requires an explicit finite sequence shape, for example "
                         + (ref.name().equals("Tuple") ? "Tuple[int, string]" : ref.name() + "[4 of int]"));
             }
-            if (ref.inferArguments()) return new ListType(Unknown.INSTANCE);
-            if (positional.size() != 1) {
-                throw new IllegalArgumentException(ref.name()
-                        + " requires one element type when using legacy '<T>' syntax; "
-                        + "prefer " + ref.name() + "[T]");
+            if (ref.inferArguments()) return sequenceType(ref.name(), Unknown.INSTANCE);
+            Ast.TypeRef declaredElement = metadata.get("type");
+            if (declaredElement == null && positional.size() == 1) {
+                // Compatibility for hand-built/pre-normalization AST producers.
+                declaredElement = positional.getFirst();
             }
-            return new ListType(resolve(positional.getFirst(), generics, self, allowNullMarker));
+            if (declaredElement == null) {
+                throw new IllegalArgumentException(ref.name()
+                        + " requires an element type parameter or an explicit '[T]' shape");
+            }
+            return sequenceType(
+                    ref.name(),
+                    resolve(declaredElement, generics, self, allowNullMarker));
         }
 
         if (!positional.isEmpty()) {
@@ -4714,14 +4862,17 @@ public final class TypeChecker {
             }
             Type nested = resolve(base, generics, self, allowNullMarker);
             int rank = declaredRank == null ? dimensions.size() : declaredRank;
-            for (int i = 0; i < rank; i++) nested = new ListType(nested);
+            for (int i = 0; i < rank; i++) nested = sequenceType(ref.name(), nested);
             return nested;
         }
 
         Ast.TypeRef shape = dimensions.getFirst();
         if (fixed) {
-            List<Ast.TypeRef> exact = expandFiniteSequencePatterns(shape.arguments(), ref.name());
+            List<Ast.TypeRef> exact =
+                    expandFixedSequencePatterns(shape.arguments(), ref.name(), metadata);
             validateFixedExtentMetadata(ref.name(), metadata, exact.size());
+            validateDeclaredSequenceElementDomain(
+                    ref.name(), metadata.get("type"), exact, generics, self, allowNullMarker);
             TupleKind kind = switch (ref.name()) {
                 case "FixedArray" -> TupleKind.FIXED_ARRAY;
                 case "FixedList" -> TupleKind.FIXED_LIST;
@@ -4752,9 +4903,16 @@ public final class TypeChecker {
             element = resolve(pattern, generics, self, allowNullMarker);
         }
 
+        Ast.TypeRef declaredElement = metadata.get("type");
+        if (declaredElement != null) {
+            Type declared = resolve(declaredElement, generics, self, allowNullMarker);
+            requireAssignable(element, declared, ref.name() + " type parameter");
+            element = declared;
+        }
+
         int rank = declaredRank == null ? 1 : declaredRank;
         Type result = element;
-        for (int i = 0; i < rank; i++) result = new ListType(result);
+        for (int i = 0; i < rank; i++) result = sequenceType(ref.name(), result);
         return result;
     }
 
@@ -4769,6 +4927,67 @@ public final class TypeChecker {
                     + " multidimensional shorthand does not combine with repeat patterns yet");
         }
         return element;
+    }
+
+    private List<Ast.TypeRef> expandFixedSequencePatterns(
+            List<Ast.TypeRef> patterns,
+            String collectionName,
+            Map<String, Ast.TypeRef> metadata) {
+        int repeatIndex = -1;
+        for (int i = 0; i < patterns.size(); i++) {
+            if (!patterns.get(i).isRepeatMany()) continue;
+            if (repeatIndex >= 0) {
+                throw new IllegalArgumentException(
+                        collectionName + " fixed sequence shape may contain at most one unbounded '...' repetition");
+            }
+            repeatIndex = i;
+        }
+
+        if (repeatIndex < 0) {
+            return expandFiniteSequencePatterns(patterns, collectionName);
+        }
+
+        Ast.TypeRef sizeRef = metadata.get("size");
+        if (sizeRef == null) {
+            throw new IllegalArgumentException(
+                    collectionName + " with unbounded '...' sequence shape requires size=N to close the fixed extent");
+        }
+        if (repeatIndex != patterns.size() - 1) {
+            throw new IllegalArgumentException(
+                    collectionName + " unbounded '...' repetition must be the final sequence-shape item");
+        }
+
+        long requested = sizeRef.intLiteralValue();
+        if (requested > 1_000_000L) {
+            throw new IllegalArgumentException("fixed sequence size is too large: " + requested);
+        }
+
+        List<Ast.TypeRef> expanded = new ArrayList<>();
+        if (repeatIndex > 0) {
+            expanded.addAll(expandFiniteSequencePatterns(
+                    patterns.subList(0, repeatIndex), collectionName));
+        }
+        if (requested < expanded.size()) {
+            throw new IllegalArgumentException(
+                    collectionName + " size=" + requested
+                            + " is smaller than the finite prefix arity " + expanded.size());
+        }
+
+        Ast.TypeRef repeat = patterns.get(repeatIndex);
+        List<Ast.TypeRef> unit = expandFiniteSequencePatterns(
+                repeat.arguments(), collectionName + " repeating unit");
+        if (unit.isEmpty()) {
+            throw new IllegalArgumentException(
+                    collectionName + " unbounded repetition requires a non-empty repeating unit");
+        }
+
+        int target = Math.toIntExact(requested);
+        int cursor = 0;
+        while (expanded.size() < target) {
+            expanded.add(unit.get(cursor % unit.size()));
+            cursor++;
+        }
+        return List.copyOf(expanded);
     }
 
     private List<Ast.TypeRef> expandFiniteSequencePatterns(List<Ast.TypeRef> patterns, String collectionName) {
@@ -4810,9 +5029,37 @@ public final class TypeChecker {
         return Types.unionOf(resolved);
     }
 
+    private Type sequenceType(String collectionName, Type element) {
+        Types.SequenceKind kind = switch (collectionName) {
+            case "Array" -> Types.SequenceKind.ARRAY;
+            case "Vector" -> Types.SequenceKind.VECTOR;
+            case "Slice" -> Types.SequenceKind.SLICE;
+            default -> Types.SequenceKind.LIST;
+        };
+        return new ListType(element, kind);
+    }
+
+    private void validateDeclaredSequenceElementDomain(
+            String collectionName,
+            Ast.TypeRef declaredElementRef,
+            List<Ast.TypeRef> exactShape,
+            Set<String> generics,
+            Type self,
+            boolean allowNullMarker) {
+        if (declaredElementRef == null) return;
+        Type declared = resolve(declaredElementRef, generics, self, allowNullMarker);
+        for (int i = 0; i < exactShape.size(); i++) {
+            Type actual = resolve(exactShape.get(i), generics, self, allowNullMarker);
+            requireAssignable(
+                    actual,
+                    declared,
+                    collectionName + " shape element " + i + " against type parameter");
+        }
+    }
+
     private void validateCollectionMetadata(String collectionName, Map<String, Ast.TypeRef> metadata) {
         Set<String> allowed = Set.of(
-                "growth_policy", "allocator", "align", "inline_capacity",
+                "type", "growth_policy", "allocator", "align", "inline_capacity",
                 "max_capacity", "storage", "rank");
         for (Map.Entry<String, Ast.TypeRef> entry : metadata.entrySet()) {
             String name = entry.getKey();
@@ -4858,7 +5105,7 @@ public final class TypeChecker {
         Ast.TypeRef size = metadata.get("size");
         if (size != null && size.intLiteralValue() != exactSize) {
             throw new IllegalArgumentException(collectionName + " size=" + size.intLiteralValue()
-                    + " disagrees with fixed sequence arity " + exactSize);
+                    + " disagrees with resolved fixed sequence arity " + exactSize);
         }
         Ast.TypeRef inlineCapacity = metadata.get("inline_capacity");
         if (inlineCapacity != null && inlineCapacity.intLiteralValue() < exactSize) {
@@ -4908,7 +5155,8 @@ public final class TypeChecker {
 
         Ast.TypeRef shape = dimensions.getFirst();
         if (name.equals("FixedArray") || name.equals("FixedList")) {
-            List<Ast.TypeRef> exact = expandFiniteSequencePatterns(shape.arguments(), name);
+            List<Ast.TypeRef> exact = expandFixedSequencePatterns(
+                    shape.arguments(), name, namedTypeParameters(declared));
             if (literal.elements().size() != exact.size()) {
                 throw new IllegalArgumentException(name + " literal has " + literal.elements().size()
                         + " element(s), but its fixed sequence shape requires " + exact.size());
@@ -5093,6 +5341,7 @@ public final class TypeChecker {
             default -> {
                 Ast.ClassDecl knownClass = findClass(ref.name());
                 if (knownClass != null) {
+                    rejectShapeMetadataOnNominalType(ref, "class " + knownClass.name());
                     validateGenericArity(ref, knownClass.genericParameters(), "class " + knownClass.name());
                     yield new Named(qualifiedClassName(knownClass),
                             ref.arguments().stream().map(arg -> resolve(arg, generics, self)).toList());
@@ -5100,12 +5349,19 @@ public final class TypeChecker {
                 Ast.InterfaceDecl knownInterface = findInterface(ref.name());
                 if (knownInterface != null) {
                     if (knownInterface.moduleContract()) throw new IllegalArgumentException("module contract '" + knownInterface.name() + "' is only valid in module 'conforms' clauses");
+                    rejectShapeMetadataOnNominalType(ref, "interface " + knownInterface.name());
                     validateGenericArity(ref, knownInterface.genericParameters(), "interface " + knownInterface.name());
                     yield new Named(qualifiedInterfaceName(knownInterface),
                             ref.arguments().stream().map(arg -> resolve(arg, generics, self)).toList());
                 }
                 if (ref.inferArguments()) {
                     throw new IllegalArgumentException("cannot infer type arguments for unknown type '" + ref.name() + "<>'");
+                }
+                if (ref.arguments().stream().anyMatch(Ast.TypeRef::isNamedParameter)
+                        || ref.arguments().stream().anyMatch(Ast.TypeRef::isSequenceShape)) {
+                    throw new IllegalArgumentException(
+                            "collection metadata/sequence-shape syntax is reserved for intrinsic shape-aware collection types; "
+                                    + "unknown/nominal type '" + ref.name() + "' must use ordinary generic type arguments");
                 }
                 yield new Named(ref.name(), ref.arguments().stream().map(arg -> resolve(arg, generics, self)).toList());
             }
