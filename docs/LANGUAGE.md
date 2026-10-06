@@ -470,9 +470,9 @@ const {foo, bar} = named();
 A bare `_` is a sequence discard pattern: it consumes that array/tuple position without declaring a variable, so it can be repeated in the same sequence pattern or reused by later destructures. Object patterns do not accept bare `_` because object destructuring is key-based rather than positional.
 
 ```ores
-[const code, _, let body] = (200, "ignored", "ok");
-[const next, _, let tail] = (201, "ignored again", "done");
-[_, _, const final] = (1, 2, 3);
+[const code, _, let body] = tuple (200, "ignored", "ok");
+[const next, _, let tail] = tuple (201, "ignored again", "done");
+[_, _, const final] = tuple (1, 2, 3);
 ```
 
 `_` is not readable after the destructure because no lexical binding is created for it. A destructured `const` is an immutable runtime binding; unlike a standalone `const x = ...` declaration, the aggregate being destructured does not need to be a compile-time constant.
@@ -505,11 +505,27 @@ names occupy a separate syntactic namespace.
 Value equality is defined by Oreslang semantics, never arbitrary host/JVM
 `equals()` behavior. Numbers compare numerically across compatible numeric
 representations; structural records/maps, tuples, arrays/lists, `Option`,
-`Result`, and iterator-result values recurse through their contents. Ordinary
-class/actor instances remain identity-equal by default unless a future explicit
-equality protocol is introduced. `switch` constants and literal match patterns
-use the same value-equality operation, so equality cannot change meaning between
-language constructs.
+`Result`, and iterator-result values recurse through their contents. Built-in
+sequence values expose `isEqualsTo(other)`, and that method delegates to the
+same recursive, cycle-safe value-equality operation used by `eq`:
+
+```ores
+val a = tuple ("x", tuple (1, true));
+val b = tuple ("x", tuple (1, true));
+val xs = arr [1, 2, 3];
+val ys = arr [1, 2, 3];
+
+val tuple_same = a.isEqualsTo(b); // true
+val list_same = xs.isEqualsTo(ys); // true
+val same_by_operator = a eq b;     // true
+```
+
+Ordinary user class/actor instances remain identity-equal by default; defining
+an ordinary method named `isEqualsTo` does not yet override infix `eq`.
+A general user-defined equality protocol should be designed separately rather
+than silently changing class equality semantics. `switch` constants and
+literal match patterns use the same value-equality operation, so equality
+cannot change meaning between language constructs.
 
 Identity is likewise semantic rather than a promise about backend object boxing.
 Ordinary objects/reference collections use reference identity, while stable
@@ -644,30 +660,41 @@ val first = values[0];
 
 `arr[...]` is the canonical inline-array spelling. The original bare `[...]` literal remains accepted for source compatibility and destructuring migration.
 
-Tuples preserve per-position static types. Parenthesized tuple literals and
-list-backed values returned against a finite tuple type both retain the declared
-positional types. Bare finite tuple syntax remains the compact form; the named
-`Tuple<...>[...]` form is used when storage metadata is needed.
+Tuples preserve per-position static types. Tuple values are constructed
+explicitly with the `tuple` keyword; ordinary parentheses remain grouping in
+value position, so `("one", 1)` is not a tuple expression.
 
 ```ores
-val pair = (1, "one");
-[const number, let label] = pair;
+val pair = tuple (1, "one");
+const (number, label) = pair;
 
-fnc result(): [int, bool, string] {
-  return [3, true, "yes"];
+fnc result(): Tuple[int, bool, string] {
+  return tuple (3, true, "yes");
 }
 
-const [num, ok, answer] = result();
+const (num, ok, answer) = result();
 
-val aligned: Tuple<align=64, size=2>[int, string] = (1, "one");
+type ResultShape = (int, bool, string);
 
-@NamedParams<align=64, size=2>
-val sameShape: [int, string] = (1, "one");
+fnc aliased(): ResultShape {
+  return tuple (4, false, "no");
+}
+
+val aligned: Tuple<align=64, size=2>[int, string] = tuple (1, "one");
 ```
 
-A tuple is a product value, not a growable array. Its `size` metadata is
-redundant by design but useful as an ABI/layout assertion; a mismatch with the
-declared positional arity is a compile-time error.
+In type position, `(T1, T2, ...)` is tuple shorthand and is equivalent to
+`Tuple[T1, T2, ...]`; a single `(T)` remains an ordinary grouped type.
+`Tuple[...]` is the canonical explicit spelling, especially when layout
+metadata is present. Legacy bracket tuple type syntax may remain accepted for
+source compatibility, but new code should prefer `Tuple[...]` or the
+parenthesized type shorthand.
+
+A tuple is a product value, not a growable array. `Tuple` is an intrinsic
+final built-in value class: user classes cannot redefine it or subclass it.
+Its `size` metadata is redundant by design but useful as an ABI/layout
+assertion; a mismatch with the declared positional arity is a compile-time
+error.
 
 ## Structural typing and interfaces
 
