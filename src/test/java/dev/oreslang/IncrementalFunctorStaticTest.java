@@ -163,59 +163,6 @@ final class IncrementalFunctorStaticTest {
     }
 
     @Test
-    void linkedParameterModesPreservePointerlessBorrowAndMutSemantics() {
-        IncrementalCompiler compiler = new IncrementalCompiler();
-        Map<String, String> sources = Map.of(
-                "service.ores", """
-                        pub fnc observe(List<int> values): int {
-                          return values.length;
-                        }
-
-                        pub fnc append(List<int> mut values): void {
-                          values.push(9);
-                          return;
-                        }
-                        """,
-                "consumer.ores", """
-                        import fnc {observe, append} from "./service.ores";
-                        pub fnc main(): void {
-                          let List<int> values = new List<int>(1, 2);
-                          val first = observe(values);
-                          val second = observe(values);
-                          append(values);
-                          stdio.stdout.write(first + second + values.length);
-                          return;
-                        }
-                        """);
-
-        assertDoesNotThrow(() -> compiler.compile(sources));
-    }
-
-    @Test
-    void linkedOrdinaryParameterStillHonorsExplicitRtTake() {
-        IncrementalCompiler compiler = new IncrementalCompiler();
-        Map<String, String> sources = Map.of(
-                "service.ores", """
-                        pub fnc observe(List<int> values): int {
-                          return values.length;
-                        }
-                        """,
-                "consumer.ores", """
-                        import fnc {observe} from "./service.ores";
-                        pub fnc main(): void {
-                          let List<int> values = new List<int>(1, 2);
-                          val size = observe(rt take values);
-                          stdio.stdout.write(values.length);
-                          return;
-                        }
-                        """);
-
-        IllegalArgumentException error = assertThrows(
-                IllegalArgumentException.class,
-                () -> compiler.compile(sources));
-        assertTrue(error.getMessage().contains("moved value"), error.getMessage());
-    }
-    @Test
     void callableKindAndActorKindParticipateInAbiInvalidation() {
         IncrementalCompiler compiler = new IncrementalCompiler();
         Map<String, String> initial = Map.of(

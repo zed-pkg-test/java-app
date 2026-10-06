@@ -7,8 +7,6 @@ import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.types.TypeChecker;
 import dev.oreslang.types.OwnershipChecker;
 
-import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 /** Trusted compiler front-end API for build systems and isolate admission. */
@@ -16,42 +14,25 @@ public final class OresCompiler {
     private OresCompiler() { }
 
     public static Ast.Program parseAndTypeCheck(String source) {
-        return parseAndTypeCheck(source, Set.of(), Map.of());
+        return parseAndTypeCheck(source, Set.of());
     }
 
     public static Ast.Program parseAndTypeCheck(
             String source,
             Set<String> importedAsyncCallables) {
-        return parseAndTypeCheck(source, importedAsyncCallables, Map.of());
-    }
-
-    public static Ast.Program parseAndTypeCheck(
-            String source,
-            Set<String> importedAsyncCallables,
-            Map<String, List<Boolean>> importedParameterMutability) {
-        return analyze(
-                Parser.parse(source),
-                importedAsyncCallables,
-                importedParameterMutability);
+        return analyze(Parser.parse(source), importedAsyncCallables);
     }
 
     /** Runs the complete front-end admission policy on an already parsed program. */
     public static Ast.Program analyze(Ast.Program program) {
-        return analyze(program, Set.of(), Map.of());
+        return analyze(program, Set.of());
     }
 
     public static Ast.Program analyze(
             Ast.Program program,
             Set<String> importedAsyncCallables) {
-        return analyze(program, importedAsyncCallables, Map.of());
-    }
-
-    public static Ast.Program analyze(
-            Ast.Program program,
-            Set<String> importedAsyncCallables,
-            Map<String, List<Boolean>> importedParameterMutability) {
         program = TypeChecker.checkTypes(program, importedAsyncCallables);
-        OwnershipChecker.check(program, importedParameterMutability);
+        OwnershipChecker.check(program);
         return program;
     }
 

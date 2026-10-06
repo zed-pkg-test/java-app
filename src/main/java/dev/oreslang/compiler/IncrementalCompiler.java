@@ -105,15 +105,14 @@ public final class IncrementalCompiler {
                 continue;
             }
 
-            LinkedCallableContracts linkedContracts = linkedCallableContractsForUnit(
+            Set<String> importedAsyncCallables = linkedAsyncCallablesForUnit(
                     id,
                     parsed.get(id),
                     parsed,
                     normalizedImportResolutions);
             Ast.Program checked = OresCompiler.parseAndTypeCheck(
                     normalized.get(id),
-                    linkedContracts.asyncCallables(),
-                    linkedContracts.parameterMutability());
+                    importedAsyncCallables);
             CompiledUnit unit = new CompiledUnit(
                     id,
                     packageId(id, checked),
@@ -136,18 +135,12 @@ public final class IncrementalCompiler {
                 initializationGroups);
     }
 
-    private record LinkedCallableContracts(
-            Set<String> asyncCallables,
-            Map<String, List<Boolean>> parameterMutability) { }
-
-    private static LinkedCallableContracts linkedCallableContractsForUnit(
+    private static Set<String> linkedAsyncCallablesForUnit(
             String unitId,
             Ast.Program program,
             Map<String, Ast.Program> programs,
             Map<String, Map<String, String>> importResolutions) {
         LinkedHashSet<String> async = new LinkedHashSet<>();
-        LinkedHashMap<String, List<Boolean>> mutability = new LinkedHashMap<>();
-
         for (Ast.ImportDecl imported : program.imports()) {
             String targetId = ImportGraph.resolveImportUnitId(
                     unitId,
@@ -164,13 +157,12 @@ public final class IncrementalCompiler {
                     String localName = ImportRules.localName(imported, sourceName);
                     for (Ast.ModuleDecl module : target.modules()) {
                         for (Ast.Decl declaration : module.declarations()) {
-                            if (!(declaration instanceof Ast.FunctionDecl fn)
-                                    || !linkableNamedFunction(fn)
-                                    || !fn.name().equals(sourceName)) continue;
-
-                            String key = linkedCallableKey(localName, fn.parameters().size());
-                            mutability.put(key, parameterMutability(fn));
-                            if (fn.async()) async.add(key);
+                            if (declaration instanceof Ast.FunctionDecl fn
+                                    && linkableNamedFunction(fn)
+                                    && fn.name().equals(sourceName)
+                                    && fn.async()) {
+                                async.add(linkedCallableKey(localName, fn.parameters().size()));
+                            }
                         }
                     }
                 }
@@ -181,27 +173,20 @@ public final class IncrementalCompiler {
                 String namespace = imported.namespace();
                 for (Ast.ModuleDecl module : target.modules()) {
                     for (Ast.Decl declaration : module.declarations()) {
-                        if (!(declaration instanceof Ast.FunctionDecl fn)
-                                || !linkableNamespaceFunction(fn)) continue;
-
-                        String key = linkedCallableKey(
-                                namespace + "." + fn.name(),
-                                fn.parameters().size());
-                        mutability.put(key, parameterMutability(fn));
-                        if (fn.async()) async.add(key);
+                        if (declaration instanceof Ast.FunctionDecl fn
+                                && linkableNamespaceFunction(fn)
+                                && fn.async()) {
+                            async.add(linkedCallableKey(
+                                    namespace + "." + fn.name(),
+                                    fn.parameters().size()));
+                        }
                     }
                 }
             }
         }
-
-        return new LinkedCallableContracts(
-                Set.copyOf(async),
-                Map.copyOf(mutability));
+        return Set.copyOf(async);
     }
 
-    private static List<Boolean> parameterMutability(Ast.FunctionDecl fn) {
-        return fn.parameters().stream().map(Ast.Param::mutable).toList();
-    }
     private static boolean linkableNamedFunction(Ast.FunctionDecl fn) {
         return fn.visibility() == Ast.Visibility.PUBLIC
                 && fn.kind() == Ast.CallableKind.FNC
