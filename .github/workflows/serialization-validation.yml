@@ -1,0 +1,30 @@
+name: serialization-validation
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  serialization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Audit serialization source invariants
+        run: python3 serialization-validation/scripts/audit.py
+      - name: Build Oreslang compiler/runtime
+        run: mvn -B -ntp -DskipTests package
+      - name: Prove pointerless mutable receivers
+        run: mvn -B -ntp -Dtest=PointerlessMutableReceiverTest test
+      - name: Run serialization and validation suite
+        run: mvn -B -ntp -DskipTests exec:java -Dexec.args="serialization-validation/tests/main.ores"
