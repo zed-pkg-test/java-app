@@ -1209,16 +1209,20 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void closeFromRuntime() {
-            // Runtime teardown has already fenced source/actor access, so it
-            // must not call acquireAsync(), whose admission intentionally
-            // rejects a globally closed runtime. Acquire the logical lock
-            // directly and retire only after active readers/writers drain.
-            ProxyRwLock.Lease lease = lock.acquireAsync(true).join();
-            try {
-                closeUnderWriteLease();
-            } finally {
-                lease.close();
-            }
+            /*
+             * Runtime teardown must remain bounded even if guest code is still
+             * inside an uncooperative proxy critical section. Revoke new access
+             * immediately, fail queued waiters at the runtime level, and defer
+             * dropping the strong target root until the last active logical
+             * lease leaves. No carrier/control thread blocks on that lease.
+             *
+             * ActorRuntime.close() zeros aggregate shared-memory accounting
+             * after revocation, so this delayed retirement intentionally does
+             * not subtract quota a second time.
+             */
+            if (!proxyClosed.compareAndSet(false, true)) return;
+            sharedProxies.remove(this);
+            lock.whenIdle(() -> retireTarget(false));
         }
 
         private void closeWithWriteLease() {
@@ -1232,11 +1236,15 @@ public final class ActorRuntime implements AutoCloseable {
 
         private void closeUnderWriteLease() {
             if (!proxyClosed.compareAndSet(false, true)) return;
+            sharedProxies.remove(this);
+            retireTarget(true);
+        }
+
+        private void retireTarget(boolean releaseBudget) {
             target = null;
             long bytes = reservedBytes;
             reservedBytes = 0L;
-            if (bytes != 0L) releaseSharedRuntimeBytes(bytes);
-            sharedProxies.remove(this);
+            if (releaseBudget && bytes != 0L) releaseSharedRuntimeBytes(bytes);
         }
 
         private void failPendingWaiters(Throwable failure) {

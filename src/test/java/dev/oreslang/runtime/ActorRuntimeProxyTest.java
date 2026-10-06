@@ -234,4 +234,52 @@ final class ActorRuntimeProxyTest {
         }
     }
 
+
+    @Test
+    void runtimeCloseRevokesProxyWithoutWaitingForActiveLease() throws Exception {
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer());
+        ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{11});
+        ActorRuntime.Proxy<int[]>.Access held =
+                proxy.acquireReadAsync().get(2, TimeUnit.SECONDS);
+
+        AtomicInteger closeState = new AtomicInteger();
+        Thread closer = Thread.ofPlatform().start(() -> {
+            runtime.close();
+            closeState.set(1);
+        });
+
+        closer.join(2_000L);
+        assertFalse(closer.isAlive(),
+                "runtime close must not join behind an active proxy lease");
+        assertEquals(1, closeState.get());
+        assertTrue(proxy.closed(),
+                "runtime close must revoke new proxy access immediately");
+        assertThrows(IllegalStateException.class,
+                () -> held.read(value -> value[0]),
+                "an already-issued lease must not start new guest access after revocation");
+
+        held.close();
+        assertTrue(runtime.isClosed());
+    }
+
+    @Test
+    void runtimeCloseFailsQueuedProxyWaiters() throws Exception {
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer());
+        ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{5});
+        ActorRuntime.Proxy<int[]>.Access writer =
+                proxy.acquireWriteAsync().get(2, TimeUnit.SECONDS);
+        OresFuture<ActorRuntime.Proxy<int[]>.Access> queued =
+                proxy.acquireReadAsync();
+
+        assertFalse(queued.isDone());
+        assertEquals(1, proxy.queuedWaiters());
+
+        runtime.close();
+
+        assertTrue(queued.isDone(),
+                "runtime teardown must settle suspended proxy waiters");
+        assertThrows(java.util.concurrent.CancellationException.class, queued::join);
+        writer.close();
+    }
+
 }
