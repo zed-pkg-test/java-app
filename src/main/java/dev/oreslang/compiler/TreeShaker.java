@@ -214,6 +214,7 @@ public final class TreeShaker {
             if (expression instanceof Ast.NewExpr created) {
                 return created.arguments().stream().anyMatch(this::containsLambda);
             }
+            if (expression instanceof Ast.SpawnExpr spawned) return containsLambda(spawned.call());
             if (expression instanceof Ast.AwaitExpr awaited) return containsLambda(awaited.expression());
             if (expression instanceof Ast.ListExpr list) {
                 return list.elements().stream().anyMatch(this::containsLambda);
@@ -329,6 +330,13 @@ public final class TreeShaker {
                     arguments.add(substitute(argument, substitutions, shadowed));
                 }
                 return new Ast.NewExpr(created.type(), arguments);
+            }
+            if (expression instanceof Ast.SpawnExpr spawned) {
+                Ast.Expr rewritten = substitute(spawned.call(), substitutions, shadowed);
+                if (!(rewritten instanceof Ast.CallExpr call)) {
+                    throw new IllegalStateException("spawn substitution must preserve call shape");
+                }
+                return new Ast.SpawnExpr(call);
             }
             if (expression instanceof Ast.AwaitExpr awaited) {
                 return new Ast.AwaitExpr(substitute(awaited.expression(), substitutions, shadowed));
@@ -885,6 +893,13 @@ public final class TreeShaker {
                 }
                 return new Ast.NewExpr(created.type(), arguments);
             }
+            if (expression instanceof Ast.SpawnExpr spawned) {
+                Ast.Expr rewritten = rewriteExpression(spawned.call(), module, locals);
+                if (!(rewritten instanceof Ast.CallExpr call)) {
+                    throw new IllegalStateException("spawn rewrite must preserve call shape");
+                }
+                return new Ast.SpawnExpr(call);
+            }
             if (expression instanceof Ast.AwaitExpr awaited) {
                 return new Ast.AwaitExpr(rewriteExpression(awaited.expression(), module, locals));
             }
@@ -1258,6 +1273,8 @@ public final class TreeShaker {
             } else if (expression instanceof Ast.NewExpr created) {
                 scanType(created.type());
                 for (Ast.Expr argument : created.arguments()) scanExpression(module, argument, locals);
+            } else if (expression instanceof Ast.SpawnExpr spawned) {
+                scanExpression(module, spawned.call(), locals);
             } else if (expression instanceof Ast.AwaitExpr awaited) {
                 scanExpression(module, awaited.expression(), locals);
             }
