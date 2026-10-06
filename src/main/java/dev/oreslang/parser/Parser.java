@@ -936,6 +936,15 @@ public final class Parser {
                 if (generatorSeen) throw error(previous(), "duplicate 'generator' modifier");
                 generatorSeen = true;
                 generator = true;
+                // "generator*" is declaration sugar; plain "generator" remains
+                // accepted for source compatibility.
+                match(STAR);
+            } else if (check(IDENT) && peek().lexeme().equals("gen") && checkNext(STAR)) {
+                Token gen = advance();
+                advance(); // '*'
+                if (generatorSeen) throw error(gen, "duplicate generator modifier");
+                generatorSeen = true;
+                generator = true;
             } else if (matchContextualStructuralModifier()) {
                 if (structuralSeen) throw error(previous(), "duplicate 'structural' modifier");
                 structuralSeen = true;
@@ -2482,24 +2491,31 @@ public final class Parser {
     }
 
     private Ast.Expr parseRuntimeExpression() {
-        Token operation = consume(IDENT, "expected runtime operation after 'rt'");
-        String name = operation.lexeme();
-        if (!name.equals("copy") && !name.equals("take")
-                && !name.equals("borrow") && !name.equals("share")) {
-            throw error(operation,
-                    "unknown rt operation '" + name
-                            + "'; supported ownership operations are copy, take, borrow, and share");
+        Token operation;
+        if (match(YIELD)) {
+            operation = previous(); // legacy spelling: rt yield
+        } else {
+            operation = consume(IDENT, "expected runtime operation after 'rt'");
         }
 
-        Ast.Expr argument;
-        if (match(LPAREN)) {
-            argument = parseExpression();
-            consume(RPAREN, "expected ')' after rt " + name + " argument");
-        } else {
-            // Command form has unary precedence: rt borrow value.member
-            argument = parseUnary();
+        boolean legacyYield = operation.type() == YIELD || operation.lexeme().equals("yield");
+        if (!legacyYield && !operation.lexeme().equals("cooperate")) {
+            throw error(operation,
+                    "unknown rt operation '" + operation.lexeme()
+                            + "'; use rt cooperate (legacy rt yield is also accepted)");
         }
-        return new Ast.RuntimeCallExpr(name, List.of(argument));
+
+        if (match(LPAREN)) {
+            if (!check(RPAREN)) {
+                throw error(peek(),
+                        "rt cooperate currently takes no arguments; scheduling policy hints are not enabled yet");
+            }
+            consume(RPAREN, "expected ')' after rt cooperate");
+        }
+
+        // Canonicalize the compatibility spelling immediately so every
+        // downstream pass sees one semantic operation.
+        return new Ast.RuntimeCallExpr("cooperate", List.of());
     }
 
     private Ast.Expr parseChannelOperation(
