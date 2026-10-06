@@ -536,9 +536,9 @@ final class ParserTest {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 define module app
                   pub fnc main(): void {
-                    [const foo, _, let bar] = (1, 2, 3);
-                    [_, _, const tail] = (4, 5, 6);
-                    [const z, _, let y] = (7, 8, 9);
+                    [const foo, _, let bar] = tuple (1, 2, 3);
+                    [_, _, const tail] = tuple (4, 5, 6);
+                    [const z, _, let y] = tuple (7, 8, 9);
                     stdio.println(foo);
                     stdio.println(bar);
                     stdio.println(tail);
