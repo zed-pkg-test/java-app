@@ -30,6 +30,10 @@ import java.util.function.Supplier;
  * <p>Completion authority belongs to the runtime operation that created the
  * Future. Guest code may observe state, await, or request cancellation, but it
  * cannot forge a value/failure.</p>
+ *
+ * <p>Blocking host bridges ({@code get}, timed {@code get}, and {@code join})
+ * reject pending reads inside actor execution. Settled reads and zero-timeout
+ * polling remain available without parking an actor dispatcher.</p>
  */
 public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     private static final Object PENDING = new Object();
@@ -522,6 +526,7 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
         Object observed = state.get();
         boolean interrupted = false;
         if (observed == PENDING) {
+            requireBlockingAllowed();
             java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
             whenCompleteRuntime((value, failure) -> done.countDown());
             for (;;) {
@@ -585,6 +590,10 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
     private Object awaitState(long timeout, TimeUnit unit) throws InterruptedException {
         Object observed = state.get();
         if (observed != PENDING) return observed;
+        // Zero-timeout polling observes state without registering an actor waiter.
+        // The public timed-get API rejects negative timeouts.
+        if (unit != null && timeout == 0L) return PENDING;
+        requireBlockingAllowed();
 
         java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
         whenCompleteRuntime((value, failure) -> done.countDown());
@@ -595,6 +604,13 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
             return state.get() == PENDING ? PENDING : state.get();
         }
         return state.get();
+    }
+
+    private static void requireBlockingAllowed() {
+        if (ActorRuntime.inActorExecution()) {
+            throw new IllegalStateException(
+                    "await would block an actor dispatcher carrier; actor continuation lowering must suspend/resume the mailbox turn");
+        }
     }
 
     @SuppressWarnings("unchecked")
