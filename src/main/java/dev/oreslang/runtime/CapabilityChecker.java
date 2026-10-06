@@ -105,7 +105,7 @@ public final class CapabilityChecker {
         try {
             IsolatePolicy effective = actorPolicy(fn.actorKind(), policy);
             if (fn.actorKind() == Ast.ActorKind.SHARED) {
-                require(effective, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor fnc " + fn.name());
+                require(effective, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, "shared actor fnc " + fn.name());
             }
             checkCallableTypes(fn.parameters(), fn.returnType(), effective);
             checkStatements(fn.body(), effective);
@@ -173,14 +173,14 @@ public final class CapabilityChecker {
                 if (declaration instanceof Ast.FunctionDecl fn) {
                     IsolatePolicy actorPolicy = actorPolicy(fn.actorKind(), policy);
                     if (fn.actorKind() == Ast.ActorKind.SHARED) {
-                        require(actorPolicy, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor fnc " + fn.name());
+                        require(actorPolicy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, "shared actor fnc " + fn.name());
                     }
                     checkCallableTypes(fn.parameters(), fn.returnType(), actorPolicy);
                     checkStatements(fn.body(), actorPolicy);
                 } else if (declaration instanceof Ast.ClassDecl klass) {
                     IsolatePolicy actorPolicy = actorPolicy(klass.actorKind(), policy);
                     if (klass.actorKind() == Ast.ActorKind.SHARED) {
-                        require(actorPolicy, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor " + klass.name());
+                        require(actorPolicy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, "shared actor " + klass.name());
                     }
                     for (Ast.TypeRef parent : klass.parents()) checkType(parent, actorPolicy);
                     for (Ast.TypeRef iface : klass.interfaces()) checkType(iface, actorPolicy);
@@ -216,7 +216,9 @@ public final class CapabilityChecker {
             Ast.ActorKind kind,
             IsolatePolicy parent) {
         return switch (kind) {
-            case NONE, SHARED -> parent;
+            case NONE -> parent;
+            case SHARED -> parent.withoutCapabilities(
+                    IsolatePolicy.Capability.SHARED_MEMORY);
             case PRIVATE -> parent.withoutCapabilities(
                     IsolatePolicy.Capability.SHARED_MEMORY,
                     IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
