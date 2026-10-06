@@ -18,6 +18,7 @@
 #include <mach/mach.h>
 #include <mach/thread_info.h>
 #include <mach/thread_act.h>
+#include <mach/thread_policy.h>
 #endif
 
 typedef struct ores_carrier_pool ores_carrier_pool;
@@ -307,6 +308,59 @@ static void *carrier_reaper_main(void *raw) {
     // leak only the retired native pool metadata rather than touching JNI with
     // an invalid environment. Process teardown will reclaim it.
     return NULL;
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeBindCurrentThreadToCarrierSlot(
+        JNIEnv *env, jclass cls, jint slot) {
+    (void)env;
+    (void)cls;
+    if (slot < 0) return -1;
+
+#if defined(__linux__)
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) return -1;
+
+    int allowed_count = CPU_COUNT(&allowed);
+    if (allowed_count <= 0) return -1;
+
+    int ordinal = slot % allowed_count;
+    int selected = -1;
+    for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+        if (!CPU_ISSET(cpu, &allowed)) continue;
+        if (ordinal-- == 0) {
+            selected = cpu;
+            break;
+        }
+    }
+    if (selected < 0) return -1;
+
+    cpu_set_t target;
+    CPU_ZERO(&target);
+    CPU_SET(selected, &target);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(target), &target) != 0) {
+        return -1;
+    }
+    return (jint)selected;
+#elif defined(__APPLE__)
+    /*
+     * Darwin does not expose Linux-style strict CPU pinning. An affinity tag
+     * asks Mach to co-schedule equal tags with cache locality when practical.
+     * The actor scheduler still keeps a stable carrier lane above this hint.
+     */
+    thread_affinity_policy_data_t policy;
+    policy.affinity_tag = (integer_t)(slot + 1);
+    mach_port_t thread = pthread_mach_thread_np(pthread_self());
+    kern_return_t status = thread_policy_set(
+            thread,
+            THREAD_AFFINITY_POLICY,
+            (thread_policy_t)&policy,
+            THREAD_AFFINITY_POLICY_COUNT);
+    return status == KERN_SUCCESS ? (jint)slot : -1;
+#else
+    return -1;
+#endif
 }
 
 JNIEXPORT void JNICALL

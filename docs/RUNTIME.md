@@ -202,7 +202,13 @@ Oreslang deliberately uses two executors:
 - **private dispatcher** — private actors, isolation-copy message transport;
 - **shared dispatcher** — shared actors, immutable sharing plus explicit `SyncCell<T>` shared state.
 
-A per-actor atomic scheduling gate ensures only one drain task for that actor is active. The executor may run different turns on different threads; thread identity is never actor identity.
+A per-actor atomic scheduling gate ensures only one drain task for that actor is active. Thread identity is never actor identity, but the production native dispatcher applies **soft ActorId-to-carrier affinity** for cache locality. Successive turns for one actor prefer the same native carrier lane and therefore the same CPU/cache-affinity target. The affinity lane is an optimization only: when its backlog crosses a bounded threshold, new turns spill to the global ready queue so locality cannot become a starvation or throughput requirement.
+
+On Linux each native carrier is pinned to one logical CPU selected from the process's current allowed CPU set (`sched_getaffinity` + `pthread_setaffinity_np`), so container/cgroup cpusets are respected. On macOS, where strict Linux-style CPU pinning is unavailable, each carrier installs a stable Mach thread-affinity tag so the kernel can preserve cache locality when practical. A future topology layer may refine lane placement by physical core, LLC group, and NUMA node; source semantics must remain independent of that mapping.
+
+This scheduler policy is deliberately aligned with actor-local heaps: an actor's mailbox turns, local allocation metadata, and hot state normally return to the same carrier/cache domain without making the heap thread-confined. If balancing pressure moves a turn, the actor retains the same ActorId, heap, mailbox, policy, and continuation state.
+
+The explicit `java` carrier backend remains a portability/debugging fallback and does not promise CPU affinity.
 
 The runtime does not interrupt a carrier thread to stop one actor because that thread belongs to the dispatcher and may subsequently execute unrelated actors. Actor cancellation is observed at compiler-injected scheduler safepoints. Whole-runtime shutdown may interrupt the dispatcher executors.
 

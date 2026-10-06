@@ -4491,6 +4491,20 @@ public final class ActorRuntime implements AutoCloseable {
         };
     }
 
+    private void executeActorBatch(ActorCell<?> cell) {
+        ExecutorService dispatcher = dispatcherFor(cell.kind);
+        if (dispatcher instanceof NativeCarrierExecutor nativeDispatcher) {
+            /*
+             * ActorId is the semantic identity; the affinity key only chooses a
+             * preferred carrier/core lane. Correctness never depends on the
+             * chosen lane and NativeCarrierExecutor may spill under pressure.
+             */
+            nativeDispatcher.executeAffinity(cell.ref.id().value().hashCode(), cell::runBatch);
+        } else {
+            dispatcher.execute(cell::runBatch);
+        }
+    }
+
     private static ExecutorService newDispatcher(
             int parallelism,
             int readyQueueCapacity,
@@ -4805,7 +4819,7 @@ public final class ActorRuntime implements AutoCloseable {
             if (stopped.get() || forceKillFenced || closed.get()) return;
             if (!scheduled.compareAndSet(false, true)) return;
             try {
-                dispatcherFor(kind).execute(this::runBatch);
+                executeActorBatch(this);
             } catch (RejectedExecutionException rejected) {
                 scheduled.set(false);
                 stop();

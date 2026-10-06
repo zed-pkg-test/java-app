@@ -20,7 +20,7 @@ final class ActorRuntimeNativeCarrierTest {
         String previous = System.getProperty("ores.runtime.carriers");
         System.setProperty("ores.runtime.carriers", "native");
         try {
-            var config = new ActorRuntime.DispatcherConfig(1, 1, 8, 128);
+            var config = new ActorRuntime.DispatcherConfig(1, 2, 1, 128);
             try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
                 assertEquals(
                         ActorRuntime.CarrierBackend.NATIVE_PTHREAD,
@@ -28,6 +28,8 @@ final class ActorRuntimeNativeCarrierTest {
 
                 CountDownLatch delivered = new CountDownLatch(32);
                 Set<Long> nativeThreads = ConcurrentHashMap.newKeySet();
+                Set<Integer> carrierSlots = ConcurrentHashMap.newKeySet();
+                Set<Integer> affinityTargets = ConcurrentHashMap.newKeySet();
 
                 var ref = runtime.<Integer>spawnShared(() -> (message, context) -> {
                     assertTrue(NativeCarrierExecutor.isNativeCarrierThread());
@@ -35,6 +37,8 @@ final class ActorRuntimeNativeCarrierTest {
                     long pthread = NativeCarrierExecutor.currentNativeThreadId();
                     assertNotEquals(0L, pthread);
                     nativeThreads.add(pthread);
+                    carrierSlots.add(NativeCarrierExecutor.currentCarrierSlot());
+                    affinityTargets.add(NativeCarrierExecutor.currentCarrierAffinityTarget());
                     delivered.countDown();
                     if (message == 31) context.self().stop();
                 });
@@ -46,7 +50,15 @@ final class ActorRuntimeNativeCarrierTest {
                 assertEquals(
                         1,
                         nativeThreads.size(),
-                        "one shared actor must multiplex its turns onto the configured native carrier");
+                        "one shared actor should reuse one native carrier when its preferred lane is healthy");
+                assertEquals(
+                        1,
+                        carrierSlots.size(),
+                        "successive mailbox turns should preserve the actor's preferred carrier slot");
+                assertEquals(
+                        1,
+                        affinityTargets.size(),
+                        "successive turns should preserve the carrier CPU/cache-affinity target");
             }
         } finally {
             if (previous == null) System.clearProperty("ores.runtime.carriers");
