@@ -121,7 +121,7 @@ The guest `THREAD_CREATE` capability is separate from host/runtime dispatcher sc
 Oreslang has two deliberately different mutex domains:
 
 - `Mutex<T>` is actor/private-domain state. It owns the protected value, uses no JVM lock, is non-reentrant, and is confined to the creating semantic actor/execution domain. Shared actors may migrate between JVM workers without changing that domain.
-- `SharedMutex<T>` is an explicit same-OS-process shared-memory capability within one `ActorRuntime`. It is non-reentrant and uses acquire/release synchronization. Only shared actors may receive/use it; private actors reject it even when the parent runtime is otherwise trusted. Sender and receiver must have `SHARED_MEMORY`. It binds transactionally to the first runtime that successfully publishes it, and later cross-runtime transport is rejected. Publication validation is nonblocking and runs while the mutex's physical permit is held, so transport never races a legitimate protected mutation; publishing a currently locked/contended mutex fails fast and may be retried later.
+- `SharedMutex<T>` is a legacy/host-compatible same-OS-process writable-memory capability within one `ActorRuntime`. It remains non-reentrant and uses acquire/release synchronization, but it is **not** implied by the SHARED actor kind. Sender and receiver must separately hold `SHARED_MEMORY`; source SHARED actors now lose that capability by default. It binds transactionally to the first runtime that successfully publishes it, and later cross-runtime transport is rejected. Publication validation is nonblocking and runs while the mutex's physical permit is held, so transport never races a legitimate protected mutation; publishing a currently locked/contended mutex fails fast and may be retried later.
 - The payload and declared type argument of `SharedMutex<T>` must be **SharedSafe**: concrete owned data whose reachable field graph contains no borrows, actor-local `Mutex`, `MutexGuard`, pending `Future`, closure/function values, or unresolved dynamic/generic state. This applies to signatures/fields/aliases as well as `SharedMutex.new(...)`. Until Oreslang has an explicit SharedSafe generic bound, unconstrained `SharedMutex<T>` is rejected conservatively. The type checker recursively validates class fields (including inherited generic substitutions), and the interpreter repeats runtime admission checks as defense in depth. Nested `SharedMutex` values are also rejected for now; recursive publication and lock-order semantics must be explicit before lock-containing-lock state is admitted.
 - `MutexGuard<T>` is a lexical linear capability. The runtime releases it on normal scope exit and poisons a shared mutex on abnormal scope exit. Guest code may call `guard.release()` for early release; there is intentionally no `mutex.unlock()`. A released guard can no longer expose its protected value.
 - Guard access is deliberately non-escaping. Copy-like fields may be read, mutable fields may be replaced, and methods may be invoked directly when they return `void` or a copy-like value. Move-only nested fields cannot be extracted through a guard, and instance methods are direct-call-only everywhere rather than becoming bound method values. For compound mutation, use `with_lock(|state| -> { ... })`.
@@ -209,13 +209,31 @@ The runtime does not interrupt a carrier thread to stop one actor because that t
 
 ## Shared actor memory
 
-Shared actors keep ordinary mutable fields actor-owned and mailbox-serialized. Cross-actor mutable memory is exceptional and represented by `SyncCell<T>`.
+A SHARED actor is a scheduling/runtime-domain classification, **not permission to mutate process-wide application state**. Its ordinary mutable fields remain actor-owned and mailbox-serialized, exactly one logical writer is active at a time, and the ownership domain follows ActorId rather than carrier-thread identity.
 
-`SyncCell<T>` is runtime-owned and closeable. Its frozen state consumes shared actor-memory quota; growth reserves quota before publishing a replacement value, shrink/close returns quota, and runtime teardown closes remaining cells. The combined private-slice plus shared-cell total cannot exceed the parent `IsolatePolicy.maxHeapBytes()`.
+The target allocation model is actor-local heaps/arenas for both private and shared actors. A shared actor may retain zero-copy references to explicitly published immutable data, but an ordinary mutable allocation belongs to one actor domain. Cross-actor application mutation should normally travel through a mailbox/channel to the owning actor.
 
-A private actor turn cannot create, snapshot, read, update, or close synchronized shared state even if trusted host code accidentally captured a cell handle. Source admission and runtime creation both require `SHARED_MEMORY`.
+### Runtime proxy escape hatch
 
-Actor failures are fail-stop in this layer. The actor ref retains the failure cause for diagnostics, queued reservations are drained, and later sends receive an `ActorTerminatedException` rather than silently targeting a dead mailbox.
+Source-level `rt proxy value` consumes an owned class/dynamic-struct value into `ActorRuntime.Proxy<T>`. The proxy is runtime-owned, quota-accounted, and protected by a fair `ReentrantReadWriteLock`. It exists for object graphs where copying is expensive enough to justify synchronized shared access.
+
+The evaluator keeps the raw target inaccessible to source code and maps operations as follows:
+
+- scalar/immutable field/index read -> read lock;
+- field/index replacement -> write lock;
+- explicitly read-only receiver method -> read lock;
+- all other direct methods -> write lock;
+- extracted/bound proxy methods -> rejected;
+- async or potentially suspending method -> rejected before executing under the lock;
+- mutable/move-only result escape -> rejected.
+
+The lock domain is independent of native carrier identity, so an actor may migrate between carrier threads without changing proxy correctness. Cross-proxy nested locking is rejected rather than attempting a global lock-order protocol, and read-to-write upgrade is rejected rather than parking forever. Closing a proxy or the enclosing ActorRuntime from inside a live proxy read section also fails before attempting the write lock.
+
+A proxy may be transported only between SHARED actors in the same `ActorRuntime`, with `ACTOR_SHARED_PROXY` on both sides. PRIVATE/UNTRUSTED actors, data-only freezes, immutable `Shared<T>` wrappers, and ordinary async-task boundaries reject proxy handles.
+
+`SyncCell<T>` and `SharedMutex<T>` remain host/runtime compatibility primitives during migration. They continue to require the separate `SHARED_MEMORY` capability, but source SHARED actors no longer receive that authority merely because their actor kind is SHARED. New actor-facing designs should prefer actor ownership/messages, immutable publication, or the explicit proxy capability.
+
+Actor failures remain fail-stop. The actor ref retains the failure cause for diagnostics, queued reservations are drained, and later sends receive an `ActorTerminatedException` rather than silently targeting a dead mailbox.
 
 ## Private actor memory confinement
 

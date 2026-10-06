@@ -949,7 +949,8 @@ public final class ActorRuntime implements AutoCloseable {
         public boolean closed() { return proxyClosed.get(); }
         public long readAcquisitions() { return readAcquisitions.get(); }
         public long writeAcquisitions() { return writeAcquisitions.get(); }
-        public int queuedWriters() { return lock.getQueueLength(); }
+        /** Approximate number of reader/writer threads waiting for this fair lock. */
+        public int queuedWaiters() { return lock.getQueueLength(); }
 
         public <R> R read(Function<? super T, ? extends R> reader) {
             Objects.requireNonNull(reader, "reader");
@@ -1016,10 +1017,15 @@ public final class ActorRuntime implements AutoCloseable {
         @Override
         public void close() {
             requireProxyAccess("close rt proxy");
-            closeFromRuntime();
+            closeWithWriteLock();
         }
 
         private void closeFromRuntime() {
+            closeWithWriteLock();
+        }
+
+        private void closeWithWriteLock() {
+            boolean entered = enterProxyLock(lock, true);
             var writeLock = lock.writeLock();
             writeLock.lock();
             try {
@@ -1031,6 +1037,7 @@ public final class ActorRuntime implements AutoCloseable {
                 sharedProxies.remove(this);
             } finally {
                 writeLock.unlock();
+                exitProxyLock(entered);
             }
         }
 
@@ -4650,6 +4657,11 @@ public final class ActorRuntime implements AutoCloseable {
     @Override
     public void close() {
         requireSupervisorContext("close an ActorRuntime");
+        if (currentProxyLock.get() != null) {
+            throw new IllegalStateException(
+                    "ActorRuntime cannot close from inside an rt Proxy critical section; "
+                            + "finish the proxy access before closing the runtime");
+        }
 
         final boolean firstClose;
         final List<ActorCell<?>> snapshot;

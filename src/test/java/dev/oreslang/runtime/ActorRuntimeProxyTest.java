@@ -84,6 +84,35 @@ final class ActorRuntimeProxyTest {
         }
     }
 
+
+    @Test
+    void closingProxyOrRuntimeFromReadSectionFailsFastWithoutPoisoningState() {
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer());
+        try {
+            ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{5});
+
+            proxy.read(value -> {
+                IllegalStateException proxyClose = assertThrows(
+                        IllegalStateException.class,
+                        proxy::close);
+                assertTrue(proxyClose.getMessage().contains("upgrade"));
+
+                IllegalStateException runtimeClose = assertThrows(
+                        IllegalStateException.class,
+                        runtime::close);
+                assertTrue(runtimeClose.getMessage().contains("critical section"));
+                return value[0];
+            });
+
+            assertFalse(proxy.closed());
+            assertEquals(5, proxy.read(value -> value[0]).intValue());
+            proxy.close();
+            assertTrue(proxy.closed());
+        } finally {
+            runtime.close();
+        }
+    }
+
     @Test
     void sharedActorMayReceiveProxyButPrivateActorCannot() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
