@@ -258,12 +258,6 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum CarrierBackend { NATIVE_PTHREAD, JVM_THREAD_POOL }
 
-    public record CarrierAffinityDiagnostics(
-            long preferredHits,
-            long steals,
-            long globalSpills,
-            int bindingFailures) { }
-
     private static final String CARRIER_BACKEND_PROPERTY = "ores.runtime.carriers";
 
     public record DispatcherConfig(
@@ -451,26 +445,6 @@ public final class ActorRuntime implements AutoCloseable {
                 && untrustedDispatcher instanceof NativeCarrierExecutor
                 ? CarrierBackend.NATIVE_PTHREAD
                 : CarrierBackend.JVM_THREAD_POOL;
-    }
-
-    public CarrierAffinityDiagnostics carrierAffinityDiagnostics() {
-        long preferredHits = 0L;
-        long steals = 0L;
-        long globalSpills = 0L;
-        int bindingFailures = 0;
-
-        for (ExecutorService dispatcher :
-                List.of(privateDispatcher, sharedDispatcher, untrustedDispatcher)) {
-            if (dispatcher instanceof NativeCarrierExecutor nativeDispatcher) {
-                preferredHits += nativeDispatcher.getAffinityPreferredHitCount();
-                steals += nativeDispatcher.getAffinityStealCount();
-                globalSpills += nativeDispatcher.getAffinityGlobalSpillCount();
-                bindingFailures += nativeDispatcher.getAffinityBindingFailureCount();
-            }
-        }
-
-        return new CarrierAffinityDiagnostics(
-                preferredHits, steals, globalSpills, bindingFailures);
     }
 
     /**
@@ -1702,7 +1676,7 @@ public final class ActorRuntime implements AutoCloseable {
     private final class GroupMailmanState<Out> implements AutoCloseable {
         private final ActorGroup group;
         private final ActorMailman<Out> mailman;
-        private final ArrayBlockingQueue<GroupMailmanEnvelope<Out>> outbox;
+        private final ChannelRuntime.Channel<GroupMailmanEnvelope<Out>> outbox;
         private final Object admissionLock = new Object();
         private final AtomicLong nextSequence = new AtomicLong();
         private final AtomicBoolean scheduled = new AtomicBoolean();
@@ -1716,7 +1690,7 @@ public final class ActorRuntime implements AutoCloseable {
                 ActorMailman<Out> mailman) {
             this.group = Objects.requireNonNull(group, "group");
             this.mailman = Objects.requireNonNull(mailman, "mailman");
-            this.outbox = new ArrayBlockingQueue<>(outboxCapacity);
+            this.outbox = new ChannelRuntime.Channel<>(outboxCapacity);
         }
 
         private boolean stopped() {
@@ -1758,7 +1732,7 @@ public final class ActorRuntime implements AutoCloseable {
                                         (Out) frozen.value()),
                                 frozen.reservation());
 
-                if (!outbox.offer(envelope)) {
+                if (!outbox.tryWrite(envelope)) {
                     envelope.release();
                     throw new IllegalStateException(
                             "ActorGroup Mailman outbox capacity exceeded for " + group.id);
@@ -1774,7 +1748,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void schedule() {
-            if (stopped.get() || outbox.isEmpty()) return;
+            if (stopped.get() || outbox.size() == 0) return;
             if (!scheduled.compareAndSet(false, true)) return;
 
             final OresFuture<Void> dispatch;
@@ -1816,42 +1790,64 @@ public final class ActorRuntime implements AutoCloseable {
                     new ActorGroupMailmanExecution(ActorRuntime.this, group.id));
 
             try {
-                ActorGroupContext context = new ActorGroupContext() {
-                    @Override
-                    public ActorGroupId groupId() {
-                        return group.id;
-                    }
-
-                    @Override
-                    public int memberCount() {
-                        if (stopped.get() || group.closed() || closed.get()) {
-                            throw new IllegalStateException(
-                                    "ActorGroup Mailman is stopped for " + group.id);
-                        }
-                        return group.members.size();
-                    }
-
-                    @Override
-                    public <M> void send(ActorRef<M> target, M message) {
-                        Objects.requireNonNull(target, "target");
-                        synchronized (admissionLock) {
-                            if (stopped.get() || group.closed() || closed.get()) {
-                                throw new IllegalStateException(
-                                        "ActorGroup Mailman is stopped for " + group.id);
-                            }
-                            sendFromActorGroupMailman(group, target, message);
-                        }
-                    }
-                };
-
                 int handled = 0;
                 long startedAt = System.nanoTime();
                 while (!stopped.get()
                         && handled < dispatcherConfig.throughput()
                         && (handled == 0
                                 || System.nanoTime() - startedAt < MAILMAN_MAX_BATCH_NANOS)) {
-                    GroupMailmanEnvelope<Out> envelope = outbox.poll();
+                    GroupMailmanEnvelope<Out> envelope;
+                    try {
+                        envelope = outbox.tryRead().orElse(null);
+                    } catch (ChannelRuntime.ChannelClosedException closedOutbox) {
+                        if (stopped.get()) break;
+                        throw closedOutbox;
+                    }
                     if (envelope == null) break;
+                    AtomicBoolean callbackActive = new AtomicBoolean(true);
+                    ActorGroupContext context = new ActorGroupContext() {
+                        private void requireActive() {
+                            if (!callbackActive.get() || executionLease.get() != Thread.currentThread()) {
+                                throw new SecurityException(
+                                        "ActorGroupContext requires its active Mailman callback");
+                            }
+                            ActorGroupMailmanExecution execution = CURRENT_ACTOR_GROUP_MAILMAN.get();
+                            if (execution == null || execution.runtime() != ActorRuntime.this
+                                    || !execution.groupId().equals(group.id)) {
+                                throw new SecurityException("ActorGroupContext belongs to another execution");
+                            }
+                        }
+
+                        @Override
+                        public ActorGroupId groupId() {
+                            requireActive();
+                            return group.id;
+                        }
+
+                        @Override
+                        public int memberCount() {
+                            requireActive();
+                            if (stopped.get() || group.closed() || closed.get()) {
+                                throw new IllegalStateException(
+                                        "ActorGroup Mailman is stopped for " + group.id);
+                            }
+                            return group.members.size();
+                        }
+
+                        @Override
+                        public <M> void send(ActorRef<M> target, M message) {
+                            requireActive();
+                            Objects.requireNonNull(target, "target");
+                            synchronized (admissionLock) {
+                                if (stopped.get() || group.closed() || closed.get()) {
+                                    throw new IllegalStateException(
+                                            "ActorGroup Mailman is stopped for " + group.id);
+                                }
+                                sendFromActorGroupMailman(group, target, message);
+                            }
+                        }
+                    };
+
                     try {
                         mailman.receiveMail(envelope.mail, context);
                     } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
@@ -1862,6 +1858,7 @@ public final class ActorRuntime implements AutoCloseable {
                         failure.compareAndSet(null, mailmanFailure);
                         stopped.set(true);
                     } finally {
+                        callbackActive.set(false);
                         envelope.release();
                     }
                     handled++;
@@ -1879,7 +1876,7 @@ public final class ActorRuntime implements AutoCloseable {
                 scheduled.set(false);
                 if (stopped.get()) {
                     drainOutbox();
-                } else if (!outbox.isEmpty()) {
+                } else if (outbox.size() != 0) {
                     try {
                         schedule();
                     } catch (RuntimeException | Error rescheduleFailure) {
@@ -1909,9 +1906,9 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void drainOutboxLocked() {
-            GroupMailmanEnvelope<Out> envelope;
-            while ((envelope = outbox.poll()) != null) {
-                envelope.release();
+            outbox.close();
+            while (outbox.drainOne(GroupMailmanEnvelope::release)) {
+                // Closing the channel preserves buffered envelopes; teardown owns their release.
             }
         }
 
@@ -4517,20 +4514,6 @@ public final class ActorRuntime implements AutoCloseable {
         };
     }
 
-    private void executeActorBatch(ActorCell<?> cell) {
-        ExecutorService dispatcher = dispatcherFor(cell.kind);
-        if (dispatcher instanceof NativeCarrierExecutor nativeDispatcher) {
-            /*
-             * ActorId is the semantic identity; the affinity key only chooses a
-             * preferred carrier/core lane. Correctness never depends on the
-             * chosen lane and NativeCarrierExecutor may spill under pressure.
-             */
-            nativeDispatcher.executeAffinity(cell.ref.id().value().hashCode(), cell::runBatch);
-        } else {
-            dispatcher.execute(cell::runBatch);
-        }
-    }
-
     private static ExecutorService newDispatcher(
             int parallelism,
             int readyQueueCapacity,
@@ -4845,7 +4828,7 @@ public final class ActorRuntime implements AutoCloseable {
             if (stopped.get() || forceKillFenced || closed.get()) return;
             if (!scheduled.compareAndSet(false, true)) return;
             try {
-                executeActorBatch(this);
+                dispatcherFor(kind).execute(this::runBatch);
             } catch (RejectedExecutionException rejected) {
                 scheduled.set(false);
                 stop();
