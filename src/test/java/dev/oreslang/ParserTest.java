@@ -56,7 +56,7 @@ final class ParserTest {
                     }
                   }
 
-                  actor Worker {
+                  actor pub Worker {
                     fnc pub async handle(int value): int {
                       return value;
                     }
@@ -66,7 +66,7 @@ final class ParserTest {
                     fnc structural render() => String;
                   }
 
-                  actor fnc pub async worker(int value): int {
+                  actor pub fnc untrusted async worker(int value): int {
                     return value;
                   }
                 end
@@ -86,6 +86,7 @@ final class ParserTest {
         assertTrue(helper.isStatic());
         assertEquals(Ast.Visibility.PUBLIC, helper.visibility());
 
+        assertEquals(Ast.Visibility.PUBLIC, actor.visibility());
         Ast.MethodDecl handle = actor.methods().getFirst();
         assertTrue(handle.async());
         assertEquals(Ast.Visibility.PUBLIC, handle.visibility());
@@ -94,7 +95,7 @@ final class ParserTest {
                 assertInstanceOf(Ast.InterfaceFunctionDecl.class, api.members().getFirst());
         assertTrue(render.structural());
 
-        assertEquals(Ast.ActorKind.SHARED, actorFunction.actorKind());
+        assertEquals(Ast.ActorKind.UNTRUSTED, actorFunction.actorKind());
         assertEquals(Ast.Visibility.PUBLIC, actorFunction.visibility());
         assertTrue(actorFunction.async());
     }
@@ -164,6 +165,13 @@ final class ParserTest {
                       return 1;
                     }
                   end
+                end
+                """,
+                """
+                define module app as
+                  isoactor fnc shared contradictory(): void {
+                    return;
+                  }
                 end
                 """
         );
