@@ -599,9 +599,17 @@ never erased into an ordinary structural object.
 
 ## Boolean combinator intrinsics
 
+`bool` and `boolean` are interchangeable spellings of the same primitive
+type. Both work in parameters, return types, bindings, casts, type tests,
+and nested types such as `Array<boolean>` or `Option<boolean>`. They have
+the same Copy ownership semantics. Boolean primitives do not accept type
+arguments; `boolean<int>` and `bool<>` are invalid.
+
 `And`, `Or`, and `Xor` are compiler-provided overload families in the
 built-in `BooleanOps` namespace and are also available as globals, like
 `Some`, `None`, `Ok`, and `Err`.
+No imports or declarations are needed to call `And(...)`, `Or(...)`, or
+`Xor(...)` directly. The qualified `BooleanOps` forms are also built in.
 
 Conceptually, each family has these two arity-selected overloads:
 
@@ -649,6 +657,9 @@ control-flow IR as the operators.
 The one-argument list overload has ordinary eager argument evaluation, then
 reduces the already-created list. Empty lists are valid: `And([])` is
 `true`, `Or([])` is `false`, and `Xor([])` is `false`.
+The intrinsic reads its list without consuming ownership, so the same array
+can be reused in subsequent calls. User-defined functions that shadow these
+names retain their declared parameter ownership rules.
 
 Module/top-level `fnc` and `routine` overload identity is also name + exact
 arity. Same-name/different-arity declarations are valid; same-name/same-arity
