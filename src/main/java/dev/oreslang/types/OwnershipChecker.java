@@ -682,6 +682,18 @@ public final class OwnershipChecker {
             Ast.TypeRef constructedType = inferConstructedType(created, argumentTypes);
             return new ValueInfo(constructedType, ValueKind.MOVE_ONLY, null);
         }
+        if (expr instanceof Ast.SpawnExpr spawned) {
+            for (Ast.Expr arg : spawned.call().arguments()) {
+                ValueInfo info = checkExpr(arg, scope, true);
+                if (containsMutexGuardType(info.type)) {
+                    throw error("MutexGuard cannot cross an actor spawn boundary");
+                }
+            }
+            return new ValueInfo(
+                    new Ast.TypeRef("ActorRef", List.of(Ast.TypeRef.inferred()), false),
+                    ValueKind.MOVE_ONLY,
+                    null);
+        }
         if (expr instanceof Ast.AwaitExpr awaited) {
             if (mutexCriticalSectionDepth > 0 || scope.hasLiveMutexGuard()) {
                 throw error("cannot await while holding a MutexGuard; release the guard before suspension");
@@ -1402,6 +1414,7 @@ public final class OwnershipChecker {
             scanExpr(e.receiver(), locals, outer, recursiveBinding, captures, write);
             scanExpr(e.index(), locals, outer, recursiveBinding, captures, false);
         } else if (expr instanceof Ast.NewExpr e) for (Ast.Expr arg : e.arguments()) scanExpr(arg, locals, outer, recursiveBinding, captures, false);
+        else if (expr instanceof Ast.SpawnExpr e) scanExpr(e.call(), locals, outer, recursiveBinding, captures, false);
         else if (expr instanceof Ast.AwaitExpr e) scanExpr(e.expression(), locals, outer, recursiveBinding, captures, false);
         else if (expr instanceof Ast.ChannelOpExpr e) {
             scanExpr(e.channel(), locals, outer, recursiveBinding, captures, false);
