@@ -242,6 +242,40 @@ final class OresSchedulerTest {
     }
 
     @Test
+    void defaultYieldQueuesBehindAlreadyRunnablePeerWork() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            java.util.List<String> order =
+                    java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            CountDownLatch firstTurnEntered = new CountDownLatch(1);
+            CountDownLatch peerQueued = new CountDownLatch(1);
+            AtomicInteger aPc = new AtomicInteger();
+
+            OresFuture<Void> a = scheduler.start(resume -> {
+                if (aPc.getAndIncrement() == 0) {
+                    order.add("a1");
+                    firstTurnEntered.countDown();
+                    assertTrue(peerQueued.await(5, TimeUnit.SECONDS));
+                    return OresScheduler.yieldNow();
+                }
+                order.add("a2");
+                return OresScheduler.done(null);
+            });
+
+            assertTrue(firstTurnEntered.await(5, TimeUnit.SECONDS));
+            OresFuture<Void> b = scheduler.start(resume -> {
+                order.add("b");
+                return OresScheduler.done(null);
+            });
+            peerQueued.countDown();
+
+            a.get(5, TimeUnit.SECONDS);
+            b.get(5, TimeUnit.SECONDS);
+            assertEquals(java.util.List.of("a1", "b", "a2"), order,
+                    "default yield must requeue behind work that is already runnable");
+        }
+    }
+
+    @Test
     void cancellationAfterYieldAdmissionPreventsQueuedResumeFromRunning() throws Exception {
         java.util.concurrent.BlockingQueue<Runnable> queued =
                 new java.util.concurrent.LinkedBlockingQueue<>();
