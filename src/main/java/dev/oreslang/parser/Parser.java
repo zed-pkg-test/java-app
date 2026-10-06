@@ -2271,7 +2271,12 @@ public final class Parser {
     }
 
     private Ast.Expr parseRuntimeExpression() {
-        Token operation = consume(IDENT, "expected runtime operation after 'rt'");
+        Token operation;
+        if (match(YIELD)) {
+            operation = previous();
+        } else {
+            operation = consume(IDENT, "expected runtime operation after 'rt'");
+        }
         if (!operation.lexeme().equals("yield")) {
             throw error(operation,
                     "unknown rt operation '" + operation.lexeme()

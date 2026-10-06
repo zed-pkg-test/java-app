@@ -113,7 +113,7 @@ final class RuntimeYieldLanguageTest {
                   }
 
                   pub fnc main(): void {
-                    for val item of values() {
+                    for let item of values() {
                       stdio.println(item);
                     }
                     return;
