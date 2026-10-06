@@ -1,0 +1,26 @@
+import fnc run_json_tests from './json_test';
+import fnc run_messagepack_tests from './messagepack_test';
+import fnc run_cbor_tests from './cbor_test';
+import fnc run_protobuf_tests from './protobuf_test';
+import fnc run_validation_tests from './validation_test';
+import fnc run_metadata_tests from './metadata_test';
+import fnc run_object_codec_tests from './object_codec_test';
+import fnc run_generated_typed_codec_tests from './generated_typed_codec_test';
+import fnc run_json_channel_tests from './json_channel_test';
+import fnc run_channel_codec_tests from './channel_codec_test';
+
+pub async fnc main(): void {
+  run_json_tests();
+  run_messagepack_tests();
+  run_cbor_tests();
+  run_protobuf_tests();
+  run_validation_tests();
+  run_metadata_tests();
+  run_object_codec_tests();
+  run_generated_typed_codec_tests();
+  await run_json_channel_tests();
+  await run_channel_codec_tests();
+
+  stdio.stdout.println("serialization/validation native tests passed");
+  return;
+}
