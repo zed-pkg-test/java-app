@@ -172,7 +172,7 @@ The design intentionally mirrors the strongest C# async/await practices:
 - keep the execution scheduler out of the source-level future contract;
 - separate I/O/task concurrency from explicitly CPU-bound scheduling.
 
-Because the current interpreter has not yet lowered `await` into a resumable state machine, an ordinary async virtual carrier may block while awaiting another future. Actor carriers are different: an incomplete `await` from an actor turn is rejected rather than parking the dispatcher. Adversarial contexts also fail closed for ordinary async execution until continuation lowering can release the strict guest-turn serialization lock at suspension points.
+Actor dispatcher carriers must not park on pending future reads. Pending `OresFuture.get()`, positive-timeout `get(...)`, and `join()` host/runtime bridges are rejected before registering a waiter. Settled reads and zero-timeout polling remain available. Guest `await` uses the compiler continuation path where supported; host blocking bridges cannot substitute for that suspension/resumption protocol.
 
 Async callable arguments/results are detached at the evaluator boundary. This is stricter than C#'s shared managed heap and preserves Oreslang's ownership direction: mutable task state is owned by the task instead of becoming an implicit cross-thread alias. Generic async boundaries remain closed until a Send/task-safe generic contract exists.
 
