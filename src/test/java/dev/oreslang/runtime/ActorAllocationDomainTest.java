@@ -221,6 +221,70 @@ final class ActorAllocationDomainTest {
         }
     }
 
+    @Test
+    void mailmanControlExecutionCannotMasqueradeAsRootOrActorAllocationDomain() throws Exception {
+        try (OresVM vm = OresVM.create(Runnable::run);
+             ActorRuntime runtime = new ActorRuntime(
+                     IsolatePolicy.developer(),
+                     new ActorRuntime.DispatcherConfig(1, 1, 8, 64),
+                     ActorRuntime.TurnExecutor.direct(),
+                     vm::executeControl)) {
+            ActorRuntime.ActorGroup group = runtime.createActorGroup();
+            ActorRuntime.ActorGroupJoinCapability join = group.joinCapability();
+            CountDownLatch joined = new CountDownLatch(1);
+            CountDownLatch checked = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+
+            group.installMailman(4, (mail, context) -> {
+                try {
+                    assertTrue(ActorRuntime.inActorGroupMailmanExecution());
+                    assertThrows(SecurityException.class, runtime::currentAllocationDomain,
+                            "CONTROL/Mailman work must not inherit ROOT allocation authority");
+                } catch (Throwable problem) {
+                    failure.compareAndSet(null, problem);
+                } finally {
+                    checked.countDown();
+                }
+            });
+
+            var emitter = runtime.<Integer>spawnShared(() -> (message, context) -> {
+                if (message == 0) {
+                    group.joinCurrent(join);
+                    joined.countDown();
+                } else {
+                    group.emit(message);
+                }
+            });
+
+            emitter.send(0);
+            assertTrue(joined.await(5, TimeUnit.SECONDS));
+            emitter.send(1);
+            assertTrue(checked.await(5, TimeUnit.SECONDS));
+            assertTrue(failure.get() == null, String.valueOf(failure.get()));
+        }
+    }
+
+    @Test
+    void retiredActorDomainTokenRemainsNonTransportableMetadataOnly() throws Exception {
+        AtomicReference<ActorRuntime.AllocationDomain> captured = new AtomicReference<>();
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var ref = runtime.<Integer>spawnSharedTrusted(factoryContext -> (message, context) -> {
+                captured.set(context.allocationDomain());
+                context.self().stop();
+            });
+
+            ref.send(1);
+            assertTrue(ref.awaitTermination(5, TimeUnit.SECONDS));
+            assertTrue(ref.failure().isEmpty());
+
+            ActorRuntime.AllocationDomain domain = captured.get();
+            assertEquals(ref.id(), domain.actorId());
+            assertEquals(ActorRuntime.AllocationDomainKind.ACTOR_LOCAL, domain.kind());
+            assertThrows(IllegalArgumentException.class, () -> ActorRuntime.freeze(domain),
+                    "allocation-domain tokens are provenance metadata, never mailbox capabilities");
+        }
+    }
+
     private static java.util.UUID runtimeId(ActorRuntime.ActorContext<?> context) {
         return context.runtime().allocationRuntimeId();
     }
