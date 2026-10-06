@@ -22,10 +22,9 @@ import java.util.Set;
  * Current model:
  * - primitive immutable values are Copy;
  * - class/list/object/function values are move-only by default;
- * - by-value call/binding/return moves move-only values;
- * - &T permits shared immutable borrows;
- * - &mut T is exclusive and requires a mutable owner;
- * - Bar mut b makes an owned parameter mutable inside the callee;
+ * - ordinary non-Copy call parameters are temporary read aliases;
+ * - Type mut name parameters are exclusive temporary mutable aliases;
+ * - explicit rt take transfers ownership at the call site;
  * - escaping closures own non-Copy captures and mutable captures;
  * - closures may not capture a borrow (pass it as a lambda parameter instead);
  * - moving an outer value from a repeating loop is rejected conservatively.
@@ -39,15 +38,28 @@ public final class OwnershipChecker {
     private final Set<String> modules = new HashSet<>();
     private final Set<String> ambiguousFunctions = new HashSet<>();
     private final Set<String> ambiguousClasses = new HashSet<>();
+    private final Map<String, List<Boolean>> importedParameterMutability;
     private int mutexCriticalSectionDepth;
     private int loopDepth;
 
-    private OwnershipChecker(Ast.Program program) {
+    private OwnershipChecker(
+            Ast.Program program,
+            Map<String, List<Boolean>> importedParameterMutability) {
+        this.importedParameterMutability = Map.copyOf(importedParameterMutability);
         index(program);
     }
 
     public static Ast.Program check(Ast.Program program) {
-        OwnershipChecker checker = new OwnershipChecker(program);
+        return check(program, Map.of());
+    }
+
+    public static Ast.Program check(
+            Ast.Program program,
+            Map<String, List<Boolean>> importedParameterMutability) {
+        if (importedParameterMutability == null) {
+            throw new IllegalArgumentException("imported parameter ownership metadata cannot be null");
+        }
+        OwnershipChecker checker = new OwnershipChecker(program, importedParameterMutability);
         checker.validate(program);
         return program;
     }
@@ -917,6 +929,19 @@ public final class OwnershipChecker {
             }
         }
 
+        if (call.callee() instanceof Ast.NameExpr importedName) {
+            List<Boolean> mutability = importedParameterMutability.get(
+                    linkedCallableKey(importedName.name(), call.arguments().size()));
+            if (mutability != null) {
+                checkLinkedArguments(
+                        call.arguments(),
+                        mutability,
+                        scope,
+                        "imported function " + importedName.name());
+                return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
+            }
+        }
+
         if (call.callee() instanceof Ast.MemberExpr qualified
                 && qualified.receiver() instanceof Ast.NameExpr namespace) {
             Ast.FunctionDecl fn = findFunction(namespace.name() + "." + qualified.member());
@@ -931,6 +956,21 @@ public final class OwnershipChecker {
                         "function " + namespace.name() + "." + qualified.member());
                 Ast.TypeRef callResult = callableResultType(signature.result(), fn.async(), fn.generator());
                 return new ValueInfo(callResult, kindOfType(callResult), null);
+            }
+        }
+
+        if (call.callee() instanceof Ast.MemberExpr importedQualified
+                && importedQualified.receiver() instanceof Ast.NameExpr importedNamespace) {
+            String qualifiedName = importedNamespace.name() + "." + importedQualified.member();
+            List<Boolean> mutability = importedParameterMutability.get(
+                    linkedCallableKey(qualifiedName, call.arguments().size()));
+            if (mutability != null) {
+                checkLinkedArguments(
+                        call.arguments(),
+                        mutability,
+                        scope,
+                        "imported function " + qualifiedName);
+                return new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
             }
         }
 
@@ -1169,6 +1209,26 @@ public final class OwnershipChecker {
         return new ValueInfo(okType, kindOfType(okType), null);
     }
 
+    private static String linkedCallableKey(String localName, int arity) {
+        return localName + "/" + arity;
+    }
+
+    private void checkLinkedArguments(
+            List<Ast.Expr> arguments,
+            List<Boolean> mutableParameters,
+            Scope scope,
+            String callable) {
+        if (arguments.size() != mutableParameters.size()) return;
+        List<Ast.Param> params = new ArrayList<>(arguments.size());
+        for (int i = 0; i < arguments.size(); i++) {
+            params.add(new Ast.Param(
+                    Ast.TypeRef.inferred(),
+                    "$linked" + i,
+                    false,
+                    mutableParameters.get(i)));
+        }
+        checkArguments(arguments, params, scope, callable);
+    }
     private void checkArguments(List<Ast.Expr> arguments, List<Ast.Param> params, Scope scope, String callable) {
         if (arguments.size() != params.size()) return; // arity is TypeChecker's responsibility
 
