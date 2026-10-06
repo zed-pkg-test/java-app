@@ -34,7 +34,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
@@ -372,7 +371,8 @@ public final class ActorRuntime implements AutoCloseable {
     private final ExecutorService untrustedDispatcher;
     private final ThreadLocal<ActorCell<?>> currentActor = new ThreadLocal<>();
     private final ThreadLocal<SyncCell<?>> currentSyncCell = new ThreadLocal<>();
-    private final ThreadLocal<ReentrantReadWriteLock> currentProxyLock = new ThreadLocal<>();
+    private record ProxyLockScope(ProxyRwLock lock, boolean write) { }
+    private final ThreadLocal<ProxyLockScope> currentProxyLock = new ThreadLocal<>();
     private final ThreadLocal<Boolean> forceCancellationCallback = new ThreadLocal<>();
 
     public ActorRuntime() {
@@ -946,8 +946,76 @@ public final class ActorRuntime implements AutoCloseable {
             PROMOTED_FROM_SHARED_ACTOR
         }
 
+        /**
+         * Runtime-owned lease facade. The lease contains synchronization
+         * authority but never exposes the raw target to source code.
+         *
+         * <p>Acquisition may complete on any runtime thread, but read/write
+         * callbacks are invoked only by the caller after its scheduler resumes.
+         * This keeps guest code off completion threads.</p>
+         */
+        public final class Access implements AutoCloseable {
+            private final ProxyRwLock.Lease lease;
+            private final boolean writeCapability;
+            private final AtomicBoolean accessClosed = new AtomicBoolean();
+
+            private Access(ProxyRwLock.Lease lease, boolean writeCapability) {
+                this.lease = lease;
+                this.writeCapability = writeCapability;
+            }
+
+            public boolean writeCapable() {
+                return writeCapability;
+            }
+
+            public <R> R read(Function<? super T, ? extends R> reader) {
+                return apply(reader, false);
+            }
+
+            public <R> R write(Function<? super T, ? extends R> writer) {
+                if (!writeCapability) {
+                    throw new IllegalStateException(
+                            "rt Proxy read lease cannot be used for mutation");
+                }
+                return apply(writer, true);
+            }
+
+            private <R> R apply(
+                    Function<? super T, ? extends R> operation,
+                    boolean writeOperation) {
+                Objects.requireNonNull(operation, "operation");
+                if (accessClosed.get()) {
+                    throw new IllegalStateException("rt Proxy access lease is closed");
+                }
+                requireProxyAccess(writeOperation ? "write rt proxy" : "read rt proxy");
+
+                ProxyLockScope held = currentProxyLock.get();
+                boolean entered = held == null;
+                if (entered) {
+                    currentProxyLock.set(new ProxyLockScope(lock, writeCapability));
+                } else {
+                    validateProxyLockNesting(lock, writeOperation);
+                }
+
+                try {
+                    T live = requireOpenTarget();
+                    if (writeOperation) writeAcquisitions.incrementAndGet();
+                    else readAcquisitions.incrementAndGet();
+                    return operation.apply(live);
+                } finally {
+                    if (entered) currentProxyLock.remove();
+                }
+            }
+
+            @Override
+            public void close() {
+                if (!accessClosed.compareAndSet(false, true)) return;
+                if (lease != null) lease.close();
+            }
+        }
+
         private final UUID id = UUID.randomUUID();
-        private final ReentrantReadWriteLock lock;
+        private final ProxyRwLock lock;
         private final TargetProvenance targetProvenance;
         private final ActorId sourceActorId;
         private final Object sourceExecutionDomain;
@@ -959,7 +1027,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         private Proxy(
                 T target,
-                ReentrantReadWriteLock lock,
+                ProxyRwLock lock,
                 TargetProvenance targetProvenance,
                 ActorId sourceActorId,
                 Object sourceExecutionDomain) {
@@ -982,59 +1050,92 @@ public final class ActorRuntime implements AutoCloseable {
         public boolean closed() { return proxyClosed.get(); }
         public long readAcquisitions() { return readAcquisitions.get(); }
         public long writeAcquisitions() { return writeAcquisitions.get(); }
-        /** Approximate number of reader/writer threads waiting for this fair lock. */
-        public int queuedWaiters() { return lock.getQueueLength(); }
+        /** Exact number of logical reader/writer waiters queued for this lock domain. */
+        public int queuedWaiters() { return lock.queuedWaiters(); }
+
+        /**
+         * Cooperatively acquire read authority. A pending future contains no
+         * guest callback and is safe for OresScheduler/actor continuation
+         * suspension.
+         */
+        public OresFuture<Access> acquireReadAsync() {
+            return acquireAsync(false);
+        }
+
+        /**
+         * Cooperatively acquire write authority. A queued writer is FIFO-ordered
+         * ahead of readers that arrive later, bounding writer starvation.
+         */
+        public OresFuture<Access> acquireWriteAsync() {
+            return acquireAsync(true);
+        }
+
+        private OresFuture<Access> acquireAsync(boolean write) {
+            requireProxyAccess(write ? "write rt proxy" : "read rt proxy");
+            requireOpenTarget();
+
+            ProxyLockScope held = currentProxyLock.get();
+            if (held != null) {
+                validateProxyLockNesting(lock, write);
+                return OresFuture.completed(new Access(null, write));
+            }
+
+            OresFuture<ProxyRwLock.Lease> leaseFuture = lock.acquireAsync(write);
+            OresFuture<Access> result =
+                    new OresFuture<>(() -> leaseFuture.cancel(false));
+            leaseFuture.whenCompleteRuntime((lease, failure) -> {
+                if (failure != null) {
+                    result.failFromRuntime(OresFuture.unwrap(failure));
+                    return;
+                }
+                if (lease == null) {
+                    result.failFromRuntime(
+                            new IllegalStateException("rt Proxy lock produced a null lease"));
+                    return;
+                }
+                Access access = new Access(lease, write);
+                if (!result.completeFromRuntime(access)) {
+                    access.close();
+                }
+            });
+            return result;
+        }
+
+        private Access acquireSync(boolean write) {
+            OresFuture<Access> future = acquireAsync(write);
+            if (!future.isDone()
+                    && (ActorRuntime.inActorExecution()
+                            || OresScheduler.current() != null)) {
+                future.cancel(false);
+                throw new IllegalStateException(
+                        "contended rt Proxy access cannot block an actor/source carrier; "
+                                + "use the cooperative evaluator/acquire*Async path");
+            }
+            return future.join();
+        }
 
         public <R> R read(Function<? super T, ? extends R> reader) {
             Objects.requireNonNull(reader, "reader");
-            requireProxyAccess("read rt proxy");
-            boolean entered = enterProxyLock(lock, false);
-            var readLock = lock.readLock();
-            readLock.lock();
-            try {
-                T live = requireOpenTarget();
-                readAcquisitions.incrementAndGet();
-                return reader.apply(live);
-            } finally {
-                readLock.unlock();
-                exitProxyLock(entered);
+            try (Access access = acquireSync(false)) {
+                return access.read(reader);
             }
         }
 
         public <R> R write(Function<? super T, ? extends R> writer) {
             Objects.requireNonNull(writer, "writer");
-            requireProxyAccess("write rt proxy");
-            boolean entered = enterProxyLock(lock, true);
-            var writeLock = lock.writeLock();
-            writeLock.lock();
-            try {
-                T live = requireOpenTarget();
-                writeAcquisitions.incrementAndGet();
-                return writer.apply(live);
-            } finally {
-                writeLock.unlock();
-                exitProxyLock(entered);
+            try (Access access = acquireSync(true)) {
+                return access.write(writer);
             }
         }
 
         /**
-         * Create a nested facade sharing the same lock domain. Evaluator code
-         * uses this only when a protected class/struct member itself is mutable;
-         * the raw nested reference never escapes to source code.
+         * Create a nested facade sharing the same logical lock domain.
          */
         @SuppressWarnings("unchecked")
         public <R> Proxy<R> child(R nested) {
             requireProxyAccess("derive rt proxy view");
             if (nested == null) throw new IllegalArgumentException("cannot proxy a null nested value");
 
-            /*
-             * Nested views are interned by target identity inside one lock
-             * domain. Without this, repeated reads such as proxy.inner.value
-             * would allocate/root a fresh handle and charge HANDLE_BYTES every
-             * time. The monitor is held only for the tiny lookup/create
-             * critical section; protected guest state still uses the fair RW
-             * lock.
-             */
             synchronized (lock) {
                 for (Proxy<?> existing : sharedProxies) {
                     if (existing.lock == lock
@@ -1075,28 +1176,71 @@ public final class ActorRuntime implements AutoCloseable {
         @Override
         public void close() {
             requireProxyAccess("close rt proxy");
-            closeWithWriteLock();
+            closeWithWriteLease();
+        }
+
+        /**
+         * Cooperative close used by source-level Proxy<T>.dispose(). The
+         * completion callback mutates only runtime state; no guest code runs on
+         * the thread that grants the lease.
+         */
+        public OresFuture<Void> closeAsync() {
+            requireProxyAccess("close rt proxy");
+            if (proxyClosed.get()) return OresFuture.completed(null);
+            OresFuture<Access> accessFuture = acquireWriteAsync();
+            OresFuture<Void> result =
+                    new OresFuture<>(() -> accessFuture.cancel(false));
+            accessFuture.whenCompleteRuntime((access, failure) -> {
+                if (failure != null) {
+                    result.failFromRuntime(OresFuture.unwrap(failure));
+                    return;
+                }
+                try (Access granted = access) {
+                    granted.write(ignored -> {
+                        closeUnderWriteLease();
+                        return null;
+                    });
+                    result.completeFromRuntime(null);
+                } catch (RuntimeException | Error closeFailure) {
+                    result.failFromRuntime(closeFailure);
+                }
+            });
+            return result;
         }
 
         private void closeFromRuntime() {
-            closeWithWriteLock();
+            // Runtime teardown has already fenced source/actor access, so it
+            // must not call acquireAsync(), whose admission intentionally
+            // rejects a globally closed runtime. Acquire the logical lock
+            // directly and retire only after active readers/writers drain.
+            ProxyRwLock.Lease lease = lock.acquireAsync(true).join();
+            try {
+                closeUnderWriteLease();
+            } finally {
+                lease.close();
+            }
         }
 
-        private void closeWithWriteLock() {
-            boolean entered = enterProxyLock(lock, true);
-            var writeLock = lock.writeLock();
-            writeLock.lock();
-            try {
-                if (!proxyClosed.compareAndSet(false, true)) return;
-                target = null;
-                long bytes = reservedBytes;
-                reservedBytes = 0L;
-                if (bytes != 0L) releaseSharedRuntimeBytes(bytes);
-                sharedProxies.remove(this);
-            } finally {
-                writeLock.unlock();
-                exitProxyLock(entered);
+        private void closeWithWriteLease() {
+            try (Access access = acquireSync(true)) {
+                access.write(ignored -> {
+                    closeUnderWriteLease();
+                    return null;
+                });
             }
+        }
+
+        private void closeUnderWriteLease() {
+            if (!proxyClosed.compareAndSet(false, true)) return;
+            target = null;
+            long bytes = reservedBytes;
+            reservedBytes = 0L;
+            if (bytes != 0L) releaseSharedRuntimeBytes(bytes);
+            sharedProxies.remove(this);
+        }
+
+        private void failPendingWaiters(Throwable failure) {
+            lock.failWaiters(failure);
         }
 
         @Override
@@ -1117,17 +1261,10 @@ public final class ActorRuntime implements AutoCloseable {
                 ? Proxy.TargetProvenance.HOST_RUNTIME
                 : Proxy.TargetProvenance.PROMOTED_FROM_SHARED_ACTOR;
 
-        /*
-         * The language ownership checker consumes the original source binding
-         * before this call. On the JVM backend this strong runtime root is the
-         * semantic promotion boundary. #289/native allocator lowering must
-         * replace this with a real move/promotion out of the actor-local arena
-         * before the proxy becomes transportable.
-         */
         reserveSharedRuntimeBytes(Proxy.HANDLE_BYTES, "shared proxy handle");
         Proxy<T> proxy = new Proxy<>(
                 value,
-                new ReentrantReadWriteLock(true),
+                new ProxyRwLock(),
                 provenance,
                 sourceActorId,
                 sourceExecutionDomain);
@@ -1139,31 +1276,21 @@ public final class ActorRuntime implements AutoCloseable {
         return proxy;
     }
 
-    private boolean enterProxyLock(
-            ReentrantReadWriteLock lock,
+    private void validateProxyLockNesting(
+            ProxyRwLock lock,
             boolean write) {
-        ReentrantReadWriteLock held = currentProxyLock.get();
-        if (held == null) {
-            currentProxyLock.set(lock);
-            return true;
-        }
-        if (held != lock) {
+        ProxyLockScope held = currentProxyLock.get();
+        if (held == null) return;
+        if (held.lock() != lock) {
             throw new IllegalStateException(
                     "nested synchronization across different rt Proxy values is forbidden; "
                             + "snapshot one proxy first or route mutation through an owner actor");
         }
-        if (write
-                && held.getReadHoldCount() > 0
-                && !held.isWriteLockedByCurrentThread()) {
+        if (write && !held.write()) {
             throw new IllegalStateException(
                     "cannot upgrade an rt Proxy read lock to a write lock; "
                             + "finish the read section before mutating");
         }
-        return false;
-    }
-
-    private void exitProxyLock(boolean entered) {
-        if (entered) currentProxyLock.remove();
     }
 
     private void requireProxyAccess(String operation) {
@@ -4804,6 +4931,18 @@ public final class ActorRuntime implements AutoCloseable {
         for (ActorCell<?> cell : snapshot) cell.stop();
 
         if (firstClose) {
+            // Pending proxy acquisitions are scheduler waiters, not carrier
+            // blockers. Fail them promptly during teardown so no suspended
+            // actor/root task remains retained behind a lock request.
+            Set<ProxyRwLock> proxyLocks = java.util.Collections.newSetFromMap(
+                    new IdentityHashMap<>());
+            for (Proxy<?> proxy : List.copyOf(sharedProxies)) {
+                if (proxyLocks.add(proxy.lock)) {
+                    proxy.lock.failWaiters(
+                            new CancellationException("ActorRuntime closed while waiting for rt Proxy"));
+                }
+            }
+
             // Stop executor carriers so queued work is rejected/removed and
             // blocked host-side executor operations can wake. This interrupt is
             // backend shutdown mechanics only; it is never an actor
