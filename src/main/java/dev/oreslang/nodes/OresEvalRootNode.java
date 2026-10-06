@@ -3955,6 +3955,17 @@ public final class OresEvalRootNode extends RootNode {
                 return value;
             }
 
+            if (value instanceof ChannelRuntime.Channel<?>) {
+                // A Channel<T> is a context-owned synchronization capability.
+                // Type checking already proves the declared payload type is
+                // task-safe before a channel handle may cross a same-context
+                // async boundary. Preserve the handle identity so producer
+                // backpressure and competing-consumer semantics remain intact.
+                // Actor mailbox transport is validated separately and still
+                // rejects Channel<T>.
+                return value;
+            }
+
             if (visiting.put(value, Boolean.TRUE) != null) {
                 throw new IllegalArgumentException(
                         "cyclic mutable values cannot cross an async task boundary");
