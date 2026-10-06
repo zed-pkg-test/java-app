@@ -34,6 +34,96 @@ final class PointerlessFncOwnershipTest {
     }
 
     @Test
+    void directCallsTemporarilyBorrowNonCopyArguments() throws Exception {
+        String output = run("""
+                define class Box as
+                  pub let int value = 7;
+                end
+
+                fnc read(Box box): int {
+                  return box.value;
+                }
+
+                pub routine main(): void {
+                  let Box box = new Box();
+                  stdio.stdout.write(read(box));
+                  box.value = 9;
+                  stdio.stdout.write(read(box));
+                  return;
+                }
+                """);
+
+        assertEquals("79", output);
+    }
+
+    @Test
+    void typeMutParameterMutatesSameRetainedReference() throws Exception {
+        String output = run("""
+                define class Box as
+                  pub let int value = 7;
+                end
+
+                fnc update(Box mut box): void {
+                  box.value = 11;
+                  return;
+                }
+
+                pub routine main(): void {
+                  let Box box = new Box();
+                  update(box);
+                  stdio.stdout.write(box.value);
+                  return;
+                }
+                """);
+
+        assertEquals("11", output);
+    }
+
+    @Test
+    void rtTakeStillExplicitlyTransfersIntoOrdinaryParameter() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 7;
+                        end
+
+                        fnc consume(Box box): void { return; }
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          consume(rt take box);
+                          stdio.println(box.value);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().contains("moved value"), error.getMessage());
+    }
+
+    @Test
+    void overlappingMutArgumentsFailClosed() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 7;
+                        end
+
+                        fnc pair(Box mut left, Box mut right): void {
+                          left.value = 1;
+                          right.value = 2;
+                          return;
+                        }
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          pair(box, box);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
+    }
+    @Test
     void storedRtBorrowBlocksMutationUntilItsScopeEnds() {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class,

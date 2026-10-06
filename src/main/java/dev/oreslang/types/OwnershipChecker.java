@@ -139,12 +139,23 @@ public final class OwnershipChecker {
             throw error("structural parameter '" + param.name()
                     + "' is a read-only borrowed view and cannot be declared mut");
         }
-        ValueKind kind = param.structural() && !param.type().isBorrow()
-                ? ValueKind.IMM_BORROW
-                : kindOfType(param.type());
-        boolean mutableOwner = param.structural() ? false : param.mutable();
-        if (param.type().isBorrow() && param.type().mutableBorrow()) mutableOwner = false;
-        return new VarState(param.type(), mutableOwner, kind, Origin.PARAM);
+
+        // Pointer-free call contract: ordinary non-Copy parameters are read
+        // aliases; Type mut name parameters are exclusive aliases. Ownership
+        // transfer is explicit at the call site with rt take.
+        ValueKind kind;
+        if (param.mutable()) {
+            kind = ValueKind.MUT_BORROW;
+        } else if (param.structural()) {
+            kind = ValueKind.IMM_BORROW;
+        } else if (param.type().isBorrow()) {
+            kind = param.type().mutableBorrow() ? ValueKind.MUT_BORROW : ValueKind.IMM_BORROW;
+        } else {
+            kind = isCopyType(param.type()) ? ValueKind.COPY : ValueKind.IMM_BORROW;
+        }
+
+        // mut grants mutation through the referenced object, not rebinding.
+        return new VarState(param.type(), false, kind, Origin.PARAM);
     }
 
     private void checkBlock(List<Ast.Stmt> body, Scope parent, Ast.TypeRef returnType) {
@@ -1160,54 +1171,140 @@ public final class OwnershipChecker {
 
     private void checkArguments(List<Ast.Expr> arguments, List<Ast.Param> params, Scope scope, String callable) {
         if (arguments.size() != params.size()) return; // arity is TypeChecker's responsibility
-        for (int i = 0; i < arguments.size(); i++) {
-            Ast.Expr arg = arguments.get(i);
-            Ast.Param param = params.get(i);
-            if (param.structural() && !param.type().isBorrow()) {
-                ValueInfo argument = checkExpr(arg, scope, false);
-                if (containsMutexGuardType(argument.type)
-                        || (mutexCriticalSectionDepth > 0 && argument.type.isBorrow())) {
-                    throw error(callable + " argument " + (i + 1)
-                            + " cannot consume protected mutex state through a structural by-value parameter");
-                }
-                continue;
-            }
-            if (param.type().isBorrow()) {
-                boolean mutable = param.type().mutableBorrow();
-                if (arg instanceof Ast.UnaryExpr unary && (unary.operator().equals("&") || unary.operator().equals("&mut"))) {
-                    if (mutable && !unary.operator().equals("&mut")) {
-                        throw error(callable + " argument " + (i + 1) + " requires &mut borrow");
+
+        List<TemporaryBorrow> temporaryBorrows = new ArrayList<>();
+        try {
+            for (int i = 0; i < arguments.size(); i++) {
+                Ast.Expr arg = arguments.get(i);
+                Ast.Param param = params.get(i);
+
+                // Explicit ownership transfer remains explicit even though
+                // ordinary parameters read-borrow by default.
+                if (arg instanceof Ast.RuntimeCallExpr runtime
+                        && runtime.operation().equals("take")) {
+                    ValueInfo taken = checkExpr(arg, scope, true);
+                    if (taken.kind == ValueKind.IMM_BORROW || taken.kind == ValueKind.MUT_BORROW) {
+                        throw error(callable + " argument " + (i + 1)
+                                + " cannot rt take a borrowed value");
                     }
-                    VarState owner = borrowOwner(unary.operand(), scope);
-                    validateBorrow(owner, mutable);
-                    if (isActorConfinedBorrow(owner)) {
-                        throw error("actor self borrow cannot cross an ordinary callable boundary");
-                    }
-                    continue; // temporary borrow ends at call boundary
-                }
-                if (arg instanceof Ast.NameExpr name) {
-                    VarState state = requireState(scope, name.name());
-                    requireUsable(state, name.name(), false);
-                    if (isActorConfinedBorrow(state)) {
-                        throw error("actor self borrow cannot cross an ordinary callable boundary");
-                    }
-                    if (mutable && state.kind != ValueKind.MUT_BORROW) {
-                        throw error(callable + " argument " + (i + 1) + " requires &mut value");
-                    }
-                    if (!mutable && state.kind != ValueKind.IMM_BORROW && state.kind != ValueKind.MUT_BORROW) {
-                        throw error(callable + " argument " + (i + 1) + " requires borrowed value; pass &" + name.name());
+                    if (containsMutexGuardType(taken.type)) {
+                        throw error(callable + " argument " + (i + 1)
+                                + " cannot transfer a guard-bearing value");
                     }
                     continue;
                 }
-                throw error(callable + " argument " + (i + 1) + " must be an explicit borrow");
+
+                boolean mutable = param.mutable()
+                        || (param.type().isBorrow() && param.type().mutableBorrow());
+
+                if (mutable) {
+                    if (!(arg instanceof Ast.NameExpr name)) {
+                        throw error(callable + " argument " + (i + 1)
+                                + " for a mut parameter must be a named mutable owner");
+                    }
+                    VarState owner = requireState(scope, name.name());
+                    requireUsable(owner, name.name(), true);
+                    if (isActorConfinedBorrow(owner)) {
+                        throw error("actor self cannot cross an ordinary mutable callable boundary");
+                    }
+                    beginTemporaryBorrow(owner, true, callable, i + 1, name.name());
+                    temporaryBorrows.add(new TemporaryBorrow(owner, true));
+                    continue;
+                }
+
+                ValueInfo read = checkExpr(arg, scope, false);
+                if (containsMutexGuardType(read.type)) {
+                    throw error(callable + " argument " + (i + 1)
+                            + " cannot borrow a guard-bearing value");
+                }
+
+                VarState owner = null;
+                String ownerName = "<projection>";
+
+                if (arg instanceof Ast.NameExpr name) {
+                    VarState state = scope.lookup(name.name());
+                    if (state == null) continue; // global/builtin/callable namespace
+                    requireUsable(state, name.name(), false);
+                    if (isActorConfinedBorrow(state)) {
+                        throw error("actor self cannot cross an ordinary callable boundary");
+                    }
+                    if (state.kind == ValueKind.COPY) continue;
+                    owner = state;
+                    ownerName = name.name();
+                } else if (read.borrowSource != null) {
+                    owner = read.borrowSource;
+                    ownerName = owner.debugName;
+                }
+
+                if (owner != null) {
+                    beginTemporaryBorrow(owner, false, callable, i + 1, ownerName);
+                    temporaryBorrows.add(new TemporaryBorrow(owner, false));
+                }
             }
-            ValueInfo argument = checkExpr(arg, scope, true);
-            if (containsMutexGuardType(argument.type)) {
-                throw error(callable + " argument " + (i + 1) + " cannot consume a guard-bearing value");
+        } finally {
+            for (int i = temporaryBorrows.size() - 1; i >= 0; i--) {
+                endTemporaryBorrow(temporaryBorrows.get(i));
             }
         }
     }
 
+    private void beginTemporaryBorrow(
+            VarState owner,
+            boolean mutable,
+            String callable,
+            int position,
+            String name) {
+        VarState root = ownershipRoot(owner);
+        requireUsable(owner, name, mutable);
+
+        if (owner.kind == ValueKind.IMM_BORROW) {
+            if (mutable) {
+                throw error(callable + " argument " + position
+                        + " requires mutable access but '" + name + "' is read-only");
+            }
+            if (root.mutableBorrowed) {
+                throw error("cannot read-borrow '" + name + "' while an exclusive borrow is active");
+            }
+            root.immutableBorrows++;
+            return;
+        }
+
+        if (owner.kind == ValueKind.MUT_BORROW) {
+            if (mutable) {
+                if (root.mutableBorrowed || root.immutableBorrows > 0) {
+                    throw error("cannot exclusively reborrow '" + name + "' while another borrow is active");
+                }
+                root.mutableBorrowed = true;
+            } else {
+                if (root.mutableBorrowed) {
+                    throw error("cannot read-borrow '" + name + "' while an exclusive borrow is active");
+                }
+                root.immutableBorrows++;
+            }
+            return;
+        }
+
+        validateBorrow(owner, mutable);
+        if (mutable) root.mutableBorrowed = true;
+        else root.immutableBorrows++;
+    }
+
+    private void endTemporaryBorrow(TemporaryBorrow temporary) {
+        VarState root = ownershipRoot(temporary.owner());
+        if (temporary.mutable()) {
+            if (!root.mutableBorrowed) {
+                throw new IllegalStateException(
+                        "Oreslang ownership checker invariant: releasing inactive mutable borrow");
+            }
+            root.mutableBorrowed = false;
+        } else {
+            if (root.immutableBorrows <= 0) {
+                throw new IllegalStateException(
+                        "Oreslang ownership checker invariant: immutable borrow underflow");
+            }
+            root.immutableBorrows--;
+        }
+    }
     private void checkAssignmentTarget(Ast.Expr target, Scope scope) {
         if (target instanceof Ast.NameExpr name) {
             VarState state = requireState(scope, name.name());
@@ -1245,7 +1342,7 @@ public final class OwnershipChecker {
             if (isMutexGuardType(state.type)) return;
             boolean mutableBorrow = state.kind == ValueKind.MUT_BORROW || (state.type.isBorrow() && state.type.mutableBorrow());
             if (!state.mutable && !mutableBorrow) {
-                throw error("cannot mutate " + what + " through immutable parameter/binding '" + name.name() + "'; declare the owned parameter as 'mut' or pass '&mut'");
+                throw error("cannot mutate " + what + " through immutable parameter/binding '" + name.name() + "'; use canonical 'Type mut name' for mutable reference authority");
             }
             if (state.kind == ValueKind.IMM_BORROW || (state.type.isBorrow() && !state.type.mutableBorrow())) {
                 throw error("cannot mutate " + what + " through immutable borrow '" + name.name() + "'");
@@ -1260,7 +1357,7 @@ public final class OwnershipChecker {
             validateBorrow(owner, true);
             return;
         }
-        throw error("mutation target must be rooted in a mutable local/parameter or &mut borrow");
+        throw error("mutation target must be rooted in a mutable local or canonical Type mut name parameter");
     }
 
     private VarState borrowOwner(Ast.Expr operand, Scope scope) {
@@ -2430,6 +2527,8 @@ public final class OwnershipChecker {
             }
         }
     }
+
+    private record TemporaryBorrow(VarState owner, boolean mutable) { }
 
     private record StateSnapshot(boolean moved, int immutableBorrows, boolean mutableBorrowed) { }
 
