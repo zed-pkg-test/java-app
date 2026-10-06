@@ -258,41 +258,29 @@ public final class Parser {
         if (match(ACTOR, ISOACTOR)) {
             Token actorToken = previous();
             boolean isolated = actorToken.type() == ISOACTOR;
-            if (isolated && (modifiers.shared || modifiers.untrusted)) {
-                throw error(
-                        actorToken,
-                        "'shared/untrusted isoactor' is contradictory; use either shared actor, untrusted actor, or isoactor");
-            }
-            if (modifiers.shared && modifiers.untrusted) {
-                throw error(actorToken, "an actor cannot be both shared and untrusted");
-            }
-            Ast.ActorKind actorKind = modifiers.untrusted
-                    ? Ast.ActorKind.UNTRUSTED
-                    : isolated ? Ast.ActorKind.PRIVATE : Ast.ActorKind.SHARED;
+            modifiers = mergeModifiers(modifiers, parseModifiers());
+
             if (isLegacyFnSpelling()) {
                 throw error(peek(), "actor functions are declared with 'actor fnc', not 'actor fn'");
             }
             if (match(FNC)) {
-                Modifiers trailing = parseModifiers();
-                if (trailing.shared || trailing.untrusted) {
-                    throw error(previous(), "'shared'/'untrusted' must appear before the actor keyword");
-                }
-                modifiers = mergeModifiers(modifiers, trailing);
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
                 return parseFunction(annotations, modifiers, Ast.CallableKind.FNC, actorKind);
             }
             if (match(ROUTINE)) {
-                Modifiers trailing = parseModifiers();
-                if (trailing.shared || trailing.untrusted) {
-                    throw error(previous(), "'shared'/'untrusted' must appear before the actor keyword");
-                }
-                modifiers = mergeModifiers(modifiers, trailing);
+                modifiers = mergeModifiers(modifiers, parseModifiers());
+                Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
                 return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE, actorKind);
             }
-            if (modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract) {
-                throw error(actorToken, "actor declarations do not accept callable/static/abstract modifiers");
+
+            Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
+            if (modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical
+                    || modifiers.isStatic || modifiers.isAbstract) {
+                throw error(actorToken, "actor class declarations accept only visibility and actor-kind modifiers");
             }
             rejectCallableStructuralAnnotation(annotations, "actor class declarations");
-            return parseActorClass(actorKind);
+            return parseActorClass(actorKind, modifiers.visibility);
         }
         if (modifiers.shared || modifiers.untrusted) throw error(previous(), "'shared'/'untrusted' must modify an actor declaration");
         if (match(FNC)) {
@@ -329,6 +317,19 @@ public final class Parser {
             return parseModuleBinding(annotations, modifiers.visibility);
         }
         return null;
+    }
+
+    private Ast.ActorKind resolveActorKind(Token actorToken, boolean isolated, Modifiers modifiers) {
+        if (isolated && (modifiers.shared || modifiers.untrusted)) {
+            throw error(
+                    actorToken,
+                    "'shared/untrusted isoactor' is contradictory; use either shared actor, untrusted actor, or isoactor");
+        }
+        if (modifiers.shared && modifiers.untrusted) {
+            throw error(actorToken, "an actor cannot be both shared and untrusted");
+        }
+        if (modifiers.untrusted) return Ast.ActorKind.UNTRUSTED;
+        return isolated ? Ast.ActorKind.PRIVATE : Ast.ActorKind.SHARED;
     }
 
     private Ast.FunctionDecl parseFunction(List<Ast.Annotation> annotations, Modifiers modifiers, Ast.CallableKind kind) {
@@ -522,7 +523,7 @@ public final class Parser {
         return check(IDENT) && peek().lexeme().equals(lexeme);
     }
 
-    private Ast.ClassDecl parseActorClass(Ast.ActorKind actorKind) {
+    private Ast.ClassDecl parseActorClass(Ast.ActorKind actorKind, Ast.Visibility visibility) {
         String name = consume(IDENT, "expected actor name").lexeme();
         List<String> generics = parseGenericParameters();
         List<Ast.TypeRef> parents = match(EXTENDS) ? parseTypeRefList() : List.of();
@@ -570,7 +571,8 @@ public final class Parser {
         consume(terminator, braceStyle
                 ? "expected '}' to close actor " + name
                 : "expected 'end' to close actor " + name);
-        return new Ast.ClassDecl(name, false, actorKind, generics, parents, interfaces, fields, methods);
+        return new Ast.ClassDecl(
+                name, visibility, false, actorKind, generics, parents, interfaces, fields, null, methods);
     }
 
     private void validateActorFieldModifiers(Modifiers modifiers) {
