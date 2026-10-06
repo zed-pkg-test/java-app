@@ -382,11 +382,15 @@ public final class CapabilityChecker {
             // enters the actor's value graph, not only for direct call syntax.
             Ast.FunctionDecl referenced = findFunction(n.name());
             if (referenced != null) checkReferencedFunction(referenced, policy);
-        }
-        else if (expr instanceof Ast.RuntimeCallExpr runtime) {
-            if (!Set.of("copy", "take", "borrow", "share").contains(runtime.operation())) {
+        } else if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (!runtime.operation().equals("cooperate")) {
                 throw new SecurityException(
-                        "runtime intrinsic 'rt " + runtime.operation() + "' is not admitted on this compiler head");
+                        "runtime intrinsic 'rt " + runtime.operation()
+                                + "' is not admitted on this compiler head");
+            }
+            if (isZeroAuthorityAdversarial(policy)) {
+                throw new SecurityException(
+                        "untrusted actor cannot use rt cooperate until continuation quota state survives scheduler handoffs");
             }
             for (Ast.Expr argument : runtime.arguments()) checkExpr(argument, policy);
         }
