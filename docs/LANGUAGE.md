@@ -1803,3 +1803,16 @@ For now, quantum placement is rejected on routines, actors/isoactors, instance m
 The compiler preserves placement as explicit callable metadata and includes non-CPU placement in exported ABI fingerprints. Changing a public callable from CPU to QPU therefore invalidates dependent incremental artifacts.
 
 The current runtime has no QPU backend. Reaching a quantum-targeted callable fails before its body executes. A future QPU backend must consume checked/lowered QPU IR through an explicit backend boundary; it must not reinterpret ordinary CPU execution as a quantum fallback.
+
+### Current QPU admission boundary
+
+Before ownership/lowering, the compiler runs a dedicated conservative QPU safety pass. Until first-class circuit/qubit/measurement IR exists, admitted quantum callables are intentionally limited to a scalar, closed-world subset:
+
+- parameters, locals, and results use the explicit scalar QPU ABI (`bool`, fixed/integer scalar families, floating scalars, and complex scalars; `void` is permitted as a result);
+- generic, structural, mutable, borrowed, collection, object, string, and host-backed ABI values are rejected;
+- calls must resolve statically to another `quantum fnc` or `quantum static fnc`;
+- a quantum callable may not call ordinary CPU functions/static functions;
+- object allocation, runtime intrinsics, async/await, channels/select, generators, lambdas, dynamic/member dispatch, host/global captures, containers, casts/patterns, try/defer, and similar host/runtime effects fail closed;
+- scalar arithmetic, local bindings/assignment, conditionals, and bounded source control flow remain representable for future QPU lowering.
+
+This restriction is deliberately narrower than a future quantum language surface. New QPU types and operations should be admitted only together with explicit checked IR/lowering semantics, rather than inheriting CPU evaluator behavior by default.
