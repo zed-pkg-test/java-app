@@ -177,6 +177,43 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
+     * Actors never receive direct write authority over runtime-shared memory.
+     * Mutable cross-actor state must have a semantic owner and be changed by
+     * mailbox/channel commands. Host/supervisor code may still maintain
+     * runtime-owned shared primitives outside actor execution.
+     */
+    static void rejectActorSharedMemoryMutation(String operation) {
+        if (inActorExecution()) {
+            throw new SecurityException(
+                    "actors cannot mutate shared memory directly via " + operation
+                            + "; send a mailbox/channel command to the owning actor instead");
+        }
+    }
+
+    private void requireReadonlySharedAccess(String operation) {
+        ActorKind kind = currentActorKind();
+        if (kind == null) return;
+        if (currentActorRuntime() != this) {
+            throw new SecurityException(
+                    "runtime-shared value belongs to a different ActorRuntime; "
+                            + operation + " cannot cross runtime boundaries by captured reference");
+        }
+        if (isPrivateKind(kind)) {
+            throw new SecurityException(
+                    "isolated/untrusted actors cannot directly access runtime-shared memory via "
+                            + operation);
+        }
+        IsolatePolicy policy = currentActorPolicy();
+        if (policy == null) {
+            throw new IllegalStateException(
+                    "actor shared-memory read is missing its actor policy");
+        }
+        policy.require(
+                IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
+                operation);
+    }
+
+    /**
      * Structured cancellation requests actor shutdown and cascades through the
      * actor's child tree. FORCE_ISOLATED additionally requires a host-owned
      * isolation revoker that can make non-cooperating guest execution
@@ -321,7 +358,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         public T value() {
-            rejectPrivateActorSharedMemoryAccess("Shared.value");
+            requireReadonlySharedAccess("Shared.value");
             if (sharedClosed.get()) throw new IllegalStateException("Shared value belongs to a closed actor runtime");
             return value;
         }
@@ -793,11 +830,12 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Explicit synchronized shared-memory cell.
+     * Runtime/supervisor-owned synchronized shared-memory cell.
      *
-     * Actor fields do not use this: a mailbox turn already provides exclusive
-     * mutation of actor-owned state. SyncCell is for state intentionally shared
-     * by multiple SHARED actors.
+     * Actors may observe this cell read-only when their policy grants
+     * ACTOR_SHARE_READONLY. Actor execution can never create, update, or close
+     * a SyncCell: mutable application state belongs to one actor and changes
+     * through mailbox/channel commands.
      */
     public final class SyncCell<T> implements AutoCloseable {
         private final ReentrantLock lock = new ReentrantLock(true);
@@ -822,7 +860,7 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         public T snapshot() {
-            rejectPrivateActorSharedMemoryAccess("SyncCell.snapshot");
+            requireReadonlySharedAccess("SyncCell.snapshot");
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -836,18 +874,27 @@ public final class ActorRuntime implements AutoCloseable {
 
         public <R> R read(Function<? super T, ? extends R> reader) {
             Objects.requireNonNull(reader);
-            requireSharedActorTurn();
+            requireReadonlySharedAccess("SyncCell.read");
             boolean entered = enterSyncCell(this);
+            final T snapshot;
             lock.lock();
             try {
                 requireOpen();
-                Object frozen = freeze(reader.apply(value));
+                snapshot = value;
+            } finally {
+                lock.unlock();
+            }
+
+            try {
+                // The cell stores only frozen data, so the callback does not
+                // need to hold the shared lock. This prevents a slow actor
+                // reader from blocking supervisor/runtime publication.
+                Object frozen = freeze(reader.apply(snapshot));
                 rejectSharedMutableHandles(frozen, new IdentityHashMap<>(), 0);
                 @SuppressWarnings("unchecked")
                 R result = (R) frozen;
                 return result;
             } finally {
-                lock.unlock();
                 exitSyncCell(entered);
             }
         }
@@ -855,7 +902,7 @@ public final class ActorRuntime implements AutoCloseable {
         @SuppressWarnings("unchecked")
         public T update(UnaryOperator<T> updater) {
             Objects.requireNonNull(updater);
-            requireSharedActorTurn();
+            rejectActorSharedMemoryMutation("SyncCell.update");
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -883,7 +930,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         @Override
         public void close() {
-            rejectPrivateActorSharedMemoryAccess("SyncCell.close");
+            rejectActorSharedMemoryMutation("SyncCell.close");
             boolean entered = enterSyncCell(this);
             try {
                 closeFromRuntime();
@@ -2511,12 +2558,17 @@ public final class ActorRuntime implements AutoCloseable {
                     IsolatePolicy.Capability.JAVA_INTEROP,
                     IsolatePolicy.Capability.JAVA_SOURCE_INTEROP);
         } else {
-            effectivePolicy = policy;
+            // A normal/shared actor may read explicitly published immutable
+            // shared data, but it never receives direct shared-write authority.
+            effectivePolicy = policy.withoutCapabilities(
+                    IsolatePolicy.Capability.SHARED_MEMORY);
         }
         requireWithinCeiling(effectivePolicy);
         requireWithinCallerPolicy(effectivePolicy);
         if (kind == ActorKind.SHARED) {
-            effectivePolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "shared actor spawn");
+            effectivePolicy.require(
+                    IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
+                    "shared actor read-only shared-memory access");
         }
         policy = effectivePolicy;
         if (!trustedFactory) {
@@ -2856,6 +2908,7 @@ public final class ActorRuntime implements AutoCloseable {
 
     public <T> SyncCell<T> syncCell(T initialValue) {
         requireCallerRuntimeAffinity("create shared SyncCell values");
+        rejectActorSharedMemoryMutation("SyncCell creation");
         if (closed.get()) throw new IllegalStateException("actor runtime is closed");
         IsolatePolicy callerPolicy = currentActorPolicy();
         if (callerPolicy != null) {
@@ -2895,13 +2948,6 @@ public final class ActorRuntime implements AutoCloseable {
         ActorCell<?> current = currentActor.get();
         if (current != null && isPrivateKind(current.kind)) {
             throw new IllegalStateException("private actors cannot access synchronized shared memory via " + operation);
-        }
-    }
-
-    private void requireSharedActorTurn() {
-        ActorCell<?> cell = currentActor.get();
-        if (cell == null || cell.kind != ActorKind.SHARED) {
-            throw new IllegalStateException("shared state mutation requires a shared actor mailbox turn");
         }
     }
 
@@ -3480,27 +3526,10 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("MutexGuard<T> is lexical and cannot cross actor mailboxes");
         }
-        if (value instanceof OresMutex.Shared<?> sharedMutex) {
-            if (target.kind != ActorKind.SHARED) {
-                throw new SecurityException("private actors cannot receive SharedMutex<T>");
-            }
-            ActorKind senderKind = currentActorKind();
-            if (senderKind != null && isPrivateKind(senderKind)) {
-                throw new SecurityException("private actors cannot send SharedMutex<T>");
-            }
-            IsolatePolicy senderPolicy = currentActorPolicy();
-            if (senderPolicy != null) {
-                senderPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex actor send");
-            } else {
-                policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex host send");
-            }
-            target.policy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex actor receive");
-            sharedMutex.inspectForTransport(payload ->
-                    requireSharedMutexPayloadSafe(
-                            payload,
-                            new IdentityHashMap<>(),
-                            depth + 1));
-            return;
+        if (value instanceof OresMutex.Shared<?>) {
+            throw new SecurityException(
+                    "SharedMutex<T> is mutable shared-memory authority and cannot cross actor mailboxes; "
+                            + "put mutable state behind an owning actor and send mailbox/channel commands");
         }
         if (value instanceof Shared<?> shared) {
             requireMutexTransport(target, shared.value(), visiting, depth + 1);
