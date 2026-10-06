@@ -3803,21 +3803,18 @@ public final class OresEvalRootNode extends RootNode {
                                         + "' has no public protocol method '"
                                         + methodName + "' with arity " + arguments.size());
                     }
-                    if (endpoint.async()
-                            || methodContainsPotentialSuspension(endpoint)) {
-                        throw new IllegalStateException(
-                                "suspending actor protocol method '"
-                                        + klass.name() + "." + endpoint.name()
-                                        + "' is not linked to the current mailbox continuation ABI yet");
-                    }
-                    Object result = callMethod(actor, endpoint, arguments);
-                    if (result instanceof OresFuture<?>) {
-                        throw new IllegalStateException(
-                                "actor protocol method '" + klass.name() + "."
-                                        + endpoint.name()
-                                        + "' unexpectedly returned a Future without suspension lowering");
-                    }
-                    return result;
+                    /*
+                     * callMethod() already lowers a method containing await,
+                     * blocking channel/select, or another suspendable source call
+                     * to startSourceMethodTask(). Because this dispatcher is
+                     * executing in the target actor, startSourceMethodTask()
+                     * uses ActorRuntime.startActorTask(), whose scheduler executor
+                     * is the same actor mailbox. The returned OresFuture is handed
+                     * back to ActorRuntime protocol plumbing; no carrier blocks
+                     * and every state-touching resume re-enters under the actor's
+                     * serialized execution lease.
+                     */
+                    return callMethod(actor, endpoint, arguments);
                 };
             });
         }
