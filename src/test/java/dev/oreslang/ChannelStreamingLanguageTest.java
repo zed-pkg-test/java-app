@@ -197,6 +197,24 @@ final class ChannelStreamingLanguageTest {
     }
 
     @Test
+    void actorCallbackWriteDrainsBeforeOneShotCallablePublishesResult() throws Exception {
+        assertEquals("callback42", run("""
+                actor fnc worker(): int {
+                  val Channel<int> channel = Channel.new<int>(0);
+                  nb cb writech channel, 42 || -> {
+                    stdio.stdout.write("callback");
+                  };
+                  return readch channel;
+                }
+
+                pub routine main(): void {
+                  stdio.stdout.write(worker());
+                  return;
+                }
+                """));
+    }
+
+    @Test
     void nestedBracedSelectAndDefaultExecuteOnlySelectedBodies() throws Exception {
         assertEquals("70:busy", run("""
                 pub routine main(): void {
