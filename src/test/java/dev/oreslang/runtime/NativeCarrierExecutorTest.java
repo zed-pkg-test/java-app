@@ -8,6 +8,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLongArray;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -393,6 +394,55 @@ final class NativeCarrierExecutorTest {
                 assertNotEquals(firstTarget.get(), secondTarget.get(),
                         "independent one-carrier executors should receive distinct Mach affinity tags");
             }
+        }
+    }
+
+
+    @Test
+    void removingLastAffinityTaskClearsLaneStealAge() throws Exception {
+        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        assumeTrue(os.contains("linux") || os.contains("mac") || os.contains("darwin"));
+
+        try (NativeCarrierExecutor executor =
+                     new NativeCarrierExecutor(2, 2, 64, "ores-native-affinity-remove-")) {
+            CountDownLatch blockersStarted = new CountDownLatch(2);
+            CountDownLatch releaseBlockers = new CountDownLatch(1);
+            CountDownLatch blockersFinished = new CountDownLatch(2);
+
+            for (int key = 0; key < 2; key++) {
+                executor.executeAffinity(key, () -> {
+                    blockersStarted.countDown();
+                    try {
+                        releaseBlockers.await();
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        blockersFinished.countDown();
+                    }
+                });
+            }
+            assertTrue(blockersStarted.await(5, TimeUnit.SECONDS));
+
+            Runnable queued = () -> { };
+            executor.executeAffinity(0, queued);
+
+            var ageField = NativeCarrierExecutor.class
+                    .getDeclaredField("affinityLaneOldestEnqueueNanos");
+            ageField.setAccessible(true);
+            AtomicLongArray ages = (AtomicLongArray) ageField.get(executor);
+
+            try {
+                assertTrue(ages.get(0) > 0L,
+                        "queued affinity work must publish a steal-age timestamp");
+                assertTrue(executor.remove(queued));
+                assertEquals(0L, ages.get(0),
+                        "removing the final affinity task must clear stale steal age");
+                assertEquals(0, executor.getQueueSize());
+            } finally {
+                releaseBlockers.countDown();
+            }
+            assertTrue(blockersFinished.await(5, TimeUnit.SECONDS),
+                    "carrier blockers must exit after the test releases them");
         }
     }
 

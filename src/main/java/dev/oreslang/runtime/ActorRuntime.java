@@ -4488,8 +4488,21 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         boolean dispatchersTerminated = true;
+        /*
+         * Actor quiescence and native-carrier retirement are separate bounded
+         * phases. A retry may observe the last actor finalize near the end of
+         * CLOSE_WAIT_NANOS; reusing that nearly-expired deadline would then
+         * report a false carrier timeout even though no actor remains live.
+         *
+         * Do not extend a genuinely stuck first close: only grant a fresh
+         * carrier-exit window once every actor in this snapshot is finalized.
+         */
+        long dispatcherDeadline = stillRunning.isEmpty() && !interrupted
+                ? System.nanoTime() + CLOSE_WAIT_NANOS
+                : deadline;
         for (ExecutorService dispatcher : List.of(privateDispatcher, sharedDispatcher, untrustedDispatcher)) {
-            long remaining = deadline - System.nanoTime();
+            if (dispatcher.isTerminated()) continue;
+            long remaining = dispatcherDeadline - System.nanoTime();
             if (remaining <= 0) {
                 dispatchersTerminated = false;
                 break;
