@@ -64,12 +64,18 @@ public final class TypeChecker {
     private int loopDepth;
 
     public static Ast.Program check(Ast.Program program) {
+        program = checkTypes(program);
+        OwnershipChecker.check(program);
+        return program;
+    }
+
+    /** Type analysis only; executable admission must use OresCompiler.analyze. */
+    public static Ast.Program checkTypes(Ast.Program program) {
         program = AnnotationExpander.expand(program);
         TypeChecker checker = new TypeChecker();
         checker.validateImports(program);
         checker.collect(program);
         checker.validate(program);
-        OwnershipChecker.check(program);
         return program;
     }
 
