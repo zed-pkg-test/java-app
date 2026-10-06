@@ -156,7 +156,6 @@ final class ParserTest {
 
         int actorCases = 0;
         for (List<String> order : permutations("pub", "nlex", "shared", "actor", "fnc")) {
-            if (order.indexOf("actor") > order.indexOf("fnc")) continue;
             actorCases++;
             assertDoesNotThrow(() -> Parser.parse("""
                     define module app
@@ -166,7 +165,20 @@ final class ParserTest {
                     end
                     """.formatted(String.join(" ", order))), String.join(" ", order));
         }
-        assertEquals(60, actorCases);
+        assertEquals(120, actorCases);
+
+        int actorRoutineCases = 0;
+        for (List<String> order : permutations("pub", "nlex", "shared", "actor", "routine")) {
+            actorRoutineCases++;
+            assertDoesNotThrow(() -> Parser.parse("""
+                    define module app
+                      %s worker_routine(int value): int {
+                        return value;
+                      }
+                    end
+                    """.formatted(String.join(" ", order))), String.join(" ", order));
+        }
+        assertEquals(120, actorRoutineCases);
     }
 
     @Test
@@ -190,6 +202,37 @@ final class ParserTest {
             Ast.InterfaceDecl iface = assertInstanceOf(Ast.InterfaceDecl.class, declaration);
             assertEquals(Ast.Visibility.PUBLIC, iface.visibility());
         }
+    }
+
+    @Test
+    void effectsBranchActorMarkerMayAppearOnEitherSideOfCallableKind() {
+        Ast.Program program = Parser.parse("""
+                define module app
+                  fnc pub actor shared nlex first(int value): int {
+                    return value;
+                  }
+
+                  routine shared pub actor nlex second(int value): int {
+                    return value;
+                  }
+
+                  fnc pub isoactor nlex third(int value): int {
+                    return value;
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        Ast.FunctionDecl first = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(0));
+        Ast.FunctionDecl second = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(1));
+        Ast.FunctionDecl third = assertInstanceOf(Ast.FunctionDecl.class, module.declarations().get(2));
+
+        assertEquals(Ast.ActorKind.SHARED, first.actorKind());
+        assertEquals(Ast.ActorKind.SHARED, second.actorKind());
+        assertEquals(Ast.ActorKind.PRIVATE, third.actorKind());
+        assertTrue(first.nonLexical());
+        assertTrue(second.nonLexical());
+        assertTrue(third.nonLexical());
     }
 
     @Test
