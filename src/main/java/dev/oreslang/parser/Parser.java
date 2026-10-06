@@ -80,11 +80,10 @@ public final class Parser {
                     if (modifiers.structural) throw error(previous(), "structural cannot modify a class");
                     rejectCallableStructuralAnnotation(annotations, "class declarations");
                     validateClassModifiers(modifiers);
-                    if (modifiers.visibility == Ast.Visibility.PUBLIC) {
-                        throw error(previous(), "top-level classes are file-private; put the class in a module to export it");
-                    }
-                    rootDeclarations.add(parseClass(Ast.Visibility.PRIVATE,
-                            modifiers.isAbstract || afterDefineAbstract, true));
+                    rootDeclarations.add(parseClass(
+                            modifiers.visibility,
+                            modifiers.isAbstract || afterDefineAbstract,
+                            modifiers.visibility != Ast.Visibility.PUBLIC));
                     continue;
                 }
                 if (match(INTERFACE)) {
