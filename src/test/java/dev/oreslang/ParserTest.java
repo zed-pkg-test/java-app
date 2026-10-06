@@ -112,6 +112,29 @@ final class ParserTest {
     }
 
     @Test
+    void effectsBranchInterfaceDefineKeywordsMayAppearInCompatibilityOrder() {
+        Ast.Program program = Parser.parse("""
+                define module app
+                  interface pub define ApiA {
+                  }
+
+                  pub interface define ApiB {
+                  }
+
+                  define interface pub ApiC {
+                  }
+                end
+                """);
+
+        Ast.ModuleDecl module = program.modules().getFirst();
+        assertEquals(3, module.declarations().size());
+        for (Ast.Decl declaration : module.declarations()) {
+            Ast.InterfaceDecl iface = assertInstanceOf(Ast.InterfaceDecl.class, declaration);
+            assertEquals(Ast.Visibility.PUBLIC, iface.visibility());
+        }
+    }
+
+    @Test
     void callableEffectModifiersMaySurroundFncAndClassesMayUseEitherBodyStyle() {
         Ast.Program program = Parser.parse("""
                 define module app
