@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.locks.LockSupport;
 
@@ -44,22 +45,9 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private static final long IDLE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
     private static final long AFFINITY_STEAL_GRACE_NANOS = TimeUnit.MILLISECONDS.toNanos(5);
 
-    private record AffinityTask(
-            Runnable delegate,
-            long enqueuedNanos,
-            int preferredSlot) implements Runnable {
-        private AffinityTask {
-            Objects.requireNonNull(delegate, "delegate");
-        }
-
-        @Override
-        public void run() {
-            delegate.run();
-        }
-    }
-
     private final ArrayBlockingQueue<Runnable> queue;
     private final List<ArrayBlockingQueue<Runnable>> affinityQueues;
+    private final AtomicLongArray affinityLaneLastEnqueueNanos;
     private final int queueCapacity;
     private final int maximumPoolSize;
     private final long nativeStackBytes;
@@ -95,6 +83,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
             lanes.add(new ArrayBlockingQueue<>(queueCapacity, true));
         }
         this.affinityQueues = List.copyOf(lanes);
+        this.affinityLaneLastEnqueueNanos = new AtomicLongArray(maximumPoolSize);
         this.queueCapacity = queueCapacity;
         this.maximumPoolSize = maximumPoolSize;
         this.nativeStackBytes = configuredCarrierStackBytes();
@@ -216,9 +205,10 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
         for (int offset = 1; offset < enabled; offset++) {
             int victimSlot = (thiefSlot + offset) % enabled;
             ArrayBlockingQueue<Runnable> victim = affinityQueues.get(victimSlot);
-            Runnable candidate = victim.peek();
-            if (!(candidate instanceof AffinityTask affinityTask)) continue;
-            if (now - affinityTask.enqueuedNanos() < AFFINITY_STEAL_GRACE_NANOS) continue;
+            if (victim.peek() == null) continue;
+            long lastEnqueue = affinityLaneLastEnqueueNanos.get(victimSlot);
+            if (lastEnqueue == 0L
+                    || now - lastEnqueue < AFFINITY_STEAL_GRACE_NANOS) continue;
             Runnable stolen = victim.poll();
             if (stolen != null) return stolen;
         }
@@ -290,7 +280,10 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
                 slot = preferredSlot(affinityKey);
                 ArrayBlockingQueue<Runnable> lane = affinityQueues.get(slot);
                 if (lane.size() < localBacklogEscapeThreshold()) {
-                    offered = lane.offer(new AffinityTask(task, System.nanoTime(), slot));
+                    offered = lane.offer(task);
+                    if (offered) {
+                        affinityLaneLastEnqueueNanos.set(slot, System.nanoTime());
+                    }
                 }
             }
             if (!offered) {
@@ -338,27 +331,15 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     }
 
     public boolean remove(Runnable task) {
-        if (removeQueuedTask(queue, task)) {
+        if (queue.remove(task)) {
             releaseReadySlot();
             return true;
         }
         for (ArrayBlockingQueue<Runnable> lane : affinityQueues) {
-            if (removeQueuedTask(lane, task)) {
+            if (lane.remove(task)) {
                 releaseReadySlot();
                 return true;
             }
-        }
-        return false;
-    }
-
-    private static boolean removeQueuedTask(
-            ArrayBlockingQueue<Runnable> source,
-            Runnable task) {
-        for (Runnable queued : source) {
-            boolean matches = queued == task
-                    || (queued instanceof AffinityTask affinityTask
-                        && affinityTask.delegate() == task);
-            if (matches && source.remove(queued)) return true;
         }
         return false;
     }
