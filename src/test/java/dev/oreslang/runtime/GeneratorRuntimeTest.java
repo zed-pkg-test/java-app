@@ -102,6 +102,23 @@ final class GeneratorRuntimeTest {
     }
 
     @Test
+    void channelAsyncIteratorPreservesRendezvousBackpressureUntilPull() throws Exception {
+        try (AsyncRuntime runtime = new AsyncRuntime()) {
+            ChannelRuntime.Channel<Integer> channel = new ChannelRuntime.Channel<>(0);
+            OresFuture<Void> writer = channel.writeAsync(5);
+            assertFalse(writer.isDone());
+
+            try (var iterator = GeneratorRuntime.channelAsyncIterator(runtime, channel)) {
+                assertEquals(5, iterator.nextStep().get(2, TimeUnit.SECONDS).value());
+                writer.get(2, TimeUnit.SECONDS);
+                assertTrue(writer.isDone());
+                channel.close();
+                assertTrue(iterator.nextStep().get(2, TimeUnit.SECONDS).done());
+            }
+        }
+    }
+
+    @Test
     void channelAsyncIteratorPropagatesExceptionalCloseAfterDrain() throws Exception {
         try (AsyncRuntime runtime = new AsyncRuntime()) {
             ChannelRuntime.Channel<Integer> channel = new ChannelRuntime.Channel<>(1);
