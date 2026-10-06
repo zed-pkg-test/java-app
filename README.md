@@ -1,73 +1,35 @@
-# litegraph-node
+# Oreslang Async / Actor / Channel Proof Harness
 
-Per-machine daemon and local authority for allocatable compute resources.
+This repository is an executable integration harness for the Oreslang concurrency stack.
 
-LiteGraph is a heterogeneous compute actor platform: CPU code owns control, networking, actor supervision and ordinary OS capabilities; suitable numerical work may be dispatched to one or more GPUs. A machine is therefore not classified as simply "CPU" or "GPU"—CPU, RAM, accelerator devices and VRAM are independently schedulable resources.
+It is intentionally designed to prove cross-layer invariants involving:
 
-## Responsibilities
+- OresFuture / Awaitable / async-await scheduler resumption
+- actor spawn and actor execution domains
+- shared, private/iso, untrusted, and hungry actors
+- ActorGroup / ActorMailman routing
+- mailbox = policy around Channel<Envelope>
+- readch / writech / nb readch / nb writech
+- static and dynamic select / nb select
+- ActorGroup event bus delivery and backpressure
+- cancellation, fairness, progress, and carrier starvation safety
 
-- CPU/RAM and accelerator discovery.
-- device/lane health and allocatable capacity.
-- local invocation supervision.
-- health/snapshot APIs and standalone workstation mode.
+The first proof branch is pinned to the active Oreslang source stack that includes
+PR #252 (channels/select/mailbox/cancellation) and PR #255 (ActorGroup event bus).
 
-## Explicit non-responsibilities
+Source snapshot: `ores-truffle-oreslang/oreslang-source.java@e1e84d071beebb59671eeae28e2344f9a6bc3940`.
 
-- cluster-wide scheduling.
-- control-plane tenant CRUD.
-- compiler/toolchain responsibilities.
+See `PROOF_MATRIX.md` on the proof branch for the required invariants and known gaps.
 
-Keeping these boundaries explicit is important: moving policy into a lower-level component makes local execution harder to reason about and creates competing authorities.
+Run the native carrier build and proof suite with `mvn clean test` (JDK 21 or 25,
+plus a C compiler on Linux/macOS). CI covers both platforms and JDK versions.
 
-## Place in the system
+The pinned snapshot includes local fixes for Darwin pthread declarations,
+closed-mailbox/subscription teardown, aggregation of void Future results, and
+the `Future<void>` channel-write type. The proof tests use bounded waits and
+explicitly arm the rendezvous read before starting its producer.
 
-```text
-scheduler/router → node → runtime/modeld/gpu-host; node → scheduler telemetry
-```
-
-Shared invariants across the platform:
-
-- invocation actors are ephemeral;
-- resident artifacts and compiled variants are immutable and revisioned;
-- guest/customer code receives capabilities, never raw accelerator pointers;
-- mutable accelerator state belongs to trusted lane/device actors;
-- CPU and GPU resources are accounted independently;
-- `cpu`, `gpu`, and `auto` describe execution requirements/preferences without changing logical function identity;
-- backpressure and cancellation must propagate rather than creating unbounded queues.
-
-## Contracts and compatibility
-
-Wire-visible names use `snake_case`. Cross-language contracts belong in `litegraph-contracts`: authored TypeSpec and JSON Schema Draft 2020-12 are peer authorities, and generated files are evidence rather than a third authored schema. Contract mismatches must fail closed before promotion.
-
-Public/shared semantic types belong in `litegraph-interfaces` or `litegraph-pub-lib-core`; this repository should not create a subtly different copy of an existing concept.
-
-## Security and isolation
-
-Treat all tenant input and artifacts as untrusted. Validate sizes, identifiers and capability requests before allocating expensive resources. Never expose native accelerator pointers/driver handles across the tenant boundary, never place credentials in manifests or examples, and keep secrets in approved runtime secret channels.
-
-Isolation policy uses the platform classes `shared`, `sandbox`, `partitioned`, and `dedicated` where applicable. Resource release on cancellation, timeout and failure is part of correctness.
-
-## Development expectations
-
-Follow the fleet policy in `ORESoftware/my-ai` (`AGENTS.md` plus `SHARED.md`) when changing this repository. Durable systems tooling, validators, code generation and CI helpers should be Rust-first. Do not add Python for repository scripts, validators, codegen or CI gates.
-
-When this repository exposes an executable with command-line configuration, its public option contract belongs in root `.cli-flags.toml` and the argv boundary should use the canonical `flags-2-env` integration rather than maintaining a second independent flag schema.
-
-Tests should cover both success and fail-closed behavior. Hardware-independent logic should run with deterministic fakes/simulators; hardware-specific certification belongs on real accelerator runners. A hosted workflow that starts zero test steps is not evidence of a passing build.
-
-## Integration map
-
-- `litegraph-contracts` — wire schemas.
-- `litegraph-interfaces` — canonical shared semantics.
-- `litegraph-scheduler` — cluster placement.
-- `litegraph-node` — machine inventory and local supervision.
-- `litegraph-runtime` — invocation lifecycle.
-- `litegraph-gpu-host` — trusted accelerator execution.
-- `litegraph-modeld` — resident model actors.
-- `litegraph-compiler` — deterministic multi-target build artifacts.
-- registries — immutable function/model artifact storage.
-- `litegraph-router.rs` — invocation forwarding and backpressure.
-
-## Documentation rule
-
-Keep this README specific to this repository. Architectural decisions that affect multiple repositories should be recorded in the canonical interface/contracts layer and linked here rather than copied into divergent local specifications.
+The enabled suite contains 12 tests. One additional `nb cb writech` syntax
+contract remains deliberately disabled until parser/type/lowering support is
+implemented; passing the enabled tests does not close the other gaps in
+`PROOF_MATRIX.md`.
