@@ -1,0 +1,49 @@
+// Async/channel adapter for the native incremental JSON decoder.
+//
+// Channel payloads are data-only. This adapter never transports callbacks,
+// parser internals, host objects, or mutable decoder state through a channel.
+//
+// The input channel carries Some(byte_chunk). None means EOF and is needed for
+// roots (notably numbers) whose completion can only be proven at end-of-stream.
+// A structurally complete JSON value may return before an EOF frame is consumed;
+// producer lifetime/cancellation remains owned by the caller.
+//
+// Ordinary Oreslang arguments are managed references. feed() reads a chunk and
+// copies only its bytes into the decoder's bounded accumulator. Do not introduce
+// C/Rust-style &/* syntax here. A future zero-copy chunk path may explicitly
+// consume storage with rt take once that ownership lowering is on the compiler
+// baseline.
+
+import class Value from '../core/value';
+import class DecodeOptions, DecodeError, DecodedValue, DecodeStep from '../core/options';
+import class JsonIncrementalDecoder from './json';
+import fnc new_incremental_decoder, feed, finish from './json';
+
+pub async fnc decode_one_from_channel(
+  Channel<Option<List<int>>> input,
+  DecodeOptions options
+): Result<DecodedValue, DecodeError> {
+  let JsonIncrementalDecoder decoder = new_incremental_decoder(options);
+
+  loop do
+    val Option<List<int>> frame = await (nb readch input);
+
+    if frame.is_none() then
+      val DecodeStep terminal = finish(decoder);
+      if terminal.status == 1 then
+        return Ok(new DecodedValue(terminal.value, terminal.consumed));
+      fi
+      return Err(terminal.error);
+    fi
+
+    val DecodeStep step = feed(decoder, frame.unwrap());
+
+    if step.status == 1 then
+      return Ok(new DecodedValue(step.value, step.consumed));
+    fi
+
+    if step.status == 2 then
+      return Err(step.error);
+    fi
+  done
+}

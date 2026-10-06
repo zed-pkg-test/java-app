@@ -1,0 +1,251 @@
+// Metadata-driven JSON object decode.
+//
+// This is the generic bridge between wire bytes and generated typed
+// constructors. It resolves wire names, validates required/unknown fields, runs
+// shared ValueRule validation, and returns an object Value keyed by source
+// field names. Generated class/struct codecs can then construct concrete values
+// with direct field writes and no reflection.
+
+import class Value, Utf8Text, WireMember from '../core/value';
+import fnc value_object from '../core/value';
+import class DecodeOptions, DecodeError, DecodeAttempt from '../core/options';
+import fnc decode_attempt from '../json/json';
+import class ValidationOptions, ValidationReport, ValidationError, PathSegment, FieldRule, ObjectSchema from '../validation/validation';
+import fnc field_rule, object_schema, validate_object, report_is_valid from '../validation/validation';
+import class CodecFieldMeta, CodecTypeMeta, MetadataError, MetadataCheck from './metadata';
+import fnc check_metadata, field_by_wire_name from './metadata';
+
+define class ObjectCodecError as
+  // kind: 0 metadata, 1 decode, 2 validation.
+  pub val int kind;
+  pub val MetadataError metadata_error;
+  pub val DecodeError decode_error;
+  pub val ValidationReport validation_report;
+end
+
+define class DecodedObject as
+  pub val Value source_object;
+  pub val Value wire_object;
+  pub val Value unknown_object;
+  pub val int consumed;
+end
+
+define class ObjectDecodeAttempt as
+  // status: 0 ready, 1 metadata failure, 2 decode failure, 3 validation failure.
+  pub val int status;
+  pub val DecodedObject decoded;
+  pub val ObjectCodecError error;
+end
+
+fnc empty_metadata_error(): MetadataError {
+  return new MetadataError("", -1, "");
+}
+
+fnc empty_decode_error(): DecodeError {
+  return new DecodeError("", 0, "");
+}
+
+fnc empty_validation_report(): ValidationReport {
+  return new ValidationReport(
+    new List<ValidationError>(),
+    false
+  );
+}
+
+fnc metadata_schema(CodecTypeMeta metadata): ObjectSchema {
+  let List<FieldRule> fields = new List<FieldRule>();
+
+  for const field of metadata.fields do
+    fields.push(
+      field_rule(
+        field.wire_name,
+        field.required,
+        false,
+        field.validation
+      )
+    );
+  done
+
+  return object_schema(
+    fields,
+    metadata.unknown_field_policy == 1
+  );
+}
+
+fnc source_object(
+  Value wire_object,
+  CodecTypeMeta metadata
+): Value {
+  let List<WireMember> output = new List<WireMember>();
+
+  for const member of wire_object.object_value do
+    let Result<CodecFieldMeta, MetadataError> selected = field_by_wire_name(
+      metadata,
+      member.key
+    );
+
+    if selected.is_err() then
+      continue;
+    fi
+
+    let CodecFieldMeta field = selected.unwrap();
+    output.push(
+      new WireMember(
+        field.source_name,
+        member.value
+      )
+    );
+  done
+
+  return value_object(output);
+}
+
+fnc unknown_object(
+  Value wire_object,
+  CodecTypeMeta metadata
+): Value {
+  let List<WireMember> output = new List<WireMember>();
+
+  if metadata.unknown_field_policy != 2 then
+    return value_object(output);
+  fi
+
+  for const member of wire_object.object_value do
+    let Result<CodecFieldMeta, MetadataError> selected = field_by_wire_name(
+      metadata,
+      member.key
+    );
+
+    if selected.is_err() then
+      output.push(member);
+    fi
+  done
+
+  return value_object(output);
+}
+
+fnc empty_decoded_object(): DecodedObject {
+  val Value empty = value_object(new List<WireMember>());
+  return new DecodedObject(empty, empty, empty, 0);
+}
+
+fnc object_codec_error(
+  int kind,
+  MetadataError metadata_error,
+  DecodeError decode_error,
+  ValidationReport validation_report
+): ObjectCodecError {
+  return new ObjectCodecError(
+    kind,
+    metadata_error,
+    decode_error,
+    validation_report
+  );
+}
+
+pub fnc decode_json_object_attempt(
+  List<int> input,
+  DecodeOptions decode_options,
+  CodecTypeMeta metadata,
+  ValidationOptions validation_options
+): ObjectDecodeAttempt {
+  let MetadataCheck checked = check_metadata(metadata);
+
+  if !checked.ok then
+    let ObjectCodecError error = object_codec_error(
+      0,
+      checked.error,
+      empty_decode_error(),
+      empty_validation_report()
+    );
+    return new ObjectDecodeAttempt(1, empty_decoded_object(), error);
+  fi
+
+  let DecodeAttempt attempt = decode_attempt(input, decode_options);
+  if attempt.status != 0 then
+    let ObjectCodecError error = object_codec_error(
+      1,
+      empty_metadata_error(),
+      attempt.error,
+      empty_validation_report()
+    );
+    return new ObjectDecodeAttempt(2, empty_decoded_object(), error);
+  fi
+
+  if attempt.value.kind != 6 then
+    let ValidationReport report = new ValidationReport(
+      new List<ValidationError>(
+        new ValidationError(
+          "type",
+          new List<PathSegment>(),
+          "metadata-driven JSON decode requires an object root",
+          0
+        )
+      ),
+      false
+    );
+
+    let ObjectCodecError error = object_codec_error(
+      2,
+      empty_metadata_error(),
+      empty_decode_error(),
+      report
+    );
+    return new ObjectDecodeAttempt(3, empty_decoded_object(), error);
+  fi
+
+  let ObjectSchema schema = metadata_schema(metadata);
+  let ValidationReport report = validate_object(
+    attempt.value,
+    schema,
+    validation_options
+  );
+
+  if !report_is_valid(report) then
+    let ObjectCodecError error = object_codec_error(
+      2,
+      empty_metadata_error(),
+      empty_decode_error(),
+      report
+    );
+    return new ObjectDecodeAttempt(3, empty_decoded_object(), error);
+  fi
+
+  let DecodedObject decoded = new DecodedObject(
+    source_object(attempt.value, metadata),
+    attempt.value,
+    unknown_object(attempt.value, metadata),
+    attempt.consumed
+  );
+
+  return new ObjectDecodeAttempt(
+    0,
+    decoded,
+    object_codec_error(
+      0,
+      empty_metadata_error(),
+      empty_decode_error(),
+      empty_validation_report()
+    )
+  );
+}
+
+pub fnc decode_json_object(
+  List<int> input,
+  DecodeOptions decode_options,
+  CodecTypeMeta metadata,
+  ValidationOptions validation_options
+): Result<DecodedObject, ObjectCodecError> {
+  let ObjectDecodeAttempt attempt = decode_json_object_attempt(
+    input,
+    decode_options,
+    metadata,
+    validation_options
+  );
+
+  if attempt.status == 0 then
+    return Ok(attempt.decoded);
+  fi
+
+  return Err(attempt.error);
+}

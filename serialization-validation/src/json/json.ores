@@ -1,0 +1,1321 @@
+// Native byte-oriented JSON encoder/decoder.
+//
+// Input and output are List<int> bytes (0..255). String payloads are retained as
+// validated UTF-8 bytes in Utf8Text, avoiding host/JVM string parsing.
+// The parser is bounded by DecodeOptions and has a resumable feed surface.
+
+import class Value, Utf8Text, WireMember from '../core/value';
+import fnc value_null, value_bool, value_number_lexeme, value_string, value_array, value_object from '../core/value';
+import fnc bytes_equal, text_hash from '../core/value';
+import fnc utf8_expected_width, utf8_prefix_status, utf8_sequence_length, utf8_is_valid, utf8_codepoint_count, utf8_append_codepoint from '../core/utf8';
+import class DecodeOptions, EncodeOptions, DecodeError, EncodeError, DecodedValue, DecodeAttempt, DecodeStep from '../core/options';
+import fnc default_decode_options, empty_decode_error, decode_error, encode_error, decode_options_valid, encode_options_valid from '../core/options';
+
+define class JsonCursor as
+  pub val List<int> input;
+  pub val DecodeOptions options;
+  pub let int index;
+  pub let bool failed;
+  pub let bool incomplete;
+  pub let DecodeError error;
+end
+
+define class JsonWriter as
+  pub let List<int> output;
+  pub val EncodeOptions options;
+  pub let bool failed;
+  pub let EncodeError error;
+end
+
+define class JsonIncrementalDecoder as
+  pub let List<int> buffer;
+  pub val DecodeOptions options;
+  pub let bool complete;
+
+  // O(total input) structural scan state.
+  // mode: 0 leading, 1 container, 2 root string, 3 literal, 4 number.
+  pub let int scan_index;
+  pub let int mode;
+  pub let int depth;
+  pub let bool in_string;
+  pub let bool escaped;
+  pub let int literal_target;
+  pub let int literal_seen;
+end
+
+fnc fail(JsonCursor mut cursor, String code, String message): void {
+  if cursor.failed || cursor.incomplete then
+    return;
+  fi
+  cursor.failed = true;
+  cursor.error = decode_error(code, cursor.index, message);
+  return;
+}
+
+fnc need_more(JsonCursor mut cursor): void {
+  if cursor.failed then
+    return;
+  fi
+  cursor.incomplete = true;
+  cursor.error = decode_error("unexpected_eof", cursor.index, "incomplete JSON value");
+  return;
+}
+
+fnc writer_fail(JsonWriter mut writer, String code, String message): void {
+  if writer.failed then
+    return;
+  fi
+  writer.failed = true;
+  writer.error = encode_error(code, message);
+  return;
+}
+
+fnc is_whitespace(int byte): bool {
+  return byte == 32 || byte == 9 || byte == 10 || byte == 13;
+}
+
+fnc is_digit(int byte): bool {
+  return byte >= 48 && byte <= 57;
+}
+
+fnc is_nonzero_digit(int byte): bool {
+  return byte >= 49 && byte <= 57;
+}
+
+fnc is_hex_digit(int byte): bool {
+  if byte >= 48 && byte <= 57 then
+    return true;
+  fi
+  if byte >= 65 && byte <= 70 then
+    return true;
+  fi
+  return byte >= 97 && byte <= 102;
+}
+
+fnc hex_value(int byte): int {
+  if byte >= 48 && byte <= 57 then
+    return byte - 48;
+  fi
+  if byte >= 65 && byte <= 70 then
+    return 10 + (byte - 65);
+  fi
+  if byte >= 97 && byte <= 102 then
+    return 10 + (byte - 97);
+  fi
+  return -1;
+}
+
+fnc skip_whitespace(JsonCursor mut cursor): void {
+  loop do
+    if cursor.index >= cursor.input.length then
+      break;
+    fi
+    if !is_whitespace(cursor.input[cursor.index]) then
+      break;
+    fi
+    cursor.index = cursor.index + 1;
+  done
+  return;
+}
+
+fnc peek(JsonCursor mut cursor): int {
+  if cursor.index >= cursor.input.length then
+    need_more(cursor);
+    return -1;
+  fi
+  return cursor.input[cursor.index];
+}
+
+fnc consume(JsonCursor mut cursor): int {
+  let int byte = peek(cursor);
+  if cursor.failed || cursor.incomplete then
+    return -1;
+  fi
+  cursor.index = cursor.index + 1;
+  return byte;
+}
+
+fnc expect_byte(JsonCursor mut cursor, int expected, String message): void {
+  let int actual = consume(cursor);
+  if cursor.failed || cursor.incomplete then
+    return;
+  fi
+  if actual != expected then
+    fail(cursor, "unexpected_byte", message);
+  fi
+  return;
+}
+
+fnc append_output(JsonWriter mut writer, int byte): void {
+  if writer.failed then
+    return;
+  fi
+  if writer.output.length >= writer.options.max_output_bytes then
+    writer_fail(writer, "output_limit", "encoded output exceeds max_output_bytes");
+    return;
+  fi
+  writer.output.push(byte);
+  return;
+}
+
+fnc read_hex4(JsonCursor mut cursor): int {
+  let int value = 0;
+  let int i = 0;
+
+  loop do
+    if i >= 4 then
+      break;
+    fi
+
+    let int byte = consume(cursor);
+    if cursor.failed || cursor.incomplete then
+      return 0;
+    fi
+
+    let int digit = hex_value(byte);
+    if digit < 0 then
+      fail(cursor, "invalid_unicode_escape", "JSON unicode escape must contain four hex digits");
+      return 0;
+    fi
+
+    value = (value * 16) + digit;
+    i = i + 1;
+  done
+
+  return value;
+}
+
+fnc parse_string(JsonCursor mut cursor): Utf8Text {
+  let List<int> output = new List<int>();
+
+  expect_byte(cursor, 34, "expected opening quote");
+  if cursor.failed || cursor.incomplete then
+    return new Utf8Text(output);
+  fi
+
+  loop do
+    if cursor.index >= cursor.input.length then
+      need_more(cursor);
+      return new Utf8Text(output);
+    fi
+
+    let int byte = consume(cursor);
+    if cursor.failed || cursor.incomplete then
+      return new Utf8Text(output);
+    fi
+
+    if byte == 34 then
+      break;
+    fi
+
+    if byte < 32 then
+      fail(cursor, "control_in_string", "unescaped control byte in JSON string");
+      return new Utf8Text(output);
+    fi
+
+    if byte == 92 then
+      if cursor.index >= cursor.input.length then
+        need_more(cursor);
+        return new Utf8Text(output);
+      fi
+
+      let int escaped = consume(cursor);
+
+      if escaped == 34 || escaped == 92 || escaped == 47 then
+        output.push(escaped);
+      elseif escaped == 98 then
+        output.push(8);
+      elseif escaped == 102 then
+        output.push(12);
+      elseif escaped == 110 then
+        output.push(10);
+      elseif escaped == 114 then
+        output.push(13);
+      elseif escaped == 116 then
+        output.push(9);
+      elseif escaped == 117 then
+        let int first = read_hex4(cursor);
+        if cursor.failed || cursor.incomplete then
+          return new Utf8Text(output);
+        fi
+
+        let int codepoint = first;
+
+        if first >= 55296 && first <= 56319 then
+          if cursor.index + 1 >= cursor.input.length then
+            need_more(cursor);
+            return new Utf8Text(output);
+          fi
+
+          if cursor.input[cursor.index] != 92 || cursor.input[cursor.index + 1] != 117 then
+            fail(cursor, "invalid_surrogate_pair", "high surrogate must be followed by a low surrogate");
+            return new Utf8Text(output);
+          fi
+
+          cursor.index = cursor.index + 2;
+          let int second = read_hex4(cursor);
+          if cursor.failed || cursor.incomplete then
+            return new Utf8Text(output);
+          fi
+          if second < 56320 || second > 57343 then
+            fail(cursor, "invalid_surrogate_pair", "invalid low surrogate");
+            return new Utf8Text(output);
+          fi
+
+          codepoint = 65536 + ((first - 55296) * 1024) + (second - 56320);
+        elseif first >= 56320 && first <= 57343 then
+          fail(cursor, "invalid_surrogate_pair", "unexpected low surrogate");
+          return new Utf8Text(output);
+        fi
+
+        if !utf8_append_codepoint(output, codepoint) then
+          fail(cursor, "invalid_unicode_escape", "unicode escape is outside the Unicode scalar range");
+          return new Utf8Text(output);
+        fi
+      else
+        fail(cursor, "invalid_escape", "invalid JSON string escape");
+        return new Utf8Text(output);
+      fi
+    elseif byte < 128 then
+      output.push(byte);
+    else
+      // consume() already advanced over the first byte; validate against the
+      // original source starting one byte earlier and copy the remaining bytes.
+      let int start = cursor.index - 1;
+      let int expected_width = utf8_expected_width(byte);
+
+      if expected_width < 2 then
+        fail(cursor, "invalid_utf8", "invalid UTF-8 lead byte in JSON string");
+        return new Utf8Text(output);
+      fi
+
+      let int prefix_status = utf8_prefix_status(
+        cursor.input,
+        start,
+        expected_width
+      );
+
+      if prefix_status == 0 then
+        fail(cursor, "invalid_utf8", "invalid UTF-8 in JSON string");
+        return new Utf8Text(output);
+      fi
+
+      if prefix_status == 1 then
+        need_more(cursor);
+        return new Utf8Text(output);
+      fi
+
+      let int width = expected_width;
+
+      output.push(byte);
+      let int j = 1;
+      loop do
+        if j >= width then
+          break;
+        fi
+        output.push(cursor.input[start + j]);
+        j = j + 1;
+      done
+      cursor.index = start + width;
+    fi
+
+    if output.length > cursor.options.max_string_bytes then
+      fail(cursor, "string_limit", "JSON string exceeds max_string_bytes");
+      return new Utf8Text(output);
+    fi
+  done
+
+  return new Utf8Text(output);
+}
+
+fnc parse_literal(
+  JsonCursor mut cursor,
+  List<int> expected,
+  Value value
+): Value {
+  let int i = 0;
+  loop do
+    if i >= expected.length then
+      break;
+    fi
+
+    if cursor.index >= cursor.input.length then
+      need_more(cursor);
+      return value_null();
+    fi
+
+    if cursor.input[cursor.index] != expected[i] then
+      fail(cursor, "invalid_literal", "invalid JSON literal");
+      return value_null();
+    fi
+
+    cursor.index = cursor.index + 1;
+    i = i + 1;
+  done
+
+  return value;
+}
+
+fnc parse_number(JsonCursor mut cursor): Value {
+  let List<int> lexeme = new List<int>();
+
+  if cursor.index < cursor.input.length && cursor.input[cursor.index] == 45 then
+    lexeme.push(45);
+    cursor.index = cursor.index + 1;
+  fi
+
+  if cursor.index >= cursor.input.length then
+    need_more(cursor);
+    return value_number_lexeme(lexeme);
+  fi
+
+  let int first = cursor.input[cursor.index];
+
+  if first == 48 then
+    lexeme.push(first);
+    cursor.index = cursor.index + 1;
+    if cursor.index < cursor.input.length && is_digit(cursor.input[cursor.index]) then
+      fail(cursor, "invalid_number", "JSON number cannot contain a leading zero");
+      return value_number_lexeme(lexeme);
+    fi
+  elseif is_nonzero_digit(first) then
+    loop do
+      if cursor.index >= cursor.input.length then
+        break;
+      fi
+      let int byte = cursor.input[cursor.index];
+      if !is_digit(byte) then
+        break;
+      fi
+      lexeme.push(byte);
+      cursor.index = cursor.index + 1;
+    done
+  else
+    fail(cursor, "invalid_number", "invalid JSON integer component");
+    return value_number_lexeme(lexeme);
+  fi
+
+  if cursor.index < cursor.input.length && cursor.input[cursor.index] == 46 then
+    lexeme.push(46);
+    cursor.index = cursor.index + 1;
+
+    if cursor.index >= cursor.input.length then
+      need_more(cursor);
+      return value_number_lexeme(lexeme);
+    fi
+    if !is_digit(cursor.input[cursor.index]) then
+      fail(cursor, "invalid_number", "fraction requires at least one digit");
+      return value_number_lexeme(lexeme);
+    fi
+
+    loop do
+      if cursor.index >= cursor.input.length then
+        break;
+      fi
+      let int byte = cursor.input[cursor.index];
+      if !is_digit(byte) then
+        break;
+      fi
+      lexeme.push(byte);
+      cursor.index = cursor.index + 1;
+    done
+  fi
+
+  if cursor.index < cursor.input.length then
+    let int byte = cursor.input[cursor.index];
+    if byte == 101 || byte == 69 then
+      lexeme.push(byte);
+      cursor.index = cursor.index + 1;
+
+      if cursor.index >= cursor.input.length then
+        need_more(cursor);
+        return value_number_lexeme(lexeme);
+      fi
+
+      let int sign = cursor.input[cursor.index];
+      if sign == 43 || sign == 45 then
+        lexeme.push(sign);
+        cursor.index = cursor.index + 1;
+      fi
+
+      if cursor.index >= cursor.input.length then
+        need_more(cursor);
+        return value_number_lexeme(lexeme);
+      fi
+      if !is_digit(cursor.input[cursor.index]) then
+        fail(cursor, "invalid_number", "exponent requires at least one digit");
+        return value_number_lexeme(lexeme);
+      fi
+
+      loop do
+        if cursor.index >= cursor.input.length then
+          break;
+        fi
+        let int exp_byte = cursor.input[cursor.index];
+        if !is_digit(exp_byte) then
+          break;
+        fi
+        lexeme.push(exp_byte);
+        cursor.index = cursor.index + 1;
+      done
+    fi
+  fi
+
+  if lexeme.length > cursor.options.max_number_bytes then
+    fail(cursor, "number_limit", "JSON number exceeds max_number_bytes");
+  fi
+
+  return value_number_lexeme(lexeme);
+}
+
+fnc member_index(
+  List<WireMember> members,
+  Map<int, List<int>> buckets,
+  Utf8Text key
+): int {
+  let int hash = text_hash(key);
+
+  if !buckets.contains(hash) then
+    return -1;
+  fi
+
+  let List<int> candidates = buckets.get(hash);
+  for const index of candidates do
+    if bytes_equal(members[index].key.bytes, key.bytes) then
+      return index;
+    fi
+  done
+
+  return -1;
+}
+
+fnc remember_member(
+  Map<int, List<int>> buckets,
+  Utf8Text key,
+  int index
+): void {
+  let int hash = text_hash(key);
+
+  if buckets.contains(hash) then
+    let List<int> candidates = buckets.get(hash);
+    candidates.push(index);
+    return;
+  fi
+
+  let List<int> candidates = new List<int>();
+  candidates.push(index);
+  buckets.set(hash, candidates);
+  return;
+}
+
+fnc object_keys_unique(List<WireMember> members): bool {
+  let Map<int, List<int>> buckets = new Map<int, List<int>>();
+  let int i = 0;
+
+  loop do
+    if i >= members.length then
+      break;
+    fi
+
+    let WireMember member = members[i];
+    if member_index(members, buckets, member.key) >= 0 then
+      return false;
+    fi
+
+    remember_member(buckets, member.key, i);
+    i = i + 1;
+  done
+
+  return true;
+}
+
+
+fnc parse_array(JsonCursor mut cursor, int depth): Value {
+  let List<Value> values = new List<Value>();
+
+  expect_byte(cursor, 91, "expected '['");
+  if cursor.failed || cursor.incomplete then
+    return value_array(values);
+  fi
+
+  skip_whitespace(cursor);
+
+  if cursor.index < cursor.input.length && cursor.input[cursor.index] == 93 then
+    cursor.index = cursor.index + 1;
+    return value_array(values);
+  fi
+
+  loop do
+    if values.length >= cursor.options.max_array_entries then
+      fail(cursor, "array_limit", "JSON array exceeds max_array_entries");
+      return value_array(values);
+    fi
+
+    let Value item = parse_value(cursor, depth + 1);
+    if cursor.failed || cursor.incomplete then
+      return value_array(values);
+    fi
+    values.push(item);
+
+    skip_whitespace(cursor);
+    let int separator = peek(cursor);
+    if cursor.failed || cursor.incomplete then
+      return value_array(values);
+    fi
+
+    if separator == 44 then
+      cursor.index = cursor.index + 1;
+      skip_whitespace(cursor);
+      continue;
+    fi
+
+    if separator == 93 then
+      cursor.index = cursor.index + 1;
+      break;
+    fi
+
+    fail(cursor, "array_separator", "expected ',' or ']' after JSON array value");
+    return value_array(values);
+  done
+
+  return value_array(values);
+}
+
+fnc parse_object(JsonCursor mut cursor, int depth): Value {
+  let List<WireMember> members = new List<WireMember>();
+  let Map<int, List<int>> buckets = new Map<int, List<int>>();
+
+  expect_byte(cursor, 123, "expected '{'");
+  if cursor.failed || cursor.incomplete then
+    return value_object(members);
+  fi
+
+  skip_whitespace(cursor);
+
+  if cursor.index < cursor.input.length && cursor.input[cursor.index] == 125 then
+    cursor.index = cursor.index + 1;
+    return value_object(members);
+  fi
+
+  loop do
+    if members.length >= cursor.options.max_map_entries then
+      fail(cursor, "map_limit", "JSON object exceeds max_map_entries");
+      return value_object(members);
+    fi
+
+    if peek(cursor) != 34 then
+      if !cursor.failed && !cursor.incomplete then
+        fail(cursor, "object_key", "JSON object key must be a string");
+      fi
+      return value_object(members);
+    fi
+
+    let Utf8Text key = parse_string(cursor);
+    if cursor.failed || cursor.incomplete then
+      return value_object(members);
+    fi
+
+    skip_whitespace(cursor);
+    expect_byte(cursor, 58, "expected ':' after JSON object key");
+    if cursor.failed || cursor.incomplete then
+      return value_object(members);
+    fi
+
+    skip_whitespace(cursor);
+    let Value field_value = parse_value(cursor, depth + 1);
+    if cursor.failed || cursor.incomplete then
+      return value_object(members);
+    fi
+
+    let int existing = member_index(members, buckets, key);
+    if existing >= 0 then
+      if cursor.options.duplicate_key_policy == 0 then
+        fail(cursor, "duplicate_key", "duplicate JSON object key");
+        return value_object(members);
+      elseif cursor.options.duplicate_key_policy == 2 then
+        members[existing] = new WireMember(key, field_value);
+      fi
+      // first_wins intentionally does not append or replace.
+    else
+      let int index = members.length;
+      members.push(new WireMember(key, field_value));
+      remember_member(buckets, key, index);
+    fi
+
+    skip_whitespace(cursor);
+    let int separator = peek(cursor);
+    if cursor.failed || cursor.incomplete then
+      return value_object(members);
+    fi
+
+    if separator == 44 then
+      cursor.index = cursor.index + 1;
+      skip_whitespace(cursor);
+      continue;
+    fi
+
+    if separator == 125 then
+      cursor.index = cursor.index + 1;
+      break;
+    fi
+
+    fail(cursor, "object_separator", "expected ',' or '}' after JSON object member");
+    return value_object(members);
+  done
+
+  return value_object(members);
+}
+
+fnc parse_value(JsonCursor mut cursor, int depth): Value {
+  if depth > cursor.options.max_depth then
+    fail(cursor, "depth_limit", "JSON nesting exceeds max_depth");
+    return value_null();
+  fi
+
+  skip_whitespace(cursor);
+
+  let int byte = peek(cursor);
+  if cursor.failed || cursor.incomplete then
+    return value_null();
+  fi
+
+  if byte == 110 then
+    return parse_literal(cursor, new List<int>(110, 117, 108, 108), value_null());
+  fi
+
+  if byte == 116 then
+    return parse_literal(cursor, new List<int>(116, 114, 117, 101), value_bool(true));
+  fi
+
+  if byte == 102 then
+    return parse_literal(cursor, new List<int>(102, 97, 108, 115, 101), value_bool(false));
+  fi
+
+  if byte == 34 then
+    return value_string(parse_string(cursor));
+  fi
+
+  if byte == 91 then
+    return parse_array(cursor, depth);
+  fi
+
+  if byte == 123 then
+    return parse_object(cursor, depth);
+  fi
+
+  if byte == 45 || is_digit(byte) then
+    return parse_number(cursor);
+  fi
+
+  fail(cursor, "unexpected_token", "invalid JSON value token");
+  return value_null();
+}
+
+pub fnc decode_attempt(
+  List<int> input,
+  DecodeOptions options
+): DecodeAttempt {
+  if !decode_options_valid(options) then
+    return new DecodeAttempt(
+      2,
+      value_null(),
+      0,
+      decode_error("invalid_options", 0, "invalid or unsafe JSON decode options")
+    );
+  fi
+
+  if input.length > options.max_input_bytes then
+    return new DecodeAttempt(
+      2,
+      value_null(),
+      0,
+      decode_error("input_limit", 0, "JSON input exceeds max_input_bytes")
+    );
+  fi
+
+  let int byte_index = 0;
+  for const byte of input do
+    if byte < 0 || byte > 255 then
+      return new DecodeAttempt(
+        2,
+        value_null(),
+        byte_index,
+        decode_error("invalid_byte", byte_index, "JSON input bytes must be 0..255")
+      );
+    fi
+    byte_index = byte_index + 1;
+  done
+
+  let JsonCursor cursor = new JsonCursor(
+    input,
+    options,
+    0,
+    false,
+    false,
+    empty_decode_error()
+  );
+
+  let Value value = parse_value(cursor, 0);
+
+  if cursor.incomplete then
+    return new DecodeAttempt(1, value_null(), cursor.index, cursor.error);
+  fi
+
+  if cursor.failed then
+    return new DecodeAttempt(2, value_null(), cursor.index, cursor.error);
+  fi
+
+  skip_whitespace(cursor);
+
+  if !options.allow_trailing_data && cursor.index != input.length then
+    return new DecodeAttempt(
+      2,
+      value_null(),
+      cursor.index,
+      decode_error("trailing_data", cursor.index, "trailing bytes after JSON value")
+    );
+  fi
+
+  return new DecodeAttempt(0, value, cursor.index, empty_decode_error());
+}
+
+pub fnc decode(
+  List<int> input,
+  DecodeOptions options
+): Result<DecodedValue, DecodeError> {
+  let DecodeAttempt attempt = decode_attempt(input, options);
+
+  if attempt.status == 0 then
+    return Ok(new DecodedValue(attempt.value, attempt.consumed));
+  fi
+
+  return Err(attempt.error);
+}
+
+pub fnc decode_default(List<int> input): Result<DecodedValue, DecodeError> {
+  return decode(input, default_decode_options());
+}
+
+fnc valid_number_lexeme(List<int> bytes): bool {
+  let DecodeOptions options = new DecodeOptions(
+    0,
+    false,
+    8,
+    bytes.length + 1,
+    1,
+    1,
+    bytes.length + 1,
+    1,
+    1
+  );
+
+  let JsonCursor cursor = new JsonCursor(
+    bytes,
+    options,
+    0,
+    false,
+    false,
+    empty_decode_error()
+  );
+
+  let Value value = parse_number(cursor);
+  if cursor.failed || cursor.incomplete then
+    return false;
+  fi
+  if cursor.index != bytes.length then
+    return false;
+  fi
+  return value.kind == 2;
+}
+
+fnc write_json_string(JsonWriter mut writer, Utf8Text text): void {
+  append_output(writer, 34);
+
+  let int i = 0;
+  loop do
+    if i >= text.bytes.length then
+      break;
+    fi
+
+    let int byte = text.bytes[i];
+
+    if byte == 34 then
+      append_output(writer, 92);
+      append_output(writer, 34);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte == 92 then
+      append_output(writer, 92);
+      append_output(writer, 92);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte == 8 then
+      append_output(writer, 92);
+      append_output(writer, 98);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte == 12 then
+      append_output(writer, 92);
+      append_output(writer, 102);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte == 10 then
+      append_output(writer, 92);
+      append_output(writer, 110);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte == 13 then
+      append_output(writer, 92);
+      append_output(writer, 114);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte == 9 then
+      append_output(writer, 92);
+      append_output(writer, 116);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte < 32 then
+      append_output(writer, 92);
+      append_output(writer, 117);
+      append_output(writer, 48);
+      append_output(writer, 48);
+
+      let int high = byte / 16;
+      let int low = byte % 16;
+      append_output(writer, high < 10 ? 48 + high : 87 + high);
+      append_output(writer, low < 10 ? 48 + low : 87 + low);
+      i = i + 1;
+      continue;
+    fi
+
+    if byte < 128 then
+      append_output(writer, byte);
+      i = i + 1;
+      continue;
+    fi
+
+    let int width = utf8_sequence_length(text.bytes, i);
+    if width < 2 then
+      writer_fail(writer, "invalid_utf8", "cannot encode invalid UTF-8 string");
+      return;
+    fi
+
+    let int j = 0;
+    loop do
+      if j >= width then
+        break;
+      fi
+      append_output(writer, text.bytes[i + j]);
+      j = j + 1;
+    done
+    i = i + width;
+  done
+
+  append_output(writer, 34);
+  return;
+}
+
+fnc write_literal(JsonWriter mut writer, List<int> bytes): void {
+  for const byte of bytes do
+    append_output(writer, byte);
+  done
+  return;
+}
+
+fnc encode_value(JsonWriter mut writer, Value value, int depth): void {
+  if writer.failed then
+    return;
+  fi
+
+  if depth > writer.options.max_depth then
+    writer_fail(writer, "depth_limit", "JSON encoding exceeds max_depth");
+    return;
+  fi
+
+  if value.kind == 0 then
+    write_literal(writer, new List<int>(110, 117, 108, 108));
+    return;
+  fi
+
+  if value.kind == 1 then
+    if value.bool_value then
+      write_literal(writer, new List<int>(116, 114, 117, 101));
+    else
+      write_literal(writer, new List<int>(102, 97, 108, 115, 101));
+    fi
+    return;
+  fi
+
+  if value.kind == 2 then
+    if !valid_number_lexeme(value.number_lexeme) then
+      writer_fail(writer, "invalid_number", "number Value contains an invalid JSON number lexeme");
+      return;
+    fi
+    write_literal(writer, value.number_lexeme);
+    return;
+  fi
+
+  if value.kind == 3 then
+    write_json_string(writer, value.string_value);
+    return;
+  fi
+
+  if value.kind == 4 || value.kind == 7 then
+    writer_fail(writer, "unsupported_value", "JSON cannot directly encode binary or extension values");
+    return;
+  fi
+
+  if value.kind == 5 then
+    append_output(writer, 91);
+
+    let int i = 0;
+    loop do
+      if i >= value.array_value.length then
+        break;
+      fi
+      if i > 0 then
+        append_output(writer, 44);
+      fi
+      encode_value(writer, value.array_value[i], depth + 1);
+      if writer.failed then
+        return;
+      fi
+      i = i + 1;
+    done
+
+    append_output(writer, 93);
+    return;
+  fi
+
+  if value.kind == 6 then
+    if !object_keys_unique(value.object_value) then
+      writer_fail(writer, "duplicate_key", "cannot encode JSON object with duplicate keys");
+      return;
+    fi
+
+    append_output(writer, 123);
+
+    let int i = 0;
+    loop do
+      if i >= value.object_value.length then
+        break;
+      fi
+      if i > 0 then
+        append_output(writer, 44);
+      fi
+
+      let WireMember member = value.object_value[i];
+      write_json_string(writer, member.key);
+      append_output(writer, 58);
+      encode_value(writer, member.value, depth + 1);
+
+      if writer.failed then
+        return;
+      fi
+      i = i + 1;
+    done
+
+    append_output(writer, 125);
+    return;
+  fi
+
+  writer_fail(writer, "unsupported_value", "unknown dynamic Value kind");
+  return;
+}
+
+pub fnc encode(
+  Value value,
+  EncodeOptions options
+): Result<List<int>, EncodeError> {
+  if !encode_options_valid(options) then
+    return Err(encode_error("invalid_options", "invalid or unsafe JSON encode options"));
+  fi
+
+  let JsonWriter writer = new JsonWriter(
+    new List<int>(),
+    options,
+    false,
+    new EncodeError("", "")
+  );
+
+  encode_value(writer, value, 0);
+
+  if writer.failed then
+    return Err(writer.error);
+  fi
+
+  return Ok(writer.output);
+}
+
+pub fnc new_incremental_decoder(
+  DecodeOptions options
+): JsonIncrementalDecoder {
+  return new JsonIncrementalDecoder(
+    new List<int>(),
+    options,
+    false,
+    0,
+    0,
+    0,
+    false,
+    false,
+    0,
+    0
+  );
+}
+
+fnc scan_incremental(JsonIncrementalDecoder mut decoder): int {
+  // 0 need more, 1 candidate complete, 2 definitely invalid token boundary.
+  loop do
+    if decoder.scan_index >= decoder.buffer.length then
+      return 0;
+    fi
+
+    let int byte = decoder.buffer[decoder.scan_index];
+
+    if decoder.mode == 0 then
+      if is_whitespace(byte) then
+        decoder.scan_index = decoder.scan_index + 1;
+        continue;
+      fi
+
+      if byte == 123 || byte == 91 then
+        decoder.mode = 1;
+        decoder.depth = 1;
+        decoder.scan_index = decoder.scan_index + 1;
+        continue;
+      fi
+
+      if byte == 34 then
+        decoder.mode = 2;
+        decoder.in_string = true;
+        decoder.scan_index = decoder.scan_index + 1;
+        continue;
+      fi
+
+      if byte == 116 || byte == 110 then
+        decoder.mode = 3;
+        decoder.literal_target = 4;
+        decoder.literal_seen = 1;
+        decoder.scan_index = decoder.scan_index + 1;
+        continue;
+      fi
+
+      if byte == 102 then
+        decoder.mode = 3;
+        decoder.literal_target = 5;
+        decoder.literal_seen = 1;
+        decoder.scan_index = decoder.scan_index + 1;
+        continue;
+      fi
+
+      if byte == 45 || is_digit(byte) then
+        decoder.mode = 4;
+        decoder.scan_index = decoder.scan_index + 1;
+        continue;
+      fi
+
+      return 2;
+    fi
+
+    if decoder.mode == 1 then
+      if decoder.in_string then
+        if decoder.escaped then
+          decoder.escaped = false;
+        elseif byte == 92 then
+          decoder.escaped = true;
+        elseif byte == 34 then
+          decoder.in_string = false;
+        fi
+      else
+        if byte == 34 then
+          decoder.in_string = true;
+        elseif byte == 123 || byte == 91 then
+          decoder.depth = decoder.depth + 1;
+        elseif byte == 125 || byte == 93 then
+          decoder.depth = decoder.depth - 1;
+          if decoder.depth == 0 then
+            decoder.scan_index = decoder.scan_index + 1;
+            return 1;
+          fi
+          if decoder.depth < 0 then
+            return 2;
+          fi
+        fi
+      fi
+
+      decoder.scan_index = decoder.scan_index + 1;
+      continue;
+    fi
+
+    if decoder.mode == 2 then
+      if decoder.escaped then
+        decoder.escaped = false;
+      elseif byte == 92 then
+        decoder.escaped = true;
+      elseif byte == 34 then
+        decoder.in_string = false;
+        decoder.scan_index = decoder.scan_index + 1;
+        return 1;
+      fi
+
+      decoder.scan_index = decoder.scan_index + 1;
+      continue;
+    fi
+
+    if decoder.mode == 3 then
+      decoder.literal_seen = decoder.literal_seen + 1;
+      decoder.scan_index = decoder.scan_index + 1;
+
+      if decoder.literal_seen >= decoder.literal_target then
+        return 1;
+      fi
+
+      continue;
+    fi
+
+    // Root numbers are complete only when a delimiter is observed. At EOF,
+    // finish() performs the final parse and publishes a terminal number.
+    if decoder.mode == 4 then
+      if is_whitespace(byte) then
+        decoder.scan_index = decoder.scan_index + 1;
+        return 1;
+      fi
+
+      if is_digit(byte) ||
+         byte == 45 ||
+         byte == 43 ||
+         byte == 46 ||
+         byte == 101 ||
+         byte == 69 then
+        decoder.scan_index = decoder.scan_index + 1;
+        continue;
+      fi
+
+      return 2;
+    fi
+  done
+
+  return 0;
+}
+
+pub fnc feed(
+  JsonIncrementalDecoder mut decoder,
+  List<int> chunk
+): DecodeStep {
+  if decoder.complete then
+    return new DecodeStep(
+      2,
+      value_null(),
+      0,
+      decode_error("decoder_complete", 0, "incremental decoder already completed a value")
+    );
+  fi
+
+  if !decode_options_valid(decoder.options) then
+    return new DecodeStep(
+      2,
+      value_null(),
+      decoder.buffer.length,
+      decode_error("invalid_options", decoder.buffer.length, "invalid or unsafe JSON decode options")
+    );
+  fi
+
+  if chunk.length > decoder.options.max_input_bytes - decoder.buffer.length then
+    return new DecodeStep(
+      2,
+      value_null(),
+      decoder.buffer.length,
+      decode_error("input_limit", decoder.buffer.length, "JSON input exceeds max_input_bytes")
+    );
+  fi
+
+  let int chunk_index = 0;
+  for const byte of chunk do
+    if byte < 0 || byte > 255 then
+      return new DecodeStep(
+        2,
+        value_null(),
+        decoder.buffer.length,
+        decode_error(
+          "invalid_byte",
+          decoder.buffer.length + chunk_index,
+          "JSON input bytes must be 0..255"
+        )
+      );
+    fi
+    chunk_index = chunk_index + 1;
+  done
+
+  for const byte of chunk do
+    decoder.buffer.push(byte);
+  done
+
+  let int scan_status = scan_incremental(decoder);
+
+  if scan_status == 0 then
+    return new DecodeStep(
+      0,
+      value_null(),
+      decoder.buffer.length,
+      decode_error("need_more", decoder.buffer.length, "incomplete JSON value")
+    );
+  fi
+
+  let DecodeAttempt attempt = decode_attempt(decoder.buffer, decoder.options);
+
+  if attempt.status == 0 then
+    decoder.complete = true;
+    return new DecodeStep(
+      1,
+      attempt.value,
+      attempt.consumed,
+      empty_decode_error()
+    );
+  fi
+
+  if attempt.status == 2 then
+    return new DecodeStep(2, value_null(), attempt.consumed, attempt.error);
+  fi
+
+  return new DecodeStep(
+    0,
+    value_null(),
+    attempt.consumed,
+    attempt.error
+  );
+}
+
+pub fnc finish(JsonIncrementalDecoder mut decoder): DecodeStep {
+  if decoder.complete then
+    return new DecodeStep(
+      2,
+      value_null(),
+      0,
+      decode_error("decoder_complete", 0, "incremental decoder already completed a value")
+    );
+  fi
+
+  let DecodeAttempt attempt = decode_attempt(decoder.buffer, decoder.options);
+
+  if attempt.status != 0 then
+    return new DecodeStep(2, value_null(), attempt.consumed, attempt.error);
+  fi
+
+  decoder.complete = true;
+  return new DecodeStep(1, attempt.value, attempt.consumed, empty_decode_error());
+}

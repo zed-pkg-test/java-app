@@ -1,0 +1,55 @@
+import fnc require_true, require_int from './assert';
+
+import class Utf8Text from '../src/core/value';
+import fnc any_rule from '../src/validation/validation';
+import class CodecFieldMeta, CodecTypeMeta, MetadataError from '../src/schema/metadata';
+import fnc codec_field, codec_type, validate_metadata, field_by_number from '../src/schema/metadata';
+
+pub fnc run_metadata_tests(): void {
+  let List<CodecFieldMeta> fields = new List<CodecFieldMeta>();
+  fields.push(
+    codec_field(
+      new Utf8Text(new List<int>(117, 115, 101, 114, 110, 97, 109, 101)),
+      new Utf8Text(new List<int>(117, 115, 101, 114, 95, 110, 97, 109, 101)),
+      1,
+      true,
+      any_rule()
+    )
+  );
+
+  val CodecTypeMeta metadata = codec_type(
+    new Utf8Text(new List<int>(85, 115, 101, 114)),
+    fields,
+    1
+  );
+
+  val Result<CodecTypeMeta, MetadataError> checked = validate_metadata(metadata);
+  require_true(checked.is_err() == false, "valid codec metadata must pass");
+
+  val Result<CodecFieldMeta, MetadataError> field = field_by_number(metadata, 1);
+  require_true(field.is_err() == false, "field number lookup must succeed");
+  require_int(field.unwrap().field_number, 1, "field number lookup result");
+
+  let List<CodecFieldMeta> duplicates = new List<CodecFieldMeta>();
+  duplicates.push(fields[0]);
+  duplicates.push(
+    codec_field(
+      new Utf8Text(new List<int>(97)),
+      new Utf8Text(new List<int>(98)),
+      1,
+      false,
+      any_rule()
+    )
+  );
+
+  val Result<CodecTypeMeta, MetadataError> bad = validate_metadata(
+    codec_type(
+      new Utf8Text(new List<int>(66, 97, 100)),
+      duplicates,
+      0
+    )
+  );
+
+  require_true(bad.is_err(), "duplicate field numbers must reject");
+  return;
+}

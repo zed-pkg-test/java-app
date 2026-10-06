@@ -1,0 +1,96 @@
+import fnc require_true, require_int from './assert';
+
+import class Utf8Text from '../src/core/value';
+import fnc any_rule, string_rule, default_validation_options from '../src/validation/validation';
+import class CodecFieldMeta, CodecTypeMeta, MetadataError from '../src/schema/metadata';
+import fnc codec_field, codec_type from '../src/schema/metadata';
+import class DecodeOptions from '../src/core/options';
+import fnc default_decode_options from '../src/core/options';
+import class DecodedObject, ObjectCodecError from '../src/schema/object_codec';
+import fnc decode_json_object from '../src/schema/object_codec';
+
+pub fnc run_object_codec_tests(): void {
+  let List<CodecFieldMeta> fields = new List<CodecFieldMeta>();
+
+  fields.push(
+    codec_field(
+      new Utf8Text(new List<int>(100, 105, 115, 112, 108, 97, 121, 95, 110, 97, 109, 101)),
+      new Utf8Text(new List<int>(100, 105, 115, 112, 108, 97, 121, 78, 97, 109, 101)),
+      1,
+      true,
+      string_rule(1, 120, false, false, false, false)
+    )
+  );
+
+  fields.push(
+    codec_field(
+      new Utf8Text(new List<int>(97, 103, 101)),
+      new Utf8Text(new List<int>(97, 103, 101)),
+      2,
+      true,
+      any_rule()
+    )
+  );
+
+  val CodecTypeMeta metadata = codec_type(
+    new Utf8Text(new List<int>(85, 115, 101, 114)),
+    fields,
+    1
+  );
+
+  val List<int> input = new List<int>(
+    123,
+    34, 100, 105, 115, 112, 108, 97, 121, 78, 97, 109, 101, 34,
+    58,
+    34, 65, 108, 101, 120, 34,
+    44,
+    34, 97, 103, 101, 34,
+    58,
+    52, 50,
+    125
+  );
+
+  val Result<DecodedObject, ObjectCodecError> decoded = decode_json_object(
+    input,
+    default_decode_options(),
+    metadata,
+    default_validation_options()
+  );
+
+  require_true(decoded.is_err() == false, "metadata-driven JSON object must decode");
+
+  val DecodedObject object = decoded.unwrap();
+  require_int(object.source_object.object_value.length, 2, "source object field count");
+
+  require_int(
+    object.source_object.object_value[0].key.bytes[7],
+    95,
+    "wire displayName must rewrite to source display_name"
+  );
+
+  val List<int> unknown = new List<int>(
+    123,
+    34, 100, 105, 115, 112, 108, 97, 121, 78, 97, 109, 101, 34,
+    58,
+    34, 65, 108, 101, 120, 34,
+    44,
+    34, 97, 103, 101, 34,
+    58,
+    52, 50,
+    44,
+    34, 120, 34,
+    58,
+    49,
+    125
+  );
+
+  val Result<DecodedObject, ObjectCodecError> rejected = decode_json_object(
+    unknown,
+    default_decode_options(),
+    metadata,
+    default_validation_options()
+  );
+
+  require_true(rejected.is_err(), "reject-unknown metadata must reject unknown JSON fields");
+  return;
+}
