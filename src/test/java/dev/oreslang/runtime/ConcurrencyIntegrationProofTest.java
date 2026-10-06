@@ -264,6 +264,38 @@ final class ConcurrencyIntegrationProofTest {
     }
 
     @Test
+    void untrustedActorProgressesWhileSharedDispatcherIsOccupied() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(
+                IsolatePolicy.developer(),
+                new ActorRuntime.DispatcherConfig(1, 1, 8))) {
+            CountDownLatch sharedStarted = new CountDownLatch(1);
+            CountDownLatch releaseShared = new CountDownLatch(1);
+
+            ActorRuntime.ActorRef<String> shared = runtime.spawnShared(() -> (message, context) -> {
+                sharedStarted.countDown();
+                assertTrue(releaseShared.await(2, TimeUnit.SECONDS));
+                context.self().stop();
+            });
+            shared.send("occupy-shared-pool");
+            assertTrue(sharedStarted.await(2, TimeUnit.SECONDS));
+
+            // The untrusted factory is capture-free by construction. If
+            // UNTRUSTED actors were multiplexed onto the occupied SHARED pool,
+            // this actor could not terminate until releaseShared is opened.
+            ActorRuntime.ActorRef<String> untrusted = runtime.spawnUntrusted(
+                    factoryContext -> (message, context) -> context.self().stop());
+            untrusted.send("prove-independent-bulkhead");
+            assertTrue(
+                    untrusted.awaitTermination(1, TimeUnit.SECONDS),
+                    "untrusted actor must progress on its independent dispatcher while shared is occupied");
+            assertTrue(untrusted.failure().isEmpty());
+
+            releaseShared.countDown();
+            assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void cancellingActorDetachesOutstandingChannelContinuation() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime(
                 IsolatePolicy.developer(),

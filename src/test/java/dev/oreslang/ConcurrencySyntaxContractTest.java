@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.TypeChecker;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 final class ConcurrencySyntaxContractTest {
@@ -37,7 +36,6 @@ final class ConcurrencySyntaxContractTest {
                 """)));
     }
 
-    @Disabled("CONTRACT GAP: add 'cb' syntax/lowering; callback must re-enter the owning actor scheduler turn")
     @Test
     void nbCbWritechIsVoidCallbackSurfaceRatherThanFutureSurface() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
