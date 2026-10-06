@@ -211,6 +211,7 @@ public final class Parser {
                 return parseClass(modifiers.isAbstract);
             }
             if (match(INTERFACE)) {
+                modifiers = mergeModifiers(modifiers, parseModifiers());
                 validateOnlyVisibilityModifiers(modifiers, "interfaces");
                 return parseInterface(modifiers.visibility);
             }
