@@ -197,16 +197,21 @@ A HungryActor is intentionally expensive. It is appropriate when reserving a who
 
 The host actor runtime follows the same scheduling shape as Akka's event-based dispatcher: many actors share an executor, each actor has its own mailbox, and a scheduled actor drains only a bounded number of messages before yielding back to the executor. The configured throughput bound prevents one hot mailbox from monopolizing a worker.
 
-Oreslang deliberately uses two executors:
+Oreslang deliberately keeps three scheduling bulkheads:
 
 - **private dispatcher** — private actors, isolation-copy message transport;
-- **shared dispatcher** — shared actors, immutable sharing plus explicit `SyncCell<T>` shared state.
+- **shared dispatcher** — shared actors, immutable sharing plus explicit `SyncCell<T>` shared state;
+- **untrusted dispatcher** — untrusted actors, with their stricter policy/isolation path kept out of the trusted actor ready queues.
 
-A per-actor atomic scheduling gate ensures only one drain task for that actor is active. Thread identity is never actor identity, but the production native dispatcher applies **soft ActorId-to-carrier affinity** for cache locality. Successive turns for one actor prefer the same native carrier lane and therefore the same CPU/cache-affinity target. The affinity lane is an optimization only: when its backlog crosses a bounded threshold, new turns spill to the global ready queue, and an otherwise-idle peer may steal affinity work only after a short locality grace period. This preserves cache warmth on the healthy path without letting a blocked or overloaded carrier become a starvation or deadlock boundary.
+A per-actor atomic scheduling gate ensures only one drain task for that actor is active. Thread identity is never actor identity, but the production native dispatcher applies **soft ActorId-to-carrier affinity** for cache locality. Successive turns for one actor prefer the same native carrier lane and therefore the same CPU/cache-affinity target. The affinity lane is an optimization only: when its backlog crosses a bounded threshold, new turns spill to the global ready queue, and an otherwise-idle peer may steal affinity work only after a short locality grace period. Local lanes also probe the global queue after a bounded burst so a permanently hot preferred lane cannot starve spill/control work. Steal scans are bounded per idle probe rather than walking every CPU lane on large hosts.
 
-On Linux each native carrier is pinned to one logical CPU selected from the process's current allowed CPU set (`sched_getaffinity` + `pthread_setaffinity_np`), so container/cgroup cpusets are respected. On macOS, where strict Linux-style CPU pinning is unavailable, each carrier installs a stable Mach thread-affinity tag so the kernel can preserve cache locality when practical. A future topology layer may refine lane placement by physical core, LLC group, and NUMA node; source semantics must remain independent of that mapping.
+On Linux each native carrier is pinned to one **logical CPU** selected from the process's current allowed CPU set (`sched_getaffinity` + `pthread_setaffinity_np`), so container/cgroup cpusets are respected. The native binder uses dynamically sized CPU masks instead of assuming `CPU_SETSIZE`, and runtime diagnostics can compare the selected target with `sched_getcpu()`. A binding failure is observable rather than silently being reported as a successful affinity target. On macOS, where strict Linux-style CPU pinning is unavailable, each carrier installs a stable Mach thread-affinity tag so the kernel can preserve cache locality when practical.
 
-This scheduler policy is deliberately aligned with actor-local heaps: an actor's mailbox turns, local allocation metadata, and hot state normally return to the same carrier/cache domain without making the heap thread-confined. If balancing pressure moves a turn, the actor retains the same ActorId, heap, mailbox, policy, and continuation state.
+Logical-CPU pinning is the current baseline, not a claim that slot numbers already model physical cores, SMT sibling sets, LLC groups, or NUMA nodes. Issue #303 tracks that topology-aware layer; source semantics must remain independent of the mapping.
+
+This scheduler policy is deliberately aligned with actor-local heaps: an actor's mailbox turns, local allocation metadata, and hot state normally return to the same carrier/cache domain without making the heap thread-confined. If balancing pressure moves a turn, the actor retains the same ActorId, heap, mailbox, policy, and continuation state. Queue admission is globally bounded across local affinity lanes plus the spill queue; shutdown retracts a post-drain enqueue when possible so no accepted lane entry can be stranded solely by the shutdown race.
+
+The native executor exposes diagnostic counters for preferred-lane hits, delayed steals, global spills, and affinity-binding failures. These are runtime/control-plane diagnostics, not language semantics.
 
 The explicit `java` carrier backend remains a portability/debugging fallback and does not promise CPU affinity.
 

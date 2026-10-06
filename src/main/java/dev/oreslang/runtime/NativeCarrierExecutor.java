@@ -249,7 +249,19 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     }
 
     private void clearLaneAgeIfEmpty(int slot, ArrayBlockingQueue<Runnable> lane) {
-        if (lane.isEmpty()) affinityLaneOldestEnqueueNanos.set(slot, 0L);
+        if (!lane.isEmpty()) return;
+
+        affinityLaneOldestEnqueueNanos.set(slot, 0L);
+
+        /*
+         * Close the empty-check-vs-enqueue race. Producers also CAS from zero,
+         * so either side that observes the lane becoming non-empty republishes
+         * a steal age without resetting the age of an already-live queue.
+         */
+        if (!lane.isEmpty()) {
+            affinityLaneOldestEnqueueNanos.compareAndSet(
+                    slot, 0L, System.nanoTime());
+        }
     }
 
     private Runnable pollStealableTask(int thiefSlot) {
@@ -348,14 +360,11 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
                 slot = preferredSlot(affinityKey);
                 ArrayBlockingQueue<Runnable> lane = affinityQueues.get(slot);
                 if (lane.size() < localBacklogEscapeThreshold()) {
-                    boolean wasEmpty = lane.isEmpty();
                     offered = lane.offer(task);
                     if (offered) {
                         destination = lane;
-                        if (wasEmpty || lane.size() == 1) {
-                            affinityLaneOldestEnqueueNanos.compareAndSet(
-                                    slot, 0L, System.nanoTime());
-                        }
+                        affinityLaneOldestEnqueueNanos.compareAndSet(
+                                slot, 0L, System.nanoTime());
                     }
                 }
             }
@@ -629,6 +638,15 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
         return target == null ? -1 : target;
     }
 
+    /**
+     * Actual logical CPU currently executing this native carrier.
+     * Linux exposes this through sched_getcpu(); other supported platforms may
+     * return -1 when no stable current-CPU query exists.
+     */
+    public static int currentCarrierCpu() {
+        return isNativeCarrierThread() ? nativeCurrentCpu() : -1;
+    }
+
     /** CPU consumed by the current native carrier, excluding time descheduled. */
     public static long currentCarrierCpuTimeNanos() {
         return isNativeCarrierThread() ? nativeCurrentThreadCpuNanos() : 0L;
@@ -654,6 +672,7 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
     private static native void nativeAwaitEnabled(long handle, int slot);
     private static native int nativeBindCurrentThreadToCarrierSlot(int slot);
     private static native void nativeShutdown(long handle);
+    private static native int nativeCurrentCpu();
     private static native long nativeCurrentThreadId();
     private static native long nativeCurrentThreadCpuNanos();
     private static native long nativeCarrierCpuTimeNanos(long handle, int slot);

@@ -61,6 +61,7 @@ final class NativeCarrierExecutorTest {
             CountDownLatch done = new CountDownLatch(24);
             Set<Integer> slots = ConcurrentHashMap.newKeySet();
             Set<Integer> affinityTargets = ConcurrentHashMap.newKeySet();
+            Set<Integer> actualCpus = ConcurrentHashMap.newKeySet();
 
             executor.executeAffinity(1, () -> {
                 peerStarted.countDown();
@@ -79,6 +80,7 @@ final class NativeCarrierExecutorTest {
                 executor.executeAffinity(0, () -> {
                     slots.add(NativeCarrierExecutor.currentCarrierSlot());
                     affinityTargets.add(NativeCarrierExecutor.currentCarrierAffinityTarget());
+                    actualCpus.add(NativeCarrierExecutor.currentCarrierCpu());
                     done.countDown();
                 });
             }
@@ -91,6 +93,8 @@ final class NativeCarrierExecutorTest {
             if (os.contains("linux")) {
                 assertTrue(affinityTargets.stream().allMatch(target -> target >= 0),
                         "Linux native carriers must prove a real allowed-CPU binding");
+                assertEquals(affinityTargets, actualCpus,
+                        "a pinned Linux carrier must actually execute on its selected CPU");
                 assertEquals(0, executor.getAffinityBindingFailureCount());
             }
             assertTrue(executor.getAffinityPreferredHitCount() >= 24);
