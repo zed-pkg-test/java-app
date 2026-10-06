@@ -92,7 +92,9 @@ Normal Java/Graal heap tracing remains under the host collector.
 
 `actor.gc()` is actor-domain local and never requests JVM-wide collection. Calling it outside an actor mailbox turn is an error. Actor-domain identity comes from the stable semantic actor execution domain, not a scheduler/carrier thread.
 
-`process.gc()` is the explicit global fallback. It requires `GC_CONTROL`, is unavailable to strict FaaS/untrusted policy, and its host-GC request is throttled so guest code cannot turn it into a high-frequency global pause primitive.
+`process.gc()` is the explicit global fallback. It requires `GC_CONTROL` and is **supervisor/root-context authority, not actor authority**. Actor spawn strips `GC_CONTROL` from both PRIVATE and SHARED actor policies even when the parent developer context has it. Actor code uses `actor.gc()`; it cannot request a whole-process host collection.
+
+Strict FaaS/untrusted policy also lacks `GC_CONTROL`. Root/supervisor host-GC requests are throttled so control-plane code cannot accidentally turn `process.gc()` into a high-frequency global pause primitive.
 
 The common path should not require `process.gc()` for correctness or acceptable memory usage.
 
