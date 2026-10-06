@@ -128,6 +128,30 @@ final class ChannelStreamingLanguageTest {
     }
 
     @Test
+    void breakingDirectChannelIterationDoesNotCloseOrDrainTheChannel() throws Exception {
+        assertEquals("1:2:3", run("""
+                pub async routine main(): void {
+                  val Channel<int> input = Channel.new<int>(2);
+                  writech input, 1;
+                  writech input, 2;
+
+                  for await const value of input {
+                    stdio.stdout.write(value);
+                    break;
+                  }
+
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(readch input);
+                  writech input, 3;
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(readch input);
+                  input.close();
+                  return;
+                }
+                """));
+    }
+
+    @Test
     void channelAsyncIterIsAFirstClassNonOwningAsyncIterator() throws Exception {
         assertEquals("12:3", run("""
                 pub async routine main(): void {
