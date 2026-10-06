@@ -1382,13 +1382,19 @@ public final class ActorRuntime implements AutoCloseable {
         Objects.requireNonNull(policy);
         Objects.requireNonNull(behaviorFactory);
         requireWithinCeiling(policy);
+        // Process-wide GC is supervisor/root authority. Actor code has
+        // actor.gc(), which is domain-local and bounded; allowing a shared
+        // actor to inherit GC_CONTROL would reintroduce a guest-triggerable
+        // whole-process pause primitive.
+        IsolatePolicy actorPolicy = policy.withoutCapabilities(
+                IsolatePolicy.Capability.GC_CONTROL);
         IsolatePolicy effectivePolicy = kind == ActorKind.PRIVATE
-                ? policy.withoutCapabilities(
+                ? actorPolicy.withoutCapabilities(
                         IsolatePolicy.Capability.SHARED_MEMORY,
                         IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
                         IsolatePolicy.Capability.JAVA_INTEROP,
                         IsolatePolicy.Capability.JAVA_SOURCE_INTEROP)
-                : policy;
+                : actorPolicy;
         requireWithinCallerPolicy(effectivePolicy);
         if (kind == ActorKind.SHARED) {
             effectivePolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "shared actor spawn");
