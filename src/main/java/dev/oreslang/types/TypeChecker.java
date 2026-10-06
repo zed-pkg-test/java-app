@@ -2867,10 +2867,27 @@ public final class TypeChecker {
             String where) {
         if (returnPosition && type == Primitive.VOID) return;
         if (type == Primitive.VOID
-                || !isSharedSafe(type, new LinkedHashSet<>(), Map.of())) {
+                || !isAsyncTaskBoundarySafe(type)) {
             throw new IllegalArgumentException(
                     where + " must be concrete owned task-safe data; borrows, futures, mutexes, functions, actor values, host capabilities, and unresolved generics cannot cross an async task boundary");
         }
+    }
+
+    private boolean isAsyncTaskBoundarySafe(Type type) {
+        Type concrete = deref(type);
+        if (concrete instanceof Named named
+                && named.name().equals("Channel")
+                && named.arguments().size() == 1) {
+            // Channels are context-owned synchronization capabilities, not
+            // actor/mailbox capabilities. Sharing the handle with another
+            // async task in the same Ores context is safe when its payload
+            // type is itself concrete task-safe data. Actor-boundary checking
+            // still rejects Channel<T> explicitly.
+            Type element = named.arguments().getFirst();
+            return element != Primitive.VOID
+                    && isSharedSafe(element, new LinkedHashSet<>(), Map.of());
+        }
+        return isSharedSafe(concrete, new LinkedHashSet<>(), Map.of());
     }
 
     private void validateActorCallableBoundaryType(
