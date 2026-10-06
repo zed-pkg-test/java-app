@@ -30,3 +30,5 @@ The language is intentionally opinionated:
 - generics, tuples, arrays, complex numbers, futures/`await`, lambdas, `defer`, and `try/catch/finally` are language-level features.
 
 The first implementation is developed on a feature branch and will land with an executable Truffle skeleton, grammar/specification, examples, tests, and CI.
+
+<!-- transient PR320 exact-tree CI trigger; restored next commit -->
