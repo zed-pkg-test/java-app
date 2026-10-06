@@ -122,10 +122,19 @@ public final class OwnershipChecker {
                             ValueKind.MUT_BORROW,
                             Origin.PARAM));
                 } else {
+                    Ast.TypeRef explicit = method.explicitReceiverType();
+                    boolean explicitMutableReceiver = explicit != null
+                            && explicit.isBorrow()
+                            && explicit.mutableBorrow();
                     ValueKind receiverKind = AnnotationExpander.isGeneratedFromJsonSetter(method)
+                            || explicitMutableReceiver
                             ? ValueKind.MUT_BORROW
                             : ValueKind.IMM_BORROW;
-                    scope.define("self", new VarState(Ast.TypeRef.simple(klass.name()), false, receiverKind, Origin.PARAM));
+                    scope.define("self", new VarState(
+                            Ast.TypeRef.simple(klass.name()),
+                            false,
+                            receiverKind,
+                            Origin.PARAM));
                 }
             }
             for (Ast.Param param : method.parameters()) scope.define(param.name(), stateForParam(param));
@@ -1035,8 +1044,16 @@ public final class OwnershipChecker {
                     : findMethodTarget(klass, concreteReceiver, member.member(), call.arguments().size(), new LinkedHashSet<>());
             if (target != null) {
                 Ast.MethodDecl method = target.method();
-                if (AnnotationExpander.isGeneratedFromJsonSetter(method)) {
-                    ensureMutableReceiver(member.receiver(), scope, "generated JSON setter '" + method.name() + "'");
+                Ast.TypeRef explicitReceiver = method.explicitReceiverType();
+                boolean mutableReceiver = AnnotationExpander.isGeneratedFromJsonSetter(method)
+                        || (explicitReceiver != null
+                        && explicitReceiver.isBorrow()
+                        && explicitReceiver.mutableBorrow());
+                if (mutableReceiver) {
+                    ensureMutableReceiver(
+                            member.receiver(),
+                            scope,
+                            "mutable receiver method '" + method.name() + "'");
                 }
                 boolean proxyReceiver = semanticProxyReceiver;
                 boolean protectedReceiver = proxyReceiver;
@@ -1286,6 +1303,14 @@ public final class OwnershipChecker {
     }
 
     private void ensureMutableReceiver(Ast.Expr receiver, Scope scope, String what) {
+        if (receiver instanceof Ast.MemberExpr member) {
+            ensureMutableReceiver(member.receiver(), scope, what);
+            return;
+        }
+        if (receiver instanceof Ast.IndexExpr indexed) {
+            ensureMutableReceiver(indexed.receiver(), scope, what);
+            return;
+        }
         if (receiver instanceof Ast.NameExpr name) {
             VarState state = requireState(scope, name.name());
             requireUsable(state, name.name(), true);
@@ -1293,7 +1318,7 @@ public final class OwnershipChecker {
             if (isProxyType(state.type)) return; // interior mutation is synchronized by the proxy.
             boolean mutableBorrow = state.kind == ValueKind.MUT_BORROW || (state.type.isBorrow() && state.type.mutableBorrow());
             if (!state.mutable && !mutableBorrow) {
-                throw error("cannot mutate " + what + " through immutable parameter/binding '" + name.name() + "'; declare the owned parameter as 'mut' or pass '&mut'");
+                throw error("cannot mutate " + what + " through immutable parameter/binding '" + name.name() + "'; use a mutable owner or canonical 'mut self'/'Type mut name' access");
             }
             if (state.kind == ValueKind.IMM_BORROW || (state.type.isBorrow() && !state.type.mutableBorrow())) {
                 throw error("cannot mutate " + what + " through immutable borrow '" + name.name() + "'");
@@ -1317,7 +1342,7 @@ public final class OwnershipChecker {
         ValueInfo projected = checkExpr(receiver, scope, false);
         if (projected.type != null && isProxyType(projected.type)) return;
 
-        throw error("mutation target must be rooted in a mutable local/parameter, &mut borrow, or rt Proxy<T> view");
+        throw error("mutation target must be rooted in a mutable owner, pointerless mutable receiver/reference, or rt Proxy<T> view");
     }
 
     private VarState borrowOwner(Ast.Expr operand, Scope scope) {
