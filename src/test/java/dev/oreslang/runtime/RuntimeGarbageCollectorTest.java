@@ -148,7 +148,7 @@ final class RuntimeGarbageCollectorTest {
             });
             actor.send("register");
             assertTrue(registered.await(2, TimeUnit.SECONDS));
-            context.close();
+            context.close(true);
             assertTrue(actor.awaitTermination(2, TimeUnit.SECONDS));
             assertEquals(1, processCleanups.get());
             assertEquals(1, actorCleanups.get());
@@ -157,7 +157,7 @@ final class RuntimeGarbageCollectorTest {
             java.lang.ref.Reference.reachabilityFence(processOwner);
             java.lang.ref.Reference.reachabilityFence(actorOwner);
         } finally {
-            context.close();
+            context.close(true);
         }
     }
 
