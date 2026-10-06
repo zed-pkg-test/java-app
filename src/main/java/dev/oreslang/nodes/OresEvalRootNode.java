@@ -836,7 +836,7 @@ public final class OresEvalRootNode extends RootNode {
 
         private boolean functionContainsPotentialSuspension(
                 Ast.FunctionDecl function,
-                Set<Ast.FunctionDecl> seen) {
+                Set<Object> seen) {
             if (!seen.add(function)) return false;
             for (Ast.Stmt stmt : function.body()) {
                 if (statementContainsPotentialSuspension(stmt, seen)) {
@@ -848,7 +848,7 @@ public final class OresEvalRootNode extends RootNode {
 
         private boolean statementContainsPotentialSuspension(
                 Ast.Stmt stmt,
-                Set<Ast.FunctionDecl> seen) {
+                Set<Object> seen) {
             if (stmt instanceof Ast.SelectStmt select) {
                 return select.mode() != Ast.WaitMode.IMMEDIATE
                         || select.arms().stream()
@@ -973,13 +973,13 @@ public final class OresEvalRootNode extends RootNode {
 
         private boolean expressionContainsPotentialSuspension(
                 Ast.Expr expr,
-                Set<Ast.FunctionDecl> seen) {
+                Set<Object> seen) {
             if (expr == null) return false;
             if (expr instanceof Ast.AwaitExpr
                     || expr instanceof Ast.ChannelOpExpr channel
-                        && channel.mode() != Ast.WaitMode.IMMEDIATE
+                        && channel.mode() == Ast.WaitMode.BLOCKING
                     || expr instanceof Ast.DynamicSelectExpr selected
-                        && selected.mode() != Ast.WaitMode.IMMEDIATE) {
+                        && selected.mode() == Ast.WaitMode.BLOCKING) {
                 return true;
             }
             if (expr instanceof Ast.CallExpr call) {
@@ -987,6 +987,26 @@ public final class OresEvalRootNode extends RootNode {
                     if (expressionContainsPotentialSuspension(argument, seen)) return true;
                 }
                 if (expressionContainsPotentialSuspension(call.callee(), seen)) return true;
+                if (call.callee() instanceof Ast.MemberExpr member) {
+                    // Resolve local method families conservatively across
+                    // overrides, without turning every builtin call into a task.
+                    for (Ast.ClassDecl klass : new LinkedHashSet<>(classes.values())) {
+                        for (Ast.MethodDecl method : klass.methods()) {
+                            if (method.name().equals(member.member())
+                                    && method.arity() == call.arguments().size()
+                                    && seen.add(method)) {
+                                if (method.async()) return true;
+                                for (Ast.Stmt statement : method.body()) {
+                                    if (statementContainsPotentialSuspension(statement, seen)) return true;
+                                }
+                            }
+                        }
+                    }
+                    // Imported receiver bodies are not in the local index.
+                    // A local receiver may shadow a builtin namespace spelling,
+                    // so names alone cannot prove a member call non-suspending.
+                    return !namedImports.isEmpty() || !namespaceImports.isEmpty();
+                }
                 if (call.callee() instanceof Ast.NameExpr name
                         && !functionNameBoundLocally(name.name())) {
                     Ast.FunctionDecl target = findFunction(name.name(), call.arguments().size());
@@ -3252,11 +3272,7 @@ public final class OresEvalRootNode extends RootNode {
                                     completeSourceInvocation(
                                             t,
                                             invocation,
-                                            direct.async()
-                                                    || direct.actorKind()
-                                                    == Ast.ActorKind.NONE
-                                                            ? direct.async()
-                                                            : false,
+                                            invocationDeclaresAsync(invocation),
                                             continuation);
                                 } catch (RuntimeException | Error failure2) {
                                     continuation.accept(t, null, failure2);
@@ -3375,10 +3391,14 @@ public final class OresEvalRootNode extends RootNode {
         private boolean invocationDeclaresAsync(Invocation invocation) {
             return switch (invocation.kind()) {
                 case FUNCTION, FUNCTION_BODY ->
-                        ((Ast.FunctionDecl) invocation.target()).async();
+                        ((Ast.FunctionDecl) invocation.target()).async()
+                                || ((Ast.FunctionDecl) invocation.target()).returnType().name().equals("Future");
                 case METHOD, STATIC_FUNCTION, STATIC_FUNCTION_BODY ->
-                        ((Ast.MethodDecl) invocation.target()).async();
-                case INVOKABLE -> false;
+                        ((Ast.MethodDecl) invocation.target()).async()
+                                || ((Ast.MethodDecl) invocation.target()).returnType().name().equals("Future");
+                // Builtin Future-returning APIs are values, not suspended
+                // guest source calls. Their consumers explicitly await them.
+                case INVOKABLE -> true;
             };
         }
 
@@ -3409,7 +3429,18 @@ public final class OresEvalRootNode extends RootNode {
                             args);
                 }
 
+                OwnedField ownedField = object.owner.findField(
+                        object.klass, member.member(), new LinkedHashSet<>());
+                if (ownedField != null) {
+                    object.owner.requireClassMemberVisible(
+                            ownedField.field().visibility(), ownedField.owner(),
+                            env.accessClass(), "field", ownedField.field().name());
+                }
                 Object fieldValue = object.fields.get(member.member());
+                if (fieldValue == UNINITIALIZED_FIELD) {
+                    throw new IllegalArgumentException("field '" + object.klass.name() + "."
+                            + member.member() + "' is read before constructor initialization");
+                }
                 if (fieldValue instanceof Invokable invokable) {
                     return object.owner.invokableInvocation(
                             invokable,
@@ -3428,6 +3459,9 @@ public final class OresEvalRootNode extends RootNode {
                             "no static function " + klass.klass().name()
                                     + "." + member.member());
                 }
+                klass.owner().requireClassMemberVisible(
+                        method.visibility(), klass.owner().declaringClass(method),
+                        env.accessClass(), "static function", method.name());
                 return klass.owner().staticFunctionInvocation(
                         method,
                         args);
