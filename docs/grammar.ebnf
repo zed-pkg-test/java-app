@@ -37,7 +37,7 @@ module_member   = contract_decl
                 | binding_decl ;
 
 visibility      = [ "pub" | "private" ] ;
-callable_modifier = "abstract" | "async" | "nlex" | "structural" ;
+callable_modifier = "abstract" | "async" | "nlex" | "structural" | "quantum" ;
 method_modifier   = "abstract" | "async" | "structural" ;
 
 callable_decl   = { annotation } visibility { callable_modifier } callable_kind callable_name [ generic_params ]
@@ -90,7 +90,7 @@ method_head     = "(" [ explicit_receiver | param_list ] ")" [ "(" [ param_list 
 explicit_receiver = "self" type_ref ;
 
 static_function_decl
-                = { annotation } visibility "static" { "async" | "structural" } "fnc" callable_name [ generic_params ]
+                = { annotation } visibility "static" { "async" | "structural" | "quantum" } "fnc" callable_name [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
 
 contract_decl   = "define" "contract" IDENT [ generic_params ]
@@ -588,4 +588,14 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      into the closure environment; borrowed values cannot be captured.
    - Class fields declared val/const are immutable; field mutation requires let
      plus mutable owner access.
+*)
+
+
+(* Execution-placement semantic restrictions:
+   - quantum is a reserved whole-callable placement modifier.
+   - quantum is admitted only for ordinary fnc and static fnc declarations.
+   - quantum routine, actor/isoactor callables, instance methods, async,
+     generator, nlex, structural, abstract, and lambda-style declarations
+     are rejected by semantic parsing.
+   - invocation requires an explicit QPU backend; there is no CPU/GPU fallback.
 *)

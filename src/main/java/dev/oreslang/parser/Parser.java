@@ -61,7 +61,7 @@ public final class Parser {
                 }
                 boolean afterDefineAbstract = match(ABSTRACT);
                 if (match(MODULE)) {
-                    if (modifiers.visibility != Ast.Visibility.PRIVATE || modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
+                    if (modifiers.visibility != Ast.Visibility.PRIVATE || modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared || modifiers.quantum) {
                         throw error(previous(), "modules do not accept function/class modifiers");
                     }
                     rejectCallableStructuralAnnotation(annotations, "module declarations");
@@ -69,8 +69,8 @@ public final class Parser {
                     continue;
                 }
                 if (match(CONTRACT)) {
-                    if (modifiers.structural || modifiers.async || modifiers.generator || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
-                        throw error(previous(), "contracts do not accept class/callable modifiers");
+                    if (modifiers.structural || modifiers.async || modifiers.generator || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared || modifiers.quantum) {
+                        throw error(previous(), "contracts do not accept class/callable/execution-target modifiers");
                     }
                     rejectCallableStructuralAnnotation(annotations, "contract declarations");
                     rootDeclarations.add(parseContract(modifiers.visibility));
@@ -91,6 +91,7 @@ public final class Parser {
                     if (modifiers.generator) throw error(previous(), "'generator' applies only to fnc or routine declarations");
                     if (modifiers.nonLexical) throw error(previous(), "'nlex' applies only to fnc, routine, or lambda");
                     if (modifiers.structural) throw error(previous(), "'structural' applies to callable declarations, not interface declarations");
+                    if (modifiers.quantum) throw error(previous(), "'quantum' applies only to fnc or static fnc declarations");
                     rejectCallableStructuralAnnotation(annotations, "interface declarations");
                     rootDeclarations.add(parseInterface(modifiers.visibility));
                     continue;
@@ -208,8 +209,8 @@ public final class Parser {
             }
             boolean afterDefineAbstract = match(ABSTRACT);
             if (match(CONTRACT)) {
-                if (modifiers.structural || modifiers.async || modifiers.generator || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared) {
-                    throw error(previous(), "contracts do not accept class/callable modifiers");
+                if (modifiers.structural || modifiers.async || modifiers.generator || modifiers.nonLexical || modifiers.isStatic || modifiers.isAbstract || modifiers.shared || modifiers.quantum) {
+                    throw error(previous(), "contracts do not accept class/callable/execution-target modifiers");
                 }
                 rejectCallableStructuralAnnotation(annotations, "contract declarations");
                 return parseContract(modifiers.visibility);
@@ -225,6 +226,7 @@ public final class Parser {
                 if (modifiers.generator) throw error(previous(), "'generator' applies only to fnc or routine declarations");
                 if (modifiers.nonLexical) throw error(previous(), "'nlex' applies only to fnc, routine, or lambda");
                 if (modifiers.structural) throw error(previous(), "'structural' applies to callable declarations, not interface declarations");
+                if (modifiers.quantum) throw error(previous(), "'quantum' applies only to fnc or static fnc declarations");
                 rejectCallableStructuralAnnotation(annotations, "interface declarations");
                 return parseInterface(modifiers.visibility);
             }
@@ -242,6 +244,9 @@ public final class Parser {
         }
         if (match(ACTOR, ISOACTOR)) {
             Token actorToken = previous();
+            if (modifiers.quantum) {
+                throw error(actorToken, "'quantum' does not apply to actor declarations or actor callables");
+            }
             boolean isolated = actorToken.type() == ISOACTOR;
             if (isolated && (modifiers.shared || modifiers.untrusted)) {
                 throw error(
@@ -268,6 +273,7 @@ public final class Parser {
         if (modifiers.shared || modifiers.untrusted) throw error(previous(), "'shared'/'untrusted' must modify an actor declaration");
         if (match(FNC)) return parseFunction(annotations, modifiers, Ast.CallableKind.FNC);
         if (match(ROUTINE)) return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE);
+        if (modifiers.quantum) throw error(peek(), "'quantum' applies only to fnc or static fnc declarations");
         if (modifiers.structural) throw error(peek(), "'structural' applies only to fnc, routine, methods, or interface callable signatures");
         if (modifiers.nonLexical) throw error(peek(), "'nlex' applies only to fnc, routine, or lambda");
         if (modifiers.generator) throw error(peek(), "'generator' applies only to fnc or routine declarations");
@@ -298,12 +304,24 @@ public final class Parser {
             Ast.ActorKind actorKind) {
         if (modifiers.isStatic) throw error(previous(), "'static fnc' is only valid inside a class");
         if (modifiers.isAbstract) throw error(previous(), "top-level/module callables cannot be abstract");
+        if (modifiers.quantum && actorKind != Ast.ActorKind.NONE) {
+            throw error(previous(), "'quantum' callables cannot use actor execution");
+        }
+        if (modifiers.quantum && kind != Ast.CallableKind.FNC) {
+            throw error(previous(), "'quantum' is supported on fnc, not routine");
+        }
+        if (modifiers.quantum && (modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical)) {
+            throw error(previous(), "'quantum fnc' cannot be async, generator, structural, or nlex");
+        }
         CallableStructural structural = normalizeCallableStructural(annotations, modifiers.structural);
-        annotations = structural.annotations();
+        annotations = withExecutionPlacement(structural.annotations(), modifiers.quantum);
         String name = consumeCallableName("expected callable name");
         List<String> generics = parseGenericParameters();
 
         if (match(EQUAL)) {
+            if (modifiers.quantum) {
+                throw error(previous(), "'quantum fnc' requires the ordinary named parameter form; lambda-style declarations are not QPU-admitted");
+            }
             consume(PIPE, "lambda-style callable declarations use '= |Type name, ...| -> [ReturnType] { ... }'");
             List<Ast.Param> params = parseDeclaredPipeParameters();
             consume(PIPE, "expected closing '|' in lambda-style callable declaration");
@@ -371,16 +389,24 @@ public final class Parser {
             if (mods.generator) throw error(peek(), "'generator' is not permitted on class methods or static class fnc; declare a module/top-level generator fnc or routine");
             if (mods.nonLexical) throw error(peek(), "'nlex' is unnecessary on class members; methods/static fnc never capture enclosing local scopes");
             if (isBindingKind(peek().type())) {
+                if (mods.quantum) throw error(peek(), "'quantum' cannot modify class fields");
                 if (mods.structural) throw error(peek(), "'structural' applies to methods/static fnc, not fields");
                 if (mods.isStatic) throw error(peek(), "static data members are not implemented yet; static class functions use 'static fnc'");
                 fields.add(parseField(annotations, mods.visibility));
                 continue;
             }
             if (check(IDENT) && checkNext(COLON)) {
+                if (mods.quantum) throw error(peek(), "'quantum' cannot modify class fields");
                 if (mods.structural) throw error(peek(), "'structural' applies to methods/static fnc, not fields");
                 if (mods.isStatic) throw error(peek(), "static data members are not implemented yet; static class functions use 'static fnc'");
                 fields.add(parseColonField(annotations, mods.visibility));
                 continue;
+            }
+            if (mods.quantum && !mods.isStatic) {
+                throw error(peek(), "'quantum' is supported on static fnc, not instance methods");
+            }
+            if (mods.quantum && (mods.async || mods.structural || mods.isAbstract)) {
+                throw error(peek(), "'quantum static fnc' cannot be async, structural, or abstract");
             }
             if (mods.isStatic) {
                 consume(FNC, "static class functions must be declared with 'static fnc'");
@@ -404,7 +430,7 @@ public final class Parser {
             boolean filePrivateScope) {
         Token keyword = advance(); // contextual 'constructor'
         if (mods.async || mods.generator || mods.nonLexical || mods.isStatic
-                || mods.isAbstract || mods.shared) {
+                || mods.isAbstract || mods.shared || mods.quantum) {
             throw error(keyword,
                     "constructors accept only private/pub visibility; async, generator, nlex, static, abstract, and shared are not permitted");
         }
@@ -426,7 +452,7 @@ public final class Parser {
 
     private void validateClassModifiers(Modifiers modifiers) {
         if (modifiers.async || modifiers.generator || modifiers.nonLexical
-                || modifiers.isStatic || modifiers.shared) {
+                || modifiers.isStatic || modifiers.shared || modifiers.quantum) {
             throw error(previous(),
                     "classes accept only private/pub visibility and abstract; async, generator, nlex, static, and shared are not permitted");
         }
@@ -450,6 +476,9 @@ public final class Parser {
         while (!check(terminator) && !check(EOF)) {
             List<Ast.Annotation> annotations = parseAnnotations();
             Modifiers mods = parseModifiers();
+            if (mods.quantum) {
+                throw error(previous(), "'quantum' does not apply to actor state or actor methods");
+            }
             if (isLegacyFnSpelling()) {
                 if (mods.isStatic) throw error(peek(), "static actor functions use 'static fnc', not 'static fn'");
                 throw error(peek(), "actor methods omit 'fn'/'fnc'; declare the method name directly");
@@ -515,7 +544,8 @@ public final class Parser {
                     || memberModifiers.nonLexical
                     || memberModifiers.isStatic
                     || memberModifiers.isAbstract
-                    || memberModifiers.shared) {
+                    || memberModifiers.shared
+                    || memberModifiers.quantum) {
                 throw error(previous(),
                         "interface callable signatures currently accept only the structural callable modifier; "
                                 + "unsupported modifiers must not be silently discarded");
@@ -626,7 +656,7 @@ public final class Parser {
 
     private Ast.MethodDecl parseMethod(List<Ast.Annotation> annotations, Modifiers mods) {
         CallableStructural structural = normalizeCallableStructural(annotations, mods.structural);
-        annotations = structural.annotations();
+        annotations = withExecutionPlacement(structural.annotations(), mods.quantum);
         String name = parseMethodName();
         List<String> generics = parseGenericParameters();
         consume(LPAREN, "expected '(' after method name");
@@ -730,6 +760,7 @@ public final class Parser {
         boolean isAbstract = false;
         boolean shared = false;
         boolean untrusted = false;
+        boolean quantum = false;
         boolean visibilitySeen = false;
         boolean asyncSeen = false;
         boolean generatorSeen = false;
@@ -739,6 +770,7 @@ public final class Parser {
         boolean abstractSeen = false;
         boolean sharedSeen = false;
         boolean untrustedSeen = false;
+        boolean quantumSeen = false;
 
         while (true) {
             if (match(PUB)) {
@@ -781,11 +813,24 @@ public final class Parser {
                 if (untrustedSeen) throw error(previous(), "duplicate 'untrusted' modifier");
                 untrustedSeen = true;
                 untrusted = true;
+            } else if (match(QUANTUM)) {
+                if (quantumSeen) throw error(previous(), "duplicate 'quantum' modifier");
+                quantumSeen = true;
+                quantum = true;
             } else {
                 break;
             }
         }
-        return new Modifiers(visibility, async, generator, structural, nonLexical, isStatic, isAbstract, shared, untrusted);
+        return new Modifiers(visibility, async, generator, structural, nonLexical, isStatic, isAbstract, shared, untrusted, quantum);
+    }
+
+    private List<Ast.Annotation> withExecutionPlacement(
+            List<Ast.Annotation> annotations,
+            boolean quantum) {
+        if (!quantum) return annotations;
+        ArrayList<Ast.Annotation> result = new ArrayList<>(annotations);
+        result.add(new Ast.Annotation(Ast.QUANTUM_ANNOTATION, List.of()));
+        return List.copyOf(result);
     }
 
     private Ast.TypeRef parseReturnType(List<Ast.Annotation> annotations) {
@@ -2792,5 +2837,5 @@ public final class Parser {
         return new IllegalArgumentException("Oreslang parse error at " + token.line() + ":" + token.column() + ": " + message);
     }
 
-    private record Modifiers(Ast.Visibility visibility, boolean async, boolean generator, boolean structural, boolean nonLexical, boolean isStatic, boolean isAbstract, boolean shared, boolean untrusted) { }
+    private record Modifiers(Ast.Visibility visibility, boolean async, boolean generator, boolean structural, boolean nonLexical, boolean isStatic, boolean isAbstract, boolean shared, boolean untrusted, boolean quantum) { }
 }

@@ -1776,3 +1776,30 @@ When explicit thread/task spawning is added, cross-thread transfer will require 
 `@FromJson("key")` is a compiler annotation for typed class fields. It expands before type/ownership checking into public typed getters/setters; no JVM reflection or guest-code macro execution is involved. The field must have an explicit type and mutable storage. The name-first shorthand `field_name: Type` is mutable only when annotated with `@FromJson`; otherwise it is an immutable `val` field.
 
 Generated setters still require a mutable owner at the call site. Duplicate/blank keys, immutable annotated fields, accessor collisions, annotations on module bindings/callables, and annotations on actor state all fail closed. JSON wire keys participate in incremental ABI fingerprints.
+
+
+## Quantum execution placement
+
+`quantum` is a reserved, fail-closed execution-placement modifier. It is a contract that the callable must execute through a quantum-processing backend; it is not an optimization hint and never permits CPU or GPU fallback.
+
+The intentionally small initial source surface is:
+
+```ores
+quantum fnc phase_estimate(int shots): int {
+  return shots;
+}
+
+define class QuantumOps as
+  pub quantum static fnc solve(int shots): int {
+    return shots;
+  }
+end
+```
+
+Modifier order is parser-flexible, so `pub quantum fnc` and `quantum pub fnc` are equivalent, as are `static quantum fnc` and `quantum static fnc`. Canonical formatting may choose one order independently.
+
+For now, quantum placement is rejected on routines, actors/isoactors, instance methods, async/generator/nlex/structural/abstract callables, fields/types/interfaces/classes, and lambda-style callable declarations. This is deliberate: the language does not yet define qubit/register/circuit/measurement syntax, backend capability negotiation, shot policy, or QPU job scheduling, so those semantics are not guessed.
+
+The compiler preserves placement as explicit callable metadata and includes non-CPU placement in exported ABI fingerprints. Changing a public callable from CPU to QPU therefore invalidates dependent incremental artifacts.
+
+The current runtime has no QPU backend. Reaching a quantum-targeted callable fails before its body executes. A future QPU backend must consume checked/lowered QPU IR through an explicit backend boundary; it must not reinterpret ordinary CPU execution as a quantum fallback.

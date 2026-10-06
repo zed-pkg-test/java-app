@@ -156,6 +156,7 @@ public final class IncrementalCompiler {
             if (fn.async()) abi.append("async ");
             if (fn.generator()) abi.append("generator ");
             if (fn.structural()) abi.append("structural ");
+            appendExecutionTarget(abi, fn.annotations());
             abi.append(fn.kind()).append(" pub ").append(fn.name());
             appendGenerics(abi, fn.genericParameters());
             appendParams(abi, fn.parameters());
@@ -238,10 +239,18 @@ public final class IncrementalCompiler {
         }
     }
 
+    private static void appendExecutionTarget(StringBuilder out, List<Ast.Annotation> annotations) {
+        Ast.ExecutionTarget target = Ast.executionTarget(annotations);
+        if (target != Ast.ExecutionTarget.CPU) {
+            out.append(target.name().toLowerCase(java.util.Locale.ROOT)).append(' ');
+        }
+    }
+
     private static String classMethodAbi(Ast.MethodDecl method) {
         StringBuilder out = new StringBuilder();
         if (method.async()) out.append("async ");
         if (method.structural()) out.append("structural ");
+        appendExecutionTarget(out, method.annotations());
         out.append(method.isStatic() ? " static-fnc " : " method ")
                 .append(method.name())
                 .append("#arity").append(method.arity());

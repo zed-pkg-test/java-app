@@ -3632,7 +3632,24 @@ public final class OresEvalRootNode extends RootNode {
             return owner.instantiate(klass, args, externalConstruction);
         }
 
+        private void rejectUnavailableExecutionTarget(
+                List<Ast.Annotation> annotations,
+                String target) {
+            switch (Ast.executionTarget(annotations)) {
+                case CPU -> { }
+                case GPU -> throw new IllegalStateException(
+                        target
+                                + " is GPU-targeted, but no GPU backend is configured on this runtime; "
+                                + "Oreslang never falls back to CPU for 'gpu' code");
+                case QUANTUM -> throw new IllegalStateException(
+                        target
+                                + " is quantum-targeted, but no QPU backend is configured; "
+                                + "Oreslang never falls back to CPU or GPU for 'quantum' code");
+            }
+        }
+
         private Object callFunctionRaw(Ast.FunctionDecl fn, List<Object> args) {
+            rejectUnavailableExecutionTarget(fn.annotations(), "function " + fn.name());
             if (fn.name().equals("init")) {
                 throw new IllegalStateException(
                         "init is a lifecycle hook and cannot be invoked directly; startup runs it exactly once");
@@ -3920,6 +3937,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callMethodRaw(OresObject receiver, Ast.MethodDecl method, List<?> args) {
+            rejectUnavailableExecutionTarget(method.annotations(), "method " + method.name());
             if (args.size() != method.parameters().size()) {
                 throw new IllegalArgumentException(
                         "method " + method.name() + " arity mismatch");
@@ -5631,6 +5649,7 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callStaticFunctionRaw(Ast.MethodDecl fn, List<?> args) {
+            rejectUnavailableExecutionTarget(fn.annotations(), "static function " + fn.name());
             if (!fn.isStatic()) {
                 throw new IllegalArgumentException(
                         "not a static class function: " + fn.name());

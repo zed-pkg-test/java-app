@@ -41,6 +41,34 @@ public final class Ast {
     public enum CallableKind { FNC, ROUTINE }
     public enum ActorKind { NONE, PRIVATE, SHARED, UNTRUSTED }
 
+    /** Compiler-owned annotations used to preserve execution placement without exposing it as user annotation syntax. */
+    public static final String GPU_ANNOTATION = "$ores_gpu$";
+    public static final String QUANTUM_ANNOTATION = "$ores_quantum$";
+
+    public enum ExecutionTarget { CPU, GPU, QUANTUM }
+
+    public static ExecutionTarget executionTarget(List<Annotation> annotations) {
+        boolean gpu = annotations.stream()
+                .anyMatch(annotation -> GPU_ANNOTATION.equals(annotation.name()));
+        boolean quantum = annotations.stream()
+                .anyMatch(annotation -> QUANTUM_ANNOTATION.equals(annotation.name()));
+        if (gpu && quantum) {
+            throw new IllegalArgumentException(
+                    "a callable cannot target both GPU and quantum execution");
+        }
+        if (quantum) return ExecutionTarget.QUANTUM;
+        if (gpu) return ExecutionTarget.GPU;
+        return ExecutionTarget.CPU;
+    }
+
+    public static boolean hasGpuPlacement(List<Annotation> annotations) {
+        return executionTarget(annotations) == ExecutionTarget.GPU;
+    }
+
+    public static boolean hasQuantumPlacement(List<Annotation> annotations) {
+        return executionTarget(annotations) == ExecutionTarget.QUANTUM;
+    }
+
     public record Annotation(String name, List<TypeRef> arguments) {
         public Annotation { arguments = List.copyOf(arguments); }
     }
