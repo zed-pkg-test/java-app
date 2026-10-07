@@ -2230,6 +2230,16 @@ public final class Parser {
     }
 
     private Ast.MatchStmt parseMatch() {
+        // Canonical match is ordered and spells its boundary explicitly:
+        //   match value over
+        //     on Pattern -> { ... }
+        //   end
+        //
+        // Preserve the pre-over grammar as a compatibility surface. Legacy
+        // match remains proof-checked unless the historical contextual
+        // `first` marker is present.
+        boolean legacyFirst = matchContextualIdentifier("first");
+
         boolean previousSuppression = suppressRefinementOperators;
         suppressRefinementOperators = true;
         Ast.Expr subject;
@@ -2239,18 +2249,27 @@ public final class Parser {
             suppressRefinementOperators = previousSuppression;
         }
 
-        consumeContextualIdentifier("over", "match requires 'over' after the subject");
+        boolean canonicalOver = matchContextualIdentifier("over");
+        if (!canonicalOver) match(SEMICOLON);
 
         List<Ast.MatchArm> arms = new ArrayList<>();
         while (!check(END) && !check(EOF)) {
-            if (!matchContextualIdentifier("on")) {
-                if (check(ELSE) || check(DEFAULT)) {
-                    throw error(peek(), "match has no default/else keyword; use 'on _ -> { ... }'");
+            if (canonicalOver) {
+                if (!matchContextualIdentifier("on")) {
+                    if (check(ELSE) || check(DEFAULT)) {
+                        throw error(peek(), "match has no default/else keyword; use 'on _ -> { ... }'");
+                    }
+                    throw error(peek(), "every 'match ... over' arm must start with contextual keyword 'on'");
                 }
-                throw error(peek(), "every match arm must start with contextual keyword 'on'");
             }
 
-            Ast.Pattern pattern = parsePattern();
+            Ast.Pattern pattern;
+            if (!canonicalOver && match(ELSE)) {
+                pattern = new Ast.WildcardPattern();
+            } else {
+                pattern = parsePattern();
+            }
+
             Ast.Expr guard = matchWhenKeyword() ? parseExpression() : null;
             if (check(FAT_ARROW)) {
                 throw error(peek(), "match implementations use the slim arrow '->'; '=>' is reserved for type definitions");
@@ -2260,13 +2279,20 @@ public final class Parser {
             arms.add(new Ast.MatchArm(pattern, guard, body));
         }
         consume(END, "expected 'end' to close match");
-        if (arms.isEmpty()) throw error(previous(), "match requires at least one 'on' arm");
-        // Canonical match semantics are ordered: the first matching arm wins.
-        return new Ast.MatchStmt(subject, true, arms);
+        if (arms.isEmpty()) {
+            throw error(previous(), canonicalOver
+                    ? "match requires at least one 'on' arm"
+                    : "match requires at least one arm");
+        }
+
+        // Canonical match is source-ordered. Legacy bare match retains the
+        // old exclusivity/proof semantics unless explicitly written
+        // `match first ...`.
+        return new Ast.MatchStmt(subject, canonicalOver || legacyFirst, arms);
     }
 
     private Ast.Pattern parsePattern() {
-        if (match(STRUCTURAL)) {
+        if (match(STRUCTURAL) || matchContextualIdentifier("structural")) {
             Ast.TypeRef target = parseTypeRef();
             String binding = check(IDENT) && !peek().lexeme().equals("_")
                     ? advance().lexeme()
