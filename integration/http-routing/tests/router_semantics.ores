@@ -1,0 +1,158 @@
+import module http_routing from "../src/http_routing";
+
+fnc ok(Result<bool, String> result) -> void {
+  stdio.println(result.is_ok());
+  return;
+}
+
+pub routine main() -> void {
+  let router_builder = http_routing.builder();
+
+  val root = http_routing.root();
+  val users_new = http_routing.path("/users/new", arr[
+    http_routing.literal("users"),
+    http_routing.literal("new")
+  ]);
+  val users_new_details = http_routing.path("/users/new/details", arr[
+    http_routing.literal("users"),
+    http_routing.literal("new"),
+    http_routing.literal("details")
+  ]);
+  val users_edit = http_routing.path("/users/{id}/edit", arr[
+    http_routing.literal("users"),
+    http_routing.param("id"),
+    http_routing.literal("edit")
+  ]);
+  val assets = http_routing.path("/assets/*rest", arr[
+    http_routing.literal("assets"),
+    http_routing.wildcard("rest")
+  ]);
+  val slash_strict = http_routing.path("/slash/", arr[
+    http_routing.literal("slash"),
+    http_routing.literal("")
+  ]);
+  val health = http_routing.path("/health", arr[
+    http_routing.literal("health")
+  ]);
+  val any_path = http_routing.path("/any", arr[
+    http_routing.literal("any")
+  ]);
+
+  ok(router_builder.get(root, 1));
+  ok(router_builder.get(users_new, 2));
+  ok(router_builder.get(users_new_details, 3));
+  ok(router_builder.get(users_edit, 4, 40, 400, "users.edit"));
+  ok(router_builder.get(assets, 5));
+  ok(router_builder.get(slash_strict, 6));
+  ok(router_builder.get(health, 7));
+  ok(router_builder.post(health, 8));
+  ok(router_builder.head(health, 9));
+  ok(router_builder.any(any_path, 10));
+
+  val router = router_builder.build();
+
+  val root_match = router.resolve("GET", http_routing.request_path(new Array<String>()));
+  stdio.println(root_match.is_match());
+  stdio.println(root_match.handler_id);
+
+  val static_match = router.resolve("GET", http_routing.request_path(arr["users", "new"]));
+  stdio.println(static_match.handler_id);
+
+  // A dead-end static branch must backtrack to the parameter branch.
+  val fallback_match = router.resolve("GET", http_routing.request_path(arr["users", "new", "edit"]));
+  stdio.println(fallback_match.handler_id);
+  stdio.println(router.capture_one(fallback_match, "id").unwrap());
+  stdio.println(fallback_match.pipeline_id);
+  stdio.println(fallback_match.contract_id);
+  stdio.println(fallback_match.operation_id);
+
+  val wildcard_match = router.resolve(
+    "GET",
+    http_routing.request_path(arr["assets", "css", "main.css"])
+  );
+  stdio.println(wildcard_match.handler_id);
+  val rest = router.capture(wildcard_match, "rest").unwrap();
+  stdio.println(rest.size());
+  stdio.println(rest.at(0).unwrap());
+  stdio.println(rest.at(1).unwrap());
+
+  val empty_wildcard = router.resolve("GET", http_routing.request_path(arr["assets"]));
+  stdio.println(empty_wildcard.is_match());
+  stdio.println(router.capture(empty_wildcard, "rest").unwrap().size());
+
+  val missing = router.resolve("GET", http_routing.request_path(arr["missing"]));
+  stdio.println(missing.is_not_found());
+
+  val wrong_method = router.resolve("DELETE", http_routing.request_path(arr["health"]));
+  stdio.println(wrong_method.is_method_not_allowed());
+  stdio.println(router.allow_count(wrong_method));
+  stdio.println(router.allow_method_at(wrong_method, 0).unwrap());
+  stdio.println(router.allow_method_at(wrong_method, 1).unwrap());
+  stdio.println(router.allow_method_at(wrong_method, 2).unwrap());
+  stdio.println(router.allow_method_at(wrong_method, 3).unwrap());
+
+  val head_match = router.resolve("HEAD", http_routing.request_path(arr["health"]));
+  stdio.println(head_match.handler_id);
+  stdio.println(head_match.suppress_body);
+
+  val auto_head_builder = http_routing.builder();
+  ok(auto_head_builder.get(users_new, 20));
+  val auto_head_router = auto_head_builder.build();
+  val auto_head = auto_head_router.resolve("HEAD", http_routing.request_path(arr["users", "new"]));
+  stdio.println(auto_head.handler_id);
+  stdio.println(auto_head.suppress_body);
+
+  val automatic_options = router.resolve("OPTIONS", http_routing.request_path(arr["users", "new"]));
+  stdio.println(automatic_options.is_automatic_options());
+
+  val any_match = router.resolve("BREW", http_routing.request_path(arr["any"]));
+  stdio.println(any_match.handler_id);
+
+  stdio.println(router.resolve("GET", http_routing.request_path(arr["slash"])).is_not_found());
+  stdio.println(router.resolve("GET", http_routing.request_path(arr["slash", ""])).handler_id);
+
+  // Build snapshots are immutable: registrations after build do not alter old routers.
+  val later = http_routing.path("/later", arr[http_routing.literal("later")]);
+  ok(router_builder.get(later, 11));
+  val router_after = router_builder.build();
+  stdio.println(router.resolve("GET", http_routing.request_path(arr["later"])).is_not_found());
+  stdio.println(router_after.resolve("GET", http_routing.request_path(arr["later"])).handler_id);
+
+  val duplicate = router_builder.get(users_new, 99);
+  stdio.println(duplicate.is_err());
+
+  val conflicting_param = http_routing.path("/users/{name}/edit", arr[
+    http_routing.literal("users"),
+    http_routing.param("name"),
+    http_routing.literal("edit")
+  ]);
+  stdio.println(router_builder.get(conflicting_param, 100).is_err());
+
+  val bad_wildcard = http_routing.path("/bad/*rest/tail", arr[
+    http_routing.literal("bad"),
+    http_routing.wildcard("rest"),
+    http_routing.literal("tail")
+  ]);
+  stdio.println(router_builder.get(bad_wildcard, 101).is_err());
+
+  val duplicate_capture = http_routing.path("/pair/{id}/{id}", arr[
+    http_routing.literal("pair"),
+    http_routing.param("id"),
+    http_routing.param("id")
+  ]);
+  stdio.println(router_builder.get(duplicate_capture, 102).is_err());
+
+  let limited_builder = http_routing.builder();
+  ok(limited_builder.set_limits(2, 32));
+  ok(limited_builder.get(users_new, 200));
+  val limited_router = limited_builder.build();
+  stdio.println(
+    limited_router.resolve(
+      "GET",
+      http_routing.request_path(arr["users", "new", "extra"])
+    ).is_limit_exceeded()
+  );
+  stdio.println(limited_builder.get(users_edit, 201).is_err());
+
+  return;
+}

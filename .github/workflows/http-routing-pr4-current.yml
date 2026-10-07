@@ -1,0 +1,43 @@
+name: http-routing-pr4-current
+
+on:
+  push:
+    branches:
+      - ci/http-routing-pr4-current
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  router:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Verify exact compiler and routing source trees
+        run: |
+          test "$(git rev-parse 'HEAD^1^{tree}')" = "bffbaa16e762991d5c533f59ccbced4a1c2c309e"
+          test "$(git rev-parse HEAD:integration/http-routing)" = "d848cead78db7827c45a9449152f81b2304f7f35"
+          test "$(cat integration/http-routing/SOURCE_REF)" = "c41cc53d9a98bcc2b7e6e56f41b78d32dd6545d5"
+      - name: Build exact pointerless compiler
+        run: |
+          mkdir -p .work
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=.work/routing-classpath.txt
+      - name: Check and execute exact router suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat .work/routing-classpath.txt)"
+          cmd=(java --enable-native-access=ALL-UNNAMED -Dpolyglot.engine.WarnInterpreterOnly=false -cp "$ORES_CLASSPATH" dev.oreslang.launcher.OresMain)
+          "${cmd[@]}" --check --platform=server integration/http-routing/tests/router_semantics.ores
+          "${cmd[@]}" --platform=server integration/http-routing/tests/router_semantics.ores > .work/router-actual.txt
+          diff -u integration/http-routing/tests/expected.txt .work/router-actual.txt
