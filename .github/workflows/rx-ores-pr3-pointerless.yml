@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 2
+          fetch-depth: 4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -26,8 +26,8 @@ jobs:
           python-version: '3.12'
       - name: Verify exact source trees
         run: |
-          test "$(git rev-parse 'HEAD^1^{tree}')" = "0383eabe4f42d49e186338e307c8b5218b71a870"
-          test "$(git rev-parse HEAD:integration/rx-ores)" = "02472fc8b68b8ca5ab60b2a8a9680b8cb65b0199"
+          test "$(git rev-parse 'HEAD~3^{tree}')" = "0383eabe4f42d49e186338e307c8b5218b71a870"
+          test "$(git rev-parse HEAD:integration/rx-ores)" = "c23130e000d601cc55b508febb26281f5ef2bdc4"
       - name: Build exact pinned compiler
         run: |
           mkdir -p .work
