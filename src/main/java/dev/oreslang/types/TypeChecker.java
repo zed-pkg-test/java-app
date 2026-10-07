@@ -65,6 +65,7 @@ public final class TypeChecker {
 
     public static Ast.Program check(Ast.Program program) {
         program = checkTypes(program);
+        PureEffectChecker.check(program);
         OwnershipChecker.check(program);
         return program;
     }
@@ -408,6 +409,10 @@ public final class TypeChecker {
     }
 
     private void checkFunction(String module, Ast.FunctionDecl fn) {
+        if (fn.pure() && fn.generator()) {
+            throw new IllegalArgumentException(
+                    "pure generators are not enabled until yield/suspension effects participate in purity");
+        }
         if (fn.trapped()) {
             if (fn.async()) {
                 throw new IllegalArgumentException("async trap callables are not enabled until the trap boundary spans every await");
@@ -426,6 +431,7 @@ public final class TypeChecker {
                     || fn.generator()
                     || fn.structural()
                     || fn.nonLexical()
+                    || fn.pure()
                     || fn.trapped()
                     || fn.actorKind() != Ast.ActorKind.NONE
                     || !fn.genericParameters().isEmpty()
@@ -2414,6 +2420,10 @@ public final class TypeChecker {
             return new Record(members);
         }
         if (expr instanceof Ast.LambdaExpr lambda) {
+            if (lambda.trapped() && lambda.async()) {
+                throw new IllegalArgumentException(
+                        "async trap lambda is not enabled until trap spans every await suspension");
+            }
             boolean nonLexical = lambda.nonLexical();
             Env lambdaEnv = new Env(nonLexical ? null : env, nonLexical);
             List<Type> parameters = new ArrayList<>();
@@ -2450,9 +2460,11 @@ public final class TypeChecker {
                 currentAsyncCallable = previousAsync;
             }
             Type returnType = declaredReturn == null ? result : declaredReturn;
+            Type callableReturn = callableResult(lambda.async(), false, returnType);
+            callableReturn = trapResult(lambda.trapped(), callableReturn);
             return new Function(parameters,
                     lambda.parameters().stream().map(Ast.Param::mutable).toList(),
-                    lambda.async(), callableResult(lambda.async(), false, returnType));
+                    lambda.async(), callableReturn);
         }
         return Unknown.INSTANCE;
     }
@@ -2910,6 +2922,7 @@ public final class TypeChecker {
             }
         } finally {
             currentClassOwner = previousClassOwner;
+            currentAsyncCallable = previousAsync;
         }
     }
 
@@ -2921,13 +2934,35 @@ public final class TypeChecker {
     }
 
     private void validateLambdaAgainstExpected(Ast.LambdaExpr lambda, Function expected, Env parent, Set<String> generics, Type self) {
+        if (lambda.trapped() && lambda.async()) {
+            throw new IllegalArgumentException(
+                    "async trap lambda is not enabled until trap spans every await suspension");
+        }
         if (lambda.async() != expected.async()) {
             throw new IllegalArgumentException("async lambda effect does not match expected callable signature");
         }
+
+        Type bodyExpected = expected.result();
+        if (expected.async()
+                && bodyExpected instanceof Named future
+                && future.name().equals("Future")
+                && future.arguments().size() == 1) {
+            bodyExpected = future.arguments().getFirst();
+        }
+        if (lambda.trapped()) {
+            if (!(bodyExpected instanceof Named option)
+                    || !option.name().equals("Option")
+                    || option.arguments().size() != 1) {
+                throw new IllegalArgumentException(
+                        "trap lambda requires an expected Option<T> callable result");
+            }
+            bodyExpected = option.arguments().getFirst();
+        }
+
         if (lambda.returnType() != null) {
             Type declared = resolve(lambda.returnType(), generics, self);
-            requireAssignable(declared, expected.result(), "typed lambda return");
-            requireAssignable(expected.result(), declared, "typed lambda expected return");
+            requireAssignable(declared, bodyExpected, "typed lambda return");
+            requireAssignable(bodyExpected, declared, "typed lambda expected return");
         }
         if (lambda.parameters().size() != expected.parameters().size()) {
             throw new IllegalArgumentException("lambda arity " + lambda.parameters().size() + " does not match expected function arity " + expected.parameters().size());
@@ -2948,21 +2983,23 @@ public final class TypeChecker {
             lambdaEnv.define(param.name(), declared, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
         }
         Ast.ClassDecl previousClassOwner = currentClassOwner;
+        boolean previousAsync = currentAsyncCallable;
         if (nonLexical) currentClassOwner = null;
+        currentAsyncCallable = lambda.async();
         try {
             if (lambda.expressionBody() != null) {
                 Type actual = typeOfAgainstExpected(
-                        lambda.expressionBody(), expected.result(), lambdaEnv, generics, self);
-                requireAssignable(actual, expected.result(), "lambda expression body");
+                        lambda.expressionBody(), bodyExpected, lambdaEnv, generics, self);
+                requireAssignable(actual, bodyExpected, "lambda expression body");
             } else {
-                checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, expected.result(), self, lambda.async());
+                checkCallableBlock(lambda.blockBody(), lambdaEnv, generics, bodyExpected, self, lambda.async());
             }
         } finally {
             currentClassOwner = previousClassOwner;
             currentAsyncCallable = previousAsync;
         }
         if (lambda.blockBody() != null
-                && expected.result() != Primitive.VOID
+                && bodyExpected != Primitive.VOID
                 && !definitelyReturns(lambda.blockBody())) {
             throw new IllegalArgumentException("non-void block lambda must explicitly return on every path");
         }

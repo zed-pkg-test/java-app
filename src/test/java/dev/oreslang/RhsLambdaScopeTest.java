@@ -249,4 +249,116 @@ final class RhsLambdaScopeTest {
                 }
                 """));
     }
+
+    @Test
+    void pureTrapAndNlexRhsModifiersAreFirstClassAndOrderIndependent() {
+        for (String modifiers : new String[] {
+                "pure",
+                "trap",
+                "nlex pure trap",
+                "trap pure nlex",
+                "pure nlex trap"
+        }) {
+            Ast.Program program = Parser.parse("""
+                    pub fnc foo(): void {
+                        const f = %s || -> int {
+                            return 1;
+                        };
+                    }
+                    """.formatted(modifiers));
+            Ast.FunctionDecl outer =
+                    (Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
+            Ast.LambdaExpr lambda =
+                    (Ast.LambdaExpr) ((Ast.BindingStmt) outer.body().getFirst()).initializer();
+            assertEquals(modifiers.contains("pure"), lambda.pure());
+            assertEquals(modifiers.contains("trap"), lambda.trapped());
+            assertEquals(modifiers.contains("nlex"), lambda.nonLexical());
+        }
+
+        for (String modifiers : new String[] {"pure pure", "trap trap"}) {
+            assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                    pub fnc foo(): void {
+                        const f = %s || -> int {
+                            return 1;
+                        };
+                    }
+                    """.formatted(modifiers)));
+        }
+    }
+
+    @Test
+    void asyncPureRhsIsAcceptedButAsyncTrapFailsClosed() {
+        assertDoesNotThrow(() -> Parser.parse("""
+                pub fnc foo(): void {
+                    const f = pure async || -> int {
+                        return 1;
+                    };
+                }
+                """));
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        pub fnc foo(): void {
+                            const f = nlex pure trap async || -> int {
+                                return 1;
+                            };
+                        }
+                        """));
+        assertTrue(error.getMessage().contains("async trap"), error.getMessage());
+    }
+
+    @Test
+    void trapRhsLambdaUsesOptionSemanticsAtRuntime() throws Exception {
+        String program = """
+                pub fnc main(): void {
+                    const good = trap || -> int {
+                        return 7;
+                    };
+                    const bad = trap || -> int {
+                        return [1][3];
+                    };
+                    stdio.stdout.write(good().unwrap());
+                    stdio.stdout.write(":");
+                    stdio.stdout.write(bad().is_none());
+                    return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(OresLanguage.ID, program, "rhs-lambda-trap.ores")
+                .mimeType(OresLanguage.MIME_TYPE).build();
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false).out(out).build()) {
+            context.eval(source);
+        }
+        assertEquals("7:true", out.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void pureRhsLambdaRejectsCapturedWritesButAllowsOwnedLocals() {
+        assertThrows(IllegalArgumentException.class, () -> check("""
+                pub fnc outer(): void {
+                    let outside = 1;
+                    const f = pure || -> void {
+                        outside = 2;
+                        return;
+                    };
+                    return;
+                }
+                """));
+
+        assertDoesNotThrow(() -> check("""
+                pub fnc outer(): void {
+                    const f = pure || -> int {
+                        let inside = 1;
+                        inside = inside + 1;
+                        return inside;
+                    };
+                    return;
+                }
+                """));
+    }
+
 }

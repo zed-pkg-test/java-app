@@ -5449,7 +5449,27 @@ public final class OresEvalRootNode extends RootNode {
                         throw new IllegalStateException("loop control cannot cross a lambda boundary", signal);
                     }
                 });
-                if (!lambda.async()) return bodyCallable;
+                TailInvokable effectiveCallable = bodyCallable;
+                if (lambda.trapped()) {
+                    if (lambda.async()) {
+                        throw new IllegalArgumentException(
+                                "async trap lambda is not enabled until trap spans every await suspension");
+                    }
+                    effectiveCallable = tailCallable(args -> {
+                        try {
+                            return new OptionValue(
+                                    true,
+                                    invoke(invokableInvocation(bodyCallable, args)));
+                        } catch (OresPanic panic) {
+                            throw panic;
+                        } catch (java.util.concurrent.CancellationException cancelled) {
+                            throw cancelled;
+                        } catch (RuntimeException ordinaryFailure) {
+                            return new OptionValue(false, null);
+                        }
+                    });
+                }
+                if (!lambda.async()) return effectiveCallable;
                 // Async RHS callbacks are first-class tasks.  The runtime-owned
                 // carrier enters guest code through the context's turn executor;
                 // it must never occupy an actor dispatcher worker while awaiting.
