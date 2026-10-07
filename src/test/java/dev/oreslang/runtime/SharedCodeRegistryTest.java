@@ -153,6 +153,58 @@ final class SharedCodeRegistryTest {
     }
 
     @Test
+    void untrustedManagersShareOnlyExactSupervisorApprovedImages() {
+        IsolatePolicy supervisor = IsolatePolicy.developer();
+        String codeUnitId = "untrusted-shared-proof.ores";
+        String changed =
+                "pub routine main(): void { val changed = 1; return; }";
+
+        try (HotReloadManager first =
+                     HotReloadManager.forUntrustedActors(
+                             supervisor, ExecutionProfile.serverJit());
+             HotReloadManager second =
+                     HotReloadManager.forUntrustedActors(
+                             supervisor, ExecutionProfile.serverJit())) {
+
+            var privateA = first.load(codeUnitId, MINIMAL_PROGRAM);
+            var privateB = second.load(codeUnitId, MINIMAL_PROGRAM);
+            assertFalse(privateA.sharedCodeImage());
+            assertFalse(privateB.sharedCodeImage());
+            assertNotSame(privateA.source(), privateB.source(),
+                    "unapproved untrusted source must remain a private code image");
+
+            first.retire(privateA.id());
+            second.retire(privateB.id());
+
+            first.approveGuestCodeSharing(codeUnitId, MINIMAL_PROGRAM);
+            try {
+                var sharedA = first.load(codeUnitId, MINIMAL_PROGRAM);
+                var sharedB = second.load(codeUnitId, MINIMAL_PROGRAM);
+                assertTrue(sharedA.sharedCodeImage());
+                assertTrue(sharedB.sharedCodeImage());
+                assertSame(sharedA.source(), sharedB.source(),
+                        "exact-approved untrusted loads may reuse one immutable Source");
+
+                var changedVersion = first.load(codeUnitId, changed);
+                assertFalse(changedVersion.sharedCodeImage(),
+                        "approval must not survive a content hash change");
+                assertNotSame(sharedA.source(), changedVersion.source());
+
+                var renamed = second.load(
+                        "renamed-untrusted-shared-proof.ores", MINIMAL_PROGRAM);
+                assertFalse(renamed.sharedCodeImage(),
+                        "approval must not transfer to another code-unit identity");
+                assertNotSame(sharedA.source(), renamed.source());
+            } finally {
+                first.revokeGuestCodeSharing(codeUnitId, MINIMAL_PROGRAM);
+            }
+        }
+
+        assertFalse(SharedCodeRegistry.process()
+                .approvedForAdversarialSharing(codeUnitId, MINIMAL_PROGRAM));
+    }
+
+    @Test
     void missingCodeIdentityIsRejectedBeforePublication() {
         SharedCodeRegistry registry = new SharedCodeRegistry();
         assertThrows(NullPointerException.class, () -> registry.acquire(null, MINIMAL_PROGRAM));
