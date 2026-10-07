@@ -796,12 +796,11 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Legacy host/runtime synchronized shared-memory cell.
+     * Explicit synchronized shared-memory cell.
      *
-     * <p>Actor code cannot access this capability. Actor fields are owned by
-     * their actor domain and cross-actor mutation uses messages/channels or the
-     * narrower explicit rt Proxy capability. SyncCell remains for embedding and
-     * runtime-internal compatibility code that holds SHARED_MEMORY.</p>
+     * Actor fields do not use this: a mailbox turn already provides exclusive
+     * mutation of actor-owned state. SyncCell is for state intentionally shared
+     * by multiple SHARED actors.
      */
     public final class SyncCell<T> implements AutoCloseable {
         private final ReentrantLock lock = new ReentrantLock(true);
@@ -842,6 +841,7 @@ public final class ActorRuntime implements AutoCloseable {
         public <R> R read(Function<? super T, ? extends R> reader) {
             Objects.requireNonNull(reader);
             requireSharedMemoryAuthority("SyncCell.read");
+            requireSharedActorTurn();
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -861,6 +861,7 @@ public final class ActorRuntime implements AutoCloseable {
         public T update(UnaryOperator<T> updater) {
             Objects.requireNonNull(updater);
             requireSharedMemoryAuthority("SyncCell.update");
+            requireSharedActorTurn();
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -1208,20 +1209,16 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void closeFromRuntime() {
-            /*
-             * Runtime teardown must remain bounded even if guest code is still
-             * inside an uncooperative proxy critical section. Revoke new access
-             * immediately, fail queued waiters at the runtime level, and defer
-             * dropping the strong target root until the last active logical
-             * lease leaves. No carrier/control thread blocks on that lease.
-             *
-             * ActorRuntime.close() zeros aggregate shared-memory accounting
-             * after revocation, so this delayed retirement intentionally does
-             * not subtract quota a second time.
-             */
-            if (!proxyClosed.compareAndSet(false, true)) return;
-            sharedProxies.remove(this);
-            lock.whenIdle(() -> retireTarget(false));
+            // Runtime teardown has already fenced source/actor access, so it
+            // must not call acquireAsync(), whose admission intentionally
+            // rejects a globally closed runtime. Acquire the logical lock
+            // directly and retire only after active readers/writers drain.
+            ProxyRwLock.Lease lease = lock.acquireAsync(true).join();
+            try {
+                closeUnderWriteLease();
+            } finally {
+                lease.close();
+            }
         }
 
         private void closeWithWriteLease() {
@@ -1235,15 +1232,11 @@ public final class ActorRuntime implements AutoCloseable {
 
         private void closeUnderWriteLease() {
             if (!proxyClosed.compareAndSet(false, true)) return;
-            sharedProxies.remove(this);
-            retireTarget(true);
-        }
-
-        private void retireTarget(boolean releaseBudget) {
             target = null;
             long bytes = reservedBytes;
             reservedBytes = 0L;
-            if (releaseBudget && bytes != 0L) releaseSharedRuntimeBytes(bytes);
+            if (bytes != 0L) releaseSharedRuntimeBytes(bytes);
+            sharedProxies.remove(this);
         }
 
         private void failPendingWaiters(Throwable failure) {
@@ -2914,13 +2907,13 @@ public final class ActorRuntime implements AutoCloseable {
                     IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
                     IsolatePolicy.Capability.JAVA_INTEROP,
                     IsolatePolicy.Capability.JAVA_SOURCE_INTEROP);
-        } else if (kind == ActorKind.SHARED) {
+        } else if (kind == ActorKind.SHARED && !trustedFactory) {
             /*
-             * Every actor owns its mutable state, including host-created shared
-             * actors. Broad SHARED_MEMORY is runtime/host authority only; it is
-             * never ambient actor authority. Cross-actor mutation is mailbox/
-             * channel based, with rt Proxy<T> as the explicit synchronized
-             * capability escape hatch under ACTOR_SHARED_PROXY.
+             * Source/compiler-facing shared actors own their mutable state.
+             * They may read published immutable data and use an explicit
+             * synchronized Proxy<T> capability, but broad SHARED_MEMORY is a
+             * host/runtime-internal legacy escape hatch, not ambient actor
+             * authority. spawnSharedTrusted(...) remains explicit opt-in.
              */
             effectivePolicy = policy.withoutCapabilities(
                     IsolatePolicy.Capability.SHARED_MEMORY);
@@ -3224,7 +3217,13 @@ public final class ActorRuntime implements AutoCloseable {
     public <T> SyncCell<T> syncCell(T initialValue) {
         requireCallerRuntimeAffinity("create shared SyncCell values");
         if (closed.get()) throw new IllegalStateException("actor runtime is closed");
-        requireSharedMemoryAuthority("SyncCell creation");
+        IsolatePolicy callerPolicy = currentActorPolicy();
+        if (callerPolicy != null) {
+            callerPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SyncCell");
+        } else {
+            policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, "SyncCell");
+        }
+        rejectPrivateActorSharedMemoryAccess("SyncCell creation");
         SyncCell<T> cell = new SyncCell<>(initialValue);
         syncCells.add(cell);
         if (closed.get()) {
@@ -3253,13 +3252,12 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private void requireSharedMemoryAuthority(String operation) {
-        if (currentActorKind() != null) {
-            throw new SecurityException(
-                    operation + " is host/runtime-only legacy shared memory; "
-                            + "actors must use ownership/messages, immutable publication, "
-                            + "or ACTOR_SHARED_PROXY");
+        IsolatePolicy callerPolicy = currentActorPolicy();
+        if (callerPolicy != null) {
+            callerPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, operation);
+        } else {
+            policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, operation);
         }
-        policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, operation);
     }
 
     private void rejectPrivateActorSharedMemoryAccess(String operation) {
@@ -3267,6 +3265,17 @@ public final class ActorRuntime implements AutoCloseable {
         if (current != null && isPrivateKind(current.kind)) {
             throw new IllegalStateException("private actors cannot access synchronized shared memory via " + operation);
         }
+    }
+
+    private void requireSharedActorTurn() {
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null || cell.kind != ActorKind.SHARED) {
+            throw new IllegalStateException(
+                    "legacy synchronized shared-memory mutation requires a SHARED actor mailbox turn");
+        }
+        cell.policy.require(
+                IsolatePolicy.Capability.SHARED_MEMORY,
+                "legacy synchronized shared-memory mutation");
     }
 
     private void reservePrivateRuntimeBytes(long bytes, ActorId owner, String purpose) {
