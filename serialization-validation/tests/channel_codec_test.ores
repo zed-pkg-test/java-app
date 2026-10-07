@@ -47,8 +47,9 @@ pub async fnc run_channel_codec_tests(): void {
     decode_protobuf_from_channel(rt take protobuf, default_proto_decode_options());
   val Result<ProtoMessage, ProtoError> protobuf_result = await protobuf_task;
   require_true(!protobuf_result.is_err(), "Protobuf channel decode must succeed");
-  require_int(protobuf_result.unwrap().fields.length, 1, "Protobuf channel field count");
-  require_int(protobuf_result.unwrap().fields[0].varint_value, 150, "Protobuf channel varint");
+  val ProtoMessage proto_payload = protobuf_result.unwrap();
+  require_int(proto_payload.fields.length, 1, "Protobuf channel field count");
+  require_int(proto_payload.fields[0].varint_value, 150, "Protobuf channel varint");
 
   val Channel<Option<List<int>>> invalid = Channel.new<Option<List<int>>>(2);
   writech invalid, Some(new List<int>(256));
