@@ -6,7 +6,7 @@ import class DecodeOptions, EncodeOptions, DecodeError, EncodeError, DecodedValu
 import fnc default_decode_options, default_encode_options from '../src/core/options';
 import class JsonIncrementalDecoder from '../src/json/json';
 import fnc decode, decode_default, encode, new_incremental_decoder from '../src/json/json';
-import fnc utf8_is_valid from '../src/core/utf8';
+import fnc utf8_is_valid, utf8_codepoint_count from '../src/core/utf8';
 
 pub fnc run_json_tests(): void {
   val List<int> input = new List<int>(
@@ -104,6 +104,24 @@ pub fnc run_json_tests(): void {
   require_true(
     !utf8_is_valid(new List<int>(192, 128)),
     "overlong UTF-8 must be rejected"
+  );
+  require_int(
+    utf8_codepoint_count(new List<int>(65, 240, 159, 152, 128)),
+    2,
+    "UTF-8 scan must count ASCII and multibyte scalar values once"
+  );
+  require_int(
+    utf8_codepoint_count(new List<int>(237, 160, 128)),
+    -1,
+    "UTF-8 scan must reject a surrogate encoding"
+  );
+  require_true(
+    !utf8_is_valid(new List<int>(244, 144, 128, 128)),
+    "UTF-8 scan must reject codepoints above U+10FFFF"
+  );
+  require_true(
+    !utf8_is_valid(new List<int>(240, 159, 152)),
+    "UTF-8 scan must reject truncated four-byte sequences"
   );
 
   val DecodeOptions shallow = new DecodeOptions(
