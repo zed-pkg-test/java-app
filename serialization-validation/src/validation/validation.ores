@@ -543,22 +543,22 @@ pub fnc is_email(Utf8Text text): bool {
     let bool at_end = i == text.bytes.length;
     let int byte = at_end ? 46 : text.bytes[i];
 
-    if byte == 46 then
-      if i == label_start then
+    if byte == 46 {
+      if i == label_start {
         return false;
-      fi
-      if text.bytes[label_start] == 45 || text.bytes[i - 1] == 45 then
+      } fi
+      if text.bytes[label_start] == 45 || text.bytes[i - 1] == 45 {
         return false;
-      fi
-      if !at_end then
+      } fi
+      if !at_end {
         saw_dot = true;
-      fi
+      } fi
       label_start = i + 1;
-    else
-      if !is_ascii_letter_or_digit(byte) && byte != 45 then
+    } else {
+      if !is_ascii_letter_or_digit(byte) && byte != 45 {
         return false;
-      fi
-    fi
+      } fi
+    } fi
 
     if at_end then
       break;
