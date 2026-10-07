@@ -1025,9 +1025,6 @@ public final class OwnershipChecker {
                             if (lambda.parameters().size() != 1) {
                                 throw error(member.member() + " callback must accept exactly one protected-value parameter");
                             }
-                            if (lambda.async()) {
-                                throw error(member.member() + " protected callbacks cannot be async: a mutex guard must not cross await");
-                            }
                             Ast.Param original = lambda.parameters().getFirst();
                             Ast.Param protectedParam = new Ast.Param(
                                     Ast.TypeRef.borrowed(element, true),
@@ -1035,8 +1032,7 @@ public final class OwnershipChecker {
                                     original.structural(),
                                     false);
                             Ast.LambdaExpr protectedLambda = new Ast.LambdaExpr(
-                                    List.of(protectedParam), lambda.expressionBody(), lambda.blockBody(),
-                                    lambda.nonLexical(), lambda.returnType(), false);
+                                    List.of(protectedParam), lambda.expressionBody(), lambda.blockBody());
                             mutexCriticalSectionDepth++;
                             try {
                                 checkLambda(protectedLambda, scope, null);
@@ -1351,19 +1347,12 @@ public final class OwnershipChecker {
     }
 
     private ValueInfo checkLambda(Ast.LambdaExpr lambda, Scope outer, String recursiveBinding) {
-        boolean nonLexical = lambda.nonLexical();
+        boolean nonLexical = lambda.nonLexical() || outer.descendantsNonLexical();
         CaptureSet captures = nonLexical ? new CaptureSet() : collectCaptures(lambda, outer, recursiveBinding);
         Scope closure = new Scope(null, nonLexical);
 
         for (Capture capture : captures.values.values()) {
             VarState source = capture.source;
-            // Async callbacks execute on a separately scheduled carrier. Until
-            // sendability proofs can transfer owned heaps, prevent aliases of
-            // mutable or move-only parent state from crossing that boundary.
-            if (lambda.async() && (capture.write || source.mutable || source.kind != ValueKind.COPY)) {
-                throw error("async closure cannot capture mutable/non-Copy value '" + capture.name
-                        + "' across a task boundary; pass an owned/sendable argument instead");
-            }
             source.debugName = capture.name;
             requireUsable(source, capture.name, capture.write);
 

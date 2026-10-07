@@ -1,7 +1,5 @@
 package dev.oreslang.runtime;
 
-import dev.oreslang.OresLanguage;
-import dev.oreslang.compiler.OresCompiler;
 import dev.oreslang.compiler.IncrementalCompiler;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.Source;
@@ -23,7 +21,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * parsed/type/capability checked, then assigned a fresh context. The trusted
  * supervisor explicitly starts the generation after activation.
  *
- * No JNI/FFI or OS dynamic-library loading is required.
+ * Trusted/private contexts share one process code image and Graal code cache.
+ * Adversarial contexts are private by default and may reuse a process-owned
+ * immutable image only after an exact supervisor approval.
  */
 public final class HotReloadManager implements AutoCloseable {
     private static final int MAX_ADVERSARIAL_SOURCE_CHARS = 1_048_576;
@@ -48,12 +48,9 @@ public final class HotReloadManager implements AutoCloseable {
             IsolatePolicy supervisorPolicy,
             IsolatePolicy guestPolicy,
             ExecutionProfile executionProfile) {
-        this.supervisorPolicy =
-                java.util.Objects.requireNonNull(supervisorPolicy);
-        this.guestPolicy =
-                java.util.Objects.requireNonNull(guestPolicy);
-        this.executionProfile =
-                java.util.Objects.requireNonNull(executionProfile);
+        this.supervisorPolicy = java.util.Objects.requireNonNull(supervisorPolicy);
+        this.guestPolicy = java.util.Objects.requireNonNull(guestPolicy);
+        this.executionProfile = java.util.Objects.requireNonNull(executionProfile);
         this.supervisorPolicy.require(
                 IsolatePolicy.Capability.HOT_CODE_LOAD,
                 "HotReloadManager");
@@ -76,25 +73,51 @@ public final class HotReloadManager implements AutoCloseable {
      */
     public synchronized Generation load(String name, String sourceText) {
         validateAdmissionInputs(name, sourceText);
-        OresCompiler.validateForIsolate(sourceText, guestPolicy);
-        return stage(name, digest(sourceText), sourceText);
+        boolean shared = canShare(name, sourceText);
+        if (!shared) {
+            // Do not let matching bytes/path attach unapproved adversarial code
+            // to the process-wide immutable AST/code-image cache.
+            CapabilityChecker.check(
+                    dev.oreslang.compiler.OresCompiler.parseAndTypeCheck(sourceText),
+                    guestPolicy);
+            return stage(name, digest(sourceText), sourceText, false);
+        }
+
+        try (SharedCodeRegistry.Lease image =
+                     SharedCodeRegistry.process().acquire(name, sourceText)) {
+            CapabilityChecker.check(image.checkedProgram(), guestPolicy);
+            return stage(name, image.sha256(), sourceText, true);
+        }
     }
 
     /**
-     * Reuses an incrementally compiled unit. Static compilation work is reused,
-     * while capability admission is deliberately repeated for the destination
-     * isolate because authority belongs to the runtime policy, not the cache.
+     * Reuses an incrementally compiled unit. Static compilation work is reused
+     * only when this destination is allowed to join the shared image.
      */
     public synchronized Generation load(IncrementalCompiler.CompiledUnit unit) {
         java.util.Objects.requireNonNull(unit, "unit");
         validateAdmissionInputs(unit.unitId(), unit.sourceText());
-        CapabilityChecker.check(unit.program(), guestPolicy);
-        return stage(unit.unitId(), unit.sourceDigest(), unit.sourceText());
+        boolean shared = canShare(unit.unitId(), unit.sourceText());
+
+        if (shared) {
+            CapabilityChecker.check(unit.program(), guestPolicy);
+        } else {
+            // Never trust a compiled-unit object from another trust domain as
+            // the admission artifact for unapproved adversarial execution.
+            CapabilityChecker.check(
+                    dev.oreslang.compiler.OresCompiler.parseAndTypeCheck(unit.sourceText()),
+                    guestPolicy);
+        }
+        return stage(unit.unitId(), unit.sourceDigest(), unit.sourceText(), shared);
     }
 
-    private void validateAdmissionInputs(
-            String codeUnitId,
-            String sourceText) {
+    private boolean canShare(String codeUnitId, String sourceText) {
+        return !guestPolicy.adversarial()
+                || SharedCodeRegistry.process()
+                        .approvedForAdversarialSharing(codeUnitId, sourceText);
+    }
+
+    private void validateAdmissionInputs(String codeUnitId, String sourceText) {
         java.util.Objects.requireNonNull(codeUnitId, "codeUnitId");
         java.util.Objects.requireNonNull(sourceText, "sourceText");
         if (codeUnitId.isBlank()) {
@@ -113,27 +136,91 @@ public final class HotReloadManager implements AutoCloseable {
         }
     }
 
-    private Generation stage(String codeUnitId, String sourceDigest, String sourceText) {
+    /**
+     * Supervisor-only exact grant. Approval is bound to code-unit identity and
+     * SHA-256 and is rejected unless the code also passes the untrusted policy.
+     */
+    public void approveGuestCodeSharing(String codeUnitId, String sourceText) {
+        if (!guestPolicy.adversarial()) {
+            throw new IllegalStateException(
+                    "guest code-sharing approval is only required for adversarial guests");
+        }
+        SharedCodeRegistry.process().approveForAdversarialSharing(
+                supervisorPolicy, codeUnitId, sourceText);
+    }
+
+    public void revokeGuestCodeSharing(String codeUnitId, String sourceText) {
+        if (!guestPolicy.adversarial()) {
+            throw new IllegalStateException(
+                    "guest code-sharing revocation is only required for adversarial guests");
+        }
+        SharedCodeRegistry.process().revokeForAdversarialSharing(
+                supervisorPolicy, codeUnitId, sourceText);
+    }
+
+    private Generation stage(
+            String codeUnitId,
+            String sourceDigest,
+            String sourceText,
+            boolean shareCodeImage) {
         if (guestPolicy.adversarial()
                 && generations.size() >= MAX_ADVERSARIAL_LIVE_GENERATIONS) {
             throw new IllegalStateException(
                     "adversarial hot-load live generation limit exceeded: "
                             + MAX_ADVERSARIAL_LIVE_GENERATIONS);
         }
+
         long id = sequence.incrementAndGet();
         Context context =
                 guestPolicy.restrictedContextBuilder(executionProfile).build();
+        SharedCodeRegistry.Lease codeImage = null;
         try {
-            Source source = Source.newBuilder(OresLanguage.ID, sourceText, codeUnitId)
-                    .mimeType(OresLanguage.MIME_TYPE)
-                    .buildLiteral();
-            Generation generation = new Generation(id, codeUnitId, sourceDigest, context, source, executionProfile);
+            Source source;
+            if (shareCodeImage) {
+                codeImage = SharedCodeRegistry.process().acquire(codeUnitId, sourceText);
+                if (!codeImage.sha256().equals(sourceDigest)) {
+                    throw new IllegalArgumentException(
+                            "compiled code-unit source digest mismatch");
+                }
+                source = codeImage.source();
+            } else {
+                if (!digest(sourceText).equals(sourceDigest)) {
+                    throw new IllegalArgumentException(
+                            "compiled code-unit source digest mismatch");
+                }
+                // cached(false) is defense in depth: even if a future embedder
+                // accidentally gives adversarial contexts a shared Engine,
+                // unapproved source still cannot enter that Engine's code cache.
+                source = Source.newBuilder(
+                                dev.oreslang.OresLanguage.ID,
+                                sourceText,
+                                codeUnitId)
+                        .mimeType(dev.oreslang.OresLanguage.MIME_TYPE)
+                        .cached(false)
+                        .buildLiteral();
+            }
+
+            Generation generation = new Generation(
+                    id,
+                    codeUnitId,
+                    sourceDigest,
+                    context,
+                    source,
+                    codeImage,
+                    executionProfile,
+                    shareCodeImage);
             generations.put(id, generation);
             activeByCodeUnit.put(codeUnitId, generation);
             active.set(generation);
             return generation;
-        } catch (RuntimeException failure) {
-            context.close(true);
+        } catch (RuntimeException | Error failure) {
+            try {
+                context.close(true);
+            } catch (RuntimeException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            } finally {
+                if (codeImage != null) codeImage.close();
+            }
             throw failure;
         }
     }
@@ -178,7 +265,8 @@ public final class HotReloadManager implements AutoCloseable {
 
     private static String digest(String text) {
         try {
-            byte[] hash = MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8));
+            byte[] hash = MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(hash);
         } catch (Exception impossible) {
             throw new IllegalStateException(impossible);
@@ -191,17 +279,29 @@ public final class HotReloadManager implements AutoCloseable {
         private final String sha256;
         private final Context context;
         private final Source source;
+        private final SharedCodeRegistry.Lease codeImage;
         private final ExecutionProfile executionProfile;
+        private final boolean sharedCodeImage;
         private final AtomicBoolean started = new AtomicBoolean();
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        private Generation(long id, String codeUnitId, String sha256, Context context, Source source, ExecutionProfile executionProfile) {
+        private Generation(
+                long id,
+                String codeUnitId,
+                String sha256,
+                Context context,
+                Source source,
+                SharedCodeRegistry.Lease codeImage,
+                ExecutionProfile executionProfile,
+                boolean sharedCodeImage) {
             this.id = id;
             this.codeUnitId = codeUnitId;
             this.sha256 = sha256;
             this.context = context;
             this.source = source;
+            this.codeImage = codeImage;
             this.executionProfile = executionProfile;
+            this.sharedCodeImage = sharedCodeImage;
         }
 
         public long id() { return id; }
@@ -210,13 +310,16 @@ public final class HotReloadManager implements AutoCloseable {
         public Context context() { return context; }
         public Source source() { return source; }
         public ExecutionProfile executionProfile() { return executionProfile; }
+        public boolean sharedCodeImage() { return sharedCodeImage; }
         public boolean started() { return started.get(); }
         public boolean closed() { return closed.get(); }
 
         /** Starts the staged generation exactly once. */
         public Value start() {
             if (closed.get()) throw new IllegalStateException("generation is closed");
-            if (!started.compareAndSet(false, true)) throw new IllegalStateException("generation already started");
+            if (!started.compareAndSet(false, true)) {
+                throw new IllegalStateException("generation already started");
+            }
             try {
                 return context.eval(source);
             } catch (RuntimeException failure) {
@@ -227,7 +330,13 @@ public final class HotReloadManager implements AutoCloseable {
 
         @Override
         public void close() {
-            if (closed.compareAndSet(false, true)) context.close(true);
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    context.close(true);
+                } finally {
+                    if (codeImage != null) codeImage.close();
+                }
+            }
         }
     }
 }

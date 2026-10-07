@@ -1087,6 +1087,12 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorId id;
         private final ActorKind kind;
         private final AtomicReference<Throwable> terminationCause = new AtomicReference<>();
+        // Observer Futures are runtime-owned: awaiting is allowed, cancelling
+        // either observer cannot cancel the actor or fabricate its lifecycle.
+        private final OresFuture<Void> readyFuture =
+                new OresFuture<>(() -> false, () -> { });
+        private final OresFuture<Void> doneFuture =
+                new OresFuture<>(() -> false, () -> { });
 
         private ActorRef(ActorId id, ActorKind kind) {
             this.id = id;
@@ -1098,6 +1104,25 @@ public final class ActorRuntime implements AutoCloseable {
         private boolean ownedBy(ActorRuntime runtime) { return ActorRuntime.this == runtime; }
         public boolean isAlive() { return ActorRuntime.this.isAlive(this); }
         public Optional<Throwable> failure() { return Optional.ofNullable(terminationCause.get()); }
+
+        /**
+         * Actor initialization barrier. Accessing ready starts an unstarted
+         * actor on its own dispatcher, even if no first message was sent.
+         * Constructor/factory failures complete this Future exceptionally.
+         */
+        public OresFuture<Void> ready() {
+            ActorCell<?> cell = actors.get(id);
+            if (cell != null && !cell.stopped.get()) cell.schedule();
+            return readyFuture;
+        }
+
+        /**
+         * Settles only after actor finalization and the TurnExecutor exit.
+         * Exceptional termination is reported as a failed Future.
+         */
+        public OresFuture<Void> done() {
+            return doneFuture;
+        }
 
         public boolean awaitTermination(long timeout, TimeUnit unit)
                 throws InterruptedException {
@@ -4811,6 +4836,14 @@ public final class ActorRuntime implements AutoCloseable {
             }
             unregisterActor(this);
             if (parent != null) parent.childFinalized(this);
+            if (!ref.readyFuture.isDone()) {
+                ref.readyFuture.failFromRuntime(
+                        new ActorTerminatedException(
+                                ref.id(), kind, ref.terminationCause.get()));
+            }
+            Throwable terminal = ref.terminationCause.get();
+            if (terminal == null) ref.doneFuture.completeFromRuntime(null);
+            else ref.doneFuture.failFromRuntime(terminal);
             finalizedFuture.completeFromRuntime(null);
             lifecycleLock.notifyAll();
         }
@@ -4978,6 +5011,13 @@ public final class ActorRuntime implements AutoCloseable {
                         validatePrivateBehaviorState(ref.id(), created);
                     }
                     behavior = created;
+                    synchronized (lifecycleLock) {
+                        if (stopped.get() || forceKillFenced) {
+                            ref.readyFuture.failFromRuntime(terminated(ref));
+                        } else {
+                            ref.readyFuture.completeFromRuntime(null);
+                        }
+                    }
                 }
 
                 int processed = 0;

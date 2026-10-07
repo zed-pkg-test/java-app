@@ -11,6 +11,7 @@ import dev.oreslang.runtime.ActorRuntime;
 import dev.oreslang.runtime.AsyncRuntime;
 import dev.oreslang.runtime.OresContext;
 import dev.oreslang.runtime.OresScheduler;
+import dev.oreslang.runtime.SharedCodeRegistry;
 import org.graalvm.polyglot.SandboxPolicy;
 
 import java.nio.file.InvalidPathException;
@@ -22,10 +23,16 @@ import java.nio.file.Path;
         version = "0.1.0",
         defaultMimeType = OresLanguage.MIME_TYPE,
         characterMimeTypes = OresLanguage.MIME_TYPE,
-        contextPolicy = TruffleLanguage.ContextPolicy.EXCLUSIVE,
+        contextPolicy = TruffleLanguage.ContextPolicy.SHARED,
         sandbox = SandboxPolicy.UNTRUSTED,
         website = "https://github.com/ores-truffle-oreslang/oreslang-source.java")
 public final class OresLanguage extends TruffleLanguage<OresContext> {
+    /*
+     * SHARED is safe only because language-global state is immutable and all
+     * mutable execution state lives in OresContext. Parsed roots obtain their
+     * context through ContextReference (OresContext.get(node)); they never
+     * retain an actor/context in the shared AST.
+     */
     public static final String ID = "ores";
     public static final String MIME_TYPE = "application/x-oreslang";
 
@@ -65,7 +72,6 @@ public final class OresLanguage extends TruffleLanguage<OresContext> {
     protected CallTarget parse(ParsingRequest request) {
         var source = request.getSource();
         String text = source.getCharacters().toString();
-        Ast.Program program = OresCompiler.parseAndTypeCheck(text);
         String codeUnitId = source.getPath();
         if (codeUnitId == null || codeUnitId.isBlank()) {
             codeUnitId = source.getName();
@@ -77,6 +83,14 @@ public final class OresLanguage extends TruffleLanguage<OresContext> {
             }
         }
         if (codeUnitId == null || codeUnitId.isBlank()) codeUnitId = "<anonymous>";
+        // A shared Engine + SHARED language policy lets Graal reuse this parsed root
+        // and optimized code across trusted/private contexts. The root contains
+        // only immutable program data; evaluator/module state lives in OresContext.
+        // This callback itself is the cache-miss signal. With one explicit
+        // Engine + ContextPolicy.SHARED, Graal should invoke parse once for an
+        // admitted Source and reuse the resulting call target in later contexts.
+        SharedCodeRegistry.process().recordParse(codeUnitId, text);
+        Ast.Program program = OresCompiler.parseAndTypeCheck(text);
         RootCallTarget evaluator = new OresEvalRootNode(this, program, codeUnitId).getCallTarget();
         return new OresInteropRootNode(this, evaluator).getCallTarget();
     }

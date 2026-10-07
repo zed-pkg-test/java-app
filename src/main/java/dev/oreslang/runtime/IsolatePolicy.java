@@ -196,6 +196,16 @@ public record IsolatePolicy(
                 .arguments(OresLanguage.ID, applicationArguments(profile, permissions, permissionCheckMode));
 
         /*
+         * Trusted and PRIVATE/isolated semantic actors share one explicit
+         * process Engine. Graal scopes AST/optimized-code sharing to an Engine.
+         * Adversarial contexts keep an implicit engine because spawnIsolate()
+         * applies to that boundary and must not join the trusted code engine.
+         */
+        if (!adversarial) {
+            builder.engine(ProcessCodeEngine.shared());
+        }
+
+        /*
          * Graal's engine.IsolateLibrary option is experimental in 25.x. Opt in
          * only when the embedding process explicitly supplies a polyglot
          * isolate library; ordinary strict/adversarial contexts remain on the

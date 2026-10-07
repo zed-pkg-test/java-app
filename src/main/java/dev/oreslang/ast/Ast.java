@@ -821,7 +821,7 @@ public final class Ast {
         public ObjectExpr { fields = List.copyOf(fields); }
     }
 
-    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType, boolean async) implements Expr {
+    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) implements Expr {
         public LambdaExpr {
             parameters = List.copyOf(parameters);
             blockBody = blockBody == null ? null : List.copyOf(blockBody);
@@ -831,13 +831,7 @@ public final class Ast {
             }
         }
         public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody) {
-            this(parameters, expressionBody, blockBody, false, null, false);
-        }
-        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) {
-            this(parameters, expressionBody, blockBody, nonLexical, null, false);
-        }
-        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType) {
-            this(parameters, expressionBody, blockBody, nonLexical, returnType, false);
+            this(parameters, expressionBody, blockBody, false);
         }
     }
 }

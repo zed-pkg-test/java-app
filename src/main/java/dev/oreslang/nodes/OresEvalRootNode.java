@@ -47,7 +47,6 @@ public final class OresEvalRootNode extends RootNode {
 
     private final Ast.Program program;
     private final String codeUnitId;
-    private volatile Evaluator evaluator;
 
     public OresEvalRootNode(OresLanguage language, Ast.Program program) {
         this(language, program, "<anonymous>");
@@ -106,13 +105,13 @@ public final class OresEvalRootNode extends RootNode {
     }
 
     private Evaluator evaluator(OresContext context) {
-        Evaluator current = evaluator;
-        if (current != null) return current;
-        synchronized (this) {
-            current = evaluator;
-            if (current == null) evaluator = current = new Evaluator(program, context, codeUnitId);
-            return current;
-        }
+        /*
+         * This RootNode may be parse-cached and executed by many contexts.
+         * Never retain an OresContext or mutable evaluator in the shared AST.
+         * Each context owns exactly one Evaluator for this shared code root.
+         */
+        return context.codeExecutionState(
+                this, () -> new Evaluator(program, context, codeUnitId));
     }
 
     private static boolean isControl(Object[] arguments, String command) {
@@ -3435,8 +3434,7 @@ public final class OresEvalRootNode extends RootNode {
                 Env env,
                 SourceValueCont continuation) {
             if (call.callee() instanceof Ast.NameExpr name
-                    && env.lookup(name.name()) == Env.MISSING
-                    && !env.outerDeclarationsBlocked()) {
+                    && env.lookup(name.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(name.name(), call.arguments().size());
                 if (direct != null) {
                     evalSuspendableArguments(
@@ -4806,12 +4804,21 @@ public final class OresEvalRootNode extends RootNode {
             throw new ReturnSignal(eval(value, env));
         }
 
+        private void requireExplicitClassCallableImport(Env env, String name) {
+            if (env.accessClass() != null) {
+                throw new IllegalArgumentException(
+                        "class '" + env.accessClass().name()
+                                + "' cannot implicitly access file/module callable '"
+                                + name + "'; declare an explicit import or use self");
+            }
+        }
+
         private Invocation prepareInvocation(Ast.CallExpr call, Env env) {
             if (call.callee() instanceof Ast.NameExpr directName
-                    && env.lookup(directName.name()) == Env.MISSING
-                    && !env.outerDeclarationsBlocked()) {
+                    && env.lookup(directName.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(directName.name(), call.arguments().size());
                 if (direct != null) {
+                    requireExplicitClassCallableImport(env, directName.name());
                     List<Object> args = evaluateArguments(call.arguments(), env);
                     return functionInvocation(direct, args);
                 }
@@ -5112,19 +5119,15 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 Invokable hostFunction = hostFunctions.get(name.name());
                 if (hostFunction != null) return hostFunction;
-                Object imported = importedValue(name.name());
-                if (imported != Env.MISSING) return imported;
-                if (env.outerDeclarationsBlocked()) {
-                    throw new IllegalArgumentException(
-                            "nlex callable cannot resolve outer declaration " + name.name()
-                                    + "; import it explicitly or pass it as an argument");
-                }
                 Ast.ModuleDecl module = modules.get(name.name());
                 if (module != null) return new ModuleFacade(this, module);
                 Ast.ClassDecl klass = findClass(name.name());
                 if (klass != null) return new ClassFacade(this, klass);
+                Object imported = importedValue(name.name());
+                if (imported != Env.MISSING) return imported;
                 Ast.FunctionDecl fn = findSingleFunction(name.name());
                 if (fn != null) {
+                    requireExplicitClassCallableImport(env, name.name());
                     if (fn.actorKind() != Ast.ActorKind.NONE) {
                         throw new IllegalArgumentException("actor callable " + fn.name()
                                 + " is an actor entry point, not a first-class callable value");
@@ -5421,9 +5424,9 @@ public final class OresEvalRootNode extends RootNode {
                 return dynamicKeys ? new DynamicStructValue(result) : Map.copyOf(result);
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
-                boolean nonLexical = lambda.nonLexical();
+                boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
-                TailInvokable bodyCallable = tailCallable(args -> {
+                return tailCallable(args -> {
                     if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
                     Env local = new Env(captured, nonLexical);
                     for (int i = 0; i < lambda.parameters().size(); i++) {
@@ -5448,17 +5451,6 @@ public final class OresEvalRootNode extends RootNode {
                     } catch (BreakSignal | ContinueSignal signal) {
                         throw new IllegalStateException("loop control cannot cross a lambda boundary", signal);
                     }
-                });
-                if (!lambda.async()) return bodyCallable;
-                // Async RHS callbacks are first-class tasks.  The runtime-owned
-                // carrier enters guest code through the context's turn executor;
-                // it must never occupy an actor dispatcher worker while awaiting.
-                return tailCallable(args -> {
-                    if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
-                    List<?> supplied = detachAsyncArguments(args);
-                    return context.asyncRuntime().submit(() -> detachAsyncValue(
-                            invoke(invokableInvocation(bodyCallable, supplied)),
-                            new IdentityHashMap<>()));
                 });
             }
             throw new IllegalArgumentException("unsupported expression " + expr);
@@ -7325,7 +7317,6 @@ public final class OresEvalRootNode extends RootNode {
         private static final Object MISSING = new Object();
         private final Env parent;
         private final boolean descendantsNonLexical;
-        private final boolean outerDeclarationsBlocked;
         private final Ast.ClassDecl accessClass;
         private final OresObject constructingObject;
         private final Map<String, Slot> slots = new HashMap<>();
@@ -7353,13 +7344,10 @@ public final class OresEvalRootNode extends RootNode {
                 OresObject constructingObject) {
             this.parent = parent;
             this.descendantsNonLexical = descendantsNonLexical;
-            this.outerDeclarationsBlocked = descendantsNonLexical
-                    || (parent != null && parent.outerDeclarationsBlocked);
             this.accessClass = accessClass;
             this.constructingObject = constructingObject;
         }
         private boolean descendantsNonLexical() { return descendantsNonLexical; }
-        private boolean outerDeclarationsBlocked() { return outerDeclarationsBlocked; }
         private Ast.ClassDecl accessClass() { return accessClass; }
         private boolean canInitialize(OresObject object) { return constructingObject == object; }
         private void define(String name, Object value, Ast.BindingKind kind) {
