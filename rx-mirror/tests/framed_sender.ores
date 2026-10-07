@@ -1,0 +1,21 @@
+import * as rx_channels from '../src/rx.ores';
+import class FramedSender, Observable, Subscription, StreamEvent from '../src/rx.ores';
+pub async fnc main(): void {
+  val Channel<Option<int>> frames = Channel.new<Option<int>>(2);
+  val FramedSender<int> writer = rx_channels.framed_sender(frames);
+  val Future<void> sent = writer.send(7);
+  await sent;
+  val Future<void> closed = writer.complete();
+  await closed;
+  stdio.println(writer.is_complete());
+  val Observable<int> stream = rx_channels.from_channel(frames);
+  val Subscription<int> sub = stream.subscribe();
+  val StreamEvent<int> item = sub.next_event();
+  stdio.println(item.is_next());
+  stdio.println(item.value.unwrap());
+  val StreamEvent<int> end = sub.next_event();
+  stdio.println(end.is_complete());
+  stdio.println(sub.is_complete());
+  stdio.println(sub.cancel());
+  return;
+}
