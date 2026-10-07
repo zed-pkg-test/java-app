@@ -268,10 +268,28 @@ pub fnc object_find_index(Value object, Utf8Text key): int {
     return -1;
   fi
 
+  // The lookup key is owned by this function: never transfer it repeatedly
+  // to a by-value equality callable from inside a loop.
+  val List<int> search_bytes = key.bytes;
   let int i = 0;
   for const member of object.object_value do
-    if text_equal(member.key, key) then
-      return i;
+    val List<int> current_bytes = member.key.bytes;
+    if current_bytes.length == search_bytes.length then
+      let bool equal = true;
+      let int j = 0;
+      loop do
+        if j >= search_bytes.length then
+          break;
+        fi
+        if current_bytes[j] != search_bytes[j] then
+          equal = false;
+          break;
+        fi
+        j = j + 1;
+      done
+      if equal then
+        return i;
+      fi
     fi
     i = i + 1;
   done
