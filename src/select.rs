@@ -183,7 +183,7 @@ pub(crate) fn normalize(source: &str) -> Result<String, FormatError> {
                 ));
             }
 
-            let (mut body, header_end) = if readiness_without_colon {
+            let (body, header_end) = if readiness_without_colon {
                 // timeout/cancelled have no ':' separator and the compiler
                 // requires a braced body. Fail closed rather than guessing
                 // where an unbraced cancellation expression ends.
