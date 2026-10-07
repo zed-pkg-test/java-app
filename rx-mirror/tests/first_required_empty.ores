@@ -1,0 +1,8 @@
+import * as rx_channels from '../src/rx.ores';
+import class Observable from '../src/rx.ores';
+pub async fnc main(): void {
+  val Observable<int> stream = rx_channels.from_values([]);
+  val int first = rx_channels.first_required(stream);
+  stdio.println(first);
+  return;
+}
