@@ -129,7 +129,7 @@ pub fnc run_json_tests(): void {
   );
   val Result<DecodedValue, DecodeError> number_exact = decode(
     new List<int>(49),
-    one_number_byte
+    rt borrow one_number_byte
   );
   require_true(!number_exact.is_err(), "JSON number at max_number_bytes must succeed");
 
