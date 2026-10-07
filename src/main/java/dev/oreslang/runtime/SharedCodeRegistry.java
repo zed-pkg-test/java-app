@@ -116,25 +116,6 @@ public final class SharedCodeRegistry {
     }
 
     /**
-     * Acquire a shared image for adversarial/untrusted execution only when the
-     * supervisor has explicitly approved this exact code identity and digest.
-     * This method is intentionally fail-closed; ordinary acquire() is for the
-     * trusted/private side of the runtime boundary.
-     */
-    public Lease acquireUntrusted(
-            String codeUnitId,
-            String sourceText,
-            UntrustedCodeShareAllowlist allowlist) {
-        Objects.requireNonNull(allowlist, "allowlist");
-        if (!allowlist.permits(codeUnitId, sourceText)) {
-            throw new SecurityException(
-                    "untrusted code image is not allowlisted for process-memory sharing: "
-                            + codeUnitId);
-        }
-        return acquire(codeUnitId, sourceText);
-    }
-
-    /**
      * Return a cached immutable, checked definition tree for a currently pinned
      * image, or null if this source was not admitted through the host registry.
      * The caller still must perform its destination-specific capability checks.
