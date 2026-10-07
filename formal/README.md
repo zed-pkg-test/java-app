@@ -18,6 +18,8 @@ This directory documents the executable formal-methods layer for Oreslang runtim
 
 `FormalStructuredCancellationModelCheckTest` models a three-level structured actor tree and proves downward-only lifecycle authority, cancellation cascade, bottom-up termination, and atomic whole-subtree force kill.
 
+`FormalProxyLockLivenessModelCheckTest` keeps blocking actor-side proxy lock acquisition as an executable starvation counterexample and models the cooperative acquisition path: waiter registration releases the carrier, unlock reserves the grant before continuation re-entry, and cancellation removes pending waiters without resurrection.
+
 The checked invariants are:
 
 1. **At-most-once protocol settlement.** A reply is completed or cancelled, never both and never twice.
