@@ -23,6 +23,24 @@ final class AsyncChannelBoundaryTest {
     }
 
     @Test
+    void channelChunkLengthRemainsNumericForBoundsChecks() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                async fnc remaining(Channel<Option<List<int>>> input): int {
+                  val Option<List<int>> frame = await (nb readch input);
+                  if frame.is_none() then
+                    return 0;
+                  fi
+                  val List<int> bytes = frame.unwrap();
+                  val int remaining = 256 - bytes.length;
+                  if bytes.length > 256 then
+                    return -1;
+                  fi
+                  return remaining;
+                }
+                """)));
+    }
+
+    @Test
     void asyncChannelsRejectCallablePayloadsTransitively() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 async fnc bad(Channel<Fnc<int, int>> input): void {
