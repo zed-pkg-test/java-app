@@ -20,7 +20,7 @@ fnc marked(Channel<bool> marker): bool {
 // A source-level notification view: cancelled is distinct from natural end.
 define class StreamEvent<T> as
   val String kind;
-  val Option<T> value;
+  pub val Option<T> value;
   constructor(String kind, Option<T> value) {
     self.kind = kind;
     self.value = value;
