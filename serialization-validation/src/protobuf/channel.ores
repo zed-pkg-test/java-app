@@ -12,7 +12,7 @@ pub async fnc decode_protobuf_from_channel(
   fi
 
   val Future<ByteStreamResult> collecting =
-    collect_bytes_from_channel(input, options.max_input_bytes);
+    collect_bytes_from_channel(rt take input, options.max_input_bytes);
   val ByteStreamResult collected = await collecting;
 
   if !collected.ok then

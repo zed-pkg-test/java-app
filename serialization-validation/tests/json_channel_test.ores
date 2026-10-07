@@ -14,7 +14,7 @@ pub async fnc run_json_channel_tests(): void {
   writech input, eof;
 
   val Future<Result<DecodedValue, DecodeError>> decode_task =
-    decode_one_from_channel(input, default_decode_options());
+    decode_one_from_channel(rt take input, default_decode_options());
   val Result<DecodedValue, DecodeError> decoded = await decode_task;
 
   require_true(decoded.is_err() == false, "channel JSON should decode");
@@ -29,7 +29,7 @@ pub async fnc run_json_channel_tests(): void {
   writech truncated, truncated_eof;
 
   val Future<Result<DecodedValue, DecodeError>> failed_task =
-    decode_one_from_channel(truncated, default_decode_options());
+    decode_one_from_channel(rt take truncated, default_decode_options());
   val Result<DecodedValue, DecodeError> failed = await failed_task;
   require_true(failed.is_err(), "EOF must reject truncated channel JSON");
 
@@ -39,7 +39,7 @@ pub async fnc run_json_channel_tests(): void {
   writech smuggled, Some(new List<int>(116, 114, 117, 101));
   writech smuggled, eof;
   val Future<Result<DecodedValue, DecodeError>> smuggled_task =
-    decode_one_from_channel(smuggled, default_decode_options());
+    decode_one_from_channel(rt take smuggled, default_decode_options());
   val Result<DecodedValue, DecodeError> smuggled_result = await smuggled_task;
   require_true(smuggled_result.is_err(), "second JSON frame must reject rather than be silently dropped");
 
@@ -49,7 +49,7 @@ pub async fnc run_json_channel_tests(): void {
   writech padded, Some(new List<int>(32, 10, 13, 9));
   writech padded, eof;
   val Future<Result<DecodedValue, DecodeError>> padded_task =
-    decode_one_from_channel(padded, default_decode_options());
+    decode_one_from_channel(rt take padded, default_decode_options());
   val Result<DecodedValue, DecodeError> padded_result = await padded_task;
   require_true(!padded_result.is_err(), "trailing JSON whitespace through EOF is valid");
 
@@ -59,7 +59,7 @@ pub async fnc run_json_channel_tests(): void {
   writech root_number, Some(new List<int>(50));
   writech root_number, eof;
   val Future<Result<DecodedValue, DecodeError>> number_task =
-    decode_one_from_channel(root_number, default_decode_options());
+    decode_one_from_channel(rt take root_number, default_decode_options());
   val Result<DecodedValue, DecodeError> number_result = await number_task;
   require_true(!number_result.is_err(), "terminal JSON root number must decode at EOF");
 
@@ -68,7 +68,7 @@ pub async fnc run_json_channel_tests(): void {
   );
   val Channel<Option<List<int>>> unframed = Channel.new<Option<List<int>>>(1);
   val Future<Result<DecodedValue, DecodeError>> framing_task =
-    decode_one_from_channel(unframed, trailing_allowed);
+    decode_one_from_channel(rt take unframed, trailing_allowed);
   val Result<DecodedValue, DecodeError> framing_rejected = await framing_task;
   require_true(
     framing_rejected.is_err(),
