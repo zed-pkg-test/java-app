@@ -197,9 +197,12 @@ final class PatternMatchingHardeningTest {
     }
 
     @Test
-    void matchRequiresOverOnAndExhaustiveness() {
-        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
-                fnc bad(Option<int> value): int {
+    void canonicalMatchRequiresOnAndExhaustivenessWhileLegacyMatchRemainsAccepted() {
+        // Compatibility: the pre-over statement grammar remains accepted so
+        // existing Oreslang does not break merely because canonical match
+        // gained explicit "over" / "on" boundaries.
+        assertDoesNotThrow(() -> Parser.parse("""
+                fnc legacy(Option<int> value): int {
                   match value
                     Some(inner) -> { return inner; }
                   end

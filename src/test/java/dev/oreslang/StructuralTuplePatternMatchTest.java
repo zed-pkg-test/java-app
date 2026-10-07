@@ -179,11 +179,12 @@ final class StructuralTuplePatternMatchTest {
                   }
 
                   pub fnc main(): void {
-                    val Base value = new Candidate();
-                    val Dog dog = new Dog();
-                    stdio.println(named(value));
-                    stdio.println(inline(value));
-                    stdio.println(tupled(value, dog));
+                    // Function arguments obey ownership transfer. Use fresh
+                    // values here so this test isolates structural/tuple
+                    // matching rather than accidentally testing reuse-after-move.
+                    stdio.println(named(new Candidate()));
+                    stdio.println(inline(new Candidate()));
+                    stdio.println(tupled(new Candidate(), new Dog()));
                     return;
                   }
                 end
