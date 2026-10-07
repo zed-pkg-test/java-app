@@ -96,11 +96,10 @@ define class Subscription<T> as
     if frame.is_some(); then
       return new StreamEvent<T>("next", frame);
     fi
-    val Option<T> empty = None;
     if marked(self.cancelled); then
-      return new StreamEvent<T>("cancelled", empty);
+      return new StreamEvent<T>("cancelled", None);
     fi
-    return new StreamEvent<T>("complete", empty);
+    return new StreamEvent<T>("complete", None);
   }
 
   pub cancel(): bool {
