@@ -484,6 +484,9 @@ pub fnc first<T>(Observable<T> source): Option<T> {
   val Subscription<T> sub = source.subscribe();
   try {
     return sub.next();
+  } catch (err) {
+    val Result<Option<T>, Object> failure = Err(err);
+    return failure.expect("rx_channels.first upstream failed");
   } finally {
     sub.cancel();
   }
