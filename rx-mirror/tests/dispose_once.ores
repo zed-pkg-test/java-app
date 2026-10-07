@@ -14,8 +14,8 @@ end
 pub async fnc main(): void {
   val Channel<int> reports = Channel.new<int>(2);
   val CountingSubscription sub = new CountingSubscription(reports);
-  val StreamEvent<int> end = sub.next_event();
-  stdio.println(end.is_complete());
+  val StreamEvent<int> terminal_event = sub.next_event();
+  stdio.println(terminal_event.is_complete());
   stdio.println(sub.cancel());
   stdio.println((readch reports) == 1);
   stdio.println((try readch reports).is_none());
