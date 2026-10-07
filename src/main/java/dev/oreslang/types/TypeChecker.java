@@ -2020,6 +2020,13 @@ public final class TypeChecker {
             if (mutexMember != null) return mutexMember;
 
             Type selectedReceiver = deref(receiver);
+            // Array/list and tuple lengths are native integer properties.
+            // Returning Unknown here makes safe bounds checks and subtraction
+            // fail typechecking even when the receiver is statically typed.
+            if ((selectedReceiver instanceof ListType || selectedReceiver instanceof Tuple)
+                    && member.member().equals("length")) {
+                return Primitive.INT;
+            }
             if (selectedReceiver instanceof Named selected
                     && selected.name().equals("SelectResult")) {
                 return switch (member.member()) {
