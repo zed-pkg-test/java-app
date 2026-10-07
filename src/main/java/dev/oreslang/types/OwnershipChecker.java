@@ -41,7 +41,6 @@ public final class OwnershipChecker {
     private final Set<String> ambiguousClasses = new HashSet<>();
     private int mutexCriticalSectionDepth;
     private int loopDepth;
-    private boolean currentAsyncGenerator;
 
     private OwnershipChecker(Ast.Program program) {
         index(program);
@@ -86,14 +85,8 @@ public final class OwnershipChecker {
         for (Ast.Param param : fn.parameters()) {
             scope.define(param.name(), stateForParam(param));
         }
-        boolean previousAsyncGenerator = currentAsyncGenerator;
-        currentAsyncGenerator = fn.generator() && fn.async();
-        try {
-            checkBlock(fn.body(), scope, fn.returnType());
-        } finally {
-            currentAsyncGenerator = previousAsyncGenerator;
-            scope.close();
-        }
+        checkBlock(fn.body(), scope, fn.returnType());
+        scope.close();
     }
 
     private Ast.ClassDecl initializingClass;
@@ -232,13 +225,8 @@ public final class OwnershipChecker {
                 throw error("cannot yield while a borrow is live; suspended generator frames currently require owned locals");
             }
             ValueInfo value = checkExpr(yielded.value(), scope, true);
-            Ast.TypeRef exposed = yielded.delegated()
-                    ? iterableElementType(value.type, currentAsyncGenerator)
-                    : value.type;
-            if (containsMutexGuardType(exposed)) {
-                throw error(yielded.delegated()
-                        ? "MutexGuard values cannot cross a yield* delegation boundary"
-                        : "MutexGuard values cannot be yielded from a generator");
+            if (containsMutexGuardType(value.type)) {
+                throw error("MutexGuard values cannot be yielded from a generator");
             }
             return;
         }
@@ -564,12 +552,6 @@ public final class OwnershipChecker {
             return checkExpr(unary.operand(), scope, false);
         }
         if (expr instanceof Ast.RuntimeCallExpr runtime) {
-            if (runtime.operation().equals("cooperate")) {
-                if (!runtime.arguments().isEmpty()) {
-                    throw error("rt cooperate takes no arguments");
-                }
-                return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
-            }
             if (runtime.arguments().size() != 1) {
                 throw error("rt " + runtime.operation() + " expects exactly one argument");
             }
@@ -589,9 +571,6 @@ public final class OwnershipChecker {
                             || (taken.type != null && taken.type.isBorrow())) {
                         throw error("rt take requires owned data; a borrow cannot regain ownership");
                     }
-                    // Explicit take is a transfer, including for otherwise
-                    // copyable handles such as Channel<T>. Ordinary calls and
-                    // channel operations may still copy/borrow that handle.
                     if (argument instanceof Ast.NameExpr name && taken.kind == ValueKind.COPY) {
                         VarState binding = scope.lookup(name.name());
                         if (binding != null) move(binding, name.name());
@@ -616,7 +595,7 @@ public final class OwnershipChecker {
                     }
                     yield source;
                 }
-                default -> throw error("unknown runtime operation 'rt " + runtime.operation() + "'");
+                default -> throw error("unknown runtime ownership operation 'rt " + runtime.operation() + "'");
             };
         }
         if (expr instanceof Ast.AssignExpr assignment) {
@@ -1350,18 +1329,7 @@ public final class OwnershipChecker {
         int previousLoopDepth = loopDepth;
         loopDepth = 0;
         try {
-            if (lambda.expressionBody() != null) {
-                // An expression body has return-value ownership semantics even
-                // though it has no explicit return statement in source.
-                ValueInfo returned = checkExpr(lambda.expressionBody(), closure, true);
-                if (containsMutexGuardType(returned.type)) {
-                    throw error("MutexGuard values are lexical and cannot be returned from a lambda");
-                }
-            } else {
-                for (Ast.Stmt stmt : lambda.blockBody()) {
-                    checkStatement(stmt, closure, Ast.TypeRef.inferred());
-                }
-            }
+            for (Ast.Stmt stmt : lambda.blockBody()) checkStatement(stmt, closure, Ast.TypeRef.inferred());
         } finally {
             loopDepth = previousLoopDepth;
             closure.close();
@@ -1373,11 +1341,7 @@ public final class OwnershipChecker {
         CaptureSet captures = new CaptureSet();
         Set<String> locals = new HashSet<>();
         for (Ast.Param param : lambda.parameters()) locals.add(param.name());
-        if (lambda.expressionBody() != null) {
-            scanExpr(lambda.expressionBody(), locals, outer, recursiveBinding, captures, false);
-        } else {
-            scanStatements(lambda.blockBody(), locals, outer, recursiveBinding, captures);
-        }
+        scanStatements(lambda.blockBody(), locals, outer, recursiveBinding, captures);
         return captures;
     }
 
@@ -1543,37 +1507,8 @@ public final class OwnershipChecker {
                 scanExpr(field.value(), locals, outer, recursiveBinding, captures, false);
             }
         }
-        else if (expr instanceof Ast.LambdaExpr lambda) {
-            // A lexical nested closure can reference values that belong to an
-            // activation outside the current lambda. Those are transitive
-            // captures of the current closure: it must keep/move them alive so
-            // the nested closure can subsequently capture them from its parent.
-            //
-            // Parameters and locals of the current lambda are deliberately kept
-            // in nestedLocals so references such as |x| -> |y| -> x + y do not
-            // become captures of the outer activation. An explicit nlex nested
-            // lambda is a capture barrier and therefore contributes nothing.
-            if (lambda.nonLexical()) return;
-            Set<String> nestedLocals = new HashSet<>(locals);
-            for (Ast.Param parameter : lambda.parameters()) {
-                nestedLocals.add(parameter.name());
-            }
-            if (lambda.expressionBody() != null) {
-                scanExpr(
-                        lambda.expressionBody(),
-                        nestedLocals,
-                        outer,
-                        recursiveBinding,
-                        captures,
-                        false);
-            } else {
-                scanStatements(
-                        lambda.blockBody(),
-                        nestedLocals,
-                        outer,
-                        recursiveBinding,
-                        captures);
-            }
+        else if (expr instanceof Ast.LambdaExpr) {
+            // Nested lambda performs its own capture analysis when checked.
         }
     }
 
@@ -2292,26 +2227,12 @@ public final class OwnershipChecker {
             boolean async,
             boolean generator) {
         if (generator) {
-            Ast.TypeRef element = generatorYieldType(result, async);
             return new Ast.TypeRef(
                     async ? "AsyncIterator" : "Iterator",
-                    List.of(element),
+                    List.of(result),
                     false);
         }
         if (async) return new Ast.TypeRef("Future", List.of(result), false);
-        return result;
-    }
-
-    private Ast.TypeRef generatorYieldType(Ast.TypeRef result, boolean async) {
-        if (result != null && result.arguments().size() == 1) {
-            boolean syncProtocol =
-                    result.name().equals("Iterator") || result.name().equals("Generator");
-            boolean asyncProtocol =
-                    result.name().equals("AsyncIterator") || result.name().equals("AsyncGenerator");
-            if ((async && asyncProtocol) || (!async && syncProtocol)) {
-                return result.arguments().getFirst();
-            }
-        }
         return result;
     }
 
