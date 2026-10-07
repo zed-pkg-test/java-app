@@ -5,7 +5,7 @@ import fnc bytes_equal, value_deep_equal from '../src/core/value';
 import class DecodeOptions, EncodeOptions, DecodeError, EncodeError, DecodedValue, DecodeStep from '../src/core/options';
 import fnc default_decode_options, default_encode_options from '../src/core/options';
 import class JsonIncrementalDecoder from '../src/json/json';
-import fnc decode, decode_default, encode, new_incremental_decoder, feed, finish from '../src/json/json';
+import fnc decode, decode_default, encode, new_incremental_decoder from '../src/json/json';
 import fnc utf8_is_valid from '../src/core/utf8';
 
 pub fnc run_json_tests(): void {
@@ -23,7 +23,7 @@ pub fnc run_json_tests(): void {
     125
   );
 
-  val Result<DecodedValue, DecodeError> decoded_result = decode_default(input);
+  val Result<DecodedValue, DecodeError> decoded_result = decode_default(rt borrow input);
   require_true(decoded_result.is_err() == false, "JSON object should decode");
 
   val DecodedValue decoded = decoded_result.unwrap();
@@ -49,30 +49,46 @@ pub fnc run_json_tests(): void {
     34, 120, 34, 58, 50,
     125
   );
-  val Result<DecodedValue, DecodeError> duplicate_result = decode_default(duplicate);
+  val Result<DecodedValue, DecodeError> duplicate_result = decode_default(rt borrow duplicate);
   require_true(duplicate_result.is_err(), "duplicate JSON keys must reject by default");
 
+  val DecodeOptions duplicate_first = new DecodeOptions(
+    1, false, 128, 64, 64, 64, 64, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> first_wins = decode(rt borrow duplicate, duplicate_first);
+  require_true(!first_wins.is_err(), "JSON first-wins duplicate policy must decode");
+  val DecodedValue first_value = first_wins.unwrap();
+  require_int(first_value.value.object_value.length, 1, "JSON first-wins must keep one member");
+  require_int(first_value.value.object_value[0].value.number_lexeme[0], 49, "JSON first-wins must preserve first value");
+
+  val DecodeOptions duplicate_last = new DecodeOptions(
+    2, false, 128, 64, 64, 64, 64, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> last_wins = decode(rt borrow duplicate, duplicate_last);
+  require_true(!last_wins.is_err(), "JSON last-wins duplicate policy must decode");
+  val DecodedValue last_value = last_wins.unwrap();
+  require_int(last_value.value.object_value.length, 1, "JSON last-wins must keep one member");
+  require_int(last_value.value.object_value[0].value.number_lexeme[0], 50, "JSON last-wins must preserve last value");
+
   let JsonIncrementalDecoder decoder = new_incremental_decoder(default_decode_options());
-  val DecodeStep first = feed(decoder, new List<int>(123, 34, 120));
+  val DecodeStep first = decoder.feed(new List<int>(123, 34, 120));
   require_int(first.status, 0, "partial JSON must request more input");
 
-  val DecodeStep second = feed(
-    decoder,
+  val DecodeStep second = decoder.feed(
     new List<int>(34, 58, 49, 125)
   );
   require_int(second.status, 1, "completed incremental JSON must yield a value");
   require_int(second.value.kind, 6, "incremental JSON root kind");
 
   let JsonIncrementalDecoder number_decoder = new_incremental_decoder(default_decode_options());
-  val DecodeStep number_partial = feed(number_decoder, new List<int>(49));
+  val DecodeStep number_partial = number_decoder.feed(new List<int>(49));
   require_int(number_partial.status, 0, "chunk-terminal JSON number must wait for finish or a delimiter");
 
-  val DecodeStep number_finished = finish(number_decoder);
+  val DecodeStep number_finished = number_decoder.finish();
   require_int(number_finished.status, 1, "finish must publish a complete terminal JSON number");
 
   let JsonIncrementalDecoder bad_utf8_decoder = new_incremental_decoder(default_decode_options());
-  val DecodeStep bad_utf8 = feed(
-    bad_utf8_decoder,
+  val DecodeStep bad_utf8 = bad_utf8_decoder.feed(
     new List<int>(34, 226, 40)
   );
   require_int(
@@ -107,6 +123,42 @@ pub fnc run_json_tests(): void {
     tiny_input
   );
   require_true(input_limited.is_err(), "JSON max_input_bytes must fail closed");
+
+  val DecodeOptions one_number_byte = new DecodeOptions(
+    0, false, 128, 64, 64, 64, 1, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> number_exact = decode(
+    new List<int>(49),
+    one_number_byte
+  );
+  require_true(!number_exact.is_err(), "JSON number at max_number_bytes must succeed");
+
+  val Result<DecodedValue, DecodeError> number_over = decode(
+    new List<int>(49, 50),
+    one_number_byte
+  );
+  require_true(number_over.is_err(), "JSON number over max_number_bytes must reject before growth");
+
+  val DecodeOptions one_string_byte = new DecodeOptions(
+    0, false, 128, 64, 1, 64, 64, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> string_exact = decode(
+    new List<int>(34, 97, 34),
+    one_string_byte
+  );
+  require_true(!string_exact.is_err(), "JSON string at max_string_bytes must succeed");
+
+  val Result<DecodedValue, DecodeError> utf8_over = decode(
+    new List<int>(34, 195, 169, 34),
+    one_string_byte
+  );
+  require_true(utf8_over.is_err(), "JSON multibyte UTF-8 must preflight max_string_bytes");
+
+  val Result<DecodedValue, DecodeError> escaped_utf8_over = decode(
+    new List<int>(34, 92, 117, 48, 48, 101, 57, 34),
+    one_string_byte
+  );
+  require_true(escaped_utf8_over.is_err(), "JSON Unicode escape must preflight encoded string bytes");
 
   return;
 }
