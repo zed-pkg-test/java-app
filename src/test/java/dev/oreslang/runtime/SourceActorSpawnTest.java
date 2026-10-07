@@ -132,8 +132,7 @@ final class SourceActorSpawnTest {
                     () -> rejected.get(2, TimeUnit.SECONDS));
             assertTrue(failure.getCause().getMessage().contains("data values only")
                     || failure.getCause().getMessage().contains("capabilities"));
-            for (int i = 0; i < 500 && actor.isAlive(); i++) Thread.yield();
-            assertFalse(actor.isAlive());
+            awaitStopped(actor);
             assertThrows(RuntimeException.class, () -> actor.request("after_failure", List.of()));
         }
     }
@@ -148,11 +147,10 @@ final class SourceActorSpawnTest {
                     (initial, context) -> (method, arguments) -> producer);
 
             OresFuture<Object> request = actor.request("bad_async", List.of());
-            producer.complete(shared);
+            producer.completeFromRuntime(shared);
             assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> request.get(2, TimeUnit.SECONDS));
-            for (int i = 0; i < 500 && actor.isAlive(); i++) Thread.yield();
-            assertFalse(actor.isAlive());
+            awaitStopped(actor);
         }
     }
 
@@ -179,11 +177,10 @@ final class SourceActorSpawnTest {
 
             OresFuture<Object> request = actor.request("grow_after_await", List.of());
             retained.set("x".repeat(9 * 1024 * 1024));
-            producer.complete(1L);
+            producer.completeFromRuntime(1L);
             assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> request.get(2, TimeUnit.SECONDS));
-            for (int i = 0; i < 500 && actor.isAlive(); i++) Thread.yield();
-            assertFalse(actor.isAlive());
+            awaitStopped(actor);
         }
     }
 
@@ -233,6 +230,14 @@ final class SourceActorSpawnTest {
             assertEquals(7L, actor.request("good", List.of()).get(2, TimeUnit.SECONDS));
             actor.stop();
         }
+    }
+
+    private static void awaitStopped(ActorRuntime.SourceActor actor) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (actor.isAlive() && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        assertFalse(actor.isAlive(), "source actor should fail-stop");
     }
 
     @Test void initialStateAndRequestArgumentsCannotSmuggleLiveCapabilities() {
