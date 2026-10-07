@@ -151,7 +151,7 @@ shared.with_lock(|cache| -> {
 
 A process-wide `singleton module` is **not** raw shared memory. It is owned by one hidden singleton actor and accessed through its typed mailbox/proxy, so its mutable state is serialized by actor execution and normally requires no mutex. Do not wrap singleton-module state in `SharedMutex<T>` merely because multiple actors can call it. Use `SharedMutex<T>` only when code deliberately opts into a writable same-process memory object that multiple actor/execution domains may dereference directly.
 
-When the private-arena/`isoactor` runtime is stacked with this work, isolated actors must run without `SHARED_MEMORY` authority. An `isoactor` may receive copied/frozen messages, but it must not receive a `SharedMutex<T>` or any other writable JVM-heap alias; otherwise the language would no longer be able to claim true actor memory isolation.
+When the private-arena/`isolated actor` runtime is stacked with this work, isolated actors must run without `SHARED_MEMORY` authority. An `isolated actor` may receive copied/frozen messages, but it must not receive a `SharedMutex<T>` or any other writable JVM-heap alias; otherwise the language would no longer be able to claim true actor memory isolation.
 
 The current reference runtime uses a one-permit JVM semaphore for `SharedMutex<T>`. Java semaphore release/acquire provides the required memory-ordering edge and, unlike a thread-owned `ReentrantLock`, allows an asynchronously acquired guard to be resumed and released by the actor execution context.
 
@@ -259,3 +259,11 @@ guest execution while the caller waits for queued continuations. Resuming a task
 retains its logical scheduler ownership without admitting another guest thread.
 A rejected context entry settles the owning task exceptionally rather than
 leaving a host waiting on an unresolved Future.
+
+## Source spawning and structured requests
+
+`spawn ActorName(...)` lowers through `ActorRuntime.spawnSource`, using the kind resolved from the actor declaration. `actor` / `shared actor` select `SHARED`, `isolated actor` selects `PRIVATE`, and `untrusted actor` selects `UNTRUSTED`. Runtime parentage is captured from the active actor execution context by the same lifecycle-locked registration used for all other actor creation. A compiler-generated initialization callback handles declaration metadata; caller-owned guest state enters only through the initialization mailbox message.
+
+Source method calls transport request identifiers, method names, and argument data. Completion authority remains in the runtime, and result data is frozen before publication. Outstanding requests are bounded by the destination actor's mailbox limit, tied to the target lifetime and (when present) the caller lifetime, and cancelled on teardown. Suspended source methods resume through the actor's continuation mailbox lane. The kind-specific `spawnChild*` Java wrappers are internal conveniences around `spawnChild(ActorKind, ...)`, not additional source operations.
+
+Persistent source actor state is measured as a logical retained graph after initialization, field replacement, method execution, and suspended completion. Private/untrusted graphs consume their actor memory slice; shared graphs consume the runtime shared budget. Growth reserves before accounting publication, shrink returns bytes, and finalization releases the remainder. Source results also have a per-result heap ceiling. This remains logical source-graph accounting: opaque runtime capabilities own their backing storage separately, and these checks are not a physical JVM heap sandbox.

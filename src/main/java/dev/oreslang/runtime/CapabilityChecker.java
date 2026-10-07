@@ -467,6 +467,7 @@ public final class CapabilityChecker {
         else if (expr instanceof Ast.ConditionalExpr e) { checkExpr(e.condition(), policy); checkExpr(e.whenTrue(), policy); checkExpr(e.whenFalse(), policy); }
         else if (expr instanceof Ast.IndexExpr e) { checkExpr(e.receiver(), policy); checkExpr(e.index(), policy); }
         else if (expr instanceof Ast.NewExpr e) {
+            if (e.actorSpawn()) require(policy, IsolatePolicy.Capability.ACTOR_SPAWN, "actor spawn");
             checkType(e.type(), policy);
             for (Ast.Expr a : e.arguments()) checkExpr(a, policy);
         }

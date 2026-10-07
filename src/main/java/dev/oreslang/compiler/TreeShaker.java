@@ -338,7 +338,7 @@ public final class TreeShaker {
                 for (Ast.Expr argument : created.arguments()) {
                     arguments.add(substitute(argument, substitutions, shadowed));
                 }
-                return new Ast.NewExpr(created.type(), arguments);
+                return new Ast.NewExpr(created.type(), arguments, created.actorSpawn());
             }
             if (expression instanceof Ast.AwaitExpr awaited) {
                 return new Ast.AwaitExpr(substitute(awaited.expression(), substitutions, shadowed));
@@ -377,9 +377,7 @@ public final class TreeShaker {
                         lambda.parameters(),
                         substitute(lambda.expressionBody(), substitutions, nestedShadowed),
                         lambda.blockBody(),
-                        lambda.nonLexical(),
-                        lambda.returnType(),
-                        lambda.async());
+                        lambda.nonLexical());
             }
             throw new IllegalStateException(
                     "unhandled expression during specialization " + expression.getClass().getSimpleName());
@@ -903,7 +901,7 @@ public final class TreeShaker {
                 for (Ast.Expr argument : created.arguments()) {
                     arguments.add(rewriteExpression(argument, module, locals));
                 }
-                return new Ast.NewExpr(created.type(), arguments);
+                return new Ast.NewExpr(created.type(), arguments, created.actorSpawn());
             }
             if (expression instanceof Ast.AwaitExpr awaited) {
                 return new Ast.AwaitExpr(rewriteExpression(awaited.expression(), module, locals));
@@ -957,9 +955,7 @@ public final class TreeShaker {
                         lambda.blockBody() == null
                                 ? null
                                 : rewriteStatements(lambda.blockBody(), module, lambdaLocals),
-                        lambda.nonLexical(),
-                        lambda.returnType(),
-                        lambda.async());
+                        lambda.nonLexical());
             }
             throw new IllegalStateException("unhandled expression " + expression.getClass().getSimpleName());
         }

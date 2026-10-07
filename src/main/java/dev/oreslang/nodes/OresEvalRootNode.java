@@ -3435,8 +3435,7 @@ public final class OresEvalRootNode extends RootNode {
                 Env env,
                 SourceValueCont continuation) {
             if (call.callee() instanceof Ast.NameExpr name
-                    && env.lookup(name.name()) == Env.MISSING
-                    && !env.outerDeclarationsBlocked()) {
+                    && env.lookup(name.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(name.name(), call.arguments().size());
                 if (direct != null) {
                     evalSuspendableArguments(
@@ -3490,7 +3489,7 @@ public final class OresEvalRootNode extends RootNode {
                                                             receiver,
                                                             values,
                                                             env);
-                                            boolean declaredFuture =
+                                            boolean declaredFuture = receiver instanceof SourceActorFacade ||
                                                     invocationDeclaresAsync(
                                                             invocation);
                                             completeSourceInvocation(
@@ -3591,6 +3590,15 @@ public final class OresEvalRootNode extends RootNode {
                 Env env) {
             Ast.MemberExpr member =
                     (Ast.MemberExpr) call.callee();
+
+            if (receiver instanceof SourceActorFacade actor) {
+                Ast.MethodDecl method = actor.owner().findMethod(actor.klass(),
+                        CallableSelector.instance(member.member(), args.size()), new LinkedHashSet<>());
+                if (method == null) throw new IllegalArgumentException("unknown actor method " + member.member());
+                actor.owner().requireClassMemberVisible(method.visibility(), actor.owner().declaringClass(method),
+                        env.accessClass(), "method", method.name());
+                return invokableInvocation(values -> actor.actor().request(method.name(), objectArguments(values)), args);
+            }
 
             if (receiver instanceof OresObject object) {
                 Ast.MethodDecl method =
@@ -3743,6 +3751,9 @@ public final class OresEvalRootNode extends RootNode {
                                         + "' is immutable");
                     }
                     object.fields.put(member.member(), value);
+                    if (object.klass.actorKind() != Ast.ActorKind.NONE) {
+                        context.actors().accountCurrentSourceState(object);
+                    }
                     return value;
                 }
                 if (receiver instanceof DynamicStructValue dynamic) {
@@ -3781,6 +3792,7 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.NewExpr created,
                 List<Object> args,
                 Env env) {
+            if (created.actorSpawn()) return spawnEvaluated(created, args);
             if (created.type().name().equals("Array")
                     || created.type().name().equals("List")) {
                 if (!args.isEmpty()) {
@@ -3821,6 +3833,48 @@ public final class OresEvalRootNode extends RootNode {
                         "unknown class " + created.type().name());
             }
             return owner.instantiate(klass, args, externalConstruction);
+        }
+
+        private Object spawnEvaluated(Ast.NewExpr created, List<Object> args) {
+            context.requireCapability(IsolatePolicy.Capability.ACTOR_SPAWN, "actor spawn");
+            Ast.ClassDecl klass = findClass(created.type().name());
+            Evaluator owner = this;
+            boolean external = false;
+            if (klass == null) {
+                Object imported = importedValue(created.type().name());
+                if (imported instanceof ClassFacade facade) {
+                    klass = facade.klass();
+                    owner = facade.owner();
+                    external = true;
+                }
+            }
+            if (klass == null || klass.actorKind() == Ast.ActorKind.NONE) {
+                throw new IllegalArgumentException("spawn requires a declared actor: " + created.type().name());
+            }
+            if (external && klass.visibility() != Ast.Visibility.PUBLIC) {
+                throw new IllegalArgumentException("cannot spawn private actor " + klass.name());
+            }
+            Ast.ClassDecl actorClass = klass;
+            Evaluator actorOwner = owner;
+            ActorRuntime.ActorKind kind = switch (klass.actorKind()) {
+                case SHARED -> ActorRuntime.ActorKind.SHARED;
+                case PRIVATE -> ActorRuntime.ActorKind.PRIVATE;
+                case UNTRUSTED -> ActorRuntime.ActorKind.UNTRUSTED;
+                case NONE -> throw new AssertionError();
+            };
+            ActorRuntime.SourceActor actor = context.actors().spawnSource(kind, args, (initial, turn) -> {
+                OresObject state = actorOwner.instantiate(actorClass, initial, false, true);
+                return new ActorRuntime.SourceBehavior() {
+                    @Override public Object retainedState() { return state; }
+                    @Override public Object invoke(String name, List<Object> arguments) {
+                        Ast.MethodDecl method = actorOwner.findMethod(actorClass,
+                                CallableSelector.instance(name, arguments.size()), new LinkedHashSet<>());
+                        if (method == null) throw new IllegalArgumentException("unknown actor method " + name);
+                        return actorOwner.callMethod(state, method, arguments);
+                    }
+                };
+            });
+            return new SourceActorFacade(actorOwner, actorClass, actor);
         }
 
         private Object callFunctionRaw(Ast.FunctionDecl fn, List<Object> args) {
@@ -4808,8 +4862,7 @@ public final class OresEvalRootNode extends RootNode {
 
         private Invocation prepareInvocation(Ast.CallExpr call, Env env) {
             if (call.callee() instanceof Ast.NameExpr directName
-                    && env.lookup(directName.name()) == Env.MISSING
-                    && !env.outerDeclarationsBlocked()) {
+                    && env.lookup(directName.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(directName.name(), call.arguments().size());
                 if (direct != null) {
                     List<Object> args = evaluateArguments(call.arguments(), env);
@@ -4861,6 +4914,10 @@ public final class OresEvalRootNode extends RootNode {
                     throw new IllegalArgumentException(
                             "no method or callable field " + object.klass.name() + "."
                                     + methodCall.member() + " with arity " + args.size());
+                }
+
+                if (receiver instanceof SourceActorFacade) {
+                    return prepareInvocationEvaluated(call, receiver, args, env);
                 }
 
                 if (receiver instanceof ClassFacade klass) {
@@ -5112,17 +5169,12 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 Invokable hostFunction = hostFunctions.get(name.name());
                 if (hostFunction != null) return hostFunction;
-                Object imported = importedValue(name.name());
-                if (imported != Env.MISSING) return imported;
-                if (env.outerDeclarationsBlocked()) {
-                    throw new IllegalArgumentException(
-                            "nlex callable cannot resolve outer declaration " + name.name()
-                                    + "; import it explicitly or pass it as an argument");
-                }
                 Ast.ModuleDecl module = modules.get(name.name());
                 if (module != null) return new ModuleFacade(this, module);
                 Ast.ClassDecl klass = findClass(name.name());
                 if (klass != null) return new ClassFacade(this, klass);
+                Object imported = importedValue(name.name());
+                if (imported != Env.MISSING) return imported;
                 Ast.FunctionDecl fn = findSingleFunction(name.name());
                 if (fn != null) {
                     if (fn.actorKind() != Ast.ActorKind.NONE) {
@@ -5178,6 +5230,9 @@ public final class OresEvalRootNode extends RootNode {
                                     + target.member() + "' is immutable");
                         }
                         object.fields.put(target.member(), value);
+                        if (object.klass.actorKind() != Ast.ActorKind.NONE) {
+                            context.actors().accountCurrentSourceState(object);
+                        }
                         return value;
                     }
                     if (receiver instanceof DynamicStructValue dynamic) {
@@ -5317,6 +5372,10 @@ public final class OresEvalRootNode extends RootNode {
                 throw new IllegalArgumentException("value is not indexable: " + receiver);
             }
             if (expr instanceof Ast.NewExpr created) {
+                if (created.actorSpawn()) {
+                    List<Object> args = created.arguments().stream().map(arg -> eval(arg, env)).toList();
+                    return spawnEvaluated(created, args);
+                }
                 if (created.type().name().equals("Array")
                         || created.type().name().equals("List")) {
                     if (!created.arguments().isEmpty()) {
@@ -5421,9 +5480,9 @@ public final class OresEvalRootNode extends RootNode {
                 return dynamicKeys ? new DynamicStructValue(result) : Map.copyOf(result);
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
-                boolean nonLexical = lambda.nonLexical();
+                boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
                 Env captured = nonLexical ? null : env.snapshot();
-                TailInvokable bodyCallable = tailCallable(args -> {
+                return tailCallable(args -> {
                     if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
                     Env local = new Env(captured, nonLexical);
                     for (int i = 0; i < lambda.parameters().size(); i++) {
@@ -5448,17 +5507,6 @@ public final class OresEvalRootNode extends RootNode {
                     } catch (BreakSignal | ContinueSignal signal) {
                         throw new IllegalStateException("loop control cannot cross a lambda boundary", signal);
                     }
-                });
-                if (!lambda.async()) return bodyCallable;
-                // Async RHS callbacks are first-class tasks.  The runtime-owned
-                // carrier enters guest code through the context's turn executor;
-                // it must never occupy an actor dispatcher worker while awaiting.
-                return tailCallable(args -> {
-                    if (args.size() != lambda.parameters().size()) throw new IllegalArgumentException("lambda arity mismatch");
-                    List<?> supplied = detachAsyncArguments(args);
-                    return context.asyncRuntime().submit(() -> detachAsyncValue(
-                            invoke(invokableInvocation(bodyCallable, supplied)),
-                            new IdentityHashMap<>()));
                 });
             }
             throw new IllegalArgumentException("unsupported expression " + expr);
@@ -6237,7 +6285,12 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.ClassDecl klass,
                 List<Object> args,
                 boolean externalConstruction) {
-            if (klass.actorKind() != Ast.ActorKind.NONE) {
+            return instantiate(klass, args, externalConstruction, false);
+        }
+
+        private OresObject instantiate(Ast.ClassDecl klass, List<Object> args,
+                                       boolean externalConstruction, boolean actorInitialization) {
+            if (klass.actorKind() != Ast.ActorKind.NONE && !actorInitialization) {
                 throw new IllegalStateException("actor '" + klass.name()
                         + "' cannot be constructed with new; actor state must be initialized inside ActorRuntime");
             }
@@ -7325,7 +7378,6 @@ public final class OresEvalRootNode extends RootNode {
         private static final Object MISSING = new Object();
         private final Env parent;
         private final boolean descendantsNonLexical;
-        private final boolean outerDeclarationsBlocked;
         private final Ast.ClassDecl accessClass;
         private final OresObject constructingObject;
         private final Map<String, Slot> slots = new HashMap<>();
@@ -7353,13 +7405,10 @@ public final class OresEvalRootNode extends RootNode {
                 OresObject constructingObject) {
             this.parent = parent;
             this.descendantsNonLexical = descendantsNonLexical;
-            this.outerDeclarationsBlocked = descendantsNonLexical
-                    || (parent != null && parent.outerDeclarationsBlocked);
             this.accessClass = accessClass;
             this.constructingObject = constructingObject;
         }
         private boolean descendantsNonLexical() { return descendantsNonLexical; }
-        private boolean outerDeclarationsBlocked() { return outerDeclarationsBlocked; }
         private Ast.ClassDecl accessClass() { return accessClass; }
         private boolean canInitialize(OresObject object) { return constructingObject == object; }
         private void define(String name, Object value, Ast.BindingKind kind) {
@@ -7592,6 +7641,7 @@ public final class OresEvalRootNode extends RootNode {
     private record ImportedBinding(Ast.ImportDecl declaration, String sourceName) { }
     private record ImportedNamespace(Evaluator owner, Ast.ImportKind kind) { }
     private record ModuleFacade(Evaluator owner, Ast.ModuleDecl module) { }
+    private record SourceActorFacade(Evaluator owner, Ast.ClassDecl klass, ActorRuntime.SourceActor actor) { }
     private record ClassFacade(Evaluator owner, Ast.ClassDecl klass) { }
     private record HostClassFacade(String className, Object symbol, boolean constructible) { }
     private record HostObjectFacade(Object value) {

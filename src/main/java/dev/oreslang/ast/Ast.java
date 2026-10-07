@@ -727,8 +727,10 @@ public final class Ast {
     public record MemberExpr(Expr receiver, String member) implements Expr { }
     public record IndexExpr(Expr receiver, Expr index) implements Expr { }
 
-    public record NewExpr(TypeRef type, List<Expr> arguments) implements Expr {
+    /** Named creation: actorSpawn distinguishes the source spawn operation from new. */
+    public record NewExpr(TypeRef type, List<Expr> arguments, boolean actorSpawn) implements Expr {
         public NewExpr { arguments = List.copyOf(arguments); }
+        public NewExpr(TypeRef type, List<Expr> arguments) { this(type, arguments, false); }
     }
 
     public record AwaitExpr(Expr expression) implements Expr { }
@@ -821,7 +823,7 @@ public final class Ast {
         public ObjectExpr { fields = List.copyOf(fields); }
     }
 
-    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType, boolean async) implements Expr {
+    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) implements Expr {
         public LambdaExpr {
             parameters = List.copyOf(parameters);
             blockBody = blockBody == null ? null : List.copyOf(blockBody);
@@ -831,13 +833,7 @@ public final class Ast {
             }
         }
         public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody) {
-            this(parameters, expressionBody, blockBody, false, null, false);
-        }
-        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) {
-            this(parameters, expressionBody, blockBody, nonLexical, null, false);
-        }
-        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType) {
-            this(parameters, expressionBody, blockBody, nonLexical, returnType, false);
+            this(parameters, expressionBody, blockBody, false);
         }
     }
 }

@@ -889,7 +889,7 @@ The interpreter represents a live generator with one serialized resumable activa
 
 Oreslang uses an Akka-style dispatcher model: an actor is **not** a thread. Every actor owns one mailbox, and at most one mailbox turn for a given actor may execute at a time. Actors are multiplexed over bounded thread pools, so the carrier thread may change between turns.
 
-There are two actor execution domains:
+Actor declarations determine one of three execution kinds:
 
 ```ores
 pub actor fnc worker(int value): int {
@@ -906,16 +906,46 @@ shared actor Account {
 }
 ```
 
-- an unqualified `actor` is **private**;
+- an unqualified `actor` is **shared** (the default);
+- `isolated actor` is isolated (`PRIVATE` internally); `isoactor` remains a compatibility spelling;
+- `untrusted actor` is isolated with a fixed restrictive policy and data-only inbound messages;
 - `shared actor` is a **shared-memory-capable** actor;
 - private and shared actors are scheduled on **different dispatcher pools** for bulkheading;
-- compiler-generated/context-aware actor factories are capture-free for **both** actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
+- compiler-generated/context-aware actor factories are capture-free for all actor kinds; mutable host state must enter through messages or explicit runtime-owned capabilities rather than Java closure capture;
 - trusted host embedding has separately named supervisor-only construction escape hatches, and adversarial policies reject them;
-- both kinds still process their own mailbox serially;
+- all kinds still process their own mailbox serially;
 - actor-owned `let` fields may mutate during a mailbox turn because that turn is the exclusive mutation capability for `self`;
 - no lock is required around ordinary actor-owned fields, including fields of a shared actor;
 - actor `self` and move-only state rooted at `self` cannot escape the mailbox turn by value or returned borrow; copy-like values such as integers, booleans, and strings may be returned normally;
 - synchronized shared memory requires the host-granted `SHARED_MEMORY` capability.
+
+The canonical actor-class declaration is `define actor Name as ... end`, with `shared`, `isolated`, or `untrusted` between `define` and `actor`. Existing brace-style declarations remain accepted.
+
+There is one explicit source spawning operation:
+
+```ores
+define isolated actor Counter as
+  let int value = 0;
+  pub fnc next(): int {
+    self.value = self.value + 1;
+    return self.value;
+  }
+end
+
+pub routine main(): void {
+  val worker = spawn Counter(41);
+  stdio.stdout.write(await worker.next()); // 42
+  return;
+}
+```
+
+`spawn` resolves the declared actor kind; it cannot create ordinary classes or unknown types. Positional arguments initialize fields in effective storage order, and remaining fields use their initializers. Initialization executes inside the new actor after arguments cross its mailbox transport boundary. Actor state is never initialized in the caller's execution domain.
+
+The resulting value is a typed actor capability, not a mutable object. Direct method calls enqueue mailbox requests and return `Future<T>` (including `Future<void>`); use `await` to receive their data-only result. State and bound methods cannot be extracted through the capability. Spawning and message transport enforce capability, ownership, resource, and isolation rules. The current runtime transport accepts frozen scalar/container data; arbitrary source class instances do not become sendable merely because they have a source type.
+
+A spawn in an active actor execution context creates a structured child, including when called through an ordinary helper. Without an active actor parent it creates a root actor. A supervisor executing as an actor is the parent of its spawns. Cancelling or failing a parent cancels its descendants and pending request futures. A root actor lives until runtime shutdown or host cancellation. Source code uses `val` for an immutable runtime handle; standalone `const` remains a compile-time constant binding.
+
+`spawnChildPrivate`, `spawnChildShared`, and `spawnChildUntrusted` are package-private Java conveniences. They are not language constructs. Legacy actor callables (`actor fnc` / `actor routine`) retain their existing one-shot invocation behavior; `spawn` creates persistent actor-class instances.
 
 Private actors do not accept explicitly shared mutable memory. Each private actor owns a **confined memory slice** identified by its actor id, independent of whichever dispatcher thread happens to execute a mailbox turn. Incoming messages are isolation-copied into that actor domain and charged against the destination slice before mailbox admission. Compiler-managed actor state allocations use the same slice.
 

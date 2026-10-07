@@ -1,0 +1,21 @@
+// Actor kind belongs to the declaration; spawn derives kind and parentage.
+define isolated actor Counter as
+  let int value = 0;
+  pub fnc next(): int {
+    self.value = self.value + 1;
+    return self.value;
+  }
+end
+
+define actor Parent as
+  pub fnc start(): int {
+    val counter = spawn Counter(41);
+    return await counter.next();
+  }
+end
+
+pub routine main(): void {
+  val parent = spawn Parent();
+  stdio.stdout.write(await parent.start());
+  return;
+}

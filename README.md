@@ -13,7 +13,8 @@ The language is intentionally opinionated:
 - classes cannot nest inside classes; class bodies contain fields, an optional constructor, methods, and `static fnc` members only;
 - one return value only (tuples/arrays/records are ordinary single values);
 - `val`, `const`, and `let` are the only variable declarations;
-- actor heaps are isolated: mutable values are never shared between actors;
+- actor state is owned by its mailbox; `isolated actor` and `untrusted actor` deny shared mutable memory, while shared actors may use explicitly synchronized shared capabilities;
+- a single `spawn Worker(...)` operation derives actor kind from its declaration and parentage from the active runtime actor context; see [the structured spawn example](examples/structured-spawn.ores);
 - immutable/sendable values may be message-passed, and explicitly frozen regions may be shared read-only;
 - isolates are stricter security boundaries for FaaS/mobile workloads, with host access denied and Oreslang APIs capability-gated by default;
 - JIT, AOT/interpreter, and AOT-host + guest-JIT hybrid execution profiles;

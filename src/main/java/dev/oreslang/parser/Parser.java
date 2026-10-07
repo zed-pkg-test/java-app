@@ -92,8 +92,14 @@ public final class Parser {
 
             if (match(DEFINE)) {
                 modifiers = mergeModifiers(modifiers, parseModifiers());
-                if (modifiers.shared) {
-                    throw error(previous(), "'shared' must modify an actor declaration; use 'shared actor <Name>'");
+                if (actorDeclarationStartsHere()) {
+                    Ast.Decl actor = parseDeclarationAfterModifiers(annotations, modifiers);
+                    if (actor == null) throw error(peek(), "expected actor declaration after 'define'");
+                    rootDeclarations.add(actor);
+                    continue;
+                }
+                if (modifiers.shared || modifiers.untrusted) {
+                    throw error(previous(), "actor-kind modifiers must modify an actor declaration");
                 }
                 if (match(MODULE)) {
                     if (modifiers.visibilitySeen || modifiers.async || modifiers.generator || modifiers.structural || modifiers.nonLexical || modifiers.trapped
@@ -267,8 +273,13 @@ public final class Parser {
 
         if (match(DEFINE)) {
             modifiers = mergeModifiers(modifiers, parseModifiers());
+            if (actorDeclarationStartsHere()) {
+                Ast.Decl actor = parseDeclarationAfterModifiers(annotations, modifiers);
+                if (actor == null) throw error(peek(), "expected actor declaration after 'define'");
+                return actor;
+            }
             if (modifiers.shared || modifiers.untrusted) {
-                throw error(previous(), "'shared'/'untrusted' must modify an actor declaration");
+                throw error(previous(), "actor-kind modifiers must modify an actor declaration");
             }
             if (match(CONTRACT)) {
                 modifiers = mergeModifiers(modifiers, parseModifiers());
@@ -301,9 +312,10 @@ public final class Parser {
         if (isLegacyFnSpelling()) {
             throw error(peek(), "functions are declared with 'fnc', not 'fn'");
         }
-        if (match(ACTOR, ISOACTOR)) {
-            Token actorToken = previous();
-            boolean isolated = actorToken.type() == ISOACTOR;
+        ActorMarker leadingActorMarker = matchActorMarker();
+        if (leadingActorMarker != null) {
+            Token actorToken = leadingActorMarker.token();
+            boolean isolated = leadingActorMarker.isolated();
             modifiers = mergeModifiers(modifiers, parseModifiers());
 
             if (isLegacyFnSpelling()) {
@@ -330,9 +342,10 @@ public final class Parser {
         }
         if (match(FNC)) {
             modifiers = mergeModifiers(modifiers, parseModifiers());
-            if (match(ACTOR, ISOACTOR)) {
-                Token actorToken = previous();
-                boolean isolated = actorToken.type() == ISOACTOR;
+            ActorMarker callableActorMarker = matchActorMarker();
+            if (callableActorMarker != null) {
+                Token actorToken = callableActorMarker.token();
+                boolean isolated = callableActorMarker.isolated();
                 modifiers = mergeModifiers(modifiers, parseModifiers());
                 Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
                 return parseFunction(annotations, modifiers, Ast.CallableKind.FNC, actorKind);
@@ -344,9 +357,10 @@ public final class Parser {
         }
         if (match(ROUTINE)) {
             modifiers = mergeModifiers(modifiers, parseModifiers());
-            if (match(ACTOR, ISOACTOR)) {
-                Token actorToken = previous();
-                boolean isolated = actorToken.type() == ISOACTOR;
+            ActorMarker callableActorMarker = matchActorMarker();
+            if (callableActorMarker != null) {
+                Token actorToken = callableActorMarker.token();
+                boolean isolated = callableActorMarker.isolated();
                 modifiers = mergeModifiers(modifiers, parseModifiers());
                 Ast.ActorKind actorKind = resolveActorKind(actorToken, isolated, modifiers);
                 return parseFunction(annotations, modifiers, Ast.CallableKind.ROUTINE, actorKind);
@@ -378,11 +392,28 @@ public final class Parser {
         return null;
     }
 
+    private record ActorMarker(Token token, boolean isolated) { }
+
+    private boolean actorDeclarationStartsHere() {
+        return check(ACTOR) || check(ISOACTOR) || isContextualIdentifier("isolated");
+    }
+
+    private ActorMarker matchActorMarker() {
+        if (match(ACTOR)) return new ActorMarker(previous(), false);
+        if (match(ISOACTOR)) return new ActorMarker(previous(), true);
+        if (isContextualIdentifier("isolated")) {
+            Token isolated = advance();
+            consume(ACTOR, "expected 'actor' after 'isolated'");
+            return new ActorMarker(isolated, true);
+        }
+        return null;
+    }
+
     private Ast.ActorKind resolveActorKind(Token actorToken, boolean isolated, Modifiers modifiers) {
         if (isolated && (modifiers.shared || modifiers.untrusted)) {
             throw error(
                     actorToken,
-                    "'shared/untrusted isoactor' is contradictory; use either shared actor, untrusted actor, or isoactor");
+                    "conflicting actor kinds; use shared actor, isolated actor, or untrusted actor");
         }
         if (modifiers.shared && modifiers.untrusted) {
             throw error(actorToken, "an actor cannot be both shared and untrusted");
@@ -611,6 +642,9 @@ public final class Parser {
         List<Ast.TypeRef> parents = match(EXTENDS) ? parseTypeRefList() : List.of();
         List<Ast.TypeRef> interfaces = match(IMPLEMENTS, IMPL) ? parseTypeRefList() : List.of();
 
+        // Canonical actor syntax is "define [kind] actor Name as ... end";
+        // brace-style and pre-"as" spellings remain compatibility forms.
+        match(AS);
         boolean braceStyle = match(LBRACE);
         Token.Type terminator = braceStyle ? RBRACE : END;
         List<Ast.FieldDecl> fields = new ArrayList<>();
@@ -2697,7 +2731,7 @@ public final class Parser {
             case IDENT,
                     DEFINE, CLASS, MODULE, NAMESPACE, IMPORT, FROM, AS, EXTENDS, IMPLEMENTS,
                     TRY, CATCH, FINALLY, END, FI, IF, DO, ELSE, THEN,
-                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, TRAP, NB, SELECT, READCH, WRITECH, ACTOR, ISOACTOR, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, EQ, NEQ, IS, WHEN, CASE, DEFAULT, FIRST, CB, UNTRUSTED, TYPE, TYPES, TYPEOF,
+                    NEW, STOP, DONE, AWAIT, ASYNC, NLEX, TRAP, NB, SELECT, READCH, WRITECH, ACTOR, ISOACTOR, SPAWN, SHARED, DEF, FNC, ROUTINE, FOR, OF, LOOP, BLOCK, BREAK, CONTINUE, YIELD, SUPER, ELSEIF, SWITCH, MATCH, MATCHES, EQ, NEQ, IS, WHEN, CASE, DEFAULT, FIRST, CB, UNTRUSTED, TYPE, TYPES, TYPEOF,
                     INTERFACE, TRAIT, STRUCT, IMPL, ABSTRACT, VOID, STATIC, PUB, PRIVATE, STRUCTURAL, RETURN, DEFER,
                     VAL, CONST, LET, MUT, SELF, TRUE, FALSE, NULL, OBJ, ARR -> true;
             default -> false;
@@ -2740,6 +2774,13 @@ public final class Parser {
             consume(RPAREN, "expected ')' after constructor arguments");
             return new Ast.NewExpr(type, args);
         }
+        if (match(SPAWN)) {
+            Ast.TypeRef type = parseTypeRef();
+            consume(LPAREN, "expected '(' after actor type");
+            List<Ast.Expr> args = parseArgumentsUntil(RPAREN);
+            consume(RPAREN, "expected ')' after spawn arguments");
+            return new Ast.NewExpr(type, args, true);
+        }
         if (match(OBJ)) return parseObjectLiteral();
         if (match(ARR)) {
             consume(LBRACKET, "expected '[' after arr");
@@ -2747,26 +2788,13 @@ public final class Parser {
             consume(RBRACKET, "expected ']' after arr literal");
             return new Ast.ListExpr(items);
         }
-        // RHS modifier order matches named callables.  Keep these modifiers
-        // attached to the callable value rather than to its enclosing binding.
-        if (check(NLEX) || check(ASYNC)) {
-            boolean nonLexical = false;
-            boolean async = false;
-            while (check(NLEX) || check(ASYNC)) {
-                if (match(NLEX)) {
-                    if (nonLexical) throw error(previous(), "duplicate 'nlex' lambda modifier");
-                    nonLexical = true;
-                } else if (match(ASYNC)) {
-                    if (async) throw error(previous(), "duplicate 'async' lambda modifier");
-                    async = true;
-                }
-            }
-            if (check(PIPE)) return parsePipeLambda(nonLexical, async);
-            if (check(LPAREN) && looksLikeLambda()) return parseLambda(nonLexical, async);
-            throw error(peek(), "RHS 'nlex'/'async' modifiers must prefix a lambda");
+        if (match(NLEX)) {
+            if (check(PIPE)) return parsePipeLambda(true);
+            if (check(LPAREN) && looksLikeLambda()) return parseLambda(true);
+            throw error(previous(), "'nlex' in expression position must prefix a lambda");
         }
-        if (check(PIPE)) return parsePipeLambda(false, false);
-        if (check(LPAREN) && looksLikeLambda()) return parseLambda(false, false);
+        if (check(PIPE)) return parsePipeLambda(false);
+        if (check(LPAREN) && looksLikeLambda()) return parseLambda(false);
         if (match(LPAREN)) {
             Ast.Expr first = parseExpression();
             if (match(COMMA)) {
@@ -2810,15 +2838,15 @@ public final class Parser {
         return new Ast.ObjectExpr(fields);
     }
 
-    private Ast.LambdaExpr parseLambda(boolean nonLexical, boolean async) {
+    private Ast.LambdaExpr parseLambda(boolean nonLexical) {
         consume(LPAREN, "expected '('");
         List<Ast.Param> params = parseParametersUntil(RPAREN);
         consume(RPAREN, "expected ')' after lambda parameters");
         consume(ARROW, "expected '->' after lambda parameters");
-        return parseLambdaBody(params, nonLexical, async);
+        return parseLambdaBody(params, nonLexical);
     }
 
-    private Ast.LambdaExpr parsePipeLambda(boolean nonLexical, boolean async) {
+    private Ast.LambdaExpr parsePipeLambda(boolean nonLexical) {
         consume(PIPE, "expected '|'");
         List<Ast.Param> params = new ArrayList<>();
         if (!check(PIPE)) {
@@ -2836,31 +2864,18 @@ public final class Parser {
         }
         consume(PIPE, "expected closing '|' after lambda parameters");
         consume(ARROW, "lambdas use the slim arrow '->'");
-        return parseLambdaBody(params, nonLexical, async);
+        return parseLambdaBody(params, nonLexical);
     }
 
-    private Ast.LambdaExpr parseLambdaBody(List<Ast.Param> params, boolean nonLexical, boolean async) {
-        // Typed block lambdas use '|args| -> ReturnType { ... }'. Probe the
-        // type grammar and roll back unless it is immediately followed by a
-        // block: '|x| -> x + 1' must remain an expression-bodied lambda.
-        Ast.TypeRef returnType = null;
-        if (!check(LBRACE) && (check(IDENT) || check(VOID) || check(LBRACKET)
-                || check(TYPEOF) || check(LPAREN))) {
-            int checkpoint = current;
-            try {
-                Ast.TypeRef candidate = parseTypeRef();
-                if (check(LBRACE)) returnType = candidate;
-            } catch (IllegalArgumentException ignored) {
-                // The expression grammar owns this sequence unless a complete
-                // type is followed by a block.
-            }
-            if (returnType == null) current = checkpoint;
-        }
+    private Ast.LambdaExpr parseLambdaBody(List<Ast.Param> params, boolean nonLexical) {
+        // Only an immediate '{' denotes the statement-block form. Everything
+        // else starts a normal expression body. This is intentionally lexical:
+        // future prefix expressions such as `struct{...}{...}` must remain
+        // expression bodies rather than being confused with a lambda block.
         if (check(LBRACE)) {
-            return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical, returnType, async);
+            return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
         }
-        // Braces are mandatory when declaring a lambda return type.
-        return new Ast.LambdaExpr(params, parseExpression(), null, nonLexical, null, async);
+        return new Ast.LambdaExpr(params, parseExpression(), null, nonLexical);
     }
 
     private boolean looksLikeLambda() {

@@ -2092,6 +2092,220 @@ public final class ActorRuntime implements AutoCloseable {
                         + "; actor lifecycle authority is limited to self and structured descendants");
     }
 
+    /** Compiler bridge. Guest code never receives construction/completion callbacks. */
+    @FunctionalInterface
+    public interface SourceBehaviorFactory {
+        SourceBehavior create(List<Object> initialState, ActorContext<List<Object>> context) throws Exception;
+    }
+
+    @FunctionalInterface
+    public interface SourceBehavior {
+        Object invoke(String method, List<Object> arguments) throws Exception;
+        default Object retainedState() { return List.of(); }
+    }
+
+    /** Opaque source actor capability; state remains confined to its mailbox execution. */
+    public final class SourceActor {
+        private final ActorRef<List<Object>> ref;
+        private final ActorHandle<List<Object>> child;
+        private final AtomicLong requestIds = new AtomicLong();
+        private final java.util.concurrent.Semaphore requestSlots;
+        private final ConcurrentHashMap<Long, OresFuture<Object>> requests = new ConcurrentHashMap<>();
+
+        private SourceActor(ActorRef<List<Object>> ref, ActorCell<?> parent) {
+            this.ref = ref;
+            ActorCell<?> cell = actors.get(ref.id());
+            this.requestSlots = new java.util.concurrent.Semaphore(
+                    cell == null ? 1 : cell.policy.maxMailboxMessages());
+            this.child = parent == null ? null : new ActorHandle<>(ref, parent.ref.id());
+        }
+
+        public ActorId id() { return ref.id(); }
+        public ActorKind kind() { return ref.kind(); }
+        public Optional<ActorId> parentId() { return ref.parentId(); }
+        public boolean isAlive() { return ref.isAlive(); }
+        public void stop() {
+            if (child == null) ref.stop();
+            else child.stop();
+        }
+        public boolean cancel() {
+            return child == null ? ref.cancel() : child.cancel();
+        }
+
+        public OresFuture<Object> request(String method, List<Object> arguments) {
+            requireCallerRuntimeAffinity("request source actor method");
+            Objects.requireNonNull(method, "method");
+            Objects.requireNonNull(arguments, "arguments");
+            if (!requestSlots.tryAcquire()) {
+                throw new IllegalStateException("source actor request limit exceeded");
+            }
+            OresFuture<Object> completion = ownCurrentActorFuture(new OresFuture<>());
+            long requestId = requestIds.incrementAndGet();
+            requests.put(requestId, completion);
+            completion.whenCompleteRuntime((value, failure) -> {
+                requests.remove(requestId, completion);
+                requestSlots.release();
+            });
+            ActorCell<?> cell = actors.get(ref.id());
+            if (cell == null) {
+                completion.failFromRuntime(terminated(ref));
+                return completion;
+            }
+            if (!ownFuture(cell, completion)) return completion;
+            try {
+                ref.send(List.of(requestId, method, arguments));
+            } catch (RuntimeException | Error failure) {
+                completion.failFromRuntime(failure);
+                throw failure;
+            }
+            return completion;
+        }
+
+        private void complete(long requestId, Object result) {
+            OresFuture<Object> completion = requests.get(requestId);
+            if (completion == null) return;
+            try {
+                Object frozen = freeze(result);
+                ActorCell<?> cell = actors.get(ref.id());
+                if (cell == null) throw terminated(ref);
+                if (estimateFrozenBytes(frozen) > cell.policy.maxHeapBytes()) {
+                    throw new IllegalStateException("source actor result exceeds heap limit");
+                }
+                completion.completeFromRuntime(frozen);
+            } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+                completion.failFromRuntime(fatal);
+                throw fatal;
+            } catch (RuntimeException | Error failure) {
+                completion.failFromRuntime(failure);
+            }
+        }
+    }
+
+    /** Account compiler-owned persistent source state in the active actor domain. */
+    public void accountCurrentSourceState(Object state) {
+        requireCallerRuntimeAffinity("account source actor state");
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null) throw new IllegalStateException("source state accounting requires an actor turn");
+        long bytes = estimateSourceStateBytes(state, new IdentityHashMap<>(), 0, new int[]{0});
+        synchronized (cell.lifecycleLock) {
+            if (cell.stopped.get() || cell.finalized) throw terminated(cell.ref);
+            long delta = bytes - cell.sourceStateBytes;
+            if (bytes > cell.policy.maxHeapBytes()
+                    || (!isPrivateKind(cell.kind)
+                        && bytes > cell.policy.maxHeapBytes() - cell.sharedMailboxBytes.get())) {
+                throw new IllegalStateException("source actor retained state exceeds heap limit");
+            }
+            if (delta > 0) {
+                if (cell.memorySlice != null) cell.memorySlice.reserve(delta, "source actor retained state");
+                else reserveSharedRuntimeBytes(delta, "source actor state");
+            } else if (delta < 0) {
+                if (cell.memorySlice != null) cell.memorySlice.release(-delta);
+                else releaseSharedRuntimeBytes(-delta);
+            }
+            cell.sourceStateBytes = bytes;
+        }
+    }
+
+    private long estimateSourceStateBytes(Object value, IdentityHashMap<Object, Boolean> seen,
+                                          int depth, int[] nodes) {
+        requireGraphDepth(depth);
+        if (++nodes[0] > MAX_MESSAGE_GRAPH_NODES) throw new IllegalArgumentException("source state graph is too large");
+        if (value == null) return 0;
+        if (value instanceof String text) return Math.addExact(32L, Math.multiplyExact(2L, text.length()));
+        if (isScalar(value)) return 32;
+        if (seen.put(value, Boolean.TRUE) != null) return 0;
+        long bytes = 64;
+        Iterable<?> children;
+        if (value instanceof OresMutex.Local<?> local) children = Collections.singletonList(local.retainedValueForRuntime());
+        else if (value instanceof OresMutex.SharedState state) children = state.sharedStateChildren();
+        else if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                bytes = Math.addExact(bytes, estimateSourceStateBytes(entry.getKey(), seen, depth + 1, nodes));
+                bytes = Math.addExact(bytes, estimateSourceStateBytes(entry.getValue(), seen, depth + 1, nodes));
+            }
+            return bytes;
+        } else if (value instanceof Iterable<?> iterable) children = iterable;
+        else if (value.getClass().isArray()) {
+            for (int i = 0; i < Array.getLength(value); i++) {
+                bytes = Math.addExact(bytes, estimateSourceStateBytes(Array.get(value, i), seen, depth + 1, nodes));
+            }
+            return bytes;
+        } else {
+            // Runtime capabilities have separately owned backing state. This is
+            // logical source-graph accounting, not an estimate of JVM object layout.
+            return bytes;
+        }
+        for (Object child : children) bytes = Math.addExact(bytes,
+                estimateSourceStateBytes(child, seen, depth + 1, nodes));
+        return bytes;
+    }
+
+    /**
+     * Single compiler lowering target for spawn. The runtime derives parentage
+     * from the active actor turn and enforces kind-specific policy/transport.
+     * Initial state crosses through the mailbox, never a caller-owned closure.
+     */
+    public SourceActor spawnSource(ActorKind kind, List<Object> initialState,
+                                  SourceBehaviorFactory factory) {
+        Objects.requireNonNull(factory, "factory");
+        ActorCell<?> parent = currentActor.get();
+        AtomicReference<SourceActor> handle = new AtomicReference<>();
+        ActorRef<List<Object>> ref = spawnInternal(kind, defaultSpawnPolicy(), factoryContext -> {
+            return new Behavior<>() {
+                private SourceBehavior behavior;
+                @Override public void onMessage(List<Object> message, ActorContext<List<Object>> turn) throws Exception {
+                    if (behavior == null) {
+                        behavior = Objects.requireNonNull(factory.create(message, turn), "source behavior");
+                        accountCurrentSourceState(behavior.retainedState());
+                        return;
+                    }
+                    long id = ((Number) message.get(0)).longValue();
+                    SourceActor actor = handle.get();
+                    OresFuture<Object> completion = actor.requests.get(id);
+                    if (completion == null || completion.isDone()) return;
+                    try {
+                        @SuppressWarnings("unchecked")
+                        List<Object> args = (List<Object>) message.get(2);
+                        Object result = behavior.invoke((String) message.get(1), args);
+                        accountCurrentSourceState(behavior.retainedState());
+                        if (result instanceof OresFuture<?> future) {
+                            completion.whenCompleteRuntime((ignored, requestFailure) -> {
+                                if (completion.isCancelled()) future.cancel(false);
+                            });
+                            enqueueOnCompletion(future, captureCurrentContinuationTarget(), (value, failure) -> {
+                                try {
+                                    accountCurrentSourceState(behavior.retainedState());
+                                    if (failure == null) actor.complete(id, value);
+                                    else completion.failFromRuntime(OresFuture.unwrap(failure));
+                                } catch (RuntimeException | Error accountingFailure) {
+                                    completion.failFromRuntime(accountingFailure);
+                                    throw accountingFailure;
+                                }
+                            });
+                        } else {
+                            actor.complete(id, result);
+                        }
+                    } catch (VirtualMachineError | ThreadDeath | LinkageError fatal) {
+                        completion.failFromRuntime(fatal);
+                        throw fatal;
+                    } catch (Throwable failure) {
+                        completion.failFromRuntime(failure);
+                        throw failure;
+                    }
+                }
+            };
+        }, true);
+        SourceActor actor = new SourceActor(ref, parent);
+        handle.set(actor);
+        try {
+            ref.send(initialState);
+        } catch (RuntimeException | Error failure) {
+            ref.stop();
+            throw failure;
+        }
+        return actor;
+    }
+
     public <M> ActorHandle<M> spawnChild(
             ActorKind kind,
             IsolatePolicy policy,
@@ -2118,7 +2332,7 @@ public final class ActorRuntime implements AutoCloseable {
         return new ActorHandle<>(ref, parent.ref.id());
     }
 
-    public <M> ActorHandle<M> spawnChildPrivate(
+    <M> ActorHandle<M> spawnChildPrivate(
             BehaviorFactory<M> behaviorFactory) {
         return spawnChild(
                 ActorKind.PRIVATE,
@@ -2126,7 +2340,7 @@ public final class ActorRuntime implements AutoCloseable {
                 behaviorFactory);
     }
 
-    public <M> ActorHandle<M> spawnChildShared(
+    <M> ActorHandle<M> spawnChildShared(
             BehaviorFactory<M> behaviorFactory) {
         return spawnChild(
                 ActorKind.SHARED,
@@ -2134,7 +2348,7 @@ public final class ActorRuntime implements AutoCloseable {
                 behaviorFactory);
     }
 
-    public <M> ActorHandle<M> spawnChildUntrusted(
+    <M> ActorHandle<M> spawnChildUntrusted(
             BehaviorFactory<M> behaviorFactory) {
         return spawnChild(
                 ActorKind.UNTRUSTED,
@@ -2567,7 +2781,7 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Compiler-only lowering target for source-level actor/isoactor callables.
+     * Compiler-only lowering target for source-level shared/isolated/untrusted actor callables.
      *
      * A fresh actor receives exactly one transported message, computes one
      * data-only result, then terminates. Synchronous nesting from an actor turn
@@ -3212,7 +3426,7 @@ public final class ActorRuntime implements AutoCloseable {
         long runtimeRemaining = Math.max(0L, policyCeiling.maxHeapBytes() - actorMemoryBytes());
         if (cell.kind == ActorKind.SHARED) {
             requireOwnedSharedHandles(message, new IdentityHashMap<>(), 0);
-            long actorRemaining = Math.max(0L, cell.policy.maxHeapBytes() - cell.sharedMailboxBytes.get());
+            long actorRemaining = Math.max(0L, cell.policy.maxHeapBytes() - cell.sharedMailboxBytes.get() - cell.sourceStateBytes);
             long allowed = Math.min(actorRemaining, runtimeRemaining);
             try {
                 estimateSharedTransportBytes(message, new IdentityHashMap<>(), 0, allowed);
@@ -4643,6 +4857,7 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorCell<?> parent;
         private final Set<ActorCell<?>> children = ConcurrentHashMap.newKeySet();
         private final Set<OresFuture<?>> pendingOperations = ConcurrentHashMap.newKeySet();
+        private volatile long sourceStateBytes;
         /** Settles only after the actor has fully crossed its TurnExecutor boundary. */
         private final OresFuture<Void> finalizedFuture = new OresFuture<>();
         /** Mailbox transport is a bounded Oreslang channel of runtime envelopes. */
@@ -4801,6 +5016,8 @@ public final class ActorRuntime implements AutoCloseable {
             }
             drainMailboxReservations();
             if (memorySlice != null) memorySlice.close();
+            else releaseSharedRuntimeBytes(sourceStateBytes);
+            sourceStateBytes = 0;
             try {
                 actorExitHook.accept(executionDomain);
             } catch (VirtualMachineError | ThreadDeath fatal) {
@@ -4863,7 +5080,7 @@ public final class ActorRuntime implements AutoCloseable {
                 } catch (ArithmeticException overflow) {
                     throw new IllegalStateException("shared actor mailbox memory accounting overflow");
                 }
-                if (next > policy.maxHeapBytes()) {
+                if (next > policy.maxHeapBytes() - sourceStateBytes) {
                     throw new IllegalStateException("shared actor mailbox memory limit exceeded for " + ref.id()
                             + ": requested=" + bytes + " used=" + current + " limit=" + policy.maxHeapBytes());
                 }
