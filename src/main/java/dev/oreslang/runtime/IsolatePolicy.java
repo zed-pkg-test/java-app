@@ -196,12 +196,19 @@ public record IsolatePolicy(
                 .arguments(OresLanguage.ID, applicationArguments(profile, permissions, permissionCheckMode));
 
         /*
-         * Trusted and PRIVATE/isolated semantic actors share one explicit
-         * process Engine. Graal scopes AST/optimized-code sharing to an Engine.
-         * Adversarial contexts keep an implicit engine because spawnIsolate()
-         * applies to that boundary and must not join the trusted code engine.
+         * Trusted/private actor contexts with NO Java host imports share one
+         * explicit process Engine. This is the actor executable-code sharing
+         * domain: private actors strip Java interop, so their HostAccess shape
+         * is stable (HostAccess.NONE).
+         *
+         * Graal requires every Context on one Engine to have the same HostAccess
+         * configuration. Java/mixed-source contexts can have different exact
+         * class allowlists and even different compilation ClassLoaders, so they
+         * deliberately keep an implicit Engine instead of contaminating the
+         * actor code-cache domain. Adversarial contexts likewise keep their
+         * separate sandbox/isolate Engine boundary.
          */
-        if (!adversarial) {
+        if (!adversarial && hostClasses.isEmpty()) {
             builder.engine(ProcessCodeEngine.shared());
         }
 

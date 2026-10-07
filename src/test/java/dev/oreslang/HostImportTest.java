@@ -105,6 +105,22 @@ final class HostImportTest {
     }
 
     @Test
+    void javaHostAccessContextsDoNotJoinPrivateActorCodeEngine() {
+        IsolatePolicy policy = IsolatePolicy.developer()
+                .withCapabilities(IsolatePolicy.Capability.JAVA_INTEROP);
+
+        try (Context actorDomain = IsolatePolicy.developer()
+                     .restrictedContextBuilder(ExecutionProfile.serverJit()).build();
+             Context javaDomain = policy.restrictedContextBuilder(
+                     ExecutionProfile.serverJit(), Set.of("java.lang.Math")).build()) {
+            assertSame(dev.oreslang.runtime.ProcessCodeEngine.shared(),
+                    actorDomain.getEngine());
+            assertNotSame(actorDomain.getEngine(), javaDomain.getEngine(),
+                    "different HostAccess configurations must never share one Engine");
+        }
+    }
+
+    @Test
     void aliasesConstructsAndInvokesAllowlistedJavaClasses() {
         IsolatePolicy policy = IsolatePolicy.developer()
                 .withCapabilities(IsolatePolicy.Capability.JAVA_INTEROP);

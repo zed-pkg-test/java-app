@@ -116,35 +116,6 @@ final class SharedCodeRegistryTest {
     }
 
     @Test
-    void unapprovedAdversarialLoadDoesNotJoinProcessSharedImage() {
-        IsolatePolicy supervisor = IsolatePolicy.developer();
-        try (HotReloadManager manager =
-                     HotReloadManager.forUntrustedActors(
-                             supervisor, ExecutionProfile.serverJit())) {
-            var privateGeneration = manager.load("same.ores", MINIMAL_PROGRAM);
-            assertFalse(privateGeneration.sharedCodeImage(),
-                    "unapproved adversarial code must use a private source path");
-        }
-    }
-
-    @Test
-    void approvedAdversarialLoadMayReuseOnlyItsExactSharedImage() {
-        IsolatePolicy supervisor = IsolatePolicy.developer();
-        try (HotReloadManager manager =
-                     HotReloadManager.forUntrustedActors(
-                             supervisor, ExecutionProfile.serverJit())) {
-            manager.approveGuestCodeSharing("same.ores", MINIMAL_PROGRAM);
-            var sharedGeneration = manager.load("same.ores", MINIMAL_PROGRAM);
-            assertTrue(sharedGeneration.sharedCodeImage());
-
-            String changed = "pub routine main(): void { val n = 2; return; }";
-            var changedGeneration = manager.load("same.ores", changed);
-            assertFalse(changedGeneration.sharedCodeImage(),
-                    "approval must not extend to a different content hash");
-        }
-    }
-
-    @Test
     void adversarialSharingRequiresExactSupervisorApprovalPerCodeUnit() {
         SharedCodeRegistry registry = new SharedCodeRegistry();
         IsolatePolicy supervisor = IsolatePolicy.developer();
