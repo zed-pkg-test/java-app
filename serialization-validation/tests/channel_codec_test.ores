@@ -66,7 +66,7 @@ pub async fnc run_channel_codec_tests(): void {
 
   val Channel<Option<List<int>>> unframed_msgpack = Channel.new<Option<List<int>>>(1);
   val Future<Result<DecodedValue, DecodeError>> msgpack_framing_task =
-    decode_messagepack_from_channel(rt take unframed_msgpack, trailing_allowed);
+    decode_messagepack_from_channel(rt take unframed_msgpack, rt borrow trailing_allowed);
   val Result<DecodedValue, DecodeError> msgpack_framing = await msgpack_framing_task;
   require_true(
     msgpack_framing.is_err(),
