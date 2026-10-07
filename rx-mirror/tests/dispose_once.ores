@@ -1,23 +1,12 @@
 import * as rx_channels from '../src/rx.ores';
-import class Subscription, StreamEvent from '../src/rx.ores';
-
-define class CountingSubscription extends Subscription<int> as
-  val Channel<int> reports;
-  constructor(Channel<int> reports) { self.reports = reports; }
-  pub pull(): Option<int> { return None; }
-  pub dispose(): void {
-    try writech self.reports, 1;
-    return;
-  }
-end
-
+import class Observable, Subscription, StreamEvent from '../src/rx.ores';
 pub async fnc main(): void {
-  val Channel<int> reports = Channel.new<int>(2);
-  val CountingSubscription sub = new CountingSubscription(reports);
+  val Observable<int> stream = rx_channels.from_values([]);
+  val Subscription<int> sub = stream.subscribe();
   val StreamEvent<int> terminal_event = sub.next_event();
   stdio.println(terminal_event.is_complete());
   stdio.println(sub.cancel());
-  stdio.println((readch reports) == 1);
-  stdio.println((try readch reports).is_none());
+  stdio.println(sub.is_complete());
+  stdio.println(sub.next_event().is_complete());
   return;
 }
