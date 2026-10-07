@@ -140,7 +140,7 @@ default: { idle(); }
 fn await_binding_and_nested_cancel_expression_remain_intact() {
     let src = r#"select first {
 when await pending.map(transform): const result { consume(result); }
-when cancelled owner.token(): { stop(); }
+when cancelled owner.token() { stop(); }
 when timeout 2.5ms { retry(); }
 }
 "#;
@@ -158,6 +158,8 @@ fn readiness_arms_fail_closed_when_required_shape_is_missing() {
         "select { when await future val x {} }",
         "select { when timeout 5s }",
         "select { when cancelled token }",
+        "select { when cancelled token: {} }",
+        "select { when timeout 5s: {} }",
         "select { when unknown source: {} }",
     ] {
         assert!(format_source(source).is_err(), "{source}");

@@ -206,6 +206,12 @@ pub(crate) fn normalize(source: &str) -> Result<String, FormatError> {
                         "timeout/cancelled select arms require a braced body",
                     ));
                 }
+                if cursor > arm + 2 && tokens[cursor - 1].text == ":" {
+                    return Err(error(
+                        tokens[cursor - 1].start,
+                        "timeout/cancelled select arms do not use ':' before the body",
+                    ));
+                }
                 if cursor <= arm + 2 {
                     return Err(error(
                         tokens[arm].start,
