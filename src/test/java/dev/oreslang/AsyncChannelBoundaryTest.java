@@ -51,12 +51,16 @@ final class AsyncChannelBoundaryTest {
     }
 
     @Test
-    void actorBoundariesStillDisallowChannels() {
+    void channelOwnershipCannotBeTransferredTwice() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
-                actor Worker {
-                  fnc bad(Channel<int> input): void {
-                    return;
-                  }
+                async fnc consume(Channel<int> input): int {
+                  return await (nb readch input);
+                }
+                fnc bad(): void {
+                  val Channel<int> channel = Channel.new<int>(1);
+                  val Future<int> one = consume(rt take channel);
+                  val Future<int> two = consume(rt take channel);
+                  return;
                 }
                 """)));
     }
