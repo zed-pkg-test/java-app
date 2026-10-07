@@ -22,7 +22,7 @@ pub fnc run_messagepack_tests(): void {
   val Value source = value_object(members);
 
   val Result<List<int>, EncodeError> encoded = encode(
-    source,
+    rt borrow source,
     default_encode_options()
   );
   require_true(encoded.is_err() == false, "MessagePack object must encode");
@@ -34,10 +34,9 @@ pub fnc run_messagepack_tests(): void {
   require_true(decoded.is_err() == false, "MessagePack object must decode");
   require_true(
     value_deep_equal(source, decoded.unwrap().value),
-    "MessagePack dynamic value must round-trip"
+    "MessagePack dynamic value must round-trip without consuming source"
   );
 
-  // [1, 2, 3] using fixarray/fixints.
   val Result<DecodedValue, DecodeError> fixed = decode(
     new List<int>(147, 1, 2, 3),
     default_decode_options()
@@ -45,21 +44,46 @@ pub fnc run_messagepack_tests(): void {
   require_true(fixed.is_err() == false, "MessagePack fixarray should decode");
   require_int(fixed.unwrap().value.array_value.length, 3, "MessagePack fixarray length");
 
-  // { 1: 2 } is a general MessagePack map, not a JSON-shaped object.
   val Result<DecodedValue, DecodeError> general_map = decode(
     new List<int>(129, 1, 2),
     default_decode_options()
   );
   require_true(general_map.is_err() == false, "MessagePack integer-key map must decode");
-  require_int(general_map.unwrap().value.kind, 8, "integer-key MessagePack map kind");
-  require_int(general_map.unwrap().value.map_value.length, 1, "integer-key MessagePack map size");
+  val DecodedValue general = general_map.unwrap();
+  require_int(general.value.kind, 8, "integer-key MessagePack map kind");
+  require_int(general.value.map_value.length, 1, "integer-key MessagePack map size");
 
   val Result<List<int>, EncodeError> general_map_encoded = encode(
-    general_map.unwrap().value,
+    general.value,
     default_encode_options()
   );
   require_true(general_map_encoded.is_err() == false, "MessagePack general map must re-encode");
   require_int(general_map_encoded.unwrap()[0], 129, "MessagePack general map header");
+
+  val List<int> duplicate_map = new List<int>(130, 1, 2, 1, 3);
+  val Result<DecodedValue, DecodeError> duplicate_reject = decode(
+    rt borrow duplicate_map,
+    default_decode_options()
+  );
+  require_true(duplicate_reject.is_err(), "MessagePack duplicate general-map keys must reject by default");
+
+  val DecodeOptions duplicate_first = new DecodeOptions(
+    1, false, 128, 64, 64, 64, 64, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> first_wins = decode(rt borrow duplicate_map, duplicate_first);
+  require_true(!first_wins.is_err(), "MessagePack first-wins duplicate policy must decode");
+  val DecodedValue first_value = first_wins.unwrap();
+  require_int(first_value.value.map_value.length, 1, "MessagePack first-wins must keep one entry");
+  require_int(first_value.value.map_value[0].value.number_lexeme[0], 50, "MessagePack first-wins must preserve first value");
+
+  val DecodeOptions duplicate_last = new DecodeOptions(
+    2, false, 128, 64, 64, 64, 64, 16, 16
+  );
+  val Result<DecodedValue, DecodeError> last_wins = decode(rt borrow duplicate_map, duplicate_last);
+  require_true(!last_wins.is_err(), "MessagePack last-wins duplicate policy must decode");
+  val DecodedValue last_value = last_wins.unwrap();
+  require_int(last_value.value.map_value.length, 1, "MessagePack last-wins must keep one entry");
+  require_int(last_value.value.map_value[0].value.number_lexeme[0], 51, "MessagePack last-wins must preserve last value");
 
   val int min_int = -9223372036854775807 - 1;
   val int max_int = 9223372036854775807;
@@ -69,7 +93,6 @@ pub fnc run_messagepack_tests(): void {
     default_encode_options()
   );
   require_true(min_encoded.is_err() == false, "MessagePack int64 minimum must encode");
-
   val Result<DecodedValue, DecodeError> min_decoded = decode(
     min_encoded.unwrap(),
     default_decode_options()
@@ -85,7 +108,6 @@ pub fnc run_messagepack_tests(): void {
     default_encode_options()
   );
   require_true(max_encoded.is_err() == false, "MessagePack int64 maximum must encode");
-
   val Result<DecodedValue, DecodeError> max_decoded = decode(
     max_encoded.unwrap(),
     default_decode_options()
@@ -106,10 +128,7 @@ pub fnc run_messagepack_tests(): void {
     new List<int>(219, 255, 255, 255, 255),
     default_decode_options()
   );
-  require_true(
-    declared_length_bomb.is_err(),
-    "MessagePack huge declared string length must reject before allocation"
-  );
+  require_true(declared_length_bomb.is_err(), "MessagePack huge declared string length must reject before allocation");
 
   val DecodeOptions tiny_input = new DecodeOptions(
     0, false, 128, 1, 16, 16, 16, 16, 16
