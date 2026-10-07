@@ -62,7 +62,7 @@ Imports of generic functions currently use the module-qualified direct-call form
 | `merge_channels(left, right)` | Fair deterministic merging of two channel inputs |
 | `first(Observable<T>)` | Compatibility helper returning `Option<T>`; cancellation in `finally` |
 | `first_required(Observable<T>)` | Returns `T`, fails on empty rather than returning `None` (native Future-valued `first()` is a future integration target) |
-| `new FramedPipe<T>(capacity)` | **Preferred:** privately owns one writer/channel and admits one subscriber |
+| `framed_pipe(capacity, typedNone)` | **Preferred:** privately owns one writer/channel and admits one subscriber |
 | `pipe.send(value)` / `pipe.complete()` | Bounded writes, rejects duplicate completion and writes after completion |
 | `pipe.subscribe()` | Claims the single subscriber; duplicate calls fail |
 | `framed_sender(Channel<Option<T>>)` | Creates checked `FramedSender<T>` for ordered terminal writes |
@@ -112,4 +112,6 @@ The test runner type/ownership-checks the library, examples, and every test prog
 
 ## Ownership and lifecycle audit (October 2026)
 
-`new FramedPipe<T>(capacity)` is the recommended entry point when the stream owns its channel. Its transport and sender are private and it accepts only one subscriber; this eliminates external raw-write bypass of the terminal sentinel for this API. Existing `framed_sender(rawChannel)` and `from_channel(rawChannel)` remain compatibility adapters without this enforcement. All methods assume task/actor-local sequential access; the source `marked()` read/restore probe is not an atomic cross-thread peek. `Subscription.dispose_once()` is private to prevent external callers from triggering cleanup independently of terminal state. `pull()` and `dispose()` are still public override hooks pending support for protected class methods, and must not be called directly. Native `std/rx` remains the eventual authority on structured cancellation.
+`framed_pipe(capacity, typedNone)` is the recommended entry point when the stream owns its channel. Its transport and sender are private and it accepts only one subscriber; this eliminates external raw-write bypass of the terminal sentinel for this API. Existing `framed_sender(rawChannel)` and `from_channel(rawChannel)` remain compatibility adapters without this enforcement. All methods assume task/actor-local sequential access; the source `marked()` read/restore probe is not an atomic cross-thread peek. `Subscription.dispose_once()` is private to prevent external callers from triggering cleanup independently of terminal state. `pull()` and `dispose()` are still public override hooks pending support for protected class methods, and must not be called directly. Native `std/rx` remains the eventual authority on structured cancellation.
+
+**Generic factory note:** The pinned compiler forbids public constructors on file-private classes and explicit generic type arguments on imported function calls. For now create a typed `None` value (for example `val Option<int> witness = None;`) and call `rx_channels.framed_pipe(0, witness)`. The witness is *not* a stream value and is checked to be `None`; it only enables generic parameter inference. This avoids exposing the pipe's raw channel while respecting file-private class visibility.

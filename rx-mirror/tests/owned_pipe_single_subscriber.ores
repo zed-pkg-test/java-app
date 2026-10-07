@@ -1,7 +1,8 @@
 import * as rx_channels from '../src/rx.ores';
 import class FramedPipe, Subscription from '../src/rx.ores';
 pub async fnc main(): void {
-  val FramedPipe<int> pipe = new FramedPipe<int>(1);
+  val Option<int> element_type = None;
+  val FramedPipe<int> pipe = rx_channels.framed_pipe(1, element_type);
   val Subscription<int> first = pipe.subscribe();
   val Subscription<int> second = pipe.subscribe();
   stdio.println(second.next().is_none());

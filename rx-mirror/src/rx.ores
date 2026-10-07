@@ -233,12 +233,12 @@ define class FramedSender<T> as
 end
 
 // The transport and sender never escape; one producer, one subscriber.
-pub define class FramedPipe<T> extends Observable<T> as
+define class FramedPipe<T> extends Observable<T> as
   val Channel<Option<T>> input;
   val FramedSender<T> writer;
   val Channel<bool> subscribed = Channel.new<bool>(1);
 
-  pub constructor(int capacity) {
+  constructor(int capacity) {
     self.input = Channel.new<Option<T>>(capacity);
     self.writer = new FramedSender<T>(self.input);
   }
@@ -255,6 +255,16 @@ pub define class FramedPipe<T> extends Observable<T> as
     return new ChannelSubscription<T>(self.input);
   }
 end
+
+// Until generic return-context inference is available across imports, callers
+// pass an explicitly typed None to bind T. Reject Some rather than consuming data.
+pub fnc framed_pipe<T>(int capacity, Option<T> witness): FramedPipe<T> {
+  if witness.is_some(); then
+    val Result<bool, String> failure = Err("framed pipe witness must be None");
+    failure.expect("rx_channels.framed_pipe");
+  fi
+  return new FramedPipe<T>(capacity);
+}
 
 pub fnc framed_sender<T>(Channel<Option<T>> output): FramedSender<T> {
   return new FramedSender<T>(output);
