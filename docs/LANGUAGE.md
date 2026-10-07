@@ -924,27 +924,16 @@ define class Cache as
 end
 
 val cache = rt proxy new Cache();
-cache.hits = 10;       // write lock
-val n = cache.hits;    // read lock
-val m = cache.inc();   // conservative write lock
+cache.hits = 10;       // write lease
+val n = cache.hits;    // read lease
+val m = cache.inc();   // conservative write lease
 ```
 
 Both `rt proxy value` and `rt proxy(value)` are accepted. The original move-only owner is consumed, so code cannot keep a raw mutable alias beside the proxy. A proxy can cross only SHARED actor boundaries and requires the explicit `ACTOR_SHARED_PROXY` capability; private/untrusted actors and ordinary async-task boundaries reject it.
 
-Proxy contention is scheduler-cooperative. An uncontended access receives a logical
-lease immediately. If a read/write lease is unavailable, source execution registers a
-runtime-owned `OresFuture` waiter, stores its continuation, and returns from the current
-scheduler turn so the physical actor/source carrier can run other work. The lock reserves
-the grant before settling that future; the continuation is resumed only by its owning
-scheduler. Future completion never executes guest Oreslang code directly. Cancellation
-detaches queued waiters, and runtime shutdown fails queued waiters instead of leaving
-suspended continuations retained. FIFO ordering admits consecutive readers at the head as
-a batch while a queued writer prevents later readers from barging, bounding writer
-starvation.
+Proxy contention is scheduler-cooperative. An uncontended access receives a logical lease immediately. If a read/write lease is unavailable, source execution registers a runtime-owned `OresFuture` waiter, stores its continuation, and returns from the current scheduler turn so the physical actor/source carrier can run other work. The lock reserves the grant before settling that future; the continuation is resumed only by its owning scheduler. Future completion never executes guest Oreslang code directly. Cancellation detaches queued waiters, and runtime shutdown fails queued waiters instead of leaving suspended continuations retained. FIFO ordering admits consecutive readers at the head as a batch while a queued writer prevents later readers from barging, bounding writer starvation.
 
-The synchronous host/runtime convenience API may wait only outside actor/source scheduler
-execution. A contended synchronous access from an actor or scheduler turn fails closed
-rather than parking its carrier.
+The synchronous host/runtime convenience API may wait only outside actor/source scheduler execution. A contended synchronous access from an actor or scheduler turn fails closed rather than parking its carrier.
 
 Proxy access is deliberately restrictive:
 
@@ -963,7 +952,7 @@ Proxy field/index assignment is statement-like: it returns `void`. A move-only v
 
 `rt proxy` is therefore **not** the ordinary meaning of `shared actor`. It is an explicit synchronized capability for large or awkward object graphs where the programmer knowingly chooses shared mutable access.
 
-The older `SyncCell<T>` / `SharedMutex<T>` runtime machinery remains available to host/runtime compatibility code while the ownership model is migrated, but source-level shared actors no longer receive `SHARED_MEMORY` merely because they are shared actors. New application code should prefer owner actors/messages, immutable publication, or explicit `rt proxy` where synchronization is genuinely required.
+The older `SyncCell<T>` / `SharedMutex<T>` runtime machinery remains available to host/runtime compatibility code while the ownership model is migrated, but **actors do not receive `SHARED_MEMORY` authority**, including trusted host-created shared actors. New application code should prefer owner actors/messages, immutable publication, or explicit `rt proxy` where synchronization is genuinely required.
 
 The other `rt` ownership operations are being converged separately with allocation-domain semantics. In particular, `rt share` must not silently publish a pointer from one actor heap into globally visible memory; global immutable publication requires a distinct checked boundary.
 
@@ -1383,7 +1372,7 @@ Security is layered. Oreslang uses a deny-by-default language capability policy 
 
 An isolate policy can independently allow or deny:
 
-`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `ACTOR_SHARED_PROXY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`.
+`STDIN`, `STDOUT`, `PROCESS_INFO`, `ACTOR_SHARE_READONLY`, `ACTOR_SHARED_PROXY`, `SHARED_MEMORY`, `NETWORK`, `FILESYSTEM_READ`, `FILESYSTEM_WRITE`, `ENVIRONMENT`, `HOT_CODE_LOAD`, `FFI`, `NATIVE`, `REFLECTION`, `CHILD_PROCESS`, `THREAD_CREATE`, and `POLYGLOT`. `SHARED_MEMORY` is a host/runtime compatibility authority; actor policy derivation strips it. `ACTOR_SHARED_PROXY` is the narrower actor-facing synchronized capability.
 
 The trusted compiler API can reject forbidden API usage before execution:
 
