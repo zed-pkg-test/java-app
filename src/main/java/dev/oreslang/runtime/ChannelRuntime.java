@@ -486,7 +486,7 @@ public final class ChannelRuntime {
         private final int index;
         private final SelectCase selectCase;
         private final long ticket;
-        private final long timeoutDeadlineNanos;
+        private final long timeoutStartedNanos;
 
         private boolean externalReady;
         private Object externalValue;
@@ -503,9 +503,9 @@ public final class ChannelRuntime {
             this.index = index;
             this.selectCase = selectCase;
             this.ticket = nextTicket++;
-            this.timeoutDeadlineNanos =
-                    selectCase instanceof TimeoutCase timeout
-                            ? saturatingDeadline(timeout.timeoutNanos())
+            this.timeoutStartedNanos =
+                    selectCase instanceof TimeoutCase
+                            ? System.nanoTime()
                             : 0L;
         }
 
@@ -659,13 +659,6 @@ public final class ChannelRuntime {
         selection.registrations.clear();
     }
 
-    private static long saturatingDeadline(long delayNanos) {
-        long now = System.nanoTime();
-        if (delayNanos == 0L) return now;
-        long deadline = now + delayNanos;
-        return deadline < 0L && now > 0L ? Long.MAX_VALUE : deadline;
-    }
-
     private static void refreshExternalReadyLocked(SelectRegistration selection) {
         long now = System.nanoTime();
         for (CaseRegistration registration : selection.registrations) {
@@ -689,8 +682,8 @@ public final class ChannelRuntime {
                 continue;
             }
 
-            if (registration.selectCase instanceof TimeoutCase
-                    && now - registration.timeoutDeadlineNanos >= 0L) {
+            if (registration.selectCase instanceof TimeoutCase timeout
+                    && now - registration.timeoutStartedNanos >= timeout.timeoutNanos()) {
                 registration.externalReady = true;
             }
         }
@@ -702,7 +695,7 @@ public final class ChannelRuntime {
             if (selection.decided || registration.externalReady) continue;
 
             if (registration.selectCase instanceof AwaitCase<?> awaited) {
-                registration.futureWaiter =
+                OresFuture.RuntimeWaiterRegistration<?> waiter =
                         awaited.future().whenCompleteRuntimeCancellable(
                                 (value, failure) ->
                                         signalExternalReady(
@@ -711,21 +704,32 @@ public final class ChannelRuntime {
                                                 failure == null
                                                         ? null
                                                         : OresFuture.unwrap(failure)));
+                registration.futureWaiter = waiter;
+                if (selection.decided || !selection.registered) {
+                    waiter.detach();
+                    registration.futureWaiter = null;
+                }
                 continue;
             }
 
             if (registration.selectCase instanceof CancelledCase cancelled) {
-                registration.cancellationWaiter =
+                CancellationToken.Registration waiter =
                         cancelled.token().whenCancelledRuntime(
                                 () -> signalExternalReady(
                                         registration,
                                         null,
                                         null));
+                registration.cancellationWaiter = waiter;
+                if (selection.decided || !selection.registered) {
+                    waiter.detach();
+                    registration.cancellationWaiter = null;
+                }
                 continue;
             }
 
-            if (registration.selectCase instanceof TimeoutCase) {
-                long remaining = registration.timeoutDeadlineNanos - System.nanoTime();
+            if (registration.selectCase instanceof TimeoutCase timeout) {
+                long elapsed = System.nanoTime() - registration.timeoutStartedNanos;
+                long remaining = timeout.timeoutNanos() - Math.max(0L, elapsed);
                 registration.timeoutTask = TIMER.schedule(
                         () -> signalExternalReady(
                                 registration,
@@ -847,7 +851,33 @@ public final class ChannelRuntime {
                             findMutualPeerLocked(
                                     chosen,
                                     SelectOperation.READ);
-                   private static CaseRegistration preferredCommittableCaseLocked(
+                    if (reader != null) {
+                        commitPairLocked(reader, chosen, completions);
+                        progressed = true;
+                        break;
+                    }
+
+                    if (channel.capacity > channel.buffer.size()) {
+                        @SuppressWarnings("unchecked")
+                        Channel<Object> writable =
+                                (Channel<Object>) channel;
+                        writable.buffer.addLast(chosen.writeValue());
+                        commitSingleLocked(
+                                chosen,
+                                new SelectResult(
+                                        chosen.index,
+                                        SelectOperation.WRITE,
+                                        null),
+                                completions);
+                        progressed = true;
+                        break;
+                    }
+                }
+            }
+        } while (progressed);
+    }
+
+    private static CaseRegistration preferredCommittableCaseLocked(
             SelectRegistration selection) {
         if (selection.decided) return null;
 

@@ -329,7 +329,7 @@ public final class CapabilityChecker {
                 checkStatements(s.defaultBody(), policy);
             } else if (stmt instanceof Ast.SelectStmt s) {
                 for (Ast.SelectArm arm : s.arms()) {
-                    if (arm.channel() != null) checkExpr(arm.channel(), policy);
+                    if (arm.source() != null) checkExpr(arm.source(), policy);
                     if (arm.value() != null) checkExpr(arm.value(), policy);
                     checkStatements(arm.body(), policy);
                 }
