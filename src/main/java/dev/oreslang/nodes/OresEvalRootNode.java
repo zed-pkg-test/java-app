@@ -1253,20 +1253,15 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             Ast.Stmt stmt = statements.get(index);
-            if (!statementContainsPotentialSuspension(
+            // Source tasks must carry returns as SourceFlow, not as a tail-call
+            // signal, including when a discarded do-select value is a call.
+            if (!(stmt instanceof Ast.ReturnStmt)
+                    && !statementContainsPotentialSuspension(
                     stmt,
                     java.util.Collections.newSetFromMap(
                             new IdentityHashMap<>()))) {
                 try {
                     executeStatement(stmt, env, defers, false);
-                    runStatements(
-                            task,
-                            statements,
-                            env,
-                            defers,
-                            index + 1,
-                            continuation);
-                    return;
                 } catch (ReturnSignal returned) {
                     finishBlock(
                             task,
@@ -1300,6 +1295,12 @@ public final class OresEvalRootNode extends RootNode {
                             continuation);
                     return;
                 }
+                // A later source statement or completion callback is not part
+                // of this statement's exception scope. Never reinterpret its
+                // error as another completion for the current block.
+                runStatements(
+                        task, statements, env, defers, index + 1, continuation);
+                return;
             }
 
             runSuspendableStatement(
@@ -1334,15 +1335,15 @@ public final class OresEvalRootNode extends RootNode {
                 SourceFlow initialFlow,
                 SourceFlowCont continuation) {
             if (defers.isEmpty()) {
+                SourceFlow completed = initialFlow;
                 try {
                     env.releaseMutexGuards(
                             initialFlow.kind() != SourceFlowKind.NORMAL);
-                    continuation.accept(task, initialFlow);
                 } catch (RuntimeException | Error failure) {
-                    continuation.accept(
-                            task,
-                            SourceFlow.throwing(failure));
+                    completed = SourceFlow.throwing(failure);
                 }
+                // The consumer owns any failure it throws. Do not call it twice.
+                continuation.accept(task, completed);
                 return;
             }
 
@@ -1362,15 +1363,14 @@ public final class OresEvalRootNode extends RootNode {
                 SourceFlowCont continuation) {
             Ast.Expr defer = defers.pollFirst();
             if (defer == null) {
+                SourceFlow completed = currentFlow;
                 try {
                     env.releaseMutexGuards(
                             currentFlow.kind() != SourceFlowKind.NORMAL);
-                    continuation.accept(task, currentFlow);
                 } catch (RuntimeException | Error failure) {
-                    continuation.accept(
-                            task,
-                            SourceFlow.throwing(failure));
+                    completed = SourceFlow.throwing(failure);
                 }
+                continuation.accept(task, completed);
                 return;
             }
 
@@ -1933,6 +1933,37 @@ public final class OresEvalRootNode extends RootNode {
                     });
         }
 
+        /**
+         * A selected branch is a source block, not an exception boundary. Run
+         * it on the resumable source frame so RETURN/BREAK/CONTINUE propagate
+         * as SourceFlow rather than escaping as host RuntimeExceptions.
+         * Explicit do-select suppresses only the arm-local RETURN; errors,
+         * cancellation and other failures still propagate.
+         */
+        private void runSelectedArmSuspendable(
+                SourceTask task,
+                Ast.SelectStmt select,
+                ChannelRuntime.SelectResult selected,
+                Env parent,
+                SourceFlowCont continuation) {
+            if (selected.index() < 0 || selected.index() >= select.arms().size()) {
+                continuation.accept(task, SourceFlow.throwing(
+                        new IllegalStateException("selected arm index is out of range")));
+                return;
+            }
+            Ast.SelectArm arm = select.arms().get(selected.index());
+            Env armEnv = new Env(parent);
+            if (arm.operation() == Ast.ChannelOperation.READ
+                    && arm.bindingName() != null) {
+                armEnv.define(arm.bindingName(), selected.value(), arm.bindingKind());
+            }
+            runBlock(task, arm.body(), armEnv, (t, flow) ->
+                    continuation.accept(t,
+                            select.explicitDo() && flow.kind() == SourceFlowKind.RETURN
+                                    ? SourceFlow.normal()
+                                    : flow));
+        }
+
         private void runSelectSuspendable(
                 SourceTask task,
                 Ast.SelectStmt select,
@@ -1944,24 +1975,18 @@ public final class OresEvalRootNode extends RootNode {
                     runtimeSelectPolicy(select.policy());
 
             if (select.mode() == Ast.WaitMode.IMMEDIATE) {
+                java.util.Optional<ChannelRuntime.SelectResult> result;
                 try {
-                    java.util.Optional<ChannelRuntime.SelectResult> result =
-                            set.trySelect(policy);
-                    if (result.isEmpty()) {
-                        continuation.accept(task, SourceFlow.normal());
-                    } else {
-                        executeSelectedArm(
-                                select,
-                                result.get(),
-                                env,
-                                false,
-                                false);
-                        continuation.accept(task, SourceFlow.normal());
-                    }
+                    result = set.trySelect(policy);
                 } catch (RuntimeException | Error failure) {
-                    continuation.accept(
-                            task,
-                            SourceFlow.throwing(failure));
+                    continuation.accept(task, SourceFlow.throwing(failure));
+                    return;
+                }
+                if (result.isEmpty()) {
+                    continuation.accept(task, SourceFlow.normal());
+                } else {
+                    runSelectedArmSuspendable(
+                            task, select, result.get(), env, continuation);
                 }
                 return;
             }
@@ -2003,19 +2028,15 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             if (future.isDone()) {
+                ChannelRuntime.SelectResult chosen;
                 try {
-                    executeSelectedArm(
-                            select,
-                            (ChannelRuntime.SelectResult) future.join(),
-                            env,
-                            false,
-                            false);
-                    continuation.accept(task, SourceFlow.normal());
+                    chosen = (ChannelRuntime.SelectResult) future.join();
                 } catch (RuntimeException | Error failure) {
-                    continuation.accept(
-                            task,
-                            SourceFlow.throwing(failure));
+                    continuation.accept(task, SourceFlow.throwing(failure));
+                    return;
                 }
+                runSelectedArmSuspendable(
+                        task, select, chosen, env, continuation);
                 return;
             }
 
@@ -2029,21 +2050,13 @@ public final class OresEvalRootNode extends RootNode {
                                             OresFuture.unwrap(failure)));
                             return;
                         }
-                        try {
-                            executeSelectedArm(
-                                    select,
-                                    (ChannelRuntime.SelectResult) value,
-                                    env,
-                                    false,
-                                    false);
-                            continuation.accept(
-                                    t,
-                                    SourceFlow.normal());
-                        } catch (RuntimeException | Error selectFailure) {
-                            continuation.accept(
-                                    t,
-                                    SourceFlow.throwing(selectFailure));
-                        }
+                        // The selected arm runs in the same source task. An
+                        // exception from a downstream completion must not be
+                        // reclassified as a second selected-arm completion.
+                        runSelectedArmSuspendable(
+                                t, select,
+                                (ChannelRuntime.SelectResult) value,
+                                env, continuation);
                     });
         }
 
@@ -3595,6 +3608,11 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.MethodDecl method = actor.owner().findMethod(actor.klass(),
                         CallableSelector.instance(member.member(), args.size()), new LinkedHashSet<>());
                 if (method == null) throw new IllegalArgumentException("unknown actor method " + member.member());
+                if (method.visibility() != Ast.Visibility.PUBLIC) {
+                    throw new IllegalArgumentException(
+                            "private actor method '" + actor.klass().name() + "." + method.name()
+                                    + "' is self-only and cannot be invoked through an actor capability");
+                }
                 actor.owner().requireClassMemberVisible(method.visibility(), actor.owner().declaringClass(method),
                         env.accessClass(), "method", method.name());
                 return invokableInvocation(values -> actor.actor().request(method.name(), objectArguments(values)), args);
@@ -3870,6 +3888,11 @@ public final class OresEvalRootNode extends RootNode {
                         Ast.MethodDecl method = actorOwner.findMethod(actorClass,
                                 CallableSelector.instance(name, arguments.size()), new LinkedHashSet<>());
                         if (method == null) throw new IllegalArgumentException("unknown actor method " + name);
+                        if (method.visibility() != Ast.Visibility.PUBLIC) {
+                            throw new IllegalArgumentException(
+                                    "private actor method '" + actorClass.name() + "." + method.name()
+                                            + "' is self-only and cannot be dispatched through the mailbox");
+                        }
                         return actorOwner.callMethod(state, method, arguments);
                     }
                 };
@@ -4659,18 +4682,30 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             if (!detached) {
-                executeBlock(arm.body(), armEnv, tailBarrier);
+                if (selected.explicitDo()) {
+                    try {
+                        // Return values are discarded, so this arm must be a
+                        // tail-call barrier even when the caller is in tail
+                        // position. Otherwise 'return fn();' escapes as a
+                        // TailCallSignal and hijacks the enclosing callable.
+                        executeBlock(arm.body(), armEnv, true);
+                    } catch (ReturnSignal ignored) {
+                        // Do-select return is arm-local; expression evaluated, value discarded.
+                    }
+                } else {
+                    executeBlock(arm.body(), armEnv, tailBarrier);
+                }
                 return;
             }
 
             try {
                 executeBlock(arm.body(), armEnv, true);
             } catch (ReturnSignal returned) {
-                if (returned.value != null) {
+                if (returned.value != null && !selected.explicitDo()) {
                     throw new IllegalStateException(
                             "nb select continuation cannot return a value");
                 }
-                // return; exits only this detached arm.
+                // do nb select may discard an arm-local return value.
             } catch (BreakSignal | ContinueSignal escapedLoopControl) {
                 throw new IllegalStateException(
                         "nb select continuation cannot break/continue an enclosing loop",
@@ -5610,6 +5645,21 @@ public final class OresEvalRootNode extends RootNode {
                 return switch (name) {
                     case "gc" -> (Invokable) actor::gc;
                     default -> throw new IllegalArgumentException("unknown actor member " + name);
+                };
+            }
+            if (receiver instanceof ChannelRuntime.Channel<?> channel) {
+                return switch (name) {
+                    case "close" -> (Invokable) args -> {
+                        requireZero(args, "Channel.close");
+                        channel.close();
+                        return null;
+                    };
+                    case "is_closed" -> (Invokable) args -> {
+                        requireZero(args, "Channel.is_closed");
+                        return channel.isClosed();
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown Channel member " + name);
                 };
             }
             if (receiver instanceof ChannelFactory factory) {

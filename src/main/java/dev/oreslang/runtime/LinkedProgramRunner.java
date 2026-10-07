@@ -335,6 +335,7 @@ public final class LinkedProgramRunner {
 
         Ast.Program program = Parser.parse(mixed.oresSource());
         for (Ast.ImportDecl imported : program.imports()) {
+            ImportRules.validate(imported);
             if (ImportRules.isJavaPath(imported.path())) continue;
 
             String raw = imported.path().replace('\\', '/');
@@ -349,9 +350,15 @@ public final class LinkedProgramRunner {
                 continue;
             }
 
-            String targetId = unitId(target.get());
+            Path resolvedTarget = target.get().toAbsolutePath().normalize();
+            if (Files.isSameFile(normalized, resolvedTarget)) {
+                throw new IllegalArgumentException(
+                        "source unit '" + id + "' cannot import itself via '" + imported.path() + "'");
+            }
+
+            String targetId = unitId(resolvedTarget);
             recordImportResolution(importResolutions, id, imported.path(), targetId);
-            collectImportClosure(target.get(), units, projectConfig, importResolutions);
+            collectImportClosure(resolvedTarget, units, projectConfig, importResolutions);
         }
     }
 

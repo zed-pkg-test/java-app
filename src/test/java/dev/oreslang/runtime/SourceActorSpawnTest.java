@@ -118,14 +118,86 @@ final class SourceActorSpawnTest {
         }
     }
 
+    @Test void sourceActorResultsRejectLiveSharedCapabilitiesWithoutKillingActor() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), 8)) {
+            OresMutex.Shared<int[]> shared = OresMutex.shared(new int[]{1});
+            ActorRuntime.SourceActor actor = runtime.spawnSource(
+                    ActorRuntime.ActorKind.SHARED,
+                    List.of(),
+                    (initial, context) -> (method, arguments) ->
+                            method.equals("bad") ? shared : 7L);
+
+            OresFuture<Object> rejected = actor.request("bad", List.of());
+            java.util.concurrent.ExecutionException failure = assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> rejected.get(2, TimeUnit.SECONDS));
+            assertTrue(failure.getCause().getMessage().contains("data values only")
+                    || failure.getCause().getMessage().contains("capabilities"));
+            assertTrue(actor.isAlive());
+            assertEquals(7L, actor.request("good", List.of()).get(2, TimeUnit.SECONDS));
+            actor.stop();
+        }
+    }
+
+    @Test void sharedSourceActorTransportPreservesExplicitSharedMutexCapability() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), 8)) {
+            OresMutex.Shared<int[]> shared = OresMutex.shared(new int[]{1});
+            ActorRuntime.SourceActor actor = runtime.spawnSource(
+                    ActorRuntime.ActorKind.SHARED,
+                    List.of(shared),
+                    (initial, context) -> {
+                        assertSame(shared, initial.getFirst());
+                        return (method, arguments) -> {
+                            assertSame(shared, arguments.getFirst());
+                            return 1L;
+                        };
+                    });
+            assertEquals(1L, actor.request("accept", List.of(shared)).get(2, TimeUnit.SECONDS));
+            actor.stop();
+        }
+    }
+
+    @Test void rejectedRequestTransportReleasesTheOnlyOutstandingRequestSlot() throws Exception {
+        IsolatePolicy base = IsolatePolicy.developer();
+        IsolatePolicy policy = new IsolatePolicy(
+                base.capabilities(),
+                base.maxHeapBytes(),
+                1,
+                base.maxWallTime(),
+                false);
+        try (ActorRuntime runtime = new ActorRuntime(policy, 4)) {
+            CountDownLatch initialized = new CountDownLatch(1);
+            ActorRuntime.SourceActor actor = runtime.spawnSource(
+                    ActorRuntime.ActorKind.SHARED,
+                    List.of(),
+                    (initial, context) -> {
+                        initialized.countDown();
+                        return (method, arguments) -> 7L;
+                    });
+            assertTrue(initialized.await(2, TimeUnit.SECONDS));
+
+            OresMutex.Local<Long> local = OresMutex.local(1L);
+            assertThrows(RuntimeException.class, () -> actor.request("bad", List.of(local)));
+
+            // The failed send must settle the request Future synchronously enough
+            // to return its semaphore permit; otherwise this valid request would
+            // incorrectly hit "source actor request limit exceeded".
+            assertEquals(7L, actor.request("good", List.of()).get(2, TimeUnit.SECONDS));
+            actor.stop();
+        }
+    }
+
     @Test void initialStateAndRequestArgumentsCannotSmuggleLiveCapabilities() {
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), 32)) {
             ActorRuntime.SourceActor actor = runtime.spawnSource(ActorRuntime.ActorKind.UNTRUSTED, List.of(),
                     (initial, context) -> (method, arguments) -> 1L);
             OresMutex.Local<Long> local = OresMutex.local(1L);
             assertThrows(RuntimeException.class, () -> actor.request("value", List.of(local)));
+            int actorCountBeforeRejectedSpawn = runtime.actorCount();
             assertThrows(RuntimeException.class, () -> runtime.spawnSource(ActorRuntime.ActorKind.PRIVATE,
                     List.of(local), (initial, context) -> (method, arguments) -> 1L));
+            assertEquals(actorCountBeforeRejectedSpawn, runtime.actorCount(),
+                    "rejected source initial-state transport must not leak an actor slot");
             actor.stop();
         }
     }

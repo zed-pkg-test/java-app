@@ -62,6 +62,13 @@ public final class TypeChecker {
     private boolean currentGenerator;
     private boolean currentAsyncCallable;
     private int loopDepth;
+    private boolean inDiscardingSelectArm;
+    private final List<String> warnings = new ArrayList<>();
+
+    /** Non-fatal compiler diagnostics, detached from mutable checker state. */
+    public record TypeCheckResult(Ast.Program program, List<String> warnings) {
+        public TypeCheckResult { warnings = List.copyOf(warnings); }
+    }
 
     public static Ast.Program check(Ast.Program program) {
         program = checkTypes(program);
@@ -71,12 +78,16 @@ public final class TypeChecker {
 
     /** Type analysis only; executable admission must use OresCompiler.analyze. */
     public static Ast.Program checkTypes(Ast.Program program) {
+        return checkTypesWithDiagnostics(program).program();
+    }
+
+    public static TypeCheckResult checkTypesWithDiagnostics(Ast.Program program) {
         program = AnnotationExpander.expand(program);
         TypeChecker checker = new TypeChecker();
         checker.validateImports(program);
         checker.collect(program);
         checker.validate(program);
-        return program;
+        return new TypeCheckResult(program, checker.warnings);
     }
 
     private void validateImports(Ast.Program program) {
@@ -953,6 +964,16 @@ public final class TypeChecker {
                             "structural parameter '" + param.name() + "' cannot outlive a synchronous call across await/suspension; "
                                     + "pass an owned nominal value or copy the required fields");
                 }
+                if (!method.isStatic()
+                        && klass.actorKind() != Ast.ActorKind.NONE
+                        && method.visibility() == Ast.Visibility.PUBLIC) {
+                    validateActorCallableBoundaryType(
+                            parameterType,
+                            klass.actorKind(),
+                            false,
+                            "parameter '" + param.name() + "' of public actor method '"
+                                    + klass.name() + "." + method.name() + "'");
+                }
                 if (method.async()) {
                     validateAsyncBoundaryType(
                             parameterType,
@@ -962,6 +983,16 @@ public final class TypeChecker {
                 env.define(param.name(), parameterType, param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
             Type returns = resolve(method.returnType(), generics, callableSelf);
+            if (!method.isStatic()
+                    && klass.actorKind() != Ast.ActorKind.NONE
+                    && method.visibility() == Ast.Visibility.PUBLIC) {
+                validateActorCallableBoundaryType(
+                        returns,
+                        klass.actorKind(),
+                        true,
+                        "return type of public actor method '"
+                                + klass.name() + "." + method.name() + "'");
+            }
             if (method.async()) {
                 validateAsyncBoundaryType(
                         returns,
@@ -1040,18 +1071,26 @@ public final class TypeChecker {
     }
 
     private void checkCallableBlock(List<Ast.Stmt> body, Env parent, Set<String> generics, Type expectedReturn, Type self) {
+        checkIsolatedArmBlock(body, parent, generics, expectedReturn, self, false);
+    }
+
+    private void checkIsolatedArmBlock(List<Ast.Stmt> body, Env parent, Set<String> generics,
+                                       Type expectedReturn, Type self, boolean discardReturn) {
         int previousLoopDepth = loopDepth;
         boolean previousGenerator = currentGenerator;
         boolean previousAsync = currentAsyncCallable;
+        boolean previousDiscard = inDiscardingSelectArm;
         loopDepth = 0;
         currentGenerator = false;
         currentAsyncCallable = false;
+        inDiscardingSelectArm = discardReturn;
         try {
             checkBlock(body, parent, generics, expectedReturn, self);
         } finally {
             loopDepth = previousLoopDepth;
             currentGenerator = previousGenerator;
             currentAsyncCallable = previousAsync;
+            inDiscardingSelectArm = previousDiscard;
         }
     }
 
@@ -1113,6 +1152,11 @@ public final class TypeChecker {
             return;
         }
         if (stmt instanceof Ast.ReturnStmt ret) {
+            if (inDiscardingSelectArm) {
+                warnings.add(ret.value() == null
+                        ? "W-SELECT-RETURN: return; exits only the selected do-select arm; prefer normal fallthrough"
+                        : "W-SELECT-RETURN: return value in do select exits only the selected arm; the value is discarded");
+            }
             if (currentGenerator) {
                 if (ret.value() != null) {
                     throw new IllegalArgumentException(
@@ -1215,16 +1259,14 @@ public final class TypeChecker {
                                 arm.bindingKind());
                     }
                 }
-                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
-                    // nb select arms run later as detached actor continuations.
-                    // return; exits the arm itself and loop control cannot cross
-                    // back into an already-continued enclosing loop.
-                    checkCallableBlock(
-                            arm.body(),
-                            armEnv,
-                            generics,
-                            Primitive.VOID,
-                            self);
+                if (selected.explicitDo()) {
+                    // Every do-select return is arm-local, including blocking do select.
+                    // A returned value is evaluated, discarded, and warned about.
+                    checkIsolatedArmBlock(arm.body(), armEnv, generics,
+                            Unknown.INSTANCE, self, true);
+                } else if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                    // Compatibility: detached legacy nb select arms cannot return a value.
+                    checkCallableBlock(arm.body(), armEnv, generics, Primitive.VOID, self);
                 } else {
                     checkBlock(arm.body(), armEnv, generics, expectedReturn, self);
                 }
@@ -1979,6 +2021,11 @@ public final class TypeChecker {
                         boolean remoteActor = klass.actorKind() != Ast.ActorKind.NONE
                                 && !(receiverValueType instanceof SelfType);
                         if (remoteActor) {
+                            if (method.visibility() != Ast.Visibility.PUBLIC) {
+                                throw new IllegalArgumentException(
+                                        "private actor method '" + owner.name() + "." + method.name()
+                                                + "' is self-only and cannot be invoked through an actor capability");
+                            }
                             for (Ast.Expr argument : call.arguments()) {
                                 validateActorCallableBoundaryType(typeOf(argument, env, generics, self),
                                         klass.actorKind(), false, "actor method argument");
@@ -2075,6 +2122,18 @@ public final class TypeChecker {
             }
             Type receiver = typeOf(member.receiver(), env, generics, self);
             Type sumReceiver = receiverDispatchType(deref(receiver));
+            // Channels are actor-local capabilities, but their lifecycle can
+            // be controlled by the owning source code without Java interop.
+            if (sumReceiver instanceof Named channelType
+                    && channelType.name().equals("Channel")
+                    && channelType.arguments().size() == 1) {
+                return switch (member.member()) {
+                    case "close" -> new Function(List.of(), Primitive.VOID);
+                    case "is_closed" -> new Function(List.of(), Primitive.BOOL);
+                    default -> throw new IllegalArgumentException(
+                            "unknown Channel member '" + member.member() + "'");
+                };
+            }
             Type futureMember = builtinFutureMember(sumReceiver, member.member());
             if (futureMember != null) return futureMember;
             Type collectionMember = builtinCollectionMember(sumReceiver, member.member());
@@ -3042,24 +3101,24 @@ public final class TypeChecker {
         }
         if (type instanceof Primitive || type instanceof StringLiteral) return;
         if (type instanceof ListType list) {
-            validateActorCallableBoundaryType(list.element(), actorKind, false, where + " element");
+            validateActorCallableBoundaryType(list.element(), actorKind, returnPosition, where + " element");
             return;
         }
         if (type instanceof Tuple tuple) {
             for (int i = 0; i < tuple.elements().size(); i++) {
-                validateActorCallableBoundaryType(tuple.elements().get(i), actorKind, false, where + " tuple element " + i);
+                validateActorCallableBoundaryType(tuple.elements().get(i), actorKind, returnPosition, where + " tuple element " + i);
             }
             return;
         }
         if (type instanceof Union union) {
             for (Type option : union.options()) {
-                validateActorCallableBoundaryType(option, actorKind, false, where + " union member");
+                validateActorCallableBoundaryType(option, actorKind, returnPosition, where + " union member");
             }
             return;
         }
         if (type instanceof Record record) {
             for (Map.Entry<String, Type> member : record.members().entrySet()) {
-                validateActorCallableBoundaryType(member.getValue(), actorKind, false, where + " field '" + member.getKey() + "'");
+                validateActorCallableBoundaryType(member.getValue(), actorKind, returnPosition, where + " field '" + member.getKey() + "'");
             }
             return;
         }
@@ -3082,11 +3141,15 @@ public final class TypeChecker {
             validateActorCallableBoundaryType(
                     named.arguments().getFirst(),
                     actorKind,
-                    false,
+                    returnPosition,
                     where + " value");
             return;
         }
         if (named.name().equals("SharedMutex")) {
+            if (returnPosition) {
+                throw new IllegalArgumentException(
+                        where + " must be data-only; SharedMutex<T> is a live shared capability and cannot be returned from an actor method");
+            }
             if (actorKind == Ast.ActorKind.PRIVATE || actorKind == Ast.ActorKind.UNTRUSTED) {
                 throw new IllegalArgumentException(
                         where + " cannot use SharedMutex<T> with isoactor/private actors");
@@ -3100,7 +3163,7 @@ public final class TypeChecker {
         }
 
         for (Type argument : named.arguments()) {
-            validateActorCallableBoundaryType(argument, actorKind, false, where + " type argument");
+            validateActorCallableBoundaryType(argument, actorKind, returnPosition, where + " type argument");
         }
 
         // Built-in sum/container values are data-only when their arguments pass.
@@ -3122,10 +3185,13 @@ public final class TypeChecker {
                     where + " cannot transport an actor instance by value; pass an actor capability/reference");
         }
 
-        if (!isSharedSafe(type, new LinkedHashSet<>(), Map.of())) {
-            throw new IllegalArgumentException(
-                    where + " contains state that is not safe to transport across an actor boundary");
-        }
+        // Source class objects are evaluator-owned mutable objects. The runtime
+        // transport currently supports scalar/container data and explicit
+        // capabilities, not arbitrary OresObject serialization. Reject these
+        // statically even when every declared field is individually shared-safe.
+        throw new IllegalArgumentException(
+                where + " cannot transport source class instance '" + klass.name()
+                        + "' by value yet; serialize/copy it into a data container first");
     }
 
     private boolean isSharedSafe(Type type, Set<Ast.ClassDecl> seen, Map<String, Type> genericBindings) {
