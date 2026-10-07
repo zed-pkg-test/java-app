@@ -370,4 +370,27 @@ final class ActorRuntimeProxyTest {
         }
     }
 
+
+    @Test
+    void runtimeCloseCancelsQueuedProxyDispose() throws Exception {
+        ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer());
+        ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{17});
+        ActorRuntime.Proxy<int[]>.Access reader =
+                proxy.acquireReadAsync().get(2, TimeUnit.SECONDS);
+
+        OresFuture<Void> closing = proxy.closeAsync();
+        assertFalse(closing.isDone(),
+                "dispose must wait cooperatively behind the active reader");
+        assertEquals(1, proxy.queuedWaiters());
+
+        runtime.close();
+
+        assertTrue(closing.isCancelled(),
+                "runtime teardown must preserve cancellation through Proxy.closeAsync");
+        assertThrows(java.util.concurrent.CancellationException.class, closing::join);
+        assertTrue(proxy.closed());
+
+        reader.close();
+    }
+
 }
