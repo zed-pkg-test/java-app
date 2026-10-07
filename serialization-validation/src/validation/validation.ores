@@ -279,6 +279,14 @@ pub fnc value_rule_valid(ValueRule rule): bool {
     return false;
   fi
 
+  if rule.has_min_number && rule.min_number != rule.min_number then
+    return false;
+  fi
+
+  if rule.has_max_number && rule.max_number != rule.max_number then
+    return false;
+  fi
+
   if rule.has_min_number && rule.has_max_number then
     if rule.min_number > rule.max_number then
       return false;
@@ -309,7 +317,19 @@ fnc config_report(
   return new ValidationReport(errors, false);
 }
 
+pub fnc max_schema_fields(): int {
+  return 4096;
+}
+
+pub fnc max_schema_key_bytes(): int {
+  return 65536;
+}
+
 fnc object_schema_valid(ObjectSchema schema): bool {
+  if schema.fields.length > max_schema_fields() then
+    return false;
+  fi
+
   let Map<int, List<int>> buckets = new Map<int, List<int>>();
   let int i = 0;
 
@@ -319,6 +339,11 @@ fnc object_schema_valid(ObjectSchema schema): bool {
     fi
 
     let FieldRule field = schema.fields[i];
+
+    if field.key.bytes.length > max_schema_key_bytes() ||
+       !utf8_is_valid(field.key.bytes) then
+      return false;
+    fi
 
     if field.required && field.forbidden then
       return false;
@@ -433,15 +458,15 @@ pub fnc is_uuid(Utf8Text text): bool {
       break;
     fi
 
-    if i == 8 || i == 13 || i == 18 || i == 23 {
-      if text.bytes[i] != 45 {
+    if i == 8 || i == 13 || i == 18 || i == 23 then
+      if text.bytes[i] != 45 then
         return false;
-      } fi
-    } else {
-      if !is_hex(text.bytes[i]) {
+      fi
+    else
+      if !is_hex(text.bytes[i]) then
         return false;
-      } fi
-    } fi
+      fi
+    fi
 
     i = i + 1;
   done
@@ -518,22 +543,22 @@ pub fnc is_email(Utf8Text text): bool {
     let bool at_end = i == text.bytes.length;
     let int byte = at_end ? 46 : text.bytes[i];
 
-    if byte == 46 {
-      if i == label_start {
+    if byte == 46 then
+      if i == label_start then
         return false;
-      } fi
-      if text.bytes[label_start] == 45 || text.bytes[i - 1] == 45 {
+      fi
+      if text.bytes[label_start] == 45 || text.bytes[i - 1] == 45 then
         return false;
-      } fi
-      if !at_end {
+      fi
+      if !at_end then
         saw_dot = true;
-      } fi
+      fi
       label_start = i + 1;
-    } else {
-      if !is_ascii_letter_or_digit(byte) && byte != 45 {
+    else
+      if !is_ascii_letter_or_digit(byte) && byte != 45 then
         return false;
-      } fi
-    } fi
+      fi
+    fi
 
     if at_end then
       break;
@@ -733,6 +758,10 @@ pub fnc parse_number(Value value): ParsedNumber {
     j = j + 1;
   done
 
+  if result != result then
+    return new ParsedNumber(false, 0.0);
+  fi
+
   return new ParsedNumber(true, result);
 }
 
@@ -875,33 +904,33 @@ fnc validate_rule_at(
       return;
     fi
 
-    if rule.has_min_number {
-      if rule.min_exclusive {
-        if parsed.value <= rule.min_number {
+    if rule.has_min_number then
+      if rule.min_exclusive then
+        if parsed.value <= rule.min_number then
           add_error(report, options, "exclusive_min", path, "number must be greater than the minimum");
-        } fi
-      } else {
-        if parsed.value < rule.min_number {
+        fi
+      else
+        if parsed.value < rule.min_number then
           add_error(report, options, "min", path, "number is below the minimum");
-        } fi
-      } fi
-    } fi
+        fi
+      fi
+    fi
 
     if should_stop(report, options) then
       return;
     fi
 
-    if rule.has_max_number {
-      if rule.max_exclusive {
-        if parsed.value >= rule.max_number {
+    if rule.has_max_number then
+      if rule.max_exclusive then
+        if parsed.value >= rule.max_number then
           add_error(report, options, "exclusive_max", path, "number must be less than the maximum");
-        } fi
-      } else {
-        if parsed.value > rule.max_number {
+        fi
+      else
+        if parsed.value > rule.max_number then
           add_error(report, options, "max", path, "number is above the maximum");
-        } fi
-      } fi
-    } fi
+        fi
+      fi
+    fi
   fi
 
   return;
@@ -934,15 +963,75 @@ pub fnc validate_value(
   return report;
 }
 
-fnc schema_field_index(ObjectSchema schema, Utf8Text key): int {
-  let int i = 0;
-  for const field of schema.fields do
-    if text_equal(field.key, key) then
-      return i;
+fnc remember_text_index(
+  Map<int, List<int>> buckets,
+  Utf8Text key,
+  int index
+): void {
+  let int hash = text_hash(key);
+  if buckets.contains(hash) then
+    let List<int> candidates = buckets.get(hash);
+    candidates.push(index);
+    return;
+  fi
+
+  let List<int> candidates = new List<int>();
+  candidates.push(index);
+  buckets.set(hash, candidates);
+  return;
+}
+
+fnc schema_field_index(
+  ObjectSchema schema,
+  Map<int, List<int>> buckets,
+  Utf8Text key
+): int {
+  let int hash = text_hash(key);
+  if !buckets.contains(hash) then
+    return -1;
+  fi
+
+  let List<int> candidates = buckets.get(hash);
+  for const index of candidates do
+    if text_equal(schema.fields[index].key, key) then
+      return index;
     fi
-    i = i + 1;
   done
   return -1;
+}
+
+fnc object_field_index(
+  Value object,
+  Map<int, List<int>> buckets,
+  Utf8Text key
+): int {
+  let int hash = text_hash(key);
+  if !buckets.contains(hash) then
+    return -1;
+  fi
+
+  let List<int> candidates = buckets.get(hash);
+  for const index of candidates do
+    if text_equal(object.object_value[index].key, key) then
+      return index;
+    fi
+  done
+  return -1;
+}
+
+fnc object_keys_unique(Value object): bool {
+  let Map<int, List<int>> buckets = new Map<int, List<int>>();
+  let int i = 0;
+
+  for const member of object.object_value do
+    if object_field_index(object, buckets, member.key) >= 0 then
+      return false;
+    fi
+    remember_text_index(buckets, member.key, i);
+    i = i + 1;
+  done
+
+  return true;
 }
 
 pub fnc validate_object(
@@ -980,8 +1069,33 @@ pub fnc validate_object(
     return report;
   fi
 
+  if !object_keys_unique(value) then
+    add_error(
+      report,
+      options,
+      "duplicate_key",
+      new List<PathSegment>(),
+      "object contains duplicate field names"
+    );
+    return report;
+  fi
+
+  let Map<int, List<int>> schema_buckets = new Map<int, List<int>>();
+  let int schema_index = 0;
   for const field of schema.fields do
-    let int index = object_find_index(value, field.key);
+    remember_text_index(schema_buckets, field.key, schema_index);
+    schema_index = schema_index + 1;
+  done
+
+  let Map<int, List<int>> object_buckets = new Map<int, List<int>>();
+  let int object_index = 0;
+  for const member of value.object_value do
+    remember_text_index(object_buckets, member.key, object_index);
+    object_index = object_index + 1;
+  done
+
+  for const field of schema.fields do
+    let int index = object_field_index(value, object_buckets, field.key);
 
     if index < 0 then
       if field.required then
@@ -1029,7 +1143,7 @@ pub fnc validate_object(
 
   if schema.reject_unknown_fields then
     for const member of value.object_value do
-      if schema_field_index(schema, member.key) < 0 then
+      if schema_field_index(schema, schema_buckets, member.key) < 0 then
         add_error(
           report,
           options,
