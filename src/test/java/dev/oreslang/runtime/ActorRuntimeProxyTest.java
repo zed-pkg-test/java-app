@@ -2,9 +2,11 @@ package dev.oreslang.runtime;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -279,6 +281,93 @@ final class ActorRuntimeProxyTest {
                 "runtime teardown must settle suspended proxy waiters");
         assertThrows(java.util.concurrent.CancellationException.class, queued::join);
         writer.close();
+    }
+
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void contendedProxyWaitersReleaseTheOnlySharedCarrier() throws Exception {
+        ActorRuntime.DispatcherConfig config =
+                new ActorRuntime.DispatcherConfig(1, 1, 1, 64);
+        try (ActorRuntime runtime =
+                     new ActorRuntime(IsolatePolicy.developer(), config)) {
+            int contenders = 8;
+            ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{0});
+            ActorRuntime.Proxy<int[]>.Access blocker =
+                    proxy.acquireWriteAsync().get(2, TimeUnit.SECONDS);
+
+            CountDownLatch registered = new CountDownLatch(contenders);
+            CountDownLatch terminal = new CountDownLatch(contenders);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            ArrayList<ActorRuntime.ActorRef<String>> refs = new ArrayList<>();
+
+            try {
+                for (int i = 0; i < contenders; i++) {
+                    ActorRuntime.ActorRef<String> ref =
+                            runtime.spawnSharedTrusted(factoryContext ->
+                                    (message, actorContext) -> {
+                                        OresFuture<Void> task =
+                                                actorContext.runtime().startActorTask(
+                                                        new OresScheduler.Task<Void>() {
+                                                            @Override
+                                                            public OresScheduler.Step<Void> resume(
+                                                                    OresScheduler.Resume resume) {
+                                                                if (resume.initial()) {
+                                                                    OresFuture<ActorRuntime.Proxy<int[]>.Access> pending =
+                                                                            proxy.acquireWriteAsync();
+                                                                    registered.countDown();
+                                                                    return OresScheduler.<Void>await(pending);
+                                                                }
+                                                                if (resume.failure() != null) {
+                                                                    throw new RuntimeException(resume.failure());
+                                                                }
+                                                                ActorRuntime.Proxy<int[]>.Access access =
+                                                                        (ActorRuntime.Proxy<int[]>.Access) resume.value();
+                                                                try (access) {
+                                                                    access.write(value -> {
+                                                                        value[0]++;
+                                                                        return null;
+                                                                    });
+                                                                }
+                                                                return OresScheduler.done(null);
+                                                            }
+                                                        });
+                                        actorContext.runtime().ownCurrentActorFuture(task);
+                                        task.whenCompleteRuntime((ignored, taskFailure) -> {
+                                            if (taskFailure != null) {
+                                                failure.compareAndSet(null, taskFailure);
+                                            }
+                                            terminal.countDown();
+                                        });
+                                    });
+                    refs.add(ref);
+                    ref.send("go");
+                }
+
+                assertTrue(
+                        registered.await(3, TimeUnit.SECONDS),
+                        "all actor tasks must register proxy waiters even with only one shared carrier");
+                assertEquals(
+                        contenders,
+                        proxy.queuedWaiters(),
+                        "contended actor-side proxy acquisition must suspend the logical task instead of parking the carrier");
+            } finally {
+                blocker.close();
+            }
+
+            assertTrue(
+                    terminal.await(5, TimeUnit.SECONDS),
+                    "all suspended actor tasks should resume after the proxy grant chain advances");
+            assertNull(failure.get(), () -> "proxy actor task failed: " + failure.get());
+            assertEquals(contenders, proxy.read(value -> value[0]).intValue());
+            assertEquals(0, proxy.queuedWaiters());
+
+            for (ActorRuntime.ActorRef<String> ref : refs) ref.stop();
+            for (ActorRuntime.ActorRef<String> ref : refs) {
+                assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
+                assertTrue(ref.failure().isEmpty());
+            }
+        }
     }
 
 }
