@@ -238,7 +238,7 @@ define class FramedPipe<T> extends Observable<T> as
   val FramedSender<T> writer;
   val Channel<bool> subscribed = Channel.new<bool>(1);
 
-  constructor(int capacity) {
+  pub constructor(int capacity) {
     self.input = Channel.new<Option<T>>(capacity);
     self.writer = new FramedSender<T>(self.input);
   }
@@ -255,10 +255,6 @@ define class FramedPipe<T> extends Observable<T> as
     return new ChannelSubscription<T>(self.input);
   }
 end
-
-pub fnc framed_pipe<T>(int capacity): FramedPipe<T> {
-  return new FramedPipe<T>(capacity);
-}
 
 pub fnc framed_sender<T>(Channel<Option<T>> output): FramedSender<T> {
   return new FramedSender<T>(output);
