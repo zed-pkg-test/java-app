@@ -3,53 +3,41 @@ import fnc require_true, require_int from './assert';
 import class Utf8Text from '../src/core/value';
 import fnc any_rule from '../src/validation/validation';
 import class CodecFieldMeta, CodecTypeMeta, MetadataError from '../src/schema/metadata';
-import fnc codec_field, codec_type, validate_metadata, field_by_number from '../src/schema/metadata';
+import fnc codec_field, codec_type, validate_metadata, field_by_number, max_codec_fields from '../src/schema/metadata';
 
 pub fnc run_metadata_tests(): void {
   let List<CodecFieldMeta> fields = new List<CodecFieldMeta>();
-  fields.push(
-    codec_field(
-      new Utf8Text(new List<int>(117, 115, 101, 114, 110, 97, 109, 101)),
-      new Utf8Text(new List<int>(117, 115, 101, 114, 95, 110, 97, 109, 101)),
-      1,
-      true,
-      any_rule()
-    )
-  );
+  fields.push(codec_field(
+    new Utf8Text(new List<int>(117, 115, 101, 114, 110, 97, 109, 101)),
+    new Utf8Text(new List<int>(117, 115, 101, 114, 95, 110, 97, 109, 101)),
+    1, true, any_rule()
+  ));
 
-  val CodecTypeMeta metadata = codec_type(
-    new Utf8Text(new List<int>(85, 115, 101, 114)),
-    fields,
-    1
-  );
-
-  val Result<CodecTypeMeta, MetadataError> checked = validate_metadata(metadata);
+  val CodecTypeMeta metadata = codec_type(new Utf8Text(new List<int>(85, 115, 101, 114)), fields, 1);
+  val Result<CodecTypeMeta, MetadataError> checked = validate_metadata(rt borrow metadata);
   require_true(checked.is_err() == false, "valid codec metadata must pass");
-
-  val Result<CodecFieldMeta, MetadataError> field = field_by_number(metadata, 1);
+  val Result<CodecFieldMeta, MetadataError> field = field_by_number(rt borrow metadata, 1);
   require_true(field.is_err() == false, "field number lookup must succeed");
-  require_int(field.unwrap().field_number, 1, "field number lookup result");
+  val CodecFieldMeta found = field.unwrap();
+  require_int(found.field_number, 1, "field number lookup result");
 
   let List<CodecFieldMeta> duplicates = new List<CodecFieldMeta>();
-  duplicates.push(fields[0]);
-  duplicates.push(
-    codec_field(
-      new Utf8Text(new List<int>(97)),
-      new Utf8Text(new List<int>(98)),
-      1,
-      false,
-      any_rule()
-    )
-  );
-
-  val Result<CodecTypeMeta, MetadataError> bad = validate_metadata(
-    codec_type(
-      new Utf8Text(new List<int>(66, 97, 100)),
-      duplicates,
-      0
-    )
-  );
-
+  duplicates.push(rt borrow fields[0]);
+  duplicates.push(codec_field(new Utf8Text(new List<int>(97)), new Utf8Text(new List<int>(98)), 1, false, any_rule()));
+  val Result<CodecTypeMeta, MetadataError> bad = validate_metadata(codec_type(new Utf8Text(new List<int>(66, 97, 100)), duplicates, 0));
   require_true(bad.is_err(), "duplicate field numbers must reject");
+
+  val Result<CodecTypeMeta, MetadataError> empty_type_name = validate_metadata(codec_type(new Utf8Text(new List<int>()), new List<CodecFieldMeta>(), 0));
+  require_true(empty_type_name.is_err(), "empty codec type names must reject");
+
+  let List<CodecFieldMeta> too_many_fields = new List<CodecFieldMeta>();
+  let int field_index = 0;
+  loop do
+    if field_index > max_codec_fields() then break; fi
+    too_many_fields.push(rt borrow fields[0]);
+    field_index = field_index + 1;
+  done
+  val Result<CodecTypeMeta, MetadataError> field_limited = validate_metadata(codec_type(new Utf8Text(new List<int>(66, 105, 103)), too_many_fields, 0));
+  require_true(field_limited.is_err(), "codec metadata field ceiling must fail closed");
   return;
 }
