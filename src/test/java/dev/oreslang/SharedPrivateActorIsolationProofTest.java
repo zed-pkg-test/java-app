@@ -14,34 +14,42 @@ import static org.junit.jupiter.api.Assertions.*;
 final class SharedPrivateActorIsolationProofTest {
 
     @Test
-    void sharedActorCanShareExplicitStateWhilePrivateActorRemainsConfined() throws Exception {
+    void sharedActorCanUseExplicitProxyWhilePrivateActorRemainsConfined() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
-            // Positive control: SHARED actors may coordinate through an explicit SyncCell.
-            ActorRuntime.SyncCell<Integer> sharedCell = runtime.syncCell(10);
+            // Positive control: SHARED actors may hold the explicit synchronized
+            // proxy capability without receiving broad SHARED_MEMORY authority.
+            ActorRuntime.Proxy<int[]> proxy = runtime.proxy(new int[]{10});
             CountDownLatch sharedTurn = new CountDownLatch(1);
 
-            var shared = runtime.<String>spawnShared(() -> (message, context) -> {
-                assertEquals(ActorRuntime.ActorKind.SHARED, context.kind());
-                assertTrue(context.privateMemory().isEmpty());
-                sharedCell.update(value -> value + 1);
-                sharedTurn.countDown();
-                context.self().stop();
-            });
+            var shared = runtime.<ActorRuntime.Proxy<int[]>>spawnShared(
+                    () -> (message, context) -> {
+                        assertEquals(ActorRuntime.ActorKind.SHARED, context.kind());
+                        assertTrue(context.privateMemory().isEmpty());
+                        assertFalse(context.policy().allows(
+                                dev.oreslang.runtime.IsolatePolicy.Capability.SHARED_MEMORY));
+                        message.write(value -> {
+                            value[0]++;
+                            return null;
+                        });
+                        sharedTurn.countDown();
+                        context.self().stop();
+                    });
 
-            shared.send("increment");
+            shared.send(proxy);
             assertTrue(sharedTurn.await(2, TimeUnit.SECONDS));
             assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(shared.failure().isEmpty());
-            assertEquals(11, sharedCell.snapshot());
+            assertEquals(11, proxy.read(value -> value[0]).intValue());
 
-            // Negative control: a PRIVATE actor may not receive that writable shared handle.
+            // Negative control: a PRIVATE actor may not receive the synchronized
+            // proxy capability at all.
             var isolated = runtime.<Object>spawnPrivate(factoryContext -> {
                 assertEquals(ActorRuntime.ActorKind.PRIVATE, factoryContext.kind());
                 assertTrue(factoryContext.privateMemory().isPresent());
                 return (message, context) -> context.self().stop();
             });
 
-            assertThrows(IllegalArgumentException.class, () -> isolated.send(sharedCell));
+            assertThrows(SecurityException.class, () -> isolated.send(proxy));
             isolated.send("ordinary-value");
             assertTrue(isolated.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(isolated.failure().isEmpty());
