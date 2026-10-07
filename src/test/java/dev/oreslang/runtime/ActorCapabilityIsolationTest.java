@@ -249,7 +249,7 @@ final class ActorCapabilityIsolationTest {
 
 
     @Test
-    void trustedHostSharedActorStillCannotGainAmbientSharedWriteAuthority() throws Exception {
+    void trustedHostSharedActorCanStillOptIntoLegacySharedMemoryAuthority() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
             var shared = runtime.<String>spawnSharedTrusted(
                     IsolatePolicy.developer(),
@@ -263,7 +263,7 @@ final class ActorCapabilityIsolationTest {
 
             shared.send("check");
             assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
-            assertInstanceOf(SecurityException.class, shared.failure().orElseThrow());
+            assertTrue(shared.failure().isEmpty());
         }
     }
 
