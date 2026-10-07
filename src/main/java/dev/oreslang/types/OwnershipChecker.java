@@ -195,6 +195,8 @@ public final class OwnershipChecker {
         }
     }
 
+    private boolean discardingSelectReturn;
+
     private void checkStatement(Ast.Stmt stmt, Scope scope, Ast.TypeRef returnType) {
         if (stmt instanceof Ast.BindingStmt binding) {
             checkBinding(binding, scope);
@@ -230,6 +232,12 @@ public final class OwnershipChecker {
             return;
         }
         if (stmt instanceof Ast.ReturnStmt ret) {
+            if (discardingSelectReturn) {
+                // The returned expression is evaluated as a side effect only.
+                // It never escapes the selected arm or its actor's heap.
+                if (ret.value() != null) checkExpr(ret.value(), scope, false);
+                return;
+            }
             if (ret.value() != null) {
                 if (mutexCriticalSectionDepth > 0) {
                     throw error("with_lock/recover critical-section callbacks cannot return a value");
@@ -401,16 +409,19 @@ public final class OwnershipChecker {
                                     Origin.LOCAL));
                 }
 
-                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                if (selected.mode() == Ast.WaitMode.NONBLOCKING || selected.explicitDo()) {
                     int previousLoopDepth = loopDepth;
+                    boolean previousDiscard = discardingSelectReturn;
                     loopDepth = 0;
+                    discardingSelectReturn = selected.explicitDo();
                     try {
-                        checkBlock(
-                                arm.body(),
-                                armScope,
-                                Ast.TypeRef.simple("void"));
+                        checkBlock(arm.body(), armScope,
+                                selected.explicitDo()
+                                        ? Ast.TypeRef.inferred()
+                                        : Ast.TypeRef.simple("void"));
                     } finally {
                         loopDepth = previousLoopDepth;
+                        discardingSelectReturn = previousDiscard;
                     }
                 } else {
                     checkBlock(arm.body(), armScope, returnType);
@@ -1025,9 +1036,6 @@ public final class OwnershipChecker {
                             if (lambda.parameters().size() != 1) {
                                 throw error(member.member() + " callback must accept exactly one protected-value parameter");
                             }
-                            if (lambda.async()) {
-                                throw error(member.member() + " protected callbacks cannot be async: a mutex guard must not cross await");
-                            }
                             Ast.Param original = lambda.parameters().getFirst();
                             Ast.Param protectedParam = new Ast.Param(
                                     Ast.TypeRef.borrowed(element, true),
@@ -1035,8 +1043,7 @@ public final class OwnershipChecker {
                                     original.structural(),
                                     false);
                             Ast.LambdaExpr protectedLambda = new Ast.LambdaExpr(
-                                    List.of(protectedParam), lambda.expressionBody(), lambda.blockBody(),
-                                    lambda.nonLexical(), lambda.returnType(), false);
+                                    List.of(protectedParam), lambda.expressionBody(), lambda.blockBody());
                             mutexCriticalSectionDepth++;
                             try {
                                 checkLambda(protectedLambda, scope, null);
@@ -1351,19 +1358,12 @@ public final class OwnershipChecker {
     }
 
     private ValueInfo checkLambda(Ast.LambdaExpr lambda, Scope outer, String recursiveBinding) {
-        boolean nonLexical = lambda.nonLexical();
+        boolean nonLexical = lambda.nonLexical() || outer.descendantsNonLexical();
         CaptureSet captures = nonLexical ? new CaptureSet() : collectCaptures(lambda, outer, recursiveBinding);
         Scope closure = new Scope(null, nonLexical);
 
         for (Capture capture : captures.values.values()) {
             VarState source = capture.source;
-            // Async callbacks execute on a separately scheduled carrier. Until
-            // sendability proofs can transfer owned heaps, prevent aliases of
-            // mutable or move-only parent state from crossing that boundary.
-            if (lambda.async() && (capture.write || source.mutable || source.kind != ValueKind.COPY)) {
-                throw error("async closure cannot capture mutable/non-Copy value '" + capture.name
-                        + "' across a task boundary; pass an owned/sendable argument instead");
-            }
             source.debugName = capture.name;
             requireUsable(source, capture.name, capture.write);
 
@@ -1389,7 +1389,9 @@ public final class OwnershipChecker {
 
         for (Ast.Param param : lambda.parameters()) closure.define(param.name(), stateForParam(param));
         int previousLoopDepth = loopDepth;
+        boolean previousDiscard = discardingSelectReturn;
         loopDepth = 0;
+        discardingSelectReturn = false;
         try {
             if (lambda.expressionBody() != null) {
                 // An expression body has return-value ownership semantics even
@@ -1405,6 +1407,7 @@ public final class OwnershipChecker {
             }
         } finally {
             loopDepth = previousLoopDepth;
+            discardingSelectReturn = previousDiscard;
             closure.close();
         }
         return new ValueInfo(Ast.TypeRef.simple("Fnc"), ValueKind.MOVE_ONLY, null);

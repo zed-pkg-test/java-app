@@ -655,11 +655,28 @@ public final class Ast {
         }
     }
 
+    /**
+     * Static select carries an explicitDo source marker for result-discarding
+     * dispatch. Historical select/nb select statement syntax remains accepted;
+     * callers that intentionally want side effects use "do select".
+     */
     public record SelectStmt(
             WaitMode mode,
             SelectPolicy policy,
-            List<SelectArm> arms) implements Stmt {
+            List<SelectArm> arms,
+            boolean explicitDo) implements Stmt {
+        public SelectStmt(WaitMode mode, SelectPolicy policy, List<SelectArm> arms) {
+            this(mode, policy, arms, false);
+        }
+
         public SelectStmt {
+            if (mode == null || policy == null) {
+                throw new IllegalArgumentException("select mode and policy are required");
+            }
+            if (explicitDo && mode == WaitMode.IMMEDIATE) {
+                throw new IllegalArgumentException(
+                        "'do try select' is not supported; use 'try select' for an immediate probe");
+            }
             arms = List.copyOf(arms);
             if (arms.isEmpty()) throw new IllegalArgumentException("select requires at least one arm");
             long defaults = arms.stream().filter(arm -> arm.operation() == ChannelOperation.DEFAULT).count();
@@ -821,7 +838,7 @@ public final class Ast {
         public ObjectExpr { fields = List.copyOf(fields); }
     }
 
-    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType, boolean async) implements Expr {
+    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) implements Expr {
         public LambdaExpr {
             parameters = List.copyOf(parameters);
             blockBody = blockBody == null ? null : List.copyOf(blockBody);
@@ -831,13 +848,7 @@ public final class Ast {
             }
         }
         public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody) {
-            this(parameters, expressionBody, blockBody, false, null, false);
-        }
-        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) {
-            this(parameters, expressionBody, blockBody, nonLexical, null, false);
-        }
-        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType) {
-            this(parameters, expressionBody, blockBody, nonLexical, returnType, false);
+            this(parameters, expressionBody, blockBody, false);
         }
     }
 }

@@ -22,6 +22,21 @@ public final class OresCompiler {
         return program;
     }
 
+    /** Compiler diagnostics are returned explicitly instead of written to shared stderr. */
+    public record AnalysisResult(Ast.Program program, java.util.List<String> warnings) {
+        public AnalysisResult { warnings = java.util.List.copyOf(warnings); }
+    }
+
+    public static AnalysisResult parseAndTypeCheckWithDiagnostics(String source) {
+        return analyzeWithDiagnostics(Parser.parse(source));
+    }
+
+    public static AnalysisResult analyzeWithDiagnostics(Ast.Program program) {
+        TypeChecker.TypeCheckResult checked = TypeChecker.checkTypesWithDiagnostics(program);
+        OwnershipChecker.check(checked.program());
+        return new AnalysisResult(checked.program(), checked.warnings());
+    }
+
     /**
      * Parse and type-check the complete source first, then perform closed-world
      * build optimization. Type errors in code that later becomes unreachable

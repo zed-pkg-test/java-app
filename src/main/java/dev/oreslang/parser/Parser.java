@@ -1385,6 +1385,23 @@ public final class Parser {
 
     private Ast.Stmt parseStatement() {
         if (looksLikeStaticSelectStatement()) return parseStaticSelectStatement();
+        // "cb" is reserved for callback-bearing writech; it is not the
+        // no-result/static-select marker. "do" is the canonical spelling.
+        if (check(CB) && checkNext(SELECT)) {
+            throw error(peek(), "use 'do select { ... }' instead of 'cb select'");
+        }
+        if (check(NB) && checkNext(CB)
+                && current + 2 < tokens.size()
+                && tokens.get(current + 2).type() == SELECT) {
+            throw error(peek(), "use 'do nb select { ... }' instead of 'nb cb select'");
+        }
+        if (check(DO) && (checkNext(SELECT)
+                || (checkNext(NB) && current + 2 < tokens.size()
+                    && tokens.get(current + 2).type() == SELECT))) {
+            throw error(peek(), "'do select' requires braced static cases; "
+                    + "dynamic 'select from cases' produces a result and "
+                    + "has no callback arms to handle discarded reads");
+        }
         if (looksLikeImmediateChannelExpression()) {
             Ast.Expr expression = parseExpression();
             consumeStatementTerminator("channel probe expression should end with ';'");
@@ -1490,8 +1507,9 @@ public final class Parser {
     private boolean looksLikeStaticSelectStatement() {
         int i = current;
         if (i >= tokens.size()) return false;
-        Token.Type first = tokens.get(i).type();
-        if (first == NB || first == TRY) i++;
+        if (tokens.get(i).type() == DO) i++;
+        if (i < tokens.size()
+                && (tokens.get(i).type() == NB || tokens.get(i).type() == TRY)) i++;
         if (i >= tokens.size() || tokens.get(i).type() != SELECT) return false;
         i++;
 
@@ -1511,9 +1529,16 @@ public final class Parser {
     }
 
     private Ast.SelectStmt parseStaticSelectStatement() {
+        boolean explicitDo = match(DO);
         Ast.WaitMode mode = Ast.WaitMode.BLOCKING;
         if (match(NB)) mode = Ast.WaitMode.NONBLOCKING;
-        else if (match(TRY)) mode = Ast.WaitMode.IMMEDIATE;
+        else if (match(TRY)) {
+            if (explicitDo) {
+                throw error(previous(),
+                        "'do try select' is not supported; use 'try select'");
+            }
+            mode = Ast.WaitMode.IMMEDIATE;
+        }
 
         consume(SELECT, "expected 'select'");
         Ast.SelectPolicy policy = parseSelectPolicy();
@@ -1581,7 +1606,7 @@ public final class Parser {
         }
 
         consume(RBRACE, "expected '}' after select");
-        return new Ast.SelectStmt(mode, policy, arms);
+        return new Ast.SelectStmt(mode, policy, arms, explicitDo);
     }
 
     private Ast.SelectPolicy parseSelectPolicy() {
@@ -2747,26 +2772,13 @@ public final class Parser {
             consume(RBRACKET, "expected ']' after arr literal");
             return new Ast.ListExpr(items);
         }
-        // RHS modifier order matches named callables.  Keep these modifiers
-        // attached to the callable value rather than to its enclosing binding.
-        if (check(NLEX) || check(ASYNC)) {
-            boolean nonLexical = false;
-            boolean async = false;
-            while (check(NLEX) || check(ASYNC)) {
-                if (match(NLEX)) {
-                    if (nonLexical) throw error(previous(), "duplicate 'nlex' lambda modifier");
-                    nonLexical = true;
-                } else if (match(ASYNC)) {
-                    if (async) throw error(previous(), "duplicate 'async' lambda modifier");
-                    async = true;
-                }
-            }
-            if (check(PIPE)) return parsePipeLambda(nonLexical, async);
-            if (check(LPAREN) && looksLikeLambda()) return parseLambda(nonLexical, async);
-            throw error(peek(), "RHS 'nlex'/'async' modifiers must prefix a lambda");
+        if (match(NLEX)) {
+            if (check(PIPE)) return parsePipeLambda(true);
+            if (check(LPAREN) && looksLikeLambda()) return parseLambda(true);
+            throw error(previous(), "'nlex' in expression position must prefix a lambda");
         }
-        if (check(PIPE)) return parsePipeLambda(false, false);
-        if (check(LPAREN) && looksLikeLambda()) return parseLambda(false, false);
+        if (check(PIPE)) return parsePipeLambda(false);
+        if (check(LPAREN) && looksLikeLambda()) return parseLambda(false);
         if (match(LPAREN)) {
             Ast.Expr first = parseExpression();
             if (match(COMMA)) {
@@ -2810,15 +2822,15 @@ public final class Parser {
         return new Ast.ObjectExpr(fields);
     }
 
-    private Ast.LambdaExpr parseLambda(boolean nonLexical, boolean async) {
+    private Ast.LambdaExpr parseLambda(boolean nonLexical) {
         consume(LPAREN, "expected '('");
         List<Ast.Param> params = parseParametersUntil(RPAREN);
         consume(RPAREN, "expected ')' after lambda parameters");
         consume(ARROW, "expected '->' after lambda parameters");
-        return parseLambdaBody(params, nonLexical, async);
+        return parseLambdaBody(params, nonLexical);
     }
 
-    private Ast.LambdaExpr parsePipeLambda(boolean nonLexical, boolean async) {
+    private Ast.LambdaExpr parsePipeLambda(boolean nonLexical) {
         consume(PIPE, "expected '|'");
         List<Ast.Param> params = new ArrayList<>();
         if (!check(PIPE)) {
@@ -2836,31 +2848,18 @@ public final class Parser {
         }
         consume(PIPE, "expected closing '|' after lambda parameters");
         consume(ARROW, "lambdas use the slim arrow '->'");
-        return parseLambdaBody(params, nonLexical, async);
+        return parseLambdaBody(params, nonLexical);
     }
 
-    private Ast.LambdaExpr parseLambdaBody(List<Ast.Param> params, boolean nonLexical, boolean async) {
-        // Typed block lambdas use '|args| -> ReturnType { ... }'. Probe the
-        // type grammar and roll back unless it is immediately followed by a
-        // block: '|x| -> x + 1' must remain an expression-bodied lambda.
-        Ast.TypeRef returnType = null;
-        if (!check(LBRACE) && (check(IDENT) || check(VOID) || check(LBRACKET)
-                || check(TYPEOF) || check(LPAREN))) {
-            int checkpoint = current;
-            try {
-                Ast.TypeRef candidate = parseTypeRef();
-                if (check(LBRACE)) returnType = candidate;
-            } catch (IllegalArgumentException ignored) {
-                // The expression grammar owns this sequence unless a complete
-                // type is followed by a block.
-            }
-            if (returnType == null) current = checkpoint;
-        }
+    private Ast.LambdaExpr parseLambdaBody(List<Ast.Param> params, boolean nonLexical) {
+        // Only an immediate '{' denotes the statement-block form. Everything
+        // else starts a normal expression body. This is intentionally lexical:
+        // future prefix expressions such as `struct{...}{...}` must remain
+        // expression bodies rather than being confused with a lambda block.
         if (check(LBRACE)) {
-            return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical, returnType, async);
+            return new Ast.LambdaExpr(params, null, parseBlock(), nonLexical);
         }
-        // Braces are mandatory when declaring a lambda return type.
-        return new Ast.LambdaExpr(params, parseExpression(), null, nonLexical, null, async);
+        return new Ast.LambdaExpr(params, parseExpression(), null, nonLexical);
     }
 
     private boolean looksLikeLambda() {

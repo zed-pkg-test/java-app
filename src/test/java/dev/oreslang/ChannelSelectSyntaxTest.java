@@ -80,6 +80,88 @@ final class ChannelSelectSyntaxTest {
     }
 
     @Test
+    void explicitDoSelectParsesAsNoResultDispatchWithoutChangingLegacySelect() {
+        Ast.Program checked = TypeChecker.check(Parser.parse("""
+                fnc consume(Channel<int> input): void {
+                  do select first {
+                    case readch input: val value {
+                      stdio.println(value);
+                    }
+                  }
+                  select {
+                    case readch input: val another {
+                      stdio.println(another);
+                    }
+                  }
+                  return;
+                }
+
+                actor fnc consumeLater(): void {
+                  val Channel<int> input = Channel.new<int>(1);
+                  do nb select random {
+                    case readch input: const value {
+                      stdio.println(value);
+                    }
+                  }
+                  nb select {
+                    case readch input: const another {
+                      stdio.println(another);
+                    }
+                  }
+                  return;
+                }
+                """));
+
+        Ast.FunctionDecl consume =
+                (Ast.FunctionDecl) checked.modules().getFirst().declarations().get(0);
+        Ast.SelectStmt synchronous = (Ast.SelectStmt) consume.body().get(0);
+        assertTrue(synchronous.explicitDo());
+        assertEquals(Ast.WaitMode.BLOCKING, synchronous.mode());
+        assertEquals(Ast.SelectPolicy.PRIORITY, synchronous.policy());
+        assertEquals(false, ((Ast.SelectStmt) consume.body().get(1)).explicitDo());
+
+        Ast.FunctionDecl later =
+                (Ast.FunctionDecl) checked.modules().getFirst().declarations().get(1);
+        Ast.SelectStmt asynchronous = (Ast.SelectStmt) later.body().get(1);
+        assertTrue(asynchronous.explicitDo());
+        assertEquals(Ast.WaitMode.NONBLOCKING, asynchronous.mode());
+        assertEquals(Ast.SelectPolicy.RANDOM, asynchronous.policy());
+        assertEquals(false, ((Ast.SelectStmt) later.body().get(2)).explicitDo());
+
+        assertDoesNotThrow(() -> OwnershipChecker.check(checked));
+    }
+
+    @Test
+    void callbackSelectAliasesAndUnsafeDynamicNoResultFormsAreRejected() {
+        String[] invalid = {
+            "cb select { default: {} }",
+            "nb cb select { default: {} }",
+            "do try select { default: {} }",
+            "do select from cases;",
+            "do nb select from cases;"
+        };
+        for (String selected : invalid) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Parser.parse("fnc invalid(): void { " + selected + " return; }"),
+                    selected);
+        }
+    }
+
+    @Test
+    void explicitDoSelectCannotEscapeItsActorBeforeDeferredArmRuns() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                fnc invalid(Channel<int> input): void {
+                  do nb select {
+                    case readch input: val value {
+                      stdio.println(value);
+                    }
+                  }
+                  return;
+                }
+                """)));
+    }
+
+    @Test
     void staticNbSelectRequiresActorExecutionDomain() {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 fnc wrong(Channel<int> input): void {

@@ -117,6 +117,7 @@ public final class OresMain {
         String directOresSource = filename.endsWith(".ores") ? Files.readString(path) : null;
         if (directOresSource != null) {
             formatSyntaxWarnings(path, directOresSource).forEach(System.err::println);
+            formatSelectReturnWarnings(path, directOresSource).forEach(System.err::println);
         }
 
         IsolatePolicy policy = strict ? IsolatePolicy.strictFaas() : IsolatePolicy.developer();
@@ -269,6 +270,25 @@ public final class OresMain {
         } catch (IllegalArgumentException ignored) {
             // The normal compile/check path will report the authoritative parse
             // error. Do not replace it with a secondary warning-scan failure.
+            return List.of();
+        }
+    }
+
+    /**
+     * Report no-result select arm returns on the normal CLI path, not only
+     * through the programmatic diagnostics API. The linked program compiler
+     * remains the authoritative checker; a failed preliminary analysis must
+     * not mask imports, source errors, or the normal diagnostic location.
+     */
+    static List<String> formatSelectReturnWarnings(Path path, String source) {
+        try {
+            Path normalized = path.toAbsolutePath().normalize();
+            return OresCompiler.parseAndTypeCheckWithDiagnostics(source).warnings().stream()
+                    .map(warning -> normalized + ": warning: " + warning)
+                    .toList();
+        } catch (IllegalArgumentException ignored) {
+            // Linked modules may need the import graph before full typechecking;
+            // always let the authoritative compiler report the actual error.
             return List.of();
         }
     }
