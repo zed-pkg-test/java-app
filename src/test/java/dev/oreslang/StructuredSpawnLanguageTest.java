@@ -89,6 +89,131 @@ final class StructuredSpawnLanguageTest {
         }
     }
 
+    @Test void sharedMutexIsInboundOnlyForSharedActorsAndResultsStayDataOnly() throws Exception {
+        assertEquals("7", run("""
+                define shared actor Worker as
+                  pub fnc accept(SharedMutex<int> value): int { return 7; }
+                end
+                pub routine main(): void {
+                  val worker = spawn Worker();
+                  val shared = SharedMutex.new(1);
+                  stdio.stdout.write(await worker.accept(shared));
+                  return;
+                }
+                """));
+
+        for (String returnType : List.of("SharedMutex<int>", "Option<SharedMutex<int>>")) {
+            String result = returnType.startsWith("Option")
+                    ? "return Some(SharedMutex.new(1));"
+                    : "return SharedMutex.new(1);";
+            assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                    define shared actor Worker as
+                      pub fnc expose(): %s { %s }
+                    end
+                    pub routine main(): void {
+                      val worker = spawn Worker();
+                      val exposed = await worker.expose();
+                      return;
+                    }
+                    """.formatted(returnType, result))), returnType);
+        }
+    }
+
+    @Test void sourceClassInstancesAreRejectedAtActorBoundariesBeforeRuntime() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define class Box as
+                  val int value;
+                end
+                define shared actor Worker as
+                  pub fnc accept(Box value): int { return 1; }
+                end
+                pub routine main(): void {
+                  val worker = spawn Worker();
+                  val result = await worker.accept(new Box(1));
+                  return;
+                }
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define class Box as
+                  val int value;
+                end
+                define shared actor Worker as
+                  pub fnc make(): Box { return new Box(1); }
+                end
+                pub routine main(): void {
+                  val worker = spawn Worker();
+                  val box = await worker.make();
+                  return;
+                }
+                """)));
+    }
+
+    @Test void invalidPublicActorApiIsRejectedEvenWhenUnused() {
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define shared actor Worker as
+                  pub fnc expose(): SharedMutex<int> { return SharedMutex.new(1); }
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define class Box as
+                  val int value;
+                end
+                define shared actor Worker as
+                  pub fnc accept(Box value): int { return 1; }
+                end
+                """)));
+    }
+
+    @Test void privateActorMethodsAreSelfOnlyAndMayUseTurnLocalTypes() throws Exception {
+        assertEquals("7", run("""
+                define isolated actor Worker as
+                  private fnc local(Mutex<int> value): int { return 7; }
+                  pub fnc run(): int {
+                    val local = Mutex.new(1);
+                    return self.local(local);
+                  }
+                end
+                pub routine main(): void {
+                  val worker = spawn Worker();
+                  stdio.stdout.write(await worker.run());
+                  return;
+                }
+                """));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define isolated actor Worker as
+                  private fnc secret(): int { return 7; }
+                  pub fnc try_other(): int {
+                    val other = spawn Worker();
+                    return await other.secret();
+                  }
+                end
+                """)));
+    }
+
+    @Test void genericPublicActorApisDeferUnresolvedTypesUntilCallSpecialization() throws Exception {
+        assertEquals("7", run("""
+                define isolated actor Worker as
+                  pub fnc echo<T>(T value): T { return value; }
+                end
+                pub routine main(): void {
+                  val worker = spawn Worker();
+                  stdio.stdout.write(await worker.echo<int>(7));
+                  return;
+                }
+                """));
+    }
+
+    @Test void actorConstructorsRemainForbidden() {
+        assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                define actor Worker as
+                  pub constructor() { }
+                end
+                """));
+    }
+
     @Test void spawnRequiresCapabilityEvenForEmptyActor() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 define actor Worker as end

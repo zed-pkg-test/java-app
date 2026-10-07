@@ -43,6 +43,7 @@ final class ImportGraph {
                 .get(imported.path());
         if (resolved != null) {
             String normalizedResolved = normalizeUnitId(resolved);
+            rejectSelfImport(normalizedUnitId, imported.path(), normalizedResolved);
             if (!available.contains(normalizedResolved)) {
                 throw new IllegalArgumentException(
                         "resolved import '" + imported.path() + "' from '" + unitId
@@ -61,6 +62,7 @@ final class ImportGraph {
             if (available.contains(candidate + ".ores")) candidate += ".ores";
             else if (available.contains(candidate + ".java")) candidate += ".java";
         }
+        rejectSelfImport(normalizedUnitId, imported.path(), candidate);
         if (available.contains(candidate)) return candidate;
         if (raw.startsWith(".")) {
             throw new IllegalArgumentException("relative import '" + imported.path() + "' from '" + unitId
@@ -230,6 +232,13 @@ final class ImportGraph {
         visiting.remove(component);
         visited.add(component);
         ordered.add(components.get(component));
+    }
+
+    private static void rejectSelfImport(String importerId, String importPath, String targetId) {
+        if (importerId.equals(targetId)) {
+            throw new IllegalArgumentException(
+                    "source unit '" + importerId + "' cannot import itself via '" + importPath + "'");
+        }
     }
 
     static String normalizeUnitId(String id) {

@@ -724,8 +724,11 @@ final class MutexRuntimeTest {
 
             assertTrue(validationEntered.await(2, TimeUnit.SECONDS));
             allowFailure.countDown();
-            for (int i = 0; i < 500 && doomed.failure().isEmpty(); i++) Thread.yield();
-            assertTrue(doomed.failure().isPresent());
+            long failureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (doomed.failure().isEmpty() && System.nanoTime() < failureDeadline) {
+                Thread.sleep(1);
+            }
+            assertTrue(doomed.failure().isPresent(), "doomed actor should publish its failure before admission resumes");
 
             releaseValidation.countDown();
             sender.join();

@@ -179,10 +179,23 @@ read can rendezvous with a pending select-write.
 
 ## Static select
 
-Canonical static syntax:
+**Result-mode vocabulary:** `do select { ... }` and
+`do nb select { ... }` explicitly request no-result, side-effecting dispatch.
+The selected arm runs as a statement, not as a value-producing expression.
+The older `select { ... }` and `nb select { ... }` remain accepted as
+statement forms for source compatibility. A future value-returning static
+select expression will require separate typed expression/arm support rather
+than silently changing the existing statement contract.
+
+`cb select` and `nb cb select` are **not** aliases: the parser rejects
+both with a hint to use `do select` or `do nb select`. The existing
+`nb cb writech ... || -> { ... }` is different: it actually supplies a
+callback function and remains supported.
+
+Canonical explicit no-result static syntax:
 
 ```ores
-select {
+do select {
   case readch incoming: let msg {
     stdio.println("Received:", msg);
   }
@@ -202,7 +215,7 @@ compile-time constant.
 Every `case` and `default` arm requires its own `{ ... }` body, including
 empty arms. Canonical source uses two spaces per indentation level and no tabs
 for indentation: arms sit one level inside `select`, and their statements sit
-one level inside the arm. The same rules apply to `nb select` and `try select`.
+one level inside the arm. The same rules apply to `nb select`, `do nb select`, and `try select`.
 Legacy unbraced arms are rejected by the parser; `oresfmt` migrates them.
 
 A select may include one `default: { ... }` arm.
@@ -257,7 +270,7 @@ It cannot reverse a case that has already atomically won a readiness race.
 ## Nonblocking static select
 
 ```ores
-nb select {
+do nb select {
   case readch incoming: let msg {
     stdio.println("Received:", msg);
   }
@@ -307,6 +320,12 @@ wins or the selection is cancelled.
 If the owning actor terminates before the select wins, actor teardown cancels
 the pending select Future and detaches all channel registrations.
 
+`do nb select` is not a request for unreliable fire-and-forget execution:
+the operation must register atomically, execute exactly one winning branch
+under its actor's serialized continuation when it wins, or be explicitly
+cancelled through actor teardown. Its no-result contract does not weaken
+cancellation, ownership, or fairness guarantees.
+
 ## Dynamic select
 
 Static and dynamic select lower to the same runtime `SelectSet` primitive.
@@ -326,6 +345,12 @@ val Option<SelectResult> result = select from cases;
 val Future<Option<SelectResult>> pending = nb select from cases;
 val Option<SelectResult> ready = try select from cases;
 ```
+
+Dynamic selection has **no arm bodies** to handle a consumed channel value;
+`do select from cases` and `do nb select from cases` are deliberately
+rejected rather than register a read and silently discard its outcome.
+Handle the returned `Option<SelectResult>` or `Future<Option<SelectResult>>`
+explicitly, or use braced static `do select` dispatch.
 
 A reusable set can retain its fairness cursor:
 

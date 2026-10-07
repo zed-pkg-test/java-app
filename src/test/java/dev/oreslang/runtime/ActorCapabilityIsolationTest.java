@@ -309,15 +309,15 @@ final class ActorCapabilityIsolationTest {
     @Test
     void invalidOreslangPrivateActorSharingFixtureIsRejected() throws Exception {
         String source = Files.readString(Path.of("examples/private-actor-sharing-invalid.ores"));
-        Ast.Program program = TypeChecker.check(Parser.parse(source));
 
-        SecurityException error = assertThrows(
-                SecurityException.class,
-                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse(source)));
 
         assertTrue(
-                error.getMessage().contains("SHARED_MEMORY")
-                        || error.getMessage().contains("ACTOR_SHARE_READONLY"));
+                error.getMessage().contains("SharedMutex")
+                        && (error.getMessage().contains("private")
+                            || error.getMessage().contains("isoactor")));
     }
 
 

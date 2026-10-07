@@ -195,6 +195,8 @@ public final class OwnershipChecker {
         }
     }
 
+    private boolean discardingSelectReturn;
+
     private void checkStatement(Ast.Stmt stmt, Scope scope, Ast.TypeRef returnType) {
         if (stmt instanceof Ast.BindingStmt binding) {
             checkBinding(binding, scope);
@@ -230,6 +232,12 @@ public final class OwnershipChecker {
             return;
         }
         if (stmt instanceof Ast.ReturnStmt ret) {
+            if (discardingSelectReturn) {
+                // The returned expression is evaluated as a side effect only.
+                // It never escapes the selected arm or its actor's heap.
+                if (ret.value() != null) checkExpr(ret.value(), scope, false);
+                return;
+            }
             if (ret.value() != null) {
                 if (mutexCriticalSectionDepth > 0) {
                     throw error("with_lock/recover critical-section callbacks cannot return a value");
@@ -401,16 +409,19 @@ public final class OwnershipChecker {
                                     Origin.LOCAL));
                 }
 
-                if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                if (selected.mode() == Ast.WaitMode.NONBLOCKING || selected.explicitDo()) {
                     int previousLoopDepth = loopDepth;
+                    boolean previousDiscard = discardingSelectReturn;
                     loopDepth = 0;
+                    discardingSelectReturn = selected.explicitDo();
                     try {
-                        checkBlock(
-                                arm.body(),
-                                armScope,
-                                Ast.TypeRef.simple("void"));
+                        checkBlock(arm.body(), armScope,
+                                selected.explicitDo()
+                                        ? Ast.TypeRef.inferred()
+                                        : Ast.TypeRef.simple("void"));
                     } finally {
                         loopDepth = previousLoopDepth;
+                        discardingSelectReturn = previousDiscard;
                     }
                 } else {
                     checkBlock(arm.body(), armScope, returnType);
@@ -1380,7 +1391,9 @@ public final class OwnershipChecker {
 
         for (Ast.Param param : lambda.parameters()) closure.define(param.name(), stateForParam(param));
         int previousLoopDepth = loopDepth;
+        boolean previousDiscard = discardingSelectReturn;
         loopDepth = 0;
+        discardingSelectReturn = false;
         try {
             if (lambda.expressionBody() != null) {
                 // An expression body has return-value ownership semantics even
@@ -1396,6 +1409,7 @@ public final class OwnershipChecker {
             }
         } finally {
             loopDepth = previousLoopDepth;
+            discardingSelectReturn = previousDiscard;
             closure.close();
         }
         return new ValueInfo(Ast.TypeRef.simple("Fnc"), ValueKind.MOVE_ONLY, null);

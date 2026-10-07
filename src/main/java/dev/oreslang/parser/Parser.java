@@ -1419,6 +1419,23 @@ public final class Parser {
 
     private Ast.Stmt parseStatement() {
         if (looksLikeStaticSelectStatement()) return parseStaticSelectStatement();
+        // "cb" is reserved for callback-bearing writech; it is not the
+        // no-result/static-select marker. "do" is the canonical spelling.
+        if (check(CB) && checkNext(SELECT)) {
+            throw error(peek(), "use 'do select { ... }' instead of 'cb select'");
+        }
+        if (check(NB) && checkNext(CB)
+                && current + 2 < tokens.size()
+                && tokens.get(current + 2).type() == SELECT) {
+            throw error(peek(), "use 'do nb select { ... }' instead of 'nb cb select'");
+        }
+        if (check(DO) && (checkNext(SELECT)
+                || (checkNext(NB) && current + 2 < tokens.size()
+                    && tokens.get(current + 2).type() == SELECT))) {
+            throw error(peek(), "'do select' requires braced static cases; "
+                    + "dynamic 'select from cases' produces a result and "
+                    + "has no callback arms to handle discarded reads");
+        }
         if (looksLikeImmediateChannelExpression()) {
             Ast.Expr expression = parseExpression();
             consumeStatementTerminator("channel probe expression should end with ';'");
@@ -1524,8 +1541,9 @@ public final class Parser {
     private boolean looksLikeStaticSelectStatement() {
         int i = current;
         if (i >= tokens.size()) return false;
-        Token.Type first = tokens.get(i).type();
-        if (first == NB || first == TRY) i++;
+        if (tokens.get(i).type() == DO) i++;
+        if (i < tokens.size()
+                && (tokens.get(i).type() == NB || tokens.get(i).type() == TRY)) i++;
         if (i >= tokens.size() || tokens.get(i).type() != SELECT) return false;
         i++;
 
@@ -1545,9 +1563,16 @@ public final class Parser {
     }
 
     private Ast.SelectStmt parseStaticSelectStatement() {
+        boolean explicitDo = match(DO);
         Ast.WaitMode mode = Ast.WaitMode.BLOCKING;
         if (match(NB)) mode = Ast.WaitMode.NONBLOCKING;
-        else if (match(TRY)) mode = Ast.WaitMode.IMMEDIATE;
+        else if (match(TRY)) {
+            if (explicitDo) {
+                throw error(previous(),
+                        "'do try select' is not supported; use 'try select'");
+            }
+            mode = Ast.WaitMode.IMMEDIATE;
+        }
 
         consume(SELECT, "expected 'select'");
         Ast.SelectPolicy policy = parseSelectPolicy();
@@ -1615,7 +1640,7 @@ public final class Parser {
         }
 
         consume(RBRACE, "expected '}' after select");
-        return new Ast.SelectStmt(mode, policy, arms);
+        return new Ast.SelectStmt(mode, policy, arms, explicitDo);
     }
 
     private Ast.SelectPolicy parseSelectPolicy() {

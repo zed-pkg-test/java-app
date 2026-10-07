@@ -655,11 +655,28 @@ public final class Ast {
         }
     }
 
+    /**
+     * Static select carries an explicitDo source marker for result-discarding
+     * dispatch. Historical select/nb select statement syntax remains accepted;
+     * callers that intentionally want side effects use "do select".
+     */
     public record SelectStmt(
             WaitMode mode,
             SelectPolicy policy,
-            List<SelectArm> arms) implements Stmt {
+            List<SelectArm> arms,
+            boolean explicitDo) implements Stmt {
+        public SelectStmt(WaitMode mode, SelectPolicy policy, List<SelectArm> arms) {
+            this(mode, policy, arms, false);
+        }
+
         public SelectStmt {
+            if (mode == null || policy == null) {
+                throw new IllegalArgumentException("select mode and policy are required");
+            }
+            if (explicitDo && mode == WaitMode.IMMEDIATE) {
+                throw new IllegalArgumentException(
+                        "'do try select' is not supported; use 'try select' for an immediate probe");
+            }
             arms = List.copyOf(arms);
             if (arms.isEmpty()) throw new IllegalArgumentException("select requires at least one arm");
             long defaults = arms.stream().filter(arm -> arm.operation() == ChannelOperation.DEFAULT).count();
