@@ -128,7 +128,9 @@ end
 
 define class ValuesObservable<T> extends Observable<T> as
   val Array<T> values;
-  constructor(Array<T> values) { self.values = rt copy values; }
+  // Array<T> is move-only on this compiler. Take its ownership rather
+  // than pretending rt copy has a Symbol.rtCopy lowering already.
+  constructor(Array<T> values) { self.values = values; }
   pub subscribe(): Subscription<T> { return new ValuesSubscription<T>(self.values); }
 end
 
