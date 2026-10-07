@@ -1197,7 +1197,13 @@ public final class ActorRuntime implements AutoCloseable {
                     new OresFuture<>(() -> accessFuture.cancel(false));
             accessFuture.whenCompleteRuntime((access, failure) -> {
                 if (failure != null) {
-                    result.failFromRuntime(OresFuture.unwrap(failure));
+                    Throwable terminal = OresFuture.unwrap(failure);
+                    if (accessFuture.isCancelled()
+                            || terminal instanceof CancellationException) {
+                        result.cancel(false);
+                    } else {
+                        result.failFromRuntime(terminal);
+                    }
                     return;
                 }
                 try (Access granted = access) {
