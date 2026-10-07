@@ -1,0 +1,45 @@
+name: rx-ores-pr3-current
+
+on:
+  push:
+    branches:
+      - ci/rx-ores-pr3-mutself-current
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rx:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify source and exact compiler trees
+        run: |
+          test "$(git rev-parse 'HEAD^1^{tree}')" = "bffbaa16e762991d5c533f59ccbced4a1c2c309e"
+          test "$(git rev-parse HEAD:integration/rx-ores)" = "39936c999c3d0a33c2123d115412d24b818a5fdc"
+          test "$(cat integration/rx-ores/compiler.lock)" = "c41cc53d9a98bcc2b7e6e56f41b78d32dd6545d5"
+      - name: Build exact pointerless mutable-self compiler
+        run: |
+          mkdir -p .work
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=.work/rx-classpath.txt
+      - name: Execute exact rx-ores PR3 suite
+        run: |
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat .work/rx-classpath.txt)"
+          python3 integration/rx-ores/scripts/test.py
+          java --enable-native-access=ALL-UNNAMED \
+            -Dpolyglot.engine.WarnInterpreterOnly=false \
+            -cp "$ORES_CLASSPATH" dev.oreslang.launcher.OresMain \
+            --check integration/rx-ores/bench/pipeline.ores
