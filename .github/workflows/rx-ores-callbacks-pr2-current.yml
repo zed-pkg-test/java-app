@@ -1,0 +1,45 @@
+name: rx-ores-callbacks-pr2-current
+
+on:
+  push:
+    branches:
+      - ci/rx-ores-callbacks-pr2-current
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  callbacks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify source and compiler identity
+        run: |
+          test "$(git rev-parse 'HEAD^1^{tree}')" = "e17024bc2afdb575049ff046a7390ee2093c2b4a"
+          test "$(git rev-parse HEAD:integration/rx-ores-callbacks)" = "086793eca271836b1591840e179d19a6f8878c16"
+          test "$(cat integration/rx-ores-callbacks/compiler.lock)" = "046983572473696353bea1c31a1678fef96f60ff"
+      - name: Build exact pointerless callback compiler
+        run: |
+          mkdir -p .work
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=.work/rx-classpath.txt
+      - name: Execute exact callback RX2 suite
+        run: |
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat .work/rx-classpath.txt)"
+          python3 integration/rx-ores-callbacks/scripts/test.py
+          java --enable-native-access=ALL-UNNAMED \
+            -Dpolyglot.engine.WarnInterpreterOnly=false \
+            -cp "$ORES_CLASSPATH" dev.oreslang.launcher.OresMain \
+            --check integration/rx-ores-callbacks/bench/pipeline.ores

@@ -1,0 +1,28 @@
+name: Oreslang library tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Authenticate private compiler checkout
+        env:
+          GH_TOKEN: ${{ secrets.ORES_COMPILER_READ_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo '::error::Set ORES_COMPILER_READ_TOKEN to a read-only token for oreslang-source.java.'
+            exit 1
+          fi
+          gh auth setup-git
+      - name: Build pinned compiler
+        env:
+          GH_TOKEN: ${{ secrets.ORES_COMPILER_READ_TOKEN }}
+        run: python3 scripts/setup.py
+      - run: source .work/env.sh && python3 scripts/test.py

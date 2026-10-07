@@ -1,0 +1,34 @@
+import * as rx_callbacks from '../src/rx.ores';
+import class Observable from '../src/rx.ores';
+
+pub fnc main(): void {
+  let int checksum = 0;
+
+  for let iteration = 0; iteration < 20000; iteration++ do
+    val Observable<int> source = rx_callbacks.from_values([1, 2, 3, 4, 5, 6, 7, 8]);
+    val Fnc<int, int> twice = |value| -> {
+      val int item = value as int;
+      return item * 2;
+    };
+    val Observable<int> doubled = rx_callbacks.map(source, twice);
+    val Fnc<int, bool> above_four = |value| -> {
+      val int item = value as int;
+      return item > 4;
+    };
+    val Observable<int> selected = rx_callbacks.filter(doubled, above_four);
+    val Observable<int> limited = rx_callbacks.take(selected, 3);
+
+    val Fnc<int, bool> sink = |value| -> {
+      val int item = value as int;
+      return item == 6 || item == 8 || item == 10;
+    };
+
+    // The callback-only API returns the number of consumed values.
+    // Do not capture and mutate a loop-local that the closure owns.
+    val int consumed = rx_callbacks.for_each(limited, sink);
+    checksum = checksum + consumed * 8;
+  done
+
+  stdio.println(checksum);
+  return;
+}
