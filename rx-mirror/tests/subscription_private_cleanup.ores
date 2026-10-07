@@ -1,0 +1,8 @@
+import * as rx_channels from '../src/rx.ores';
+import class Observable, Subscription from '../src/rx.ores';
+pub async fnc main(): void {
+  val Observable<int> source = rx_channels.from_values([1]);
+  val Subscription<int> sub = source.subscribe();
+  sub.dispose_once();
+  return;
+}

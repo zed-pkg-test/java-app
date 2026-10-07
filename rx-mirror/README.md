@@ -22,24 +22,21 @@ You can also set `ORES_CLASSPATH` to an existing compatible compiler's `target/c
 
 ```ores
 import * as rx_channels from './src/rx.ores';
-import class Observable, Subscription, FramedSender from './src/rx.ores';
+import class FramedPipe, Subscription, StreamEvent from './src/rx.ores';
 
 pub async fnc main(): void {
-  val Channel<Option<int>> input = Channel.new<Option<int>>(0);
-  // Registers a rendezvous write and returns immediately.
-  val FramedSender<int> producer = rx_channels.framed_sender(input);
-  val Future<void> producing = producer.send(42);
-  val Observable<int> source = rx_channels.from_channel(input);
-  val Subscription<int> sub = source.subscribe();
+  // Current compiler needs a typed None witness for generic inference.
+  val Option<int> element_type = None;
+  val FramedPipe<int> pipe = rx_channels.framed_pipe(0, element_type);
+  val Future<void> producing = pipe.send(42);
+  val Subscription<int> sub = pipe.subscribe();
 
-  // Suspends internally on await (nb select ...), releasing the carrier.
-  val Option<int> value = sub.next();
-  stdio.println(value.unwrap());
+  val StreamEvent<int> item = sub.next_event();
+  stdio.println(item.value.unwrap());
   await producing;
 
-  val Future<void> finishing = producer.complete();
-  val Option<int> terminal = sub.next();
-  stdio.println(terminal.is_none());
+  val Future<void> finishing = pipe.complete();
+  stdio.println(sub.next_event().is_complete());
   await finishing;
   return;
 }

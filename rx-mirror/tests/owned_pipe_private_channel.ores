@@ -1,0 +1,9 @@
+import * as rx_channels from '../src/rx.ores';
+import class FramedPipe from '../src/rx.ores';
+pub async fnc main(): void {
+  val Option<int> element_type = None;
+  val FramedPipe<int> pipe = rx_channels.framed_pipe(1, element_type);
+  val Channel<Option<int>> leaked = pipe.input;
+  stdio.println(leaked);
+  return;
+}
