@@ -11,6 +11,7 @@ import fnc decode_attempt from './json';
 import fnc validate_object, report_is_valid from '../validation/validation';
 
 define class JsonPayloadError as
+  // kind: 0 decode failure, 1 validation failure.
   pub val int kind;
   pub val DecodeError decode_error;
   pub val ValidationReport validation_report;
@@ -36,21 +37,27 @@ pub fnc decode_and_validate_object(
   ValidationOptions validation_options
 ): Result<ValidatedDecodedValue, JsonPayloadError> {
   let DecodeAttempt attempt = decode_attempt(input, decode_options);
+
   if attempt.status != 0 then
     return Err(new JsonPayloadError(0, attempt.error, empty_validation_report()));
   fi
 
+  // Borrow checking requires a named owner, not a field projection.
+  // Preserve the consumed-byte count separately before moving the value.
+  val Value decoded_payload = attempt.value;
+  val int consumed = attempt.consumed;
   let ValidationReport report = validate_object(
-    rt borrow attempt.value,
+    rt borrow decoded_payload,
     schema,
     validation_options
   );
+
   if !report_is_valid(rt borrow report) then
     return Err(new JsonPayloadError(1, empty_decode_error(), report));
   fi
 
   return Ok(new ValidatedDecodedValue(
-    new ValidValue(attempt.value),
-    attempt.consumed
+    new ValidValue(decoded_payload),
+    consumed
   ));
 }
