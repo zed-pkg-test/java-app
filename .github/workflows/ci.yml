@@ -132,6 +132,8 @@ jobs:
           lib="$(find target -maxdepth 1 -type f \( -name 'oresvm.so' -o -name 'liboresvm.so' -o -name 'oresvm.dylib' -o -name 'liboresvm.dylib' \) | head -n1)"
           test -n "$lib"
           echo "path=$PWD/$lib" >> "$GITHUB_OUTPUT"
+      - name: Prove exact-gated untrusted code-image sharing
+        run: timeout 180s mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -Dtest=dev.oreslang.runtime.SharedCodeRegistryTest#untrustedManagersShareOnlyExactSupervisorApprovedImages test
       - name: Run strict program in Oreslang polyglot isolate
         run: timeout 180s mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"
       - name: Resume root await inside strict isolate JNI scope

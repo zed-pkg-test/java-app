@@ -74,10 +74,13 @@ exact code-unit identity plus SHA-256 only after the source passes
   report `sharedCodeImage() == true`;
 - changed bytes or renamed code unit: fail back to the unshared path.
 
-The new end-to-end regression loads the same untrusted program through two
+The end-to-end regression loads the same untrusted program through two
 managers before and after approval, proving private `Source` identities before
 approval and identical shared `Source` identity after approval. It also proves
-that a changed digest and renamed code unit remain unshared.
+that a changed digest and renamed code unit remain unshared. Because adversarial
+contexts intentionally use `spawnIsolate(true)`, this execution-level test is
+run in the `polyglot-isolate` CI job after building the Oreslang native isolate
+library; ordinary JVM verification skips only this isolate-dependent method.
 
 **Important:** this host-side immutable image sharing does not claim that
 untrusted actors share the trusted/private Graal JIT cache. Their sandbox

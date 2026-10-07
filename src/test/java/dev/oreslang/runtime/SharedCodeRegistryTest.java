@@ -154,6 +154,9 @@ final class SharedCodeRegistryTest {
 
     @Test
     void untrustedManagersShareOnlyExactSupervisorApprovedImages() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                System.getProperty("polyglot.engine.IsolateLibrary") != null,
+                "execution-level untrusted sharing proof requires the Oreslang native isolate library");
         IsolatePolicy supervisor = IsolatePolicy.developer();
         String codeUnitId = "untrusted-shared-proof.ores";
         String changed =
