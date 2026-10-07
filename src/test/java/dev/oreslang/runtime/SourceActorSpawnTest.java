@@ -118,14 +118,13 @@ final class SourceActorSpawnTest {
         }
     }
 
-    @Test void sourceActorResultsRejectLiveSharedCapabilitiesWithoutKillingActor() throws Exception {
+    @Test void sourceActorResultsRejectLiveSharedCapabilitiesAndFailStopActor() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), 8)) {
             OresMutex.Shared<int[]> shared = OresMutex.shared(new int[]{1});
             ActorRuntime.SourceActor actor = runtime.spawnSource(
                     ActorRuntime.ActorKind.SHARED,
                     List.of(),
-                    (initial, context) -> (method, arguments) ->
-                            method.equals("bad") ? shared : 7L);
+                    (initial, context) -> (method, arguments) -> shared);
 
             OresFuture<Object> rejected = actor.request("bad", List.of());
             java.util.concurrent.ExecutionException failure = assertThrows(
@@ -133,9 +132,58 @@ final class SourceActorSpawnTest {
                     () -> rejected.get(2, TimeUnit.SECONDS));
             assertTrue(failure.getCause().getMessage().contains("data values only")
                     || failure.getCause().getMessage().contains("capabilities"));
-            assertTrue(actor.isAlive());
-            assertEquals(7L, actor.request("good", List.of()).get(2, TimeUnit.SECONDS));
-            actor.stop();
+            for (int i = 0; i < 500 && actor.isAlive(); i++) Thread.yield();
+            assertFalse(actor.isAlive());
+            assertThrows(RuntimeException.class, () -> actor.request("after_failure", List.of()));
+        }
+    }
+
+    @Test void suspendedSourceActorResultPublicationFailureAlsoFailStopsActor() throws Exception {
+        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), 8)) {
+            OresMutex.Shared<int[]> shared = OresMutex.shared(new int[]{1});
+            OresFuture<Object> producer = new OresFuture<>();
+            ActorRuntime.SourceActor actor = runtime.spawnSource(
+                    ActorRuntime.ActorKind.SHARED,
+                    List.of(),
+                    (initial, context) -> (method, arguments) -> producer);
+
+            OresFuture<Object> request = actor.request("bad_async", List.of());
+            producer.complete(shared);
+            assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> request.get(2, TimeUnit.SECONDS));
+            for (int i = 0; i < 500 && actor.isAlive(); i++) Thread.yield();
+            assertFalse(actor.isAlive());
+        }
+    }
+
+    @Test void suspendedRetainedStateOverflowFailStopsAndReleasesActor() throws Exception {
+        IsolatePolicy base = IsolatePolicy.developer();
+        IsolatePolicy policy = new IsolatePolicy(
+                base.capabilities(),
+                16L * 1024 * 1024,
+                8,
+                base.maxWallTime(),
+                false);
+        try (ActorRuntime runtime = new ActorRuntime(policy, 4)) {
+            AtomicReference<String> retained = new AtomicReference<>("");
+            OresFuture<Object> producer = new OresFuture<>();
+            ActorRuntime.SourceActor actor = runtime.spawnSource(
+                    ActorRuntime.ActorKind.SHARED,
+                    List.of(),
+                    (initial, context) -> new ActorRuntime.SourceBehavior() {
+                        @Override public Object retainedState() { return retained.get(); }
+                        @Override public Object invoke(String method, List<Object> arguments) {
+                            return producer;
+                        }
+                    });
+
+            OresFuture<Object> request = actor.request("grow_after_await", List.of());
+            retained.set("x".repeat(9 * 1024 * 1024));
+            producer.complete(1L);
+            assertThrows(java.util.concurrent.ExecutionException.class,
+                    () -> request.get(2, TimeUnit.SECONDS));
+            for (int i = 0; i < 500 && actor.isAlive(); i++) Thread.yield();
+            assertFalse(actor.isAlive());
         }
     }
 
