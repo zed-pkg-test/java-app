@@ -1716,7 +1716,13 @@ public final class TypeChecker {
                             throw new IllegalArgumentException(
                                     "SelectCase.await expects Future<T>; got " + awaited);
                         }
-                        yield new Named("SelectCase", List.of(future.arguments().getFirst()));
+                        Type payload = future.arguments().getFirst();
+                        if (payload == Primitive.VOID) {
+                            throw new IllegalArgumentException(
+                                    "SelectCase.await(Future<void>) is not representable in Select<T>; "
+                                            + "use a static 'when await future' arm without a binding");
+                        }
+                        yield new Named("SelectCase", List.of(payload));
                     }
                     case "timeout" -> {
                         if (call.arguments().size() != 1) {
@@ -2237,10 +2243,14 @@ public final class TypeChecker {
             if (selectedReceiver instanceof Named selected
                     && selected.name().equals("Select")
                     && selected.arguments().size() == 1) {
+                Type payload = selected.arguments().getFirst();
                 return switch (member.member()) {
                     case "index" -> Primitive.INT;
                     case "operation" -> Primitive.STRING;
-                    case "value" -> selected.arguments().getFirst();
+                    // Legacy .value remains intentionally erased because
+                    // readiness-only variants carry no payload at runtime.
+                    case "value" -> Unknown.INSTANCE;
+                    case "payload" -> new Named("Option", List.of(payload));
                     default -> throw new IllegalArgumentException(
                             "unknown Select<T> member '" + member.member() + "'");
                 };

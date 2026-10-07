@@ -5693,15 +5693,23 @@ public final class OresEvalRootNode extends RootNode {
                     case "index" -> (long) selected.index();
                     case "operation" -> selected.operation();
                     case "value" -> selected.value();
+                    case "payload" -> selectPayloadOption(
+                            selected.operation(),
+                            selected.value());
                     default -> throw new IllegalArgumentException(
                             "unknown SelectResult member " + name);
                 };
             }
             if (receiver instanceof ChannelRuntime.SelectResult selected) {
+                String operation = selected.operation().name()
+                        .toLowerCase(java.util.Locale.ROOT);
                 return switch (name) {
                     case "index" -> (long) selected.index();
-                    case "operation" -> selected.operation().name().toLowerCase(java.util.Locale.ROOT);
+                    case "operation" -> operation;
                     case "value" -> selected.value();
+                    case "payload" -> selectPayloadOption(
+                            operation,
+                            selected.value());
                     default -> throw new IllegalArgumentException(
                             "unknown SelectResult member " + name);
                 };
@@ -6886,6 +6894,16 @@ public final class OresEvalRootNode extends RootNode {
                 return false;
             }
             return false;
+        }
+
+        private OptionValue selectPayloadOption(
+                String operation,
+                Object value) {
+            boolean carriesPayload =
+                    operation.equals("read") || operation.equals("await");
+            return carriesPayload
+                    ? new OptionValue(true, value)
+                    : new OptionValue(false, null);
         }
 
         private String selectOperationName(Object value) {

@@ -133,6 +133,78 @@ final class SelectReadinessRuntimeTest {
                 "reused plan must start a fresh relative timeout generation");
     }
 
+
+    @Test
+    void cancellingSelectionDetachesAllExternalLosersAndPlanCanBeReused() throws Exception {
+        OresFuture<Integer> source = new OresFuture<>();
+        CancellationToken token = new CancellationToken();
+        ChannelRuntime.SelectPlan plan = new ChannelRuntime.SelectPlan(List.of(
+                ChannelRuntime.await(source),
+                ChannelRuntime.cancelled(token),
+                ChannelRuntime.timeout(TimeUnit.SECONDS.toNanos(1))));
+
+        OresFuture<ChannelRuntime.SelectResult> first =
+                plan.selectAsync(ChannelRuntime.SelectPolicy.PRIORITY);
+        assertEquals(1, source.pendingRuntimeWaiterCount());
+        assertEquals(1, token.pendingRuntimeWaiterCount());
+
+        assertTrue(first.cancel(false));
+        assertEquals(0, source.pendingRuntimeWaiterCount());
+        assertEquals(0, token.pendingRuntimeWaiterCount());
+
+        assertTrue(source.completeFromRuntime(33));
+        ChannelRuntime.SelectResult second =
+                plan.selectAsync(ChannelRuntime.SelectPolicy.PRIORITY)
+                        .get(2, TimeUnit.SECONDS);
+
+        assertEquals(0, second.index());
+        assertEquals(ChannelRuntime.SelectOperation.AWAIT, second.operation());
+        assertEquals(33, second.value());
+        assertEquals(0, source.pendingRuntimeWaiterCount());
+        assertEquals(0, token.pendingRuntimeWaiterCount());
+    }
+
+    @Test
+    void losingTimeoutFromOldGenerationCannotWinReusedPlan() throws Exception {
+        OresFuture<Integer> source = new OresFuture<>();
+        ChannelRuntime.SelectPlan plan = new ChannelRuntime.SelectPlan(List.of(
+                ChannelRuntime.await(source),
+                ChannelRuntime.timeout(TimeUnit.MILLISECONDS.toNanos(40))));
+
+        OresFuture<ChannelRuntime.SelectResult> first =
+                plan.selectAsync(ChannelRuntime.SelectPolicy.PRIORITY);
+        assertTrue(first.cancel(false));
+
+        assertTrue(source.completeFromRuntime(71));
+        ChannelRuntime.SelectResult second =
+                plan.selectAsync(ChannelRuntime.SelectPolicy.PRIORITY)
+                        .get(2, TimeUnit.SECONDS);
+        assertEquals(ChannelRuntime.SelectOperation.AWAIT, second.operation());
+        assertEquals(71, second.value());
+
+        Thread.sleep(80L);
+        assertEquals(ChannelRuntime.SelectOperation.AWAIT, second.operation());
+        assertEquals(71, second.value());
+    }
+
+    @Test
+    void preCancelledTokenParticipatesInImmediatePriorityAndFairSelection() {
+        CancellationToken token = new CancellationToken();
+        assertTrue(token.cancel());
+        OresFuture<Integer> ready = OresFuture.completed(5);
+        ChannelRuntime.SelectPlan plan = new ChannelRuntime.SelectPlan(List.of(
+                ChannelRuntime.cancelled(token),
+                ChannelRuntime.await(ready)));
+
+        ChannelRuntime.SelectResult priority =
+                plan.trySelect(ChannelRuntime.SelectPolicy.PRIORITY).orElseThrow();
+        assertEquals(ChannelRuntime.SelectOperation.CANCELLED, priority.operation());
+
+        ChannelRuntime.SelectResult fair =
+                plan.trySelect(ChannelRuntime.SelectPolicy.FAIR).orElseThrow();
+        assertEquals(ChannelRuntime.SelectOperation.CANCELLED, fair.operation());
+    }
+
     @Test
     void defaultBeatsOnlyUnreadyReadinessCases() {
         OresFuture<Integer> pending = new OresFuture<>();

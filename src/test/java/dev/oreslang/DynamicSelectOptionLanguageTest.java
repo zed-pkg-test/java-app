@@ -162,6 +162,60 @@ final class DynamicSelectOptionLanguageTest {
         assertEquals("read:7", run(program));
     }
 
+
+    @Test
+    void typedSelectPayloadIsOptionalOutsidePatternMatching() throws Exception {
+        String program = """
+                pub fnc main(): void {
+                  val Channel<int> input = Channel.new<int>(1);
+                  writech input, 17;
+
+                  val SelectPlan<int> plan =
+                      SelectPlan.new([SelectCase.read(input)]);
+                  val Option<Select<int>> result = try select first from plan;
+                  val Select<int> selected = result.unwrap();
+                  val Option<int> payload = selected.payload;
+
+                  stdio.stdout.write(payload.unwrap());
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+        assertEquals("17", run(program));
+    }
+
+    @Test
+    void readinessOnlySelectPayloadIsNone() throws Exception {
+        String program = """
+                pub fnc main(): void {
+                  val SelectPlan<void> plan =
+                      SelectPlan.new([SelectCase.timeout(0)]);
+                  val Option<Select<void>> result = try select first from plan;
+                  val Select<void> selected = result.unwrap();
+
+                  stdio.stdout.write(selected.payload.is_none());
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+        assertEquals("true", run(program));
+    }
+
+    @Test
+    void dynamicAwaitRejectsFutureVoidUntilSelectCanRepresentUnitPayloads() {
+        String program = """
+                fnc bad(Future<void> future): SelectPlan<void> {
+                  return SelectPlan.new([SelectCase.await(future)]);
+                }
+                """;
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck(program));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "select-option.ores")
