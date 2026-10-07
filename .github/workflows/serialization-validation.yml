@@ -23,5 +23,13 @@ jobs:
           cache: maven
       - name: Build Oreslang compiler/runtime
         run: mvn -B -ntp -DskipTests package
+      - name: Check serialization units individually
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            echo "==> CHECK $file"
+            mvn -B -ntp -DskipTests exec:java -Dexec.args="--check $file"
+          done < <(find serialization-validation/src serialization-validation/tests -type f -name '*.ores' | sort)
       - name: Run serialization and validation suite
         run: mvn -B -ntp -DskipTests exec:java -Dexec.args="serialization-validation/tests/main.ores"
