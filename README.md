@@ -1,73 +1,187 @@
-# litegraph-node
+# oreslang-format
 
-Per-machine daemon and local authority for allocatable compute resources.
+The canonical formatter for Oreslang source code.
 
-LiteGraph is a heterogeneous compute actor platform: CPU code owns control, networking, actor supervision and ordinary OS capabilities; suitable numerical work may be dispatched to one or more GPUs. A machine is therefore not classified as simply "CPU" or "GPU"—CPU, RAM, accelerator devices and VRAM are independently schedulable resources.
+There is deliberately **one format and no style configuration**. The same Rust
+library powers the CLI, so editor integrations, CI, and local development use
+identical behavior.
 
-## Responsibilities
+## Canonical style
 
-- CPU/RAM and accelerator discovery.
-- device/lane health and allocatable capacity.
-- local invocation supervision.
-- health/snapshot APIs and standalone workstation mode.
+- two spaces per indentation level, never tabs for indentation;
+- static `select`, `nb select`, and `try select` arms are indented one level;
+- every `when` and `default` arm has a braced body; legacy `case` select arms are accepted and canonicalized to `when`;
+- LF line endings, no trailing whitespace, one final newline;
+- at most one ordinary blank line;
+- **two blank lines between sibling executable function/routine/method declarations**;
+- executable declarations and method implementations use the slim arrow `->`;
+- interface/trait callable signatures use the type-level fat arrow `=>`;
+- conditionals canonically use `if ...; then` / `elif ...; then` / `else` / `fi`;
+- declaration modifiers are accepted in compatibility order but rewritten to one canonical order:
+  - classes: `define [pub|private] [abstract] class Name ... as`;
+  - interfaces/contracts: `define [pub|private] interface|contract Name ...`;
+  - actor declarations/callables: visibility/effects first, then `shared|untrusted` when present, then `actor|isoactor`, then `fnc|routine` for actor callables;
+  - package/module callables: `[pub|private] [quantum] [static] [async] [generator] [nlex] [pure] [trap] [structural] fnc|routine name ...`; `quantum` is currently meaningful only for `fnc`/`static fnc`, and unsupported quantum combinations are left untouched for compiler diagnostics;
+  - duplicate/conflicting or comment-separated modifier prefixes are left untouched so the compiler can diagnose them;
+  - class headers keep `as` after the complete inheritance/conformance clause.
 
-## Explicit non-responsibilities
+For example:
 
-- cluster-wide scheduling.
-- control-plane tenant CRUD.
-- compiler/toolchain responsibilities.
+```ores
+pub define class User extends Entity implements Named, Serializable as
+  pub val String name;
+end
 
-Keeping these boundaries explicit is important: moving policy into a lower-level component makes local execution harder to reason about and creates competing authorities.
-
-## Place in the system
-
-```text
-scheduler/router → node → runtime/modeld/gpu-host; node → scheduler telemetry
+fnc pub async refresh() {
+}
 ```
 
-Shared invariants across the platform:
+formats as:
 
-- invocation actors are ephemeral;
-- resident artifacts and compiled variants are immutable and revisioned;
-- guest/customer code receives capabilities, never raw accelerator pointers;
-- mutable accelerator state belongs to trusted lane/device actors;
-- CPU and GPU resources are accounted independently;
-- `cpu`, `gpu`, and `auto` describe execution requirements/preferences without changing logical function identity;
-- backpressure and cancellation must propagate rather than creating unbounded queues.
+```ores
+define pub class User extends Entity implements Named, Serializable as
+  pub val String name;
+end
 
-## Contracts and compatibility
+pub async fnc refresh() {
+}
+```
 
-Wire-visible names use `snake_case`. Cross-language contracts belong in `litegraph-contracts`: authored TypeSpec and JSON Schema Draft 2020-12 are peer authorities, and generated files are evidence rather than a third authored schema. Contract mismatches must fail closed before promotion.
+The nesting engine understands `module`, `class`, `interface`, `contract`, `trait`,
+`struct`, actor/braced bodies, `end`, `if`/`fi`, and `do`/`done`. In particular,
+`implements Foo, Bar` never creates formatter nesting; the class body begins
+only after the class header and is closed by its matching `end`.
 
-Public/shared semantic types belong in `litegraph-interfaces` or `litegraph-pub-lib-core`; this repository should not create a subtly different copy of an existing concept.
+Conditional compatibility spellings are migrated automatically: deprecated
+`if ... do` becomes `if ...; then`, `elseif` becomes `elif`, and a
+single-`fi` `else if` branch becomes `elif`. Loop `do ... done` syntax is
+unchanged; the deprecation applies only to using `do` as an if/branch
+introducer.
 
-## Security and isolation
+Static select arms use the same nesting rules as other blocks:
 
-Treat all tenant input and artifacts as untrusted. Validate sizes, identifiers and capability requests before allocating expensive resources. Never expose native accelerator pointers/driver handles across the tenant boundary, never place credentials in manifests or examples, and keep secrets in approved runtime secret channels.
+```ores
+nb select {
+  when readch inbox: val value {
+    nb writech replies, value * 10;
+  }
+  default: {
+  }
+}
+```
 
-Isolation policy uses the platform classes `shared`, `sandbox`, `partitioned`, and `dedicated` where applicable. Resource release on cancellation, timeout and failure is part of correctness.
+The formatter accepts both `when` and legacy `case` for static select arms,
+canonicalizes `case` to `when`, and adds braces to legacy unbraced select
+arms, including read arms without a binding and write/default arms. Comments
+and literals retain their contents. Dynamic `select from cases` expressions
+retain their syntax.
 
-## Development expectations
+Streaming channel writes use ordinary `for ... of ...` loops or
+`for await ... of ...` over an async iterator. Both braced loops and `do`/`done`
+loops use two-space nesting:
 
-Follow the fleet policy in `ORESoftware/my-ai` (`AGENTS.md` plus `SHARED.md`) when changing this repository. Durable systems tooling, validators, code generation and CI helpers should be Rust-first. Do not add Python for repository scripts, validators, codegen or CI gates.
+```ores
+for const value of values do
+  writech output, value;
+done
+for await const value of events() {
+  await nb writech output, value;
+}
+```
 
-When this repository exposes an executable with command-line configuration, its public option contract belongs in root `.cli-flags.toml` and the argv boundary should use the canonical `flags-2-env` integration rather than maintaining a second independent flag schema.
+Expression-bodied lambdas follow the compiler's lexical split: an immediate
+`{` after `->` is the block form; otherwise the body is an expression. For a
+multiline expression body, the formatter adds one continuation indent and
+fails closed if the containing statement never reaches its required explicit
+semicolon. Block lambdas keep explicit `return` statements.
 
-Tests should cover both success and fail-closed behavior. Hardware-independent logic should run with deterministic fakes/simulators; hardware-specific certification belongs on real accelerator runners. A hosted workflow that starts zero test steps is not evidence of a passing build.
+Generator declaration aliases accepted by the compiler are normalized:
+`fnc gen* values()` and `fnc generator* values()` become
+`generator fnc values()`. Delegating `yield* source;` is preserved, and only
+the scheduler compatibility spelling `rt yield` is rewritten to
+`rt cooperate`.
 
-## Integration map
+The formatter is intentionally conservative about grammar that is still
+changing. It reorders only recognized declaration-modifier prefixes; imports,
+traits, interfaces, class conformance lists, and unknown modifier spellings are
+left untouched.
 
-- `litegraph-contracts` — wire schemas.
-- `litegraph-interfaces` — canonical shared semantics.
-- `litegraph-scheduler` — cluster placement.
-- `litegraph-node` — machine inventory and local supervision.
-- `litegraph-runtime` — invocation lifecycle.
-- `litegraph-gpu-host` — trusted accelerator execution.
-- `litegraph-modeld` — resident model actors.
-- `litegraph-compiler` — deterministic multi-target build artifacts.
-- registries — immutable function/model artifact storage.
-- `litegraph-router.rs` — invocation forwarding and backpressure.
+For semantic safety, multiline string/template literals currently fail closed
+instead of being rewritten. This prevents indentation, trailing-whitespace, or
+line-ending normalization from changing literal runtime bytes while parser-backed
+literal preservation is still being completed.
 
-## Documentation rule
+## CLI
 
-Keep this README specific to this repository. Architectural decisions that affect multiple repositories should be recorded in the canonical interface/contracts layer and linked here rather than copied into divergent local specifications.
+```bash
+cargo install --path .
+
+# default: preview only, never modify files
+oresfmt src examples
+# would format src/foo.ores
+
+# explicit in-place rewrite
+oresfmt --write src examples
+
+# CI / pre-commit mode; exits 1 if anything would change
+oresfmt --check .
+
+# stdin -> stdout
+oresfmt - < input.ores
+
+# one file -> stdout
+oresfmt --stdout example.ores
+```
+
+The installed binary is `oresfmt`; `oreslang-format` is also provided as an
+alias. Directories are walked recursively and only `.ores` files are selected.
+
+### Safe writes
+
+Filesystem inputs are **dry-run by default**. `--write` is the only normal mode
+that modifies files, and it performs a full preflight before touching any file.
+This prevents a later unsafe path from leaving a project half-formatted.
+
+For every file that would change, `--write` fails closed when the file is:
+
+- tracked by Git but has staged or unstaged changes;
+- untracked or ignored;
+- outside a Git worktree.
+
+The overrides are intentionally explicit:
+
+```bash
+oresfmt --write --ok-to-mod-dirty-files src
+oresfmt --write --ok-to-mod-untracked-files generated
+oresfmt --write --ok-to-mod-outside-git /tmp/example.ores
+```
+
+These flags only relax write-safety checks. They do not change formatting style.
+
+Additional write hardening:
+
+- explicit symlink inputs are refused, and symlinks found during recursive walks
+  are skipped rather than followed;
+- after the full Git preflight, every file is re-read before the first write, so
+  a concurrent editor/generator change aborts the operation instead of being
+  overwritten from a stale formatter snapshot;
+- write-safety override flags are rejected unless `--write` is active.
+
+## Rust SDK
+
+```rust
+use oreslang_format::{format_source, is_formatted};
+
+let formatted = format_source(source)?;
+let clean = is_formatted(&formatted)?;
+assert!(clean);
+```
+
+`format_source` is idempotent: formatting canonical output again produces the
+same bytes.
+
+## Why no configuration?
+
+Oreslang should have one mechanically enforceable source style. This avoids
+project-specific formatter drift and gives compiler diagnostics, generated
+code, examples, editor integrations, and code review the same layout contract.
