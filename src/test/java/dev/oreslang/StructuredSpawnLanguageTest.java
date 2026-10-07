@@ -193,6 +193,19 @@ final class StructuredSpawnLanguageTest {
                 """)));
     }
 
+    @Test void genericPublicActorApisDeferUnresolvedTypesUntilCallSpecialization() throws Exception {
+        assertEquals("7", run("""
+                define isolated actor Worker as
+                  pub fnc echo<T>(T value): T { return value; }
+                end
+                pub routine main(): void {
+                  val worker = spawn Worker();
+                  stdio.stdout.write(await worker.echo<int>(7));
+                  return;
+                }
+                """));
+    }
+
     @Test void actorConstructorsRemainForbidden() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 define actor Worker as

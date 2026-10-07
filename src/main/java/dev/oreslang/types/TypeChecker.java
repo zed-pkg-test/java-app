@@ -967,7 +967,7 @@ public final class TypeChecker {
                 if (!method.isStatic()
                         && klass.actorKind() != Ast.ActorKind.NONE
                         && method.visibility() == Ast.Visibility.PUBLIC) {
-                    validateActorCallableBoundaryType(
+                    validateActorApiDeclarationType(
                             parameterType,
                             klass.actorKind(),
                             false,
@@ -986,7 +986,7 @@ public final class TypeChecker {
             if (!method.isStatic()
                     && klass.actorKind() != Ast.ActorKind.NONE
                     && method.visibility() == Ast.Visibility.PUBLIC) {
-                validateActorCallableBoundaryType(
+                validateActorApiDeclarationType(
                         returns,
                         klass.actorKind(),
                         true,
@@ -3085,15 +3085,33 @@ public final class TypeChecker {
         }
     }
 
+    private void validateActorApiDeclarationType(
+            Type type,
+            Ast.ActorKind actorKind,
+            boolean returnPosition,
+            String where) {
+        validateActorCallableBoundaryType(type, actorKind, returnPosition, where, true);
+    }
+
     private void validateActorCallableBoundaryType(
             Type type,
             Ast.ActorKind actorKind,
             boolean returnPosition,
             String where) {
+        validateActorCallableBoundaryType(type, actorKind, returnPosition, where, false);
+    }
+
+    private void validateActorCallableBoundaryType(
+            Type type,
+            Ast.ActorKind actorKind,
+            boolean returnPosition,
+            String where,
+            boolean allowUnresolvedGenerics) {
         if (returnPosition && type == Primitive.VOID) return;
         if (type == Primitive.VOID) {
             throw new IllegalArgumentException(where + " cannot be void");
         }
+        if (allowUnresolvedGenerics && type instanceof Generic) return;
         if (type == Unknown.INSTANCE || type instanceof Generic || type instanceof SelfType
                 || type instanceof Borrow || type instanceof Function || type instanceof ClassNamespace) {
             throw new IllegalArgumentException(
@@ -3101,24 +3119,24 @@ public final class TypeChecker {
         }
         if (type instanceof Primitive || type instanceof StringLiteral) return;
         if (type instanceof ListType list) {
-            validateActorCallableBoundaryType(list.element(), actorKind, returnPosition, where + " element");
+            validateActorCallableBoundaryType(list.element(), actorKind, returnPosition, where + " element", allowUnresolvedGenerics);
             return;
         }
         if (type instanceof Tuple tuple) {
             for (int i = 0; i < tuple.elements().size(); i++) {
-                validateActorCallableBoundaryType(tuple.elements().get(i), actorKind, returnPosition, where + " tuple element " + i);
+                validateActorCallableBoundaryType(tuple.elements().get(i), actorKind, returnPosition, where + " tuple element " + i, allowUnresolvedGenerics);
             }
             return;
         }
         if (type instanceof Union union) {
             for (Type option : union.options()) {
-                validateActorCallableBoundaryType(option, actorKind, returnPosition, where + " union member");
+                validateActorCallableBoundaryType(option, actorKind, returnPosition, where + " union member", allowUnresolvedGenerics);
             }
             return;
         }
         if (type instanceof Record record) {
             for (Map.Entry<String, Type> member : record.members().entrySet()) {
-                validateActorCallableBoundaryType(member.getValue(), actorKind, returnPosition, where + " field '" + member.getKey() + "'");
+                validateActorCallableBoundaryType(member.getValue(), actorKind, returnPosition, where + " field '" + member.getKey() + "'", allowUnresolvedGenerics);
             }
             return;
         }
@@ -3142,7 +3160,8 @@ public final class TypeChecker {
                     named.arguments().getFirst(),
                     actorKind,
                     returnPosition,
-                    where + " value");
+                    where + " value",
+                    allowUnresolvedGenerics);
             return;
         }
         if (named.name().equals("SharedMutex")) {
@@ -3154,8 +3173,13 @@ public final class TypeChecker {
                 throw new IllegalArgumentException(
                         where + " cannot use SharedMutex<T> with isoactor/private actors");
             }
-            if (named.arguments().size() != 1
-                    || !isSharedSafe(named.arguments().getFirst(), new LinkedHashSet<>(), Map.of())) {
+            if (named.arguments().size() != 1) {
+                throw new IllegalArgumentException(
+                        where + " requires SharedMutex<T> with exactly one payload type");
+            }
+            Type sharedPayload = named.arguments().getFirst();
+            if (!(allowUnresolvedGenerics && containsUnresolvedGeneric(sharedPayload))
+                    && !isSharedSafe(sharedPayload, new LinkedHashSet<>(), Map.of())) {
                 throw new IllegalArgumentException(
                         where + " requires SharedMutex<T> to contain shared-safe owned data");
             }
@@ -3163,7 +3187,7 @@ public final class TypeChecker {
         }
 
         for (Type argument : named.arguments()) {
-            validateActorCallableBoundaryType(argument, actorKind, returnPosition, where + " type argument");
+            validateActorCallableBoundaryType(argument, actorKind, returnPosition, where + " type argument", allowUnresolvedGenerics);
         }
 
         // Built-in sum/container values are data-only when their arguments pass.
@@ -3192,6 +3216,27 @@ public final class TypeChecker {
         throw new IllegalArgumentException(
                 where + " cannot transport source class instance '" + klass.name()
                         + "' by value yet; serialize/copy it into a data container first");
+    }
+
+    private boolean containsUnresolvedGeneric(Type type) {
+        if (type instanceof Generic) return true;
+        if (type instanceof ListType list) return containsUnresolvedGeneric(list.element());
+        if (type instanceof Tuple tuple) {
+            for (Type element : tuple.elements()) if (containsUnresolvedGeneric(element)) return true;
+            return false;
+        }
+        if (type instanceof Union union) {
+            for (Type option : union.options()) if (containsUnresolvedGeneric(option)) return true;
+            return false;
+        }
+        if (type instanceof Record record) {
+            for (Type member : record.members().values()) if (containsUnresolvedGeneric(member)) return true;
+            return false;
+        }
+        if (type instanceof Named named) {
+            for (Type argument : named.arguments()) if (containsUnresolvedGeneric(argument)) return true;
+        }
+        return false;
     }
 
     private boolean isSharedSafe(Type type, Set<Ast.ClassDecl> seen, Map<String, Type> genericBindings) {
