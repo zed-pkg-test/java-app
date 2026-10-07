@@ -342,22 +342,23 @@ val Array<SelectCase> cases = [
   SelectCase.write(b, 42)
 ];
 
-val Option<SelectResult> result = select from cases;
-val Future<Option<SelectResult>> pending = nb select from cases;
-val Option<SelectResult> ready = try select from cases;
+val Option<Select<int>> result = select from cases;
+val Future<Option<Select<int>>> pending = nb select from cases;
+val Option<Select<int>> ready = try select from cases;
 ```
 
 Dynamic selection has **no arm bodies** to handle a consumed channel value;
 `do select from cases` and `do nb select from cases` are deliberately
 rejected rather than register a read and silently discard its outcome.
-Handle the returned `Option<SelectResult>` or `Future<Option<SelectResult>>`
-explicitly, or use braced static `do select` dispatch.
+Handle the returned `Option<Select<T>>` or `Future<Option<Select<T>>>`
+explicitly, or use braced static `do select` dispatch. `SelectResult` remains
+the legacy erased spelling and is assignment-compatible with `Select<T>`.
 
 A reusable set can retain its fairness cursor:
 
 ```ores
-val set = SelectSet.new(cases);
-val Option<SelectResult> result = select from set;
+val SelectSet<int> set = SelectSet.new(cases);
+val Option<Select<int>> result = select from set;
 ```
 
 Runtime list/array and map values are accepted. For maps, value iteration order
@@ -377,18 +378,57 @@ try select from cases
 `select from` is a blocking source expression, but "blocking" means the
 current Ores continuation yields to its scheduler/actor pool while the select is
 pending; it does not park a carrier thread. Once a case commits, the continuation
-resumes and the expression returns `Some(SelectResult)`.
+resumes and the expression returns `Some(Select<T>)`.
 
 `nb select from` registers the same arbitration and returns immediately with
-the native Ores `Future<Option<SelectResult>>`. Awaiting that Future follows the
+the native Ores `Future<Option<Select<T>>>`. Awaiting that Future follows the
 same scheduler resumption path. `try select from` is an immediate probe: it
 returns `None` when no case is ready and leaves no registration behind.
 
-`SelectResult` exposes:
+`Select<T>` is the typed result surface. It exposes:
 
 - `index`
 - `operation` (`read`, `write`, `await`, `timeout`, `cancelled`, or `default`)
-- `value` for `read` and successful `await` results
+- `value: T` for compatibility/introspection; pattern matching is preferred
+  because the zero-payload variants do not contain a value
+
+Its constructor patterns are `Read(T)`, `Await(T)`, `Write`, `Timeout`,
+`Cancelled`, and `Default`. `T` is the union of value-producing readiness
+cases in the set/plan. For example, a `Channel<string>` read plus a
+`Future<int>` await yields `Select<string | int>`.
+
+A typical consumer is therefore:
+
+```ores
+val result = select from plan;
+
+match result over
+  on Some(Read(string msg)) -> {
+    handle_message(msg);
+  }
+  on Some(Await(int value)) -> {
+    handle_result(value);
+  }
+  on Some(Timeout) -> {
+    handle_timeout();
+  }
+  on Some(Cancelled) -> {
+    handle_cancel();
+  }
+  on Some(Write) -> {
+    handle_write_ready();
+  }
+  on Some(Default) -> {
+    handle_default();
+  }
+  on None -> {
+    handle_not_ready();
+  }
+end
+```
+
+`SelectResult` remains the legacy erased spelling of the result for source
+compatibility; new typed code should prefer `Select<T>`.
 
 The outer `Option` is intentionally part of the language-facing selection
 contract. It also composes uniformly with `trap` and Future APIs; the runtime
@@ -442,13 +482,13 @@ case list:
 val Channel<int> a = Channel.new<int>(16);
 val Channel<int> b = Channel.new<int>(16);
 
-val SelectPlan plan = SelectPlan.new([
+val SelectPlan<int> plan = SelectPlan.new([
   SelectCase.read(a),
   SelectCase.read(b)
 ]);
 
 loop {
-  val Option<SelectResult> next = select from plan;
+  val Option<Select<int>> next = select from plan;
   // The plan object and FAIR cursor are reused. This iteration gets a fresh
   // winner generation and fresh wait registrations; stale waiters are never
   // carried into the next iteration.

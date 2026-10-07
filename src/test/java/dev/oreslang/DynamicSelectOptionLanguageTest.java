@@ -67,14 +67,16 @@ final class DynamicSelectOptionLanguageTest {
 
                   val Option<SelectResult> a = try select from plan;
                   val Option<SelectResult> b = try select from plan;
+                  val SelectResult selected_a = a.unwrap();
+                  val SelectResult selected_b = b.unwrap();
 
-                  stdio.stdout.write(a.unwrap().index);
+                  stdio.stdout.write(selected_a.index);
                   stdio.stdout.write(":");
-                  stdio.stdout.write(a.unwrap().value);
+                  stdio.stdout.write(selected_a.value);
                   stdio.stdout.write(":");
-                  stdio.stdout.write(b.unwrap().index);
+                  stdio.stdout.write(selected_b.index);
                   stdio.stdout.write(":");
-                  stdio.stdout.write(b.unwrap().value);
+                  stdio.stdout.write(selected_b.value);
                   return;
                 }
                 """;
