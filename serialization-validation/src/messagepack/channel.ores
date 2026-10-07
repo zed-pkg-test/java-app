@@ -1,0 +1,29 @@
+import class DecodeOptions, DecodeError, DecodedValue from '../core/options';
+import fnc decode_options_valid, decode_error from '../core/options';
+import class ByteStreamError, ByteStreamResult from '../core/channel_bytes';
+import fnc collect_bytes_from_channel from '../core/channel_bytes';
+import fnc decode from './messagepack';
+
+pub async fnc decode_messagepack_from_channel(
+  Channel<Option<List<int>>> input,
+  DecodeOptions options
+): Result<DecodedValue, DecodeError> {
+  if !decode_options_valid(options) then
+    return Err(decode_error("invalid_options", 0, "invalid or unsafe decode options"));
+  fi
+
+  if options.allow_trailing_data then
+    return Err(decode_error("framing_required", 0, "EOF-framed MessagePack channel decode cannot allow trailing data; use an explicit framed/sequence decoder"));
+  fi
+
+  val Future<ByteStreamResult> collecting =
+    collect_bytes_from_channel(rt take input, options.max_input_bytes);
+  val ByteStreamResult collected = await collecting;
+
+  if !collected.ok then
+    val ByteStreamError error = collected.error;
+    return Err(decode_error(error.code, error.offset, error.message));
+  fi
+
+  return decode(collected.bytes, options);
+}

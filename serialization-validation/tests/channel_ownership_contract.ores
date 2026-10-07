@@ -1,0 +1,31 @@
+// Ownership contract for streaming codecs.
+//
+// A stream channel is transferred once into its consumer with `rt take`.
+// Native channel operations then borrow/use that channel repeatedly; they do
+// not consume the channel on each read. No pointer-style &/* syntax is needed.
+
+async fnc drain_channel(Channel<Option<int>> input): int {
+  let int total = 0;
+
+  loop do
+    val Future<Option<int>> pending = nb readch input;
+    val Option<int> frame = await pending;
+
+    if frame.is_none() then
+      return total;
+    fi
+
+    total = total + frame.unwrap();
+  done
+}
+
+pub async fnc channel_ownership_contract(): int {
+  val Channel<Option<int>> input = Channel.new<Option<int>>(3);
+  writech input, Some(2);
+  writech input, Some(3);
+  val Option<int> eof = None;
+  writech input, eof;
+
+  val Future<int> draining = drain_channel(rt take input);
+  return await draining;
+}

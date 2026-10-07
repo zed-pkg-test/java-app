@@ -1,0 +1,32 @@
+// Alternative streaming contract while Channel<T> is not yet admitted as an
+// async-callable parameter: keep channel ownership in synchronous functions and
+// move suspension into the native Future chain.
+
+async fnc ready_int(int value): int {
+  return value;
+}
+
+fnc drain_composed(
+  Channel<Option<int>> input,
+  int total
+): Future<int> {
+  val Future<Option<int>> pending = nb readch input;
+
+  return pending.compose(|Option<int> frame| -> {
+    if frame.is_none() then
+      return ready_int(total);
+    fi
+
+    return drain_composed(input, total + frame.unwrap());
+  });
+}
+
+pub fnc channel_future_composition_contract(): Future<int> {
+  val Channel<Option<int>> input = Channel.new<Option<int>>(3);
+  writech input, Some(2);
+  writech input, Some(3);
+  val Option<int> eof = None;
+  writech input, eof;
+
+  return drain_composed(rt take input, 0);
+}

@@ -1,0 +1,82 @@
+import fnc require_true, require_int from './assert';
+import class Value, Utf8Text, WireMember, MapEntry from '../src/core/value';
+import fnc value_int, value_number_lexeme, value_string, value_array, value_object, value_map, value_deep_equal from '../src/core/value';
+import class ValidationReport, FieldRule, ObjectSchema from '../src/validation/validation';
+import class JsonPayloadError, ValidatedDecodedValue from '../src/json/validated';
+import fnc decode_and_validate_object from '../src/json/validated';
+import fnc default_decode_options from '../src/core/options';
+import fnc default_validation_options, any_rule, string_rule, number_rule, array_rule, field_rule, object_schema, max_schema_fields from '../src/validation/validation';
+import fnc validate_value, validate_object, report_is_valid, is_uuid, is_email from '../src/validation/validation';
+
+pub fnc run_validation_tests(): void {
+  val Utf8Text username_key = new Utf8Text(new List<int>(117,115,101,114,110,97,109,101));
+  val Utf8Text age_key = new Utf8Text(new List<int>(97,103,101));
+  let List<WireMember> members = new List<WireMember>();
+  members.push(new WireMember(rt borrow username_key, value_string(new Utf8Text(new List<int>(97,98)))));
+  members.push(new WireMember(rt borrow age_key, value_int(151)));
+  let List<FieldRule> fields = new List<FieldRule>();
+  fields.push(field_rule(rt borrow username_key,true,false,string_rule(3,64,false,false,false,false)));
+  fields.push(field_rule(rt borrow age_key,true,false,number_rule(true,0.0,false,true,150.0,false)));
+  val ObjectSchema schema = object_schema(fields,true);
+
+  val List<int> valid_json = new List<int>(123,34,117,115,101,114,110,97,109,101,34,58,34,97,98,99,100,34,44,34,97,103,101,34,58,51,48,125);
+  val Result<ValidatedDecodedValue, JsonPayloadError> checked_json = decode_and_validate_object(valid_json,default_decode_options(),rt borrow schema,default_validation_options());
+  require_true(!checked_json.is_err(),"valid JSON payload must cross decode+validation boundary");
+  val ValidationReport invalid = validate_object(value_object(members),rt borrow schema,default_validation_options());
+  require_true(!report_is_valid(rt borrow invalid),"invalid object must fail validation");
+  require_int(invalid.errors.length,2,"validation must collect both field errors");
+
+  require_true(is_uuid(new Utf8Text(new List<int>(53,53,48,101,56,52,48,48,45,101,50,57,98,45,52,49,100,52,45,97,55,49,54,45,52,52,54,54,53,53,52,52,48,48,48,48))),"canonical UUID must validate");
+
+  let List<WireMember> object_a_members = new List<WireMember>();
+  object_a_members.push(new WireMember(new Utf8Text(new List<int>(97)),value_int(1)));
+  object_a_members.push(new WireMember(new Utf8Text(new List<int>(98)),value_int(2)));
+  let List<WireMember> object_b_members = new List<WireMember>();
+  object_b_members.push(new WireMember(new Utf8Text(new List<int>(98)),value_int(2)));
+  object_b_members.push(new WireMember(new Utf8Text(new List<int>(97)),value_int(1)));
+  val Value object_a = value_object(object_a_members);
+  val Value object_b = value_object(object_b_members);
+  require_true(value_deep_equal(rt borrow object_a,rt borrow object_b),"object equality must ignore member order");
+
+  let List<MapEntry> map_a_entries = new List<MapEntry>();
+  map_a_entries.push(new MapEntry(value_int(1),value_int(10)));
+  map_a_entries.push(new MapEntry(value_int(2),value_int(20)));
+  let List<MapEntry> map_b_entries = new List<MapEntry>();
+  map_b_entries.push(new MapEntry(value_int(2),value_int(20)));
+  map_b_entries.push(new MapEntry(value_int(1),value_int(10)));
+  require_true(value_deep_equal(value_map(map_a_entries),value_map(map_b_entries)),"general map equality must ignore entry order");
+
+  let List<Value> duplicate_objects = new List<Value>();
+  duplicate_objects.push(object_a);
+  duplicate_objects.push(object_b);
+  val ValidationReport unique_report = validate_value(value_array(duplicate_objects),array_rule(-1,-1,true),default_validation_options());
+  require_true(!report_is_valid(rt borrow unique_report),"unique_items must reject reordered-equivalent objects");
+  require_true(is_email(new Utf8Text(new List<int>(97,64,98,46,99,111,109))),"basic email must validate");
+
+  let List<WireMember> duplicate_members = new List<WireMember>();
+  duplicate_members.push(new WireMember(rt borrow username_key,value_int(1)));
+  duplicate_members.push(new WireMember(rt borrow username_key,value_int(2)));
+  val ValidationReport duplicate_object = validate_object(value_object(duplicate_members),rt borrow schema,default_validation_options());
+  require_true(!report_is_valid(rt borrow duplicate_object),"direct object validation must reject duplicate field names");
+
+  let List<FieldRule> oversized_schema_fields = new List<FieldRule>();
+  let int schema_index = 0;
+  loop do
+    if schema_index > max_schema_fields() then break; fi
+    oversized_schema_fields.push(field_rule(rt borrow username_key,false,false,any_rule()));
+    schema_index = schema_index + 1;
+  done
+  val ValidationReport oversized_schema = validate_object(value_object(new List<WireMember>()),object_schema(oversized_schema_fields,false),default_validation_options());
+  require_true(!report_is_valid(rt borrow oversized_schema),"object schema field ceiling must fail closed before expensive validation");
+
+  let List<int> huge_fraction = new List<int>(48,46);
+  let int fraction_digit = 0;
+  loop do
+    if fraction_digit >= 400 then break; fi
+    huge_fraction.push(57);
+    fraction_digit = fraction_digit + 1;
+  done
+  val ValidationReport non_finite_conversion = validate_value(value_number_lexeme(huge_fraction),number_rule(false,0.0,false,true,1.0,false),default_validation_options());
+  require_true(!report_is_valid(rt borrow non_finite_conversion),"numeric range validation must reject NaN-producing decimal conversion");
+  return;
+}

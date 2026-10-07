@@ -1,0 +1,14 @@
+pub fnc require_true(bool condition, String message): void {
+  if condition then
+    return;
+  fi
+
+  val Result<bool, String> failure = Err(message);
+  failure.expect("serialization/validation native test failed");
+  return;
+}
+
+pub fnc require_int(int actual, int expected, String message): void {
+  require_true(actual == expected, message);
+  return;
+}

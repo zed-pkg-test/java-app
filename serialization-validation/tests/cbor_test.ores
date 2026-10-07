@@ -1,0 +1,73 @@
+import fnc require_true, require_int from './assert';
+
+import class Value, Utf8Text, WireMember from '../src/core/value';
+import fnc value_int, value_string, value_object, value_deep_equal from '../src/core/value';
+import class DecodeOptions, DecodeError, EncodeError, DecodedValue from '../src/core/options';
+import fnc default_decode_options, default_encode_options from '../src/core/options';
+import fnc encode, decode from '../src/cbor/cbor';
+
+pub fnc run_cbor_tests(): void {
+  let List<WireMember> members = new List<WireMember>();
+  members.push(new WireMember(new Utf8Text(new List<int>(110)), value_int(-17)));
+  members.push(new WireMember(new Utf8Text(new List<int>(115)), value_string(new Utf8Text(new List<int>(111, 107)))));
+  val Value source = value_object(members);
+
+  val Result<List<int>, EncodeError> encoded = encode(rt borrow source, default_encode_options());
+  require_true(encoded.is_err() == false, "CBOR object must encode");
+  val Result<DecodedValue, DecodeError> decoded = decode(encoded.unwrap(), default_decode_options());
+  require_true(decoded.is_err() == false, "CBOR object must decode");
+  require_true(value_deep_equal(source, decoded.unwrap().value), "CBOR dynamic value must round-trip without consuming source");
+
+  val Result<DecodedValue, DecodeError> forty_two = decode(new List<int>(24, 42), default_decode_options());
+  require_true(forty_two.is_err() == false, "CBOR uint8 argument should decode");
+  require_int(forty_two.unwrap().value.kind, 2, "CBOR integer kind");
+
+  val Result<DecodedValue, DecodeError> general_map = decode(new List<int>(161, 1, 2), default_decode_options());
+  require_true(general_map.is_err() == false, "CBOR integer-key map must decode");
+  val DecodedValue general = general_map.unwrap();
+  require_int(general.value.kind, 8, "integer-key CBOR map kind");
+  require_int(general.value.map_value.length, 1, "integer-key CBOR map size");
+  val Result<List<int>, EncodeError> general_map_encoded = encode(general.value, default_encode_options());
+  require_true(general_map_encoded.is_err() == false, "CBOR general map must re-encode");
+  require_int(general_map_encoded.unwrap()[0], 161, "CBOR general map header");
+
+  val List<int> duplicate_map = new List<int>(162, 1, 2, 1, 3);
+  val Result<DecodedValue, DecodeError> duplicate_reject = decode(rt borrow duplicate_map, default_decode_options());
+  require_true(duplicate_reject.is_err(), "CBOR duplicate general-map keys must reject by default");
+  val DecodeOptions duplicate_first = new DecodeOptions(1, false, 128, 64, 64, 64, 64, 16, 16);
+  val Result<DecodedValue, DecodeError> first_wins = decode(rt borrow duplicate_map, duplicate_first);
+  require_true(!first_wins.is_err(), "CBOR first-wins duplicate policy must decode");
+  val DecodedValue first_value = first_wins.unwrap();
+  require_int(first_value.value.map_value.length, 1, "CBOR first-wins must keep one entry");
+  require_int(first_value.value.map_value[0].value.number_lexeme[0], 50, "CBOR first-wins must preserve first value");
+  val DecodeOptions duplicate_last = new DecodeOptions(2, false, 128, 64, 64, 64, 64, 16, 16);
+  val Result<DecodedValue, DecodeError> last_wins = decode(rt borrow duplicate_map, duplicate_last);
+  require_true(!last_wins.is_err(), "CBOR last-wins duplicate policy must decode");
+  val DecodedValue last_value = last_wins.unwrap();
+  require_int(last_value.value.map_value.length, 1, "CBOR last-wins must keep one entry");
+  require_int(last_value.value.map_value[0].value.number_lexeme[0], 51, "CBOR last-wins must preserve last value");
+
+  val int min_int = -9223372036854775807 - 1;
+  val int max_int = 9223372036854775807;
+  val Result<List<int>, EncodeError> min_encoded = encode(value_int(min_int), default_encode_options());
+  require_true(min_encoded.is_err() == false, "CBOR int64 minimum must encode");
+  val Result<DecodedValue, DecodeError> min_decoded = decode(min_encoded.unwrap(), default_decode_options());
+  require_true(min_decoded.is_err() == false, "CBOR int64 minimum must decode");
+  require_true(value_deep_equal(value_int(min_int), min_decoded.unwrap().value), "CBOR int64 minimum must round-trip");
+  val Result<List<int>, EncodeError> max_encoded = encode(value_int(max_int), default_encode_options());
+  require_true(max_encoded.is_err() == false, "CBOR int64 maximum must encode");
+  val Result<DecodedValue, DecodeError> max_decoded = decode(max_encoded.unwrap(), default_decode_options());
+  require_true(max_decoded.is_err() == false, "CBOR int64 maximum must decode");
+  require_true(value_deep_equal(value_int(max_int), max_decoded.unwrap().value), "CBOR int64 maximum must round-trip");
+
+  val Result<DecodedValue, DecodeError> truncated = decode(new List<int>(121, 0, 2, 97), default_decode_options());
+  require_true(truncated.is_err(), "CBOR truncated text must reject");
+  val Result<DecodedValue, DecodeError> declared_length_bomb = decode(new List<int>(122, 255, 255, 255, 255), default_decode_options());
+  require_true(declared_length_bomb.is_err(), "CBOR huge declared text length must reject before allocation");
+  val Result<DecodedValue, DecodeError> indefinite = decode(new List<int>(159), default_decode_options());
+  require_true(indefinite.is_err(), "CBOR indefinite-length baseline must fail closed");
+  val DecodeOptions tiny_input = new DecodeOptions(0, false, 128, 1, 16, 16, 16, 16, 16);
+  val Result<DecodedValue, DecodeError> input_limited = decode(new List<int>(24, 42), tiny_input);
+  require_true(input_limited.is_err(), "CBOR max_input_bytes must fail closed");
+  return;
+}
