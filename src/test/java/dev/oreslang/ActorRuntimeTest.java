@@ -249,28 +249,43 @@ final class ActorRuntimeTest {
     }
 
     @Test
-    void sharedActorsCanCoordinateThroughExplicitSyncCell() throws Exception {
+    void sharedActorsCannotCoordinateThroughAmbientSyncCellMutation() throws Exception {
         var config = new ActorRuntime.DispatcherConfig(1, 4, 32);
         try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer(), config)) {
             ActorRuntime.SyncCell<Integer> cell = runtime.syncCell(0);
-            CountDownLatch received = new CountDownLatch(200);
+            CountDownLatch attempted = new CountDownLatch(2);
+            AtomicReference<Throwable> first = new AtomicReference<>();
+            AtomicReference<Throwable> second = new AtomicReference<>();
 
-            var a = runtime.<Integer>spawnShared(() -> (message, context) -> {
-                cell.update(value -> value + 1);
-                received.countDown();
+            var a = runtime.<Integer>spawnSharedTrusted(context -> (message, actorContext) -> {
+                try {
+                    cell.update(value -> value + 1);
+                } catch (Throwable failure) {
+                    first.set(failure);
+                } finally {
+                    attempted.countDown();
+                    actorContext.self().stop();
+                }
             });
-            var b = runtime.<Integer>spawnShared(() -> (message, context) -> {
-                cell.update(value -> value + 1);
-                received.countDown();
+            var b = runtime.<Integer>spawnSharedTrusted(context -> (message, actorContext) -> {
+                try {
+                    cell.update(value -> value + 1);
+                } catch (Throwable failure) {
+                    second.set(failure);
+                } finally {
+                    attempted.countDown();
+                    actorContext.self().stop();
+                }
             });
 
-            for (int i = 0; i < 100; i++) {
-                a.send(i);
-                b.send(i);
-            }
+            a.send(1);
+            b.send(1);
 
-            assertTrue(received.await(5, TimeUnit.SECONDS));
-            assertEquals(200, cell.snapshot());
+            assertTrue(attempted.await(5, TimeUnit.SECONDS));
+            assertInstanceOf(SecurityException.class, first.get());
+            assertInstanceOf(SecurityException.class, second.get());
+            assertEquals(0, cell.snapshot(),
+                    "ordinary actor mutation must flow through owner actors/messages or explicit rt proxy");
         }
     }
 
@@ -279,7 +294,7 @@ final class ActorRuntimeTest {
         try (ActorRuntime runtime = new ActorRuntime()) {
             ActorRuntime.SyncCell<Integer> cell = runtime.syncCell(0);
             var ref = runtime.<Object>spawnPrivate(() -> (message, context) -> { });
-            assertThrows(IllegalArgumentException.class, () -> ref.send(cell));
+            assertThrows(SecurityException.class, () -> ref.send(cell));
         }
     }
 
@@ -488,13 +503,11 @@ final class ActorRuntimeTest {
     }
 
     @Test
-    void syncCellMutationRequiresSharedActorTurn() {
+    void hostRuntimeCanUseLegacySyncCellWithoutGrantingActorAuthority() {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var cell = runtime.syncCell(1);
-            IllegalStateException failure = assertThrows(
-                    IllegalStateException.class,
-                    () -> cell.update(value -> value + 1));
-            assertTrue(failure.getMessage().contains("shared actor mailbox turn"));
+            assertEquals(2, cell.update(value -> value + 1));
+            assertEquals(2, cell.snapshot());
         }
     }
 
@@ -503,7 +516,7 @@ final class ActorRuntimeTest {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var cell = runtime.syncCell(0);
             var ref = runtime.<Object>spawnPrivate(() -> (message, context) -> { });
-            assertThrows(IllegalArgumentException.class,
+            assertThrows(SecurityException.class,
                     () -> ref.send(Map.of("nested", List.of(cell))));
         }
     }
@@ -643,8 +656,8 @@ final class ActorRuntimeTest {
 
             ref.send("read");
             assertTrue(checked.await(2, TimeUnit.SECONDS));
-            assertInstanceOf(IllegalStateException.class, observed.get());
-            assertTrue(observed.get().getMessage().contains("private actors cannot access synchronized shared memory"));
+            assertInstanceOf(SecurityException.class, observed.get());
+            assertTrue(observed.get().getMessage().contains("host/runtime-only"));
         }
     }
 
@@ -705,7 +718,7 @@ final class ActorRuntimeTest {
             CountDownLatch checked = new CountDownLatch(1);
             AtomicReference<Throwable> observed = new AtomicReference<>();
 
-            var ref = runtime.<String>spawnShared(
+            var ref = runtime.<String>spawnSharedTrusted(
                     factoryContext -> (message, context) -> {
                         try {
                             cell.update(value -> value + 1);
@@ -749,27 +762,21 @@ final class ActorRuntimeTest {
 
 
     @Test
-    void nestedDifferentSyncCellsAreRejectedInsteadOfRiskingLockOrderDeadlock() throws Exception {
+    void hostNestedDifferentSyncCellsAreRejectedInsteadOfRiskingLockOrderDeadlock() {
         try (ActorRuntime runtime = new ActorRuntime()) {
             var first = runtime.syncCell(1);
             var second = runtime.syncCell(2);
-            CountDownLatch checked = new CountDownLatch(1);
             AtomicReference<Throwable> observed = new AtomicReference<>();
 
-            var ref = runtime.<String>spawnShared(() -> (message, context) -> {
-                first.update(value -> {
-                    try {
-                        second.snapshot();
-                    } catch (Throwable failure) {
-                        observed.set(failure);
-                    }
-                    return value;
-                });
-                checked.countDown();
+            first.update(value -> {
+                try {
+                    second.snapshot();
+                } catch (Throwable failure) {
+                    observed.set(failure);
+                }
+                return value;
             });
 
-            ref.send("check");
-            assertTrue(checked.await(2, TimeUnit.SECONDS));
             assertInstanceOf(IllegalStateException.class, observed.get());
             assertTrue(observed.get().getMessage().contains("nested synchronization"));
         }
@@ -777,30 +784,31 @@ final class ActorRuntimeTest {
 
 
     @Test
-    void runtimeCloseDoesNotBlockOnActorHeldSyncCellLock() throws Exception {
+    void runtimeCloseDoesNotBlockOnHostHeldLegacySyncCellLock() throws Exception {
         ActorRuntime runtime = new ActorRuntime(
                 IsolatePolicy.developer(),
                 new ActorRuntime.DispatcherConfig(1, 1, 8));
         var cell = runtime.syncCell(1);
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Throwable> holderFailure = new AtomicReference<>();
 
-        var ref = runtime.<String>spawnShared(() -> (message, context) ->
+        Thread holder = Thread.ofPlatform().start(() -> {
+            try {
                 cell.update(value -> {
                     entered.countDown();
-                    boolean done = false;
-                    while (!done) {
-                        try {
-                            done = release.await(25, TimeUnit.MILLISECONDS);
-                        } catch (InterruptedException ignored) {
-                            // Deliberately ignore shutdown interruption to prove
-                            // runtime.close() does not wait on this user lock.
-                        }
+                    try {
+                        assertTrue(release.await(2, TimeUnit.SECONDS));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        fail(interrupted);
                     }
                     return value;
-                }));
-
-        ref.send("hold");
+                });
+            } catch (Throwable failure) {
+                holderFailure.set(failure);
+            }
+        });
         assertTrue(entered.await(2, TimeUnit.SECONDS));
 
         AtomicReference<Throwable> closeFailure = new AtomicReference<>();
@@ -815,17 +823,19 @@ final class ActorRuntimeTest {
         closer.join(500);
 
         try {
-            assertFalse(closer.isAlive(), "runtime close must not wait for user code holding a SyncCell lock");
-            assertInstanceOf(IllegalStateException.class, closeFailure.get());
-            assertTrue(closeFailure.get().getMessage().contains("full actor termination"));
+            assertFalse(closer.isAlive(), "runtime close must not wait for host code holding a legacy SyncCell lock");
+            assertNull(closeFailure.get());
             assertTrue(cell.closed());
             assertEquals(0L, runtime.sharedMemoryBytes());
         } finally {
             release.countDown();
-            closer.join(2000);
+            holder.join(2_000L);
+            closer.join(2_000L);
         }
 
-        assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS));
+        assertTrue(holderFailure.get() == null
+                        || holderFailure.get() instanceof IllegalStateException,
+                "a racing host update may be invalidated after runtime close");
         assertDoesNotThrow(runtime::close);
     }
 
@@ -843,10 +853,10 @@ final class ActorRuntimeTest {
                     () -> ref.send(foreignShared));
             assertTrue(sharedFailure.getMessage().contains("different ActorRuntime"));
 
-            IllegalArgumentException cellFailure = assertThrows(
-                    IllegalArgumentException.class,
+            SecurityException cellFailure = assertThrows(
+                    SecurityException.class,
                     () -> ref.send(foreignCell));
-            assertTrue(cellFailure.getMessage().contains("different ActorRuntime"));
+            assertTrue(cellFailure.getMessage().contains("SyncCell"));
         }
     }
 
