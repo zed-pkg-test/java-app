@@ -233,7 +233,7 @@ define class FramedSender<T> as
 end
 
 // The transport and sender never escape; one producer, one subscriber.
-define class FramedPipe<T> extends Observable<T> as
+pub define class FramedPipe<T> extends Observable<T> as
   val Channel<Option<T>> input;
   val FramedSender<T> writer;
   val Channel<bool> subscribed = Channel.new<bool>(1);
