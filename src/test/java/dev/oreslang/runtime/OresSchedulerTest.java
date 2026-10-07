@@ -182,6 +182,100 @@ final class OresSchedulerTest {
     }
 
     @Test
+    void cooperateAlwaysCreatesFreshDispatchWithoutAllocatingFuture() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            AtomicInteger pc = new AtomicInteger();
+            AtomicReference<Thread> firstCarrier = new AtomicReference<>();
+            AtomicLong firstDispatch = new AtomicLong();
+            AtomicReference<Object> firstTaskDomain = new AtomicReference<>();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                int step = pc.getAndIncrement();
+                if (step == 0) {
+                    assertTrue(resume.initial());
+                    firstCarrier.set(Thread.currentThread());
+                    firstDispatch.set(OresScheduler.currentDispatchId());
+                    firstTaskDomain.set(OresScheduler.currentTaskDomain());
+                    return OresScheduler.cooperate();
+                }
+
+                assertFalse(resume.initial());
+                assertNull(resume.value());
+                assertNull(resume.failure());
+                assertSame(firstCarrier.get(), Thread.currentThread(),
+                        "one-carrier scheduler may reuse the same physical carrier");
+                assertNotEquals(firstDispatch.get(), OresScheduler.currentDispatchId(),
+                        "cooperate must resume through a fresh logical dispatch");
+                assertSame(firstTaskDomain.get(), OresScheduler.currentTaskDomain(),
+                        "cooperate must preserve logical task identity");
+                return OresScheduler.done(42);
+            });
+
+            assertEquals(42, result.get(5, TimeUnit.SECONDS));
+            assertEquals(2, pc.get());
+        }
+    }
+
+    @Test
+    void manyCooperatesRemainStacklessAndMakeProgress() throws Exception {
+        final int cooperates = 1024;
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            AtomicInteger pc = new AtomicInteger();
+            AtomicLong previousDispatch = new AtomicLong();
+
+            OresFuture<Integer> result = scheduler.start(resume -> {
+                long dispatch = OresScheduler.currentDispatchId();
+                long prior = previousDispatch.getAndSet(dispatch);
+                if (prior != 0L) {
+                    assertNotEquals(prior, dispatch,
+                            "every cooperate must establish a fresh dispatch");
+                }
+
+                int step = pc.getAndIncrement();
+                if (step < cooperates) return OresScheduler.cooperate();
+                return OresScheduler.done(step);
+            });
+
+            assertEquals(cooperates, result.get(10, TimeUnit.SECONDS));
+            assertEquals(cooperates + 1, pc.get());
+        }
+    }
+
+    @Test
+    void defaultCooperateQueuesBehindAlreadyRunnablePeerWork() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            java.util.List<String> order =
+                    java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            CountDownLatch firstTurnEntered = new CountDownLatch(1);
+            CountDownLatch peerQueued = new CountDownLatch(1);
+            AtomicInteger aPc = new AtomicInteger();
+
+            OresFuture<Void> a = scheduler.start(resume -> {
+                if (aPc.getAndIncrement() == 0) {
+                    order.add("a1");
+                    firstTurnEntered.countDown();
+                    assertTrue(peerQueued.await(5, TimeUnit.SECONDS));
+                    return OresScheduler.cooperate();
+                }
+                order.add("a2");
+                return OresScheduler.done(null);
+            });
+
+            assertTrue(firstTurnEntered.await(5, TimeUnit.SECONDS));
+            OresFuture<Void> b = scheduler.start(resume -> {
+                order.add("b");
+                return OresScheduler.done(null);
+            });
+            peerQueued.countDown();
+
+            a.get(5, TimeUnit.SECONDS);
+            b.get(5, TimeUnit.SECONDS);
+            assertEquals(java.util.List.of("a1", "b", "a2"), order,
+                    "default cooperate must requeue behind already-runnable work");
+        }
+    }
+
+    @Test
     void runtimeOwnedCompletionPublishesOnlyAfterGuestTurnAdmissionExits() throws Exception {
         ExecutorService carrier = Executors.newSingleThreadExecutor();
         AtomicBoolean insideGuestTurn = new AtomicBoolean();

@@ -73,6 +73,52 @@ final class OwnershipAndClosureTest {
     }
 
     @Test
+    void explicitMutableMethodReceiverMayMutateSelf() throws Exception {
+        String output = run("""
+                define class Counter as
+                  pub let int value = 0;
+
+                  pub bump(self &mut Counter)(): void {
+                    self.value = self.value + 1;
+                    return;
+                  }
+                end
+
+                pub routine main(): void {
+                  let Counter counter = new Counter();
+                  counter.bump();
+                  counter.bump();
+                  stdio.stdout.write(counter.value);
+                  return;
+                }
+                """);
+        assertEquals("2", output);
+    }
+
+    @Test
+    void explicitMutableMethodReceiverRejectsImmutableOwner() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Counter as
+                          pub let int value = 0;
+
+                          pub bump(self &mut Counter)(): void {
+                            self.value = self.value + 1;
+                            return;
+                          }
+                        end
+
+                        fnc bad(): void {
+                          val Counter counter = new Counter();
+                          counter.bump();
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().contains("mutable method receiver"));
+    }
+
+    @Test
     void mutableBorrowAllowsMutationWithoutMovingOwner() throws Exception {
         String output = run("""
                 define class Bar as
@@ -330,6 +376,63 @@ final class OwnershipAndClosureTest {
                         }
                         """)));
         assertTrue(error.getMessage().contains("use of moved value 'box'"));
+    }
+
+    @Test
+    void nestedExpressionLambdaTransitivelyMovesOuterMoveOnlyCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub val int value = 7;
+                        end
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          val (() => (() => int)) outer = || -> || -> box.value;
+                          stdio.println(box.value);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("use of moved value 'box'"));
+    }
+
+    @Test
+    void nestedBlockLambdaTransitivelyMovesOuterMoveOnlyCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub val int value = 7;
+                        end
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          val (() => (() => int)) outer = || -> {
+                            return || -> {
+                              return box.value;
+                            };
+                          };
+                          stdio.println(box.value);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("use of moved value 'box'"));
+    }
+
+    @Test
+    void explicitNlexNestedLambdaDoesNotCreateTransitiveCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        fnc bad(): void {
+                          val int outer_value = 7;
+                          val (() => (() => int)) outer = || -> nlex || -> outer_value;
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("outer_value")
+                || error.getMessage().contains("unknown name"));
     }
 
     @Test

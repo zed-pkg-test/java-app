@@ -377,7 +377,9 @@ public final class TreeShaker {
                         lambda.parameters(),
                         substitute(lambda.expressionBody(), substitutions, nestedShadowed),
                         lambda.blockBody(),
-                        lambda.nonLexical());
+                        lambda.nonLexical(),
+                        lambda.returnType(),
+                        lambda.async());
             }
             throw new IllegalStateException(
                     "unhandled expression during specialization " + expression.getClass().getSimpleName());
@@ -645,7 +647,8 @@ public final class TreeShaker {
             }
             if (statement instanceof Ast.YieldStmt yielded) {
                 return List.of(new Ast.YieldStmt(
-                        rewriteExpression(yielded.value(), module, locals)));
+                        rewriteExpression(yielded.value(), module, locals),
+                        yielded.delegated()));
             }
             if (statement instanceof Ast.ExprStmt expression) {
                 return List.of(new Ast.ExprStmt(
@@ -954,7 +957,9 @@ public final class TreeShaker {
                         lambda.blockBody() == null
                                 ? null
                                 : rewriteStatements(lambda.blockBody(), module, lambdaLocals),
-                        lambda.nonLexical());
+                        lambda.nonLexical(),
+                        lambda.returnType(),
+                        lambda.async());
             }
             throw new IllegalStateException("unhandled expression " + expression.getClass().getSimpleName());
         }

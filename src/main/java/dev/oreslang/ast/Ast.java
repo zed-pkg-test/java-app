@@ -477,7 +477,11 @@ public final class Ast {
     }
 
     public record ReturnStmt(Expr value) implements Stmt { }
-    public record YieldStmt(Expr value) implements Stmt {
+    public record YieldStmt(Expr value, boolean delegated) implements Stmt {
+        public YieldStmt(Expr value) {
+            this(value, false);
+        }
+
         public YieldStmt {
             if (value == null) throw new IllegalArgumentException("yield requires a value");
         }
@@ -817,13 +821,23 @@ public final class Ast {
         public ObjectExpr { fields = List.copyOf(fields); }
     }
 
-    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) implements Expr {
+    public record LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType, boolean async) implements Expr {
         public LambdaExpr {
             parameters = List.copyOf(parameters);
             blockBody = blockBody == null ? null : List.copyOf(blockBody);
+            if ((expressionBody == null) == (blockBody == null)) {
+                throw new IllegalArgumentException(
+                        "lambda requires exactly one expression body or block body");
+            }
         }
         public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody) {
-            this(parameters, expressionBody, blockBody, false);
+            this(parameters, expressionBody, blockBody, false, null, false);
+        }
+        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical) {
+            this(parameters, expressionBody, blockBody, nonLexical, null, false);
+        }
+        public LambdaExpr(List<Param> parameters, Expr expressionBody, List<Stmt> blockBody, boolean nonLexical, TypeRef returnType) {
+            this(parameters, expressionBody, blockBody, nonLexical, returnType, false);
         }
     }
 }
