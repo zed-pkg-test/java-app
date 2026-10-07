@@ -2915,6 +2915,15 @@ public final class TypeChecker {
             boolean returnPosition,
             String where) {
         if (returnPosition && type == Primitive.VOID) return;
+        // A typed channel handle is an Ores-owned synchronized transport, not
+        // an actor/mailbox capability. Async tasks may receive the handle when
+        // its payload is concrete, owned and task-safe. Actor boundaries retain
+        // their stricter rule and continue to reject Channel<T> entirely.
+        if (type instanceof Named named && named.name().equals("Channel")
+                && named.arguments().size() == 1
+                && isSharedSafe(named.arguments().getFirst(), new LinkedHashSet<>(), Map.of())) {
+            return;
+        }
         if (type == Primitive.VOID
                 || !isSharedSafe(type, new LinkedHashSet<>(), Map.of())) {
             throw new IllegalArgumentException(
