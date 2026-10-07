@@ -11,7 +11,6 @@ import fnc decode_attempt from './json';
 import fnc validate_object, report_is_valid from '../validation/validation';
 
 define class JsonPayloadError as
-  // kind: 0 decode failure, 1 validation failure.
   pub val int kind;
   pub val DecodeError decode_error;
   pub val ValidationReport validation_report;
@@ -27,10 +26,7 @@ fnc empty_decode_error(): DecodeError {
 }
 
 fnc empty_validation_report(): ValidationReport {
-  return new ValidationReport(
-    new List<ValidationError>(),
-    false
-  );
+  return new ValidationReport(new List<ValidationError>(), false);
 }
 
 pub fnc decode_and_validate_object(
@@ -40,37 +36,21 @@ pub fnc decode_and_validate_object(
   ValidationOptions validation_options
 ): Result<ValidatedDecodedValue, JsonPayloadError> {
   let DecodeAttempt attempt = decode_attempt(input, decode_options);
-
   if attempt.status != 0 then
-    return Err(
-      new JsonPayloadError(
-        0,
-        attempt.error,
-        empty_validation_report()
-      )
-    );
+    return Err(new JsonPayloadError(0, attempt.error, empty_validation_report()));
   fi
 
   let ValidationReport report = validate_object(
-    attempt.value,
+    rt borrow attempt.value,
     schema,
     validation_options
   );
-
-  if !report_is_valid(report) then
-    return Err(
-      new JsonPayloadError(
-        1,
-        empty_decode_error(),
-        report
-      )
-    );
+  if !report_is_valid(rt borrow report) then
+    return Err(new JsonPayloadError(1, empty_decode_error(), report));
   fi
 
-  return Ok(
-    new ValidatedDecodedValue(
-      new ValidValue(attempt.value),
-      attempt.consumed
-    )
-  );
+  return Ok(new ValidatedDecodedValue(
+    new ValidValue(attempt.value),
+    attempt.consumed
+  ));
 }
