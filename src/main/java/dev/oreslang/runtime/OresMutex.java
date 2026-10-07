@@ -43,11 +43,14 @@ public final class OresMutex {
     }
 
     public static <T> Shared<T> shared(T value) {
-        if (ActorRuntime.currentActorKind() != null) {
-            throw new SecurityException(
-                    "SharedMutex<T> is host/runtime-only legacy shared memory; "
-                            + "actors must use ownership/messages, immutable publication, "
-                            + "or rt Proxy<T>");
+        if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
+            throw new SecurityException("private actors cannot create SharedMutex<T>");
+        }
+        IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
+        if (actorPolicy != null) {
+            actorPolicy.require(
+                    IsolatePolicy.Capability.SHARED_MEMORY,
+                    "SharedMutex.new");
         }
         return new Shared<>(value);
     }
@@ -299,13 +302,9 @@ public final class OresMutex {
     }
 
     /**
-     * Legacy host/runtime same-process shared-memory mutex.
-     *
-     * <p>This primitive is intentionally not actor authority and not a
-     * distributed lock. Actor code cannot create, acquire, recover, or inspect
-     * it; actor-side shared mutation uses owner actors/messages or the narrower
-     * rt Proxy capability. Host/runtime compatibility code may still use it
-     * inside one process.</p>
+     * Explicit same-process shared-memory mutex. This is intentionally not a
+     * distributed lock and must not be serialized across OS-process/Graal
+     * isolate boundaries.
      */
     public static final class Shared<T> implements Lock<T> {
         private static final int MAX_ASYNC_WAITERS = 8_192;
@@ -408,11 +407,20 @@ public final class OresMutex {
         }
 
         private void requireActorAccess() {
-            if (ActorRuntime.currentActorKind() != null) {
-                throw new SecurityException(
-                        "SharedMutex<T> is host/runtime-only legacy shared memory; "
-                                + "actors must use ownership/messages, immutable publication, "
-                                + "or rt Proxy<T>");
+            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.PRIVATE) {
+                throw new SecurityException("private actors cannot access SharedMutex<T>");
+            }
+            IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
+            if (actorPolicy != null) {
+                actorPolicy.require(
+                        IsolatePolicy.Capability.SHARED_MEMORY,
+                        "SharedMutex operation");
+            }
+
+            ActorRuntime current = ActorRuntime.currentActorRuntime();
+            if (current != null && !bindToRuntime(current)) {
+                throw new WrongMutexDomainException(
+                        "SharedMutex belongs to another ActorRuntime");
             }
         }
 
