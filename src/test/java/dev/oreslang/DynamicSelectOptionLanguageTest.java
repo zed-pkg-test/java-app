@@ -216,6 +216,65 @@ final class DynamicSelectOptionLanguageTest {
                 () -> OresCompiler.parseAndTypeCheck(program));
     }
 
+
+    @Test
+    void heterogeneousSelectPayloadsNarrowInPatternsButRequireFallbackForExhaustiveness()
+            throws Exception {
+        String program = """
+                async fnc ready(): int {
+                  return 23;
+                }
+
+                pub fnc main(): void {
+                  val Channel<string> messages = Channel.new<string>(1);
+                  writech messages, "hello";
+                  val Future<int> future = ready();
+
+                  val SelectPlan<string | int> plan = SelectPlan.new([
+                    SelectCase.read(messages),
+                    SelectCase.await(future),
+                    SelectCase.timeout(1000000000)
+                  ]);
+
+                  val Option<Select<string | int>> result =
+                      try select first from plan;
+
+                  match result over
+                    on Some(Read(string message)) -> {
+                      stdio.stdout.write(message);
+                    }
+                    on Some(Await(int value)) -> {
+                      stdio.stdout.write(value);
+                    }
+                    on Some(Timeout) -> {
+                      stdio.stdout.write("timeout");
+                    }
+                    on None -> {
+                      stdio.stdout.write("none");
+                    }
+                    on _ -> {
+                      stdio.stdout.write("other");
+                    }
+                  end
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+        assertEquals("hello", run(program));
+
+        String unsoundlyAssumedCorrelation = program.replace(
+                """
+                    on _ -> {
+                      stdio.stdout.write("other");
+                    }
+                """,
+                "");
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> OresCompiler.parseAndTypeCheck(unsoundlyAssumedCorrelation));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "select-option.ores")

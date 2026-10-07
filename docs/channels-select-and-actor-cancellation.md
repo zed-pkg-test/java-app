@@ -405,6 +405,13 @@ Dynamic `SelectCase.await` currently requires a value-producing
 representation yet. Static `when await future` still accepts `Future<void>`
 when the arm does not bind a result.
 
+For heterogeneous payloads, constructor patterns narrow correctly, but
+`Select<T>` does not yet encode which payload subtype belongs to which
+readiness constructor. The exhaustiveness checker therefore does not infer that
+`Read(string)` plus `Await(int)` covers every theoretical
+`Select<string | int>`; use an explicit fallback until case/payload
+correlation becomes part of the plan type.
+
 A typical consumer is therefore:
 
 ```ores
@@ -431,6 +438,12 @@ match result over
   }
   on None -> {
     handle_not_ready();
+  }
+  on _ -> {
+    // Select<T> currently carries the payload union, not the exact
+    // case-to-payload correlation. This defensive fallback keeps the match
+    // exhaustive for heterogeneous payload unions.
+    unreachable();
   }
 end
 ```
