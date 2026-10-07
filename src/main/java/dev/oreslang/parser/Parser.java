@@ -2722,10 +2722,6 @@ public final class Parser {
     private Ast.Expr parseChannelOperation(
             Ast.ChannelOperation operation,
             Ast.WaitMode mode) {
-        if (operation == Ast.ChannelOperation.DEFAULT) {
-            throw new AssertionError("default is not a standalone channel operation");
-        }
-
         if (match(LPAREN)) {
             Ast.Expr channel = parseExpression();
             Ast.Expr value = null;

@@ -1506,16 +1506,16 @@ public final class OwnershipChecker {
             } else if (stmt instanceof Ast.SelectStmt s) {
                 for (Ast.SelectArm arm : s.arms()) {
                     Set<String> armLocals = new HashSet<>(blockLocals);
-                    if (arm.operation() != Ast.ChannelOperation.DEFAULT) {
+                    if (arm.source() != null) {
                         scanExpr(
-                                arm.channel(),
+                                arm.source(),
                                 blockLocals,
                                 outer,
                                 recursiveBinding,
                                 captures,
                                 false);
                     }
-                    if (arm.operation() == Ast.ChannelOperation.WRITE) {
+                    if (arm.value() != null) {
                         scanExpr(
                                 arm.value(),
                                 blockLocals,

@@ -3972,7 +3972,8 @@ public final class OresEvalRootNode extends RootNode {
                     || value instanceof Enum<?>
                     || value instanceof java.util.UUID
                     || value instanceof Complex
-                    || value instanceof OptionUnwrapError) {
+                    || value instanceof OptionUnwrapError
+                    || value instanceof CancellationToken) {
                 return value;
             }
 

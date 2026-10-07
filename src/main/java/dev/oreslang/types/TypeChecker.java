@@ -4948,10 +4948,14 @@ public final class TypeChecker {
                 rejectStaticClassGenericReferences(attempted.finallyBody(), classGenerics, klass, method);
             } else if (statement instanceof Ast.SelectStmt selected) {
                 for (Ast.SelectArm arm : selected.arms()) {
-                    rejectStaticClassGenericReferences(
-                            arm.channel(), classGenerics, klass, method);
-                    rejectStaticClassGenericReferences(
-                            arm.value(), classGenerics, klass, method);
+                    if (arm.source() != null) {
+                        rejectStaticClassGenericReferences(
+                                arm.source(), classGenerics, klass, method);
+                    }
+                    if (arm.value() != null) {
+                        rejectStaticClassGenericReferences(
+                                arm.value(), classGenerics, klass, method);
+                    }
                     rejectStaticClassGenericReferences(
                             arm.body(), classGenerics, klass, method);
                 }

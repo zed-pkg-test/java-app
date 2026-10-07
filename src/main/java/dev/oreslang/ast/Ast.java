@@ -812,9 +812,6 @@ public final class Ast {
             boolean callback,
             List<Stmt> callbackBody) implements Expr {
         public ChannelOpExpr {
-            if (operation == ChannelOperation.DEFAULT) {
-                throw new IllegalArgumentException("default is not a standalone channel operation");
-            }
             if (channel == null) throw new IllegalArgumentException("channel operation requires a channel");
             if (operation == ChannelOperation.READ && value != null) {
                 throw new IllegalArgumentException("readch cannot carry a write value");
