@@ -36,7 +36,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Function;
 
 /** Executable Truffle root. Parsing and static checks happen before this node is created. */
 public final class OresEvalRootNode extends RootNode {
@@ -144,6 +143,7 @@ public final class OresEvalRootNode extends RootNode {
                 new IdentityHashMap<>();
         private StartupPhase startupPhase = StartupPhase.CREATED;
         private final ThreadLocal<GeneratorRuntime.Emitter<Object>> activeGeneratorEmitter = new ThreadLocal<>();
+        private final ThreadLocal<Boolean> activeGeneratorAsync = new ThreadLocal<>();
         private static final int TAIL_SAFEPOINT_INTERVAL = 64;
         private static final Object UNINITIALIZED_FIELD = new Object();
 
@@ -153,7 +153,6 @@ public final class OresEvalRootNode extends RootNode {
             METHOD,
             STATIC_FUNCTION,
             STATIC_FUNCTION_BODY,
-            PROXY_METHOD,
             INVOKABLE
         }
 
@@ -163,12 +162,6 @@ public final class OresEvalRootNode extends RootNode {
                 Object receiver,
                 Object target,
                 List<Object> arguments) { }
-
-        private record ProxyMethodPlan(
-                ActorRuntime.Proxy<?> proxy,
-                Invocation inner,
-                boolean readOnly,
-                String label) { }
 
         private record TailCall(Invocation invocation) { }
 
@@ -475,8 +468,6 @@ public final class OresEvalRootNode extends RootNode {
                 case STATIC_FUNCTION_BODY -> callStaticFunctionBodyRaw(
                         (Ast.MethodDecl) invocation.target(),
                         invocation.arguments());
-                case PROXY_METHOD -> executeProxyMethod(
-                        (ProxyMethodPlan) invocation.target());
                 case INVOKABLE -> ((Invokable) invocation.target()).call(invocation.arguments());
             };
         }
@@ -540,11 +531,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         @FunctionalInterface
-        private interface SourceObjectCont {
-            void accept(SourceTask task, Map<String, Object> value, Throwable failure);
-        }
-
-        @FunctionalInterface
         private interface SourceFlowCont {
             void accept(SourceTask task, SourceFlow flow);
         }
@@ -593,7 +579,6 @@ public final class OresEvalRootNode extends RootNode {
             private final OresObject receiver;
             private final List<Ast.Stmt> blockBody;
             private final List<?> arguments;
-            private final boolean proxyAware;
             private Env initialBlockEnv;
 
             private SourceValueCont awaitingContinuation;
@@ -607,7 +592,6 @@ public final class OresEvalRootNode extends RootNode {
                 this.receiver = null;
                 this.blockBody = null;
                 this.arguments = List.copyOf(arguments);
-                this.proxyAware = functionUsesProxyCapability(function);
             }
 
             private SourceTask(
@@ -619,7 +603,6 @@ public final class OresEvalRootNode extends RootNode {
                 this.receiver = receiver;
                 this.blockBody = null;
                 this.arguments = List.copyOf(arguments);
-                this.proxyAware = methodUsesProxyCapability(method);
             }
 
             private SourceTask(List<Ast.Stmt> blockBody) {
@@ -629,11 +612,6 @@ public final class OresEvalRootNode extends RootNode {
                 this.blockBody = List.copyOf(
                         Objects.requireNonNull(blockBody, "blockBody"));
                 this.arguments = List.of();
-                // Detached callback blocks can capture a Proxy<T> through their
-                // environment snapshot even when no declaration appears in the
-                // block itself. Conservatively keep their member/index accesses
-                // on the suspendable path.
-                this.proxyAware = true;
             }
 
             @Override
@@ -729,6 +707,16 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 awaitingContinuation = continuation;
                 nextStep = OresScheduler.await(future);
+            }
+
+            private void cooperate(SourceValueCont continuation) {
+                Objects.requireNonNull(continuation, "continuation");
+                if (nextStep != null) {
+                    throw new IllegalStateException(
+                            "source continuation attempted two terminal steps in one turn");
+                }
+                awaitingContinuation = continuation;
+                nextStep = OresScheduler.cooperate();
             }
 
             private void done(Object value) {
@@ -844,6 +832,110 @@ public final class OresEvalRootNode extends RootNode {
             return future;
         }
 
+        private OresFuture<Object> startFutureChainTask(
+                OresScheduler.Task<Object> task) {
+            if (ActorRuntime.inActorExecution()) {
+                OresFuture<Object> future = context.actors().startActorTask(task);
+                context.actors().ownCurrentActorFuture(future);
+                return future;
+            }
+            OresScheduler current = OresScheduler.current();
+            return (current != null
+                    ? current
+                    : context.vm().rootScheduler()).start(task);
+        }
+
+        private OresFuture<Object> chainFuture(
+                OresFuture<?> source,
+                Invokable callback,
+                boolean flatten,
+                boolean observeSuccess) {
+            Objects.requireNonNull(source, "source");
+            Objects.requireNonNull(callback, "callback");
+            return startFutureChainTask(new OresScheduler.Task<>() {
+                private int pc;
+
+                @Override
+                public OresScheduler.Step<Object> resume(
+                        OresScheduler.Resume resume) {
+                    if (pc == 0) {
+                        if (!resume.initial()) {
+                            throw new IllegalStateException(
+                                    "Future chain started with a non-initial resume");
+                        }
+                        pc = 1;
+                        return OresScheduler.await(source);
+                    }
+
+                    if (pc == 1) {
+                        if (resume.failure() != null) {
+                            throw sourceFailure(resume.failure());
+                        }
+                        Object value = resume.value();
+                        Object mapped = invoke(
+                                invokableInvocation(callback, List.of(value)));
+
+                        if (observeSuccess) {
+                            if (mapped != null) {
+                                throw new IllegalArgumentException(
+                                        "Future.onSuccess callback must return void");
+                            }
+                            pc = 3;
+                            return OresScheduler.done(value);
+                        }
+
+                        if (!flatten) {
+                            pc = 3;
+                            return OresScheduler.done(mapped);
+                        }
+
+                        if (!(mapped instanceof OresFuture<?> nested)) {
+                            throw new IllegalArgumentException(
+                                    "Future.compose/flatMap callback must return Future<T>");
+                        }
+                        pc = 2;
+                        return OresScheduler.await(nested);
+                    }
+
+                    if (pc == 2) {
+                        if (resume.failure() != null) {
+                            throw sourceFailure(resume.failure());
+                        }
+                        pc = 3;
+                        return OresScheduler.done(resume.value());
+                    }
+
+                    throw new IllegalStateException(
+                            "Future chain resumed after completion");
+                }
+            });
+        }
+
+        private OresFuture<Object> wrapFutureSome(OresFuture<?> source) {
+            Objects.requireNonNull(source, "source");
+            return startFutureChainTask(new OresScheduler.Task<>() {
+                private boolean waiting;
+
+                @Override
+                public OresScheduler.Step<Object> resume(
+                        OresScheduler.Resume resume) {
+                    if (!waiting) {
+                        if (!resume.initial()) {
+                            throw new IllegalStateException(
+                                    "optional Future wrapper started with a non-initial resume");
+                        }
+                        waiting = true;
+                        return OresScheduler.await(source);
+                    }
+                    if (resume.failure() != null) {
+                        throw sourceFailure(resume.failure());
+                    }
+                    return OresScheduler.done(
+                            new OptionValue(true, resume.value()));
+                }
+            });
+        }
+
         private boolean functionContainsPotentialSuspension(
                 Ast.FunctionDecl function) {
             return functionContainsPotentialSuspension(
@@ -856,262 +948,9 @@ public final class OresEvalRootNode extends RootNode {
                 Ast.FunctionDecl function,
                 Set<Object> seen) {
             if (!seen.add(function)) return false;
-            if (functionUsesProxyCapability(function)) return true;
             for (Ast.Stmt stmt : function.body()) {
                 if (statementContainsPotentialSuspension(stmt, seen)) {
                     return true;
-                }
-            }
-            return false;
-        }
-
-        private boolean functionUsesProxyCapability(Ast.FunctionDecl function) {
-            if (typeContainsProxy(function.returnType())) return true;
-            for (Ast.Param param : function.parameters()) {
-                if (typeContainsProxy(param.type())) return true;
-            }
-            return statementsContainProxyCapability(function.body());
-        }
-
-        private boolean methodUsesProxyCapability(Ast.MethodDecl method) {
-            if (typeContainsProxy(method.returnType())
-                    || typeContainsProxy(method.explicitReceiverType())) {
-                return true;
-            }
-            for (Ast.Param param : method.parameters()) {
-                if (typeContainsProxy(param.type())) return true;
-            }
-            Ast.ClassDecl owner = declaringClass(method);
-            if (owner != null) {
-                for (Ast.FieldDecl field : owner.fields()) {
-                    if (typeContainsProxy(field.type())) return true;
-                }
-            }
-            return statementsContainProxyCapability(method.body());
-        }
-
-        private boolean typeContainsProxy(Ast.TypeRef type) {
-            if (type == null) return false;
-            if (type.name().equals("Proxy")) return true;
-            for (Ast.TypeRef argument : type.arguments()) {
-                if (typeContainsProxy(argument)) return true;
-            }
-            return false;
-        }
-
-        private boolean statementsContainProxyCapability(List<Ast.Stmt> statements) {
-            for (Ast.Stmt statement : statements) {
-                if (statementContainsProxyCapability(statement)) return true;
-            }
-            return false;
-        }
-
-        private boolean statementContainsProxyCapability(Ast.Stmt stmt) {
-            if (stmt instanceof Ast.BindingStmt binding) {
-                return typeContainsProxy(binding.declaredType())
-                        || expressionContainsProxyCapability(binding.initializer());
-            }
-            if (stmt instanceof Ast.DestructureStmt destructure) {
-                return expressionContainsProxyCapability(destructure.initializer());
-            }
-            if (stmt instanceof Ast.ReturnStmt ret) {
-                return expressionContainsProxyCapability(ret.value());
-            }
-            if (stmt instanceof Ast.YieldStmt yield) {
-                return expressionContainsProxyCapability(yield.value());
-            }
-            if (stmt instanceof Ast.ExprStmt expr) {
-                return expressionContainsProxyCapability(expr.expression());
-            }
-            if (stmt instanceof Ast.DeferStmt defer) {
-                return expressionContainsProxyCapability(defer.expression());
-            }
-            if (stmt instanceof Ast.BlockStmt block) {
-                return statementsContainProxyCapability(block.body());
-            }
-            if (stmt instanceof Ast.IfStmt conditional) {
-                for (Ast.IfBranch branch : conditional.branches()) {
-                    if (expressionContainsProxyCapability(branch.condition())
-                            || statementsContainProxyCapability(branch.body())) return true;
-                }
-                return statementsContainProxyCapability(conditional.elseBody());
-            }
-            if (stmt instanceof Ast.MatchStmt matched) {
-                if (expressionContainsProxyCapability(matched.subject())) return true;
-                for (Ast.MatchArm arm : matched.arms()) {
-                    if (expressionContainsProxyCapability(arm.guard())
-                            || statementsContainProxyCapability(arm.body())) return true;
-                }
-                return false;
-            }
-            if (stmt instanceof Ast.SwitchStmt switched) {
-                if (expressionContainsProxyCapability(switched.subject())) return true;
-                for (Ast.SwitchCase arm : switched.cases()) {
-                    if (statementsContainProxyCapability(arm.body())) return true;
-                }
-                return statementsContainProxyCapability(switched.defaultBody());
-            }
-            if (stmt instanceof Ast.TryStmt attempted) {
-                return statementsContainProxyCapability(attempted.body())
-                        || statementsContainProxyCapability(attempted.catchBody())
-                        || statementsContainProxyCapability(attempted.finallyBody());
-            }
-            if (stmt instanceof Ast.ForOfStmt loop) {
-                return expressionContainsProxyCapability(loop.iterable())
-                        || statementsContainProxyCapability(loop.body());
-            }
-            if (stmt instanceof Ast.ForOfDestructureStmt loop) {
-                return expressionContainsProxyCapability(loop.iterable())
-                        || statementsContainProxyCapability(loop.body());
-            }
-            if (stmt instanceof Ast.ForStmt loop) {
-                return (loop.initializer() != null && statementContainsProxyCapability(loop.initializer()))
-                        || expressionContainsProxyCapability(loop.condition())
-                        || expressionContainsProxyCapability(loop.update())
-                        || statementsContainProxyCapability(loop.body());
-            }
-            if (stmt instanceof Ast.LoopStmt loop) {
-                return statementsContainProxyCapability(loop.body());
-            }
-            return false;
-        }
-
-        private boolean expressionContainsProxyCapability(Ast.Expr expr) {
-            if (expr == null) return false;
-            if (expr instanceof Ast.CallExpr call) {
-                if (isRuntimeProxyIntrinsic(call)) return true;
-                if (call.callee() instanceof Ast.NameExpr name) {
-                    Ast.FunctionDecl target = findFunction(name.name(), call.arguments().size());
-                    if (target != null && typeContainsProxy(target.returnType())) return true;
-                }
-                if (expressionContainsProxyCapability(call.callee())) return true;
-                for (Ast.Expr argument : call.arguments()) {
-                    if (expressionContainsProxyCapability(argument)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.UnaryExpr unary) {
-                return expressionContainsProxyCapability(unary.operand());
-            }
-            if (expr instanceof Ast.BinaryExpr binary) {
-                return expressionContainsProxyCapability(binary.left())
-                        || expressionContainsProxyCapability(binary.right());
-            }
-            if (expr instanceof Ast.AssignExpr assignment) {
-                return expressionContainsProxyCapability(assignment.target())
-                        || expressionContainsProxyCapability(assignment.value());
-            }
-            if (expr instanceof Ast.ConditionalExpr conditional) {
-                return expressionContainsProxyCapability(conditional.condition())
-                        || expressionContainsProxyCapability(conditional.whenTrue())
-                        || expressionContainsProxyCapability(conditional.whenFalse());
-            }
-            if (expr instanceof Ast.TypeTestExpr test) {
-                return typeContainsProxy(test.targetType())
-                        || expressionContainsProxyCapability(test.value());
-            }
-            if (expr instanceof Ast.PatternTestExpr test) {
-                return expressionContainsProxyCapability(test.value());
-            }
-            if (expr instanceof Ast.CastExpr cast) {
-                return typeContainsProxy(cast.targetType())
-                        || expressionContainsProxyCapability(cast.value());
-            }
-            if (expr instanceof Ast.MemberExpr member) {
-                return expressionContainsProxyCapability(member.receiver());
-            }
-            if (expr instanceof Ast.IndexExpr index) {
-                return expressionContainsProxyCapability(index.receiver())
-                        || expressionContainsProxyCapability(index.index());
-            }
-            if (expr instanceof Ast.NewExpr created) {
-                if (typeContainsProxy(created.type())) return true;
-                for (Ast.Expr argument : created.arguments()) {
-                    if (expressionContainsProxyCapability(argument)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.ListExpr list) {
-                for (Ast.Expr item : list.elements()) {
-                    if (expressionContainsProxyCapability(item)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.TupleExpr tuple) {
-                for (Ast.Expr item : tuple.elements()) {
-                    if (expressionContainsProxyCapability(item)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.ObjectExpr object) {
-                for (Ast.ObjectField field : object.fields()) {
-                    if ((field.isDynamic()
-                                    && expressionContainsProxyCapability(field.dynamicName()))
-                            || expressionContainsProxyCapability(field.value())) return true;
-                }
-            }
-            return false;
-        }
-
-        private boolean expressionContainsProxyLeaseCandidate(Ast.Expr expr) {
-            if (expr == null) return false;
-            if (expr instanceof Ast.MemberExpr || expr instanceof Ast.IndexExpr) return true;
-            if (expr instanceof Ast.AssignExpr assignment) {
-                return expressionContainsProxyLeaseCandidate(assignment.target())
-                        || expressionContainsProxyLeaseCandidate(assignment.value());
-            }
-            if (expr instanceof Ast.CallExpr call) {
-                if (call.callee() instanceof Ast.MemberExpr) return true;
-                if (expressionContainsProxyLeaseCandidate(call.callee())) return true;
-                for (Ast.Expr argument : call.arguments()) {
-                    if (expressionContainsProxyLeaseCandidate(argument)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.UnaryExpr unary) {
-                return expressionContainsProxyLeaseCandidate(unary.operand());
-            }
-            if (expr instanceof Ast.BinaryExpr binary) {
-                return expressionContainsProxyLeaseCandidate(binary.left())
-                        || expressionContainsProxyLeaseCandidate(binary.right());
-            }
-            if (expr instanceof Ast.ConditionalExpr conditional) {
-                return expressionContainsProxyLeaseCandidate(conditional.condition())
-                        || expressionContainsProxyLeaseCandidate(conditional.whenTrue())
-                        || expressionContainsProxyLeaseCandidate(conditional.whenFalse());
-            }
-            if (expr instanceof Ast.TypeTestExpr test) {
-                return expressionContainsProxyLeaseCandidate(test.value());
-            }
-            if (expr instanceof Ast.PatternTestExpr test) {
-                return expressionContainsProxyLeaseCandidate(test.value());
-            }
-            if (expr instanceof Ast.CastExpr cast) {
-                return expressionContainsProxyLeaseCandidate(cast.value());
-            }
-            if (expr instanceof Ast.NewExpr created) {
-                for (Ast.Expr argument : created.arguments()) {
-                    if (expressionContainsProxyLeaseCandidate(argument)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.ListExpr list) {
-                for (Ast.Expr item : list.elements()) {
-                    if (expressionContainsProxyLeaseCandidate(item)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.TupleExpr tuple) {
-                for (Ast.Expr item : tuple.elements()) {
-                    if (expressionContainsProxyLeaseCandidate(item)) return true;
-                }
-                return false;
-            }
-            if (expr instanceof Ast.ObjectExpr object) {
-                for (Ast.ObjectField field : object.fields()) {
-                    if ((field.isDynamic()
-                                    && expressionContainsProxyLeaseCandidate(field.dynamicName()))
-                            || expressionContainsProxyLeaseCandidate(field.value())) return true;
                 }
             }
             return false;
@@ -1253,6 +1092,11 @@ public final class OresEvalRootNode extends RootNode {
                         && selected.mode() == Ast.WaitMode.BLOCKING) {
                 return true;
             }
+            if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                if (runtime.operation().equals("cooperate")) return true;
+                return runtime.arguments().stream()
+                        .anyMatch(argument -> expressionContainsPotentialSuspension(argument, seen));
+            }
             if (expr instanceof Ast.CallExpr call) {
                 for (Ast.Expr argument : call.arguments()) {
                     if (expressionContainsPotentialSuspension(argument, seen)) return true;
@@ -1355,12 +1199,7 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.ObjectExpr object) {
                 return object.fields().stream().anyMatch(
-                        field ->
-                                (field.isDynamic()
-                                        && expressionContainsPotentialSuspension(
-                                                field.dynamicName(), seen))
-                                        || expressionContainsPotentialSuspension(
-                                                field.value(), seen));
+                        field -> expressionContainsPotentialSuspension(field.value(), seen));
             }
             return false;
         }
@@ -2648,9 +2487,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (!expressionContainsPotentialSuspension(
                         expr,
                         java.util.Collections.newSetFromMap(
-                                new IdentityHashMap<>()))
-                        && !(task.proxyAware
-                                && expressionContainsProxyLeaseCandidate(expr))) {
+                                new IdentityHashMap<>()))) {
                     continuation.accept(
                             task,
                             eval(expr, env),
@@ -2726,20 +2563,18 @@ public final class OresEvalRootNode extends RootNode {
                                             set.selectAsync(policy);
                                     if (selected.mode()
                                             == Ast.WaitMode.NONBLOCKING) {
-                                        if (ActorRuntime.inActorExecution()) {
-                                            context.actors().ownCurrentActorFuture(
-                                                    future);
-                                        }
                                         continuation.accept(
                                                 t,
-                                                future,
+                                                wrapFutureSome(future),
                                                 null);
                                         return;
                                     }
                                     if (future.isDone()) {
                                         continuation.accept(
                                                 t,
-                                                future.join(),
+                                                new OptionValue(
+                                                        true,
+                                                        future.join()),
                                                 null);
                                         return;
                                     }
@@ -2748,7 +2583,11 @@ public final class OresEvalRootNode extends RootNode {
                                             (t2, value, failure2) ->
                                                     continuation.accept(
                                                             t2,
-                                                            value,
+                                                            failure2 == null
+                                                                    ? new OptionValue(
+                                                                            true,
+                                                                            value)
+                                                                    : null,
                                                             failure2));
                                 } catch (RuntimeException | Error failure2) {
                                     continuation.accept(
@@ -2963,6 +2802,11 @@ public final class OresEvalRootNode extends RootNode {
                     return;
                 }
 
+                if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                    evalSuspendableRuntimeCall(task, runtime, env, continuation);
+                    return;
+                }
+
                 if (expr instanceof Ast.MemberExpr member) {
                     evalSuspendableExpr(
                             task,
@@ -2971,30 +2815,6 @@ public final class OresEvalRootNode extends RootNode {
                             (t, receiver, failure) -> {
                                 if (failure != null) {
                                     continuation.accept(t, null, failure);
-                                    return;
-                                }
-                                if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                                    completeProxyAccess(
-                                            t,
-                                            proxy,
-                                            false,
-                                            raw -> {
-                                                Object value = member(
-                                                        raw,
-                                                        member.member(),
-                                                        env);
-                                                if (value instanceof Invokable) {
-                                                    throw new IllegalArgumentException(
-                                                            "rt Proxy<T> methods are direct-call-only; invoke '"
-                                                                    + member.member()
-                                                                    + "(...)' instead of extracting the method");
-                                                }
-                                                return requireProxyBoundaryValue(
-                                                        proxy,
-                                                        value,
-                                                        "rt proxy member '" + member.member() + "'");
-                                            },
-                                            continuation);
                                     return;
                                 }
                                 try {
@@ -3034,18 +2854,6 @@ public final class OresEvalRootNode extends RootNode {
                                                         failure2);
                                                 return;
                                             }
-                                            if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                                                completeProxyAccess(
-                                                        t2,
-                                                        proxy,
-                                                        false,
-                                                        raw -> requireProxyBoundaryValue(
-                                                                proxy,
-                                                                indexValue(raw, key),
-                                                                "rt proxy indexed read"),
-                                                        continuation);
-                                                return;
-                                            }
                                             try {
                                                 continuation.accept(
                                                         t2,
@@ -3074,104 +2882,17 @@ public final class OresEvalRootNode extends RootNode {
                                     continuation.accept(t, null, failure);
                                     return;
                                 }
-                                if (assignment.target() instanceof Ast.NameExpr name) {
-                                    try {
-                                        env.assign(name.name(), value);
-                                        continuation.accept(t, value, null);
-                                    } catch (RuntimeException | Error failure2) {
-                                        continuation.accept(t, null, failure2);
-                                    }
-                                    return;
-                                }
-                                if (assignment.target() instanceof Ast.MemberExpr target) {
-                                    evalSuspendableExpr(
+                                try {
+                                    continuation.accept(
                                             t,
-                                            target.receiver(),
-                                            env,
-                                            (t2, receiver, failure2) -> {
-                                                if (failure2 != null) {
-                                                    continuation.accept(t2, null, failure2);
-                                                    return;
-                                                }
-                                                if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                                                    completeProxyAccess(
-                                                            t2,
-                                                            proxy,
-                                                            true,
-                                                            raw -> assignProxyMemberRaw(
-                                                                    raw,
-                                                                    target.member(),
-                                                                    value,
-                                                                    env),
-                                                            continuation);
-                                                    return;
-                                                }
-                                                try {
-                                                    continuation.accept(
-                                                            t2,
-                                                            assignMemberEvaluated(
-                                                                    receiver,
-                                                                    target.member(),
-                                                                    value,
-                                                                    env),
-                                                            null);
-                                                } catch (RuntimeException | Error failure3) {
-                                                    continuation.accept(t2, null, failure3);
-                                                }
-                                            });
-                                    return;
+                                            assignEvaluated(
+                                                    assignment.target(),
+                                                    value,
+                                                    env),
+                                            null);
+                                } catch (RuntimeException | Error failure2) {
+                                    continuation.accept(t, null, failure2);
                                 }
-                                if (assignment.target() instanceof Ast.IndexExpr target) {
-                                    evalSuspendableExpr(
-                                            t,
-                                            target.receiver(),
-                                            env,
-                                            (t2, receiver, failure2) -> {
-                                                if (failure2 != null) {
-                                                    continuation.accept(t2, null, failure2);
-                                                    return;
-                                                }
-                                                evalSuspendableExpr(
-                                                        t2,
-                                                        target.index(),
-                                                        env,
-                                                        (t3, key, failure3) -> {
-                                                            if (failure3 != null) {
-                                                                continuation.accept(t3, null, failure3);
-                                                                return;
-                                                            }
-                                                            if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                                                                completeProxyAccess(
-                                                                        t3,
-                                                                        proxy,
-                                                                        true,
-                                                                        raw -> assignProxyIndexRaw(
-                                                                                raw,
-                                                                                key,
-                                                                                value),
-                                                                        continuation);
-                                                                return;
-                                                            }
-                                                            try {
-                                                                continuation.accept(
-                                                                        t3,
-                                                                        assignIndexEvaluated(
-                                                                                receiver,
-                                                                                key,
-                                                                                value),
-                                                                        null);
-                                                            } catch (RuntimeException | Error failure4) {
-                                                                continuation.accept(t3, null, failure4);
-                                                            }
-                                                        });
-                                            });
-                                    return;
-                                }
-                                continuation.accept(
-                                        t,
-                                        null,
-                                        new IllegalArgumentException(
-                                                "unsupported assignment target"));
                             });
                     return;
                 }
@@ -3326,73 +3047,62 @@ public final class OresEvalRootNode extends RootNode {
                 Env env,
                 ArrayList<Object> values,
                 int index,
-                SourceObjectCont continuation) {
+                SourceValueCont continuation) {
             if (index >= object.fields().size()) {
                 LinkedHashMap<String, Object> result = new LinkedHashMap<>();
+                if (object.explicitStruct()) {
+                    for (Ast.StructFieldSpec field : object.declaredFields()) {
+                        if (result.putIfAbsent(field.name(), UNINITIALIZED_FIELD) != null) {
+                            throw new IllegalArgumentException(
+                                    "duplicate explicit struct field " + field.name());
+                        }
+                    }
+                }
                 for (Object value : values) {
                     @SuppressWarnings("unchecked")
                     Map.Entry<String, Object> entry =
                             (Map.Entry<String, Object>) value;
-                    if (result.putIfAbsent(entry.getKey(), entry.getValue()) != null) {
+                    if (object.explicitStruct()) {
+                        if (!result.containsKey(entry.getKey())) {
+                            throw new IllegalArgumentException(
+                                    "explicit struct initializer contains undeclared field " + entry.getKey());
+                        }
+                        if (result.get(entry.getKey()) != UNINITIALIZED_FIELD) {
+                            throw new IllegalArgumentException(
+                                    "duplicate explicit struct initializer field " + entry.getKey());
+                        }
+                        result.put(entry.getKey(), entry.getValue());
+                    } else if (result.putIfAbsent(entry.getKey(), entry.getValue()) != null) {
                         throw new IllegalArgumentException(
-                                "duplicate obj field " + entry.getKey());
+                                "duplicate struct field " + entry.getKey());
                     }
                 }
-                continuation.accept(task, result, null);
+                Object built = object.explicitStruct()
+                        ? result
+                        : new ReadonlyRecordValue(result);
+                continuation.accept(task, built, null);
                 return;
             }
 
             Ast.ObjectField field = object.fields().get(index);
-            SourceValueCont afterKey =
-                    (t, key, failure) -> {
+            evalSuspendableExpr(
+                    task,
+                    field.value(),
+                    env,
+                    (t, value, failure) -> {
                         if (failure != null) {
                             continuation.accept(t, null, failure);
                             return;
                         }
-                        final String actualKey;
-                        if (field.isDynamic()) {
-                            if (!(key instanceof String stringKey)) {
-                                continuation.accept(
-                                        t,
-                                        null,
-                                        new IllegalArgumentException(
-                                                "dynamic obj key must evaluate to a string"));
-                                return;
-                            }
-                            actualKey = stringKey;
-                        } else {
-                            actualKey = field.name();
-                        }
-                        evalSuspendableExpr(
+                        values.add(Map.entry(field.name(), value));
+                        evalSuspendableObjectField(
                                 t,
-                                field.value(),
+                                object,
                                 env,
-                                (t2, value, failure2) -> {
-                                    if (failure2 != null) {
-                                        continuation.accept(t2, null, failure2);
-                                        return;
-                                    }
-                                    values.add(
-                                            Map.entry(actualKey, value));
-                                    evalSuspendableObjectField(
-                                            t2,
-                                            object,
-                                            env,
-                                            values,
-                                            index + 1,
-                                            continuation);
-                                });
-                    };
-
-            if (field.isDynamic()) {
-                evalSuspendableExpr(
-                        task,
-                        field.dynamicName(),
-                        env,
-                        afterKey);
-            } else {
-                afterKey.accept(task, field.name(), null);
-            }
+                                values,
+                                index + 1,
+                                continuation);
+                    });
         }
 
         private void suspendOnAwaitable(
@@ -3442,79 +3152,6 @@ public final class OresEvalRootNode extends RootNode {
                                     t,
                                     result,
                                     failure));
-        }
-
-        @SuppressWarnings({"rawtypes", "unchecked"})
-        private void completeProxyAccess(
-                SourceTask task,
-                ActorRuntime.Proxy<?> proxy,
-                boolean write,
-                Function<Object, Object> operation,
-                SourceValueCont continuation) {
-            final OresFuture<?> acquisition;
-            try {
-                ActorRuntime.Proxy rawProxy = (ActorRuntime.Proxy) proxy;
-                acquisition = write
-                        ? rawProxy.acquireWriteAsync()
-                        : rawProxy.acquireReadAsync();
-            } catch (RuntimeException | Error failure) {
-                continuation.accept(task, null, failure);
-                return;
-            }
-
-            if (acquisition.isDone()) {
-                try {
-                    completeGrantedProxyAccess(
-                            task,
-                            acquisition.join(),
-                            write,
-                            operation,
-                            continuation);
-                } catch (RuntimeException | Error failure) {
-                    continuation.accept(task, null, failure);
-                }
-                return;
-            }
-
-            task.suspend(
-                    acquisition,
-                    (resumed, granted, failure) -> {
-                        if (failure != null) {
-                            continuation.accept(resumed, null, failure);
-                            return;
-                        }
-                        completeGrantedProxyAccess(
-                                resumed,
-                                granted,
-                                write,
-                                operation,
-                                continuation);
-                    });
-        }
-
-        @SuppressWarnings({"rawtypes", "unchecked"})
-        private void completeGrantedProxyAccess(
-                SourceTask task,
-                Object granted,
-                boolean write,
-                Function<Object, Object> operation,
-                SourceValueCont continuation) {
-            if (!(granted instanceof ActorRuntime.Proxy.Access access)) {
-                continuation.accept(
-                        task,
-                        null,
-                        new IllegalStateException(
-                                "rt Proxy acquisition resumed without an access lease"));
-                return;
-            }
-            try (ActorRuntime.Proxy.Access lease = access) {
-                Object result = write
-                        ? lease.write((Function) operation)
-                        : lease.read((Function) operation);
-                continuation.accept(task, result, null);
-            } catch (RuntimeException | Error failure) {
-                continuation.accept(task, null, failure);
-            }
         }
 
         private void evalSuspendableChannel(
@@ -3717,41 +3354,65 @@ public final class OresEvalRootNode extends RootNode {
                     });
         }
 
+        private void evalSuspendableRuntimeCall(
+                SourceTask task,
+                Ast.RuntimeCallExpr runtime,
+                Env env,
+                SourceValueCont continuation) {
+            if (runtime.operation().equals("cooperate")) {
+                if (!runtime.arguments().isEmpty()) {
+                    continuation.accept(
+                            task,
+                            null,
+                            new IllegalArgumentException("rt cooperate takes no arguments"));
+                    return;
+                }
+                if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
+                    continuation.accept(
+                            task,
+                            null,
+                            new SecurityException(
+                                    "rt cooperate is disabled for untrusted actors until continuation quota state survives scheduler handoffs"));
+                    return;
+                }
+                task.cooperate((t, ignored, failure) ->
+                        continuation.accept(t, null, failure));
+                return;
+            }
+
+            if (runtime.arguments().size() != 1) {
+                continuation.accept(
+                        task,
+                        null,
+                        new IllegalArgumentException(
+                                "rt " + runtime.operation() + " expects exactly one argument"));
+                return;
+            }
+            evalSuspendableExpr(
+                    task,
+                    runtime.arguments().getFirst(),
+                    env,
+                    (t, value, failure) -> {
+                        if (failure != null) {
+                            continuation.accept(t, null, failure);
+                            return;
+                        }
+                        try {
+                            continuation.accept(
+                                    t,
+                                    applyRuntimeOwnership(runtime.operation(), value),
+                                    null);
+                        } catch (RuntimeException | Error ownershipFailure) {
+                            continuation.accept(t, null, ownershipFailure);
+                        }
+                    });
+        }
+
         private void evalSuspendableCall(
                 SourceTask task,
                 Ast.CallExpr call,
                 Env env,
                 SourceValueCont continuation) {
-            if (isRuntimeProxyIntrinsic(call)) {
-                if (call.arguments().size() != 1) {
-                    continuation.accept(
-                            task,
-                            null,
-                            new IllegalArgumentException(
-                                    "rt proxy requires exactly one value operand"));
-                    return;
-                }
-                evalSuspendableExpr(
-                        task,
-                        call.arguments().getFirst(),
-                        env,
-                        (t, value, failure) -> {
-                            if (failure != null) {
-                                continuation.accept(t, null, failure);
-                                return;
-                            }
-                            try {
-                                continuation.accept(
-                                        t,
-                                        createRuntimeProxy(value),
-                                        null);
-                            } catch (RuntimeException | Error proxyFailure) {
-                                continuation.accept(t, null, proxyFailure);
-                            }
-                        });
-                return;
-            }
-
             if (call.callee() instanceof Ast.NameExpr name
                     && env.lookup(name.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(name.name(), call.arguments().size());
@@ -3798,64 +3459,6 @@ public final class OresEvalRootNode extends RootNode {
                                     (t2, values, failure2) -> {
                                         if (failure2 != null) {
                                             continuation.accept(t2, null, failure2);
-                                            return;
-                                        }
-                                        if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                                            if (member.member().equals("dispose")) {
-                                                if (call.typeArgumentsPresent() || !values.isEmpty()) {
-                                                    continuation.accept(
-                                                            t2,
-                                                            null,
-                                                            new IllegalArgumentException(
-                                                                    "Proxy<T>.dispose() takes no arguments or type arguments"));
-                                                    return;
-                                                }
-                                                try {
-                                                    OresFuture<Void> closing = proxy.closeAsync();
-                                                    if (closing.isDone()) {
-                                                        closing.join();
-                                                        continuation.accept(t2, null, null);
-                                                    } else {
-                                                        t2.suspend(
-                                                                closing,
-                                                                (t3, ignored, failure3) ->
-                                                                        continuation.accept(
-                                                                                t3,
-                                                                                null,
-                                                                                failure3));
-                                                    }
-                                                } catch (RuntimeException | Error failure3) {
-                                                    continuation.accept(t2, null, failure3);
-                                                }
-                                                return;
-                                            }
-
-                                            completeProxyAccess(
-                                                    t2,
-                                                    proxy,
-                                                    false,
-                                                    raw -> prepareProxyInvocationLocked(
-                                                            call,
-                                                            proxy,
-                                                            raw,
-                                                            values,
-                                                            env),
-                                                    (t3, planned, failure3) -> {
-                                                        if (failure3 != null) {
-                                                            continuation.accept(
-                                                                    t3,
-                                                                    null,
-                                                                    failure3);
-                                                            return;
-                                                        }
-                                                        Invocation invocation =
-                                                                (Invocation) planned;
-                                                        completeSourceInvocation(
-                                                                t3,
-                                                                invocation,
-                                                                false,
-                                                                continuation);
-                                                    });
                                             return;
                                         }
                                         try {
@@ -3923,13 +3526,6 @@ public final class OresEvalRootNode extends RootNode {
                 Invocation invocation,
                 boolean declaredFuture,
                 SourceValueCont continuation) {
-            if (invocation.kind() == InvocationKind.PROXY_METHOD) {
-                completeSourceProxyInvocation(
-                        task,
-                        (ProxyMethodPlan) invocation.target(),
-                        continuation);
-                return;
-            }
             try {
                 Object result = invoke(invocation);
                 if (result instanceof OresFuture<?> future
@@ -3952,24 +3548,6 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
-        private void completeSourceProxyInvocation(
-                SourceTask task,
-                ProxyMethodPlan plan,
-                SourceValueCont continuation) {
-            completeProxyAccess(
-                    task,
-                    plan.proxy(),
-                    !plan.readOnly(),
-                    ignored -> {
-                        Object result = plan.inner().owner().invoke(plan.inner());
-                        return requireProxyBoundaryValue(
-                                plan.proxy(),
-                                result,
-                                "rt proxy method '" + plan.label() + "' result");
-                    },
-                    continuation);
-        }
-
         private boolean invocationDeclaresAsync(Invocation invocation) {
             return switch (invocation.kind()) {
                 case FUNCTION, FUNCTION_BODY ->
@@ -3978,7 +3556,6 @@ public final class OresEvalRootNode extends RootNode {
                 case METHOD, STATIC_FUNCTION, STATIC_FUNCTION_BODY ->
                         ((Ast.MethodDecl) invocation.target()).async()
                                 || ((Ast.MethodDecl) invocation.target()).returnType().name().equals("Future");
-                case PROXY_METHOD -> false;
                 // Builtin Future-returning APIs are values, not suspended
                 // guest source calls. Their consumers explicitly await them.
                 case INVOKABLE -> true;
@@ -3992,10 +3569,6 @@ public final class OresEvalRootNode extends RootNode {
                 Env env) {
             Ast.MemberExpr member =
                     (Ast.MemberExpr) call.callee();
-
-            if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                return prepareProxyInvocation(call, proxy, args, env);
-            }
 
             if (receiver instanceof OresObject object) {
                 Ast.MethodDecl method =
@@ -4077,23 +3650,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object indexValue(Object receiver, Object index) {
-            if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                return proxy.read(raw -> requireProxyBoundaryValue(
-                        proxy,
-                        indexValue(raw, index),
-                        "rt proxy indexed read"));
-            }
-            if (receiver instanceof DynamicStructValue dynamic) {
-                if (!(index instanceof String key)) {
-                    throw new IllegalArgumentException(
-                            "DynamicStruct key must be a string");
-                }
-                if (!dynamic.fields.containsKey(key)) {
-                    throw new IllegalArgumentException(
-                            "unknown DynamicStruct key " + key);
-                }
-                return dynamic.fields.get(key);
-            }
             if (receiver instanceof Map<?, ?> map) {
                 if (!(index instanceof String key)) {
                     throw new IllegalArgumentException(
@@ -4103,7 +3659,12 @@ public final class OresEvalRootNode extends RootNode {
                     throw new IllegalArgumentException(
                             "unknown object/map key " + key);
                 }
-                return map.get(key);
+                Object value = map.get(key);
+                if (value == UNINITIALIZED_FIELD) {
+                    throw new IllegalArgumentException(
+                            "explicit struct field '" + key + "' is read before initialization");
+                }
+                return value;
             }
             if (!(index instanceof Number number)) {
                 throw new IllegalArgumentException(
@@ -4114,56 +3675,6 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof Object[] array) return array[i];
             throw new IllegalArgumentException(
                     "value is not indexable");
-        }
-
-        private Object requireProxyBoundaryValue(
-                ActorRuntime.Proxy<?> proxy,
-                Object value,
-                String operation) {
-            if (value == null
-                    || value instanceof String
-                    || value instanceof Boolean
-                    || value instanceof Character
-                    || value instanceof Byte
-                    || value instanceof Short
-                    || value instanceof Integer
-                    || value instanceof Long
-                    || value instanceof Float
-                    || value instanceof Double
-                    || value instanceof java.math.BigInteger
-                    || value instanceof java.math.BigDecimal
-                    || value instanceof Enum<?>
-                    || value instanceof java.util.UUID
-                    || value instanceof Complex
-                    || value instanceof OptionUnwrapError) {
-                return value;
-            }
-            if (value instanceof OptionValue option) {
-                if (!option.present()) return option;
-                return new OptionValue(
-                        true,
-                        requireProxyBoundaryValue(
-                                proxy,
-                                option.value(),
-                                operation + " Option payload"));
-            }
-            if (value instanceof ResultValue result) {
-                return new ResultValue(
-                        result.ok(),
-                        requireProxyBoundaryValue(
-                                proxy,
-                                result.value(),
-                                operation + " Result payload"));
-            }
-            if (value instanceof OresObject
-                    || value instanceof DynamicStructValue) {
-                return proxy.child(value);
-            }
-            throw new IllegalArgumentException(
-                    operation
-                            + " cannot expose mutable/capability state from behind rt Proxy<T>; "
-                            + "nested class/struct values remain proxied, while collections/callables/"
-                            + "host capabilities require an explicit snapshot or dedicated proxy adapter");
         }
 
         private Object unaryValue(String operator, Object value) {
@@ -4187,156 +3698,72 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (target instanceof Ast.MemberExpr member) {
                 Object receiver = eval(member.receiver(), env);
-                if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                    return proxy.write(raw ->
-                            assignProxyMemberRaw(
-                                    raw,
+                if (receiver instanceof OresObject object) {
+                    OwnedField targetField =
+                            object.owner.findField(
+                                    object.klass,
                                     member.member(),
-                                    value,
-                                    env));
+                                    new LinkedHashSet<>());
+                    if (targetField == null) {
+                        throw new IllegalArgumentException(
+                                "unknown field " + member.member());
+                    }
+                    if (targetField.field().bindingKind() != Ast.BindingKind.LET) {
+                        throw new IllegalArgumentException(
+                                "field '" + object.klass.name()
+                                        + "." + member.member()
+                                        + "' is immutable");
+                    }
+                    object.fields.put(member.member(), value);
+                    return value;
                 }
-                return assignMemberEvaluated(
-                        receiver,
-                        member.member(),
-                        value,
-                        env);
+                if (receiver instanceof LinkedHashMap<?, ?> rawRecord) {
+                    @SuppressWarnings("unchecked")
+                    LinkedHashMap<String, Object> record =
+                            (LinkedHashMap<String, Object>) rawRecord;
+                    if (!record.containsKey(member.member())) {
+                        throw new IllegalArgumentException(
+                                "unknown explicit struct field " + member.member());
+                    }
+                    record.put(member.member(), value);
+                    return value;
+                }
+                throw new IllegalArgumentException(
+                        "member assignment requires mutable object state");
             }
             if (target instanceof Ast.IndexExpr index) {
                 Object receiver = eval(index.receiver(), env);
                 Object key = eval(index.index(), env);
-                if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                    return proxy.write(raw ->
-                            assignProxyIndexRaw(raw, key, value));
+                if (receiver instanceof List<?> raw
+                        && key instanceof Number number) {
+                    @SuppressWarnings("unchecked")
+                    List<Object> list = (List<Object>) raw;
+                    list.set(Math.toIntExact(number.longValue()), value);
+                    return value;
                 }
-                return assignIndexEvaluated(receiver, key, value);
+                throw new IllegalArgumentException(
+                        "indexed assignment requires a mutable array/list; struct fields use statically known member assignment");
             }
             throw new IllegalArgumentException(
                     "unsupported assignment target");
-        }
-
-        private Object assignMemberEvaluated(
-                Object receiver,
-                String member,
-                Object value,
-                Env env) {
-            if (receiver instanceof OresObject object) {
-                OwnedField targetField =
-                        object.owner.findField(
-                                object.klass,
-                                member,
-                                new LinkedHashSet<>());
-                if (targetField == null) {
-                    throw new IllegalArgumentException(
-                            "unknown field " + member);
-                }
-                object.owner.requireClassMemberVisible(
-                        targetField.field().visibility(),
-                        targetField.owner(),
-                        env == null ? null : env.accessClass(),
-                        "field",
-                        targetField.field().name());
-                if (targetField.field().bindingKind() != Ast.BindingKind.LET) {
-                    throw new IllegalArgumentException(
-                            "field '" + object.klass.name()
-                                    + "." + member
-                                    + "' is immutable");
-                }
-                object.fields.put(member, value);
-                return value;
-            }
-            if (receiver instanceof DynamicStructValue dynamic) {
-                dynamic.fields.put(member, value);
-                return value;
-            }
-            throw new IllegalArgumentException(
-                    "member assignment requires mutable object state");
-        }
-
-        private Object assignIndexEvaluated(
-                Object receiver,
-                Object key,
-                Object value) {
-            if (receiver instanceof DynamicStructValue dynamic) {
-                if (!(key instanceof String string)) {
-                    throw new IllegalArgumentException(
-                            "DynamicStruct key must be a string");
-                }
-                dynamic.fields.put(string, value);
-                return value;
-            }
-            if (receiver instanceof List<?> raw
-                    && key instanceof Number number) {
-                @SuppressWarnings("unchecked")
-                List<Object> list = (List<Object>) raw;
-                list.set(Math.toIntExact(number.longValue()), value);
-                return value;
-            }
-            throw new IllegalArgumentException(
-                    "indexed assignment requires mutable array/list or DynamicStruct");
-        }
-
-        private Object assignProxyMemberRaw(
-                Object receiver,
-                String member,
-                Object value,
-                Env env) {
-            if (receiver instanceof OresObject object) {
-                OwnedField ownedField = object.owner.findField(
-                        object.klass,
-                        member,
-                        new LinkedHashSet<>());
-                if (ownedField == null) {
-                    throw new IllegalArgumentException(
-                            "unknown field " + object.klass.name() + "." + member);
-                }
-                object.owner.requireClassMemberVisible(
-                        ownedField.field().visibility(),
-                        ownedField.owner(),
-                        env == null ? null : env.accessClass(),
-                        "field",
-                        ownedField.field().name());
-                if (ownedField.field().bindingKind() != Ast.BindingKind.LET) {
-                    throw new IllegalArgumentException(
-                            "field '" + object.klass.name() + "." + member
-                                    + "' is immutable");
-                }
-                object.fields.put(member, value);
-                return null;
-            }
-            if (receiver instanceof DynamicStructValue dynamic) {
-                dynamic.fields.put(member, value);
-                return null;
-            }
-            throw new IllegalArgumentException(
-                    "rt Proxy<T> member assignment requires class/struct state");
-        }
-
-        private Object assignProxyIndexRaw(
-                Object receiver,
-                Object index,
-                Object value) {
-            if (receiver instanceof DynamicStructValue dynamic) {
-                if (!(index instanceof String key)) {
-                    throw new IllegalArgumentException(
-                            "DynamicStruct key must be a string");
-                }
-                dynamic.fields.put(key, value);
-                return null;
-            }
-            throw new IllegalArgumentException(
-                    "indexed rt Proxy<T> assignment currently requires DynamicStruct<T>");
         }
 
         private Object instantiateEvaluated(
                 Ast.NewExpr created,
                 List<Object> args,
                 Env env) {
-            if (created.type().name().equals("DynamicStruct")) {
+            if (created.type().name().equals("Array")
+                    || created.type().name().equals("List")) {
                 if (!args.isEmpty()) {
                     throw new IllegalArgumentException(
-                            "DynamicStruct<T> constructor takes no positional arguments");
+                            created.type().name()
+                                    + "<T> constructor takes no positional arguments");
                 }
-                return new DynamicStructValue();
+                return new ArrayList<>();
+            }
+            if (created.type().name().equals("DynamicStruct")) {
+                throw new IllegalArgumentException(
+                        "DynamicStruct has been removed; use struct infer{...} or an explicit closed struct");
             }
             HostClassFacade hostClass =
                     hostClasses.get(created.type().name());
@@ -4515,12 +3942,12 @@ public final class OresEvalRootNode extends RootNode {
                     }
                     return new OresObject(object.owner, object.klass, fields);
                 }
-                if (value instanceof DynamicStructValue dynamic) {
+                if (value instanceof ReadonlyRecordValue readonly) {
                     LinkedHashMap<String, Object> fields = new LinkedHashMap<>();
-                    for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
+                    for (Map.Entry<String, Object> entry : readonly.entrySet()) {
                         fields.put(entry.getKey(), detachAsyncValue(entry.getValue(), visiting));
                     }
-                    return new DynamicStructValue(fields);
+                    return new ReadonlyRecordValue(fields);
                 }
                 if (value instanceof OptionValue option) {
                     return option.present()
@@ -4573,6 +4000,24 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object callFunctionBodyRaw(Ast.FunctionDecl fn, List<?> args) {
+            if (!fn.trapped()) {
+                return callFunctionBodyUnchecked(fn, args);
+            }
+            try {
+                return new OptionValue(true, callFunctionBodyUnchecked(fn, args));
+            } catch (OresPanic panic) {
+                throw panic;
+            } catch (java.util.concurrent.CancellationException cancelled) {
+                throw cancelled;
+            } catch (RuntimeException ordinaryFailure) {
+                // trap is deliberately lossy: ordinary guest/runtime failure
+                // becomes None. Panic and scheduler cancellation remain distinct
+                // non-trappable control channels.
+                return new OptionValue(false, null);
+            }
+        }
+
+        private Object callFunctionBodyUnchecked(Ast.FunctionDecl fn, List<?> args) {
             if (fn.async() || functionContainsPotentialSuspension(fn)) {
                 OresFuture<Object> future =
                         startSourceFunctionTask(
@@ -4589,7 +4034,10 @@ public final class OresEvalRootNode extends RootNode {
                 env.define(param.name(), args.get(i), param.mutable() ? Ast.BindingKind.LET : Ast.BindingKind.VAL);
             }
             try {
-                executeBlock(fn.body(), env);
+                // A trap boundary must survive tail-call lowering. Treat it as a
+                // tail barrier so a callee failure cannot escape by replacing
+                // this function's dynamic boundary.
+                executeBlock(fn.body(), env, fn.trapped());
                 return null;
             } catch (TailCallSignal signal) {
                 return new TailCall(signal.invocation);
@@ -4605,7 +4053,6 @@ public final class OresEvalRootNode extends RootNode {
 
         private boolean methodContainsPotentialSuspension(
                 Ast.MethodDecl method) {
-            if (methodUsesProxyCapability(method)) return true;
             for (Ast.Stmt stmt : method.body()) {
                 if (statementContainsPotentialSuspension(
                         stmt,
@@ -4628,7 +4075,9 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             GeneratorRuntime.Emitter<Object> previous = activeGeneratorEmitter.get();
+            Boolean previousAsync = activeGeneratorAsync.get();
             activeGeneratorEmitter.set(emitter);
+            activeGeneratorAsync.set(fn.async());
             try {
                 executeBlock(fn.body(), env);
             } catch (ReturnSignal signal) {
@@ -4645,6 +4094,8 @@ public final class OresEvalRootNode extends RootNode {
             } finally {
                 if (previous == null) activeGeneratorEmitter.remove();
                 else activeGeneratorEmitter.set(previous);
+                if (previousAsync == null) activeGeneratorAsync.remove();
+                else activeGeneratorAsync.set(previousAsync);
             }
         }
 
@@ -4766,6 +4217,20 @@ public final class OresEvalRootNode extends RootNode {
                     throw new IllegalStateException("yield executed outside a generator activation");
                 }
                 Object value = eval(yielded.value(), env);
+                if (yielded.delegated()) {
+                    Iterable<?> delegated = Boolean.TRUE.equals(activeGeneratorAsync.get())
+                            ? asyncIterableValues(value, env)
+                            : iterableValues(value, env);
+                    try {
+                        for (Object item : delegated) {
+                            context.schedulerSafepoint();
+                            emitter.emit(item);
+                        }
+                    } finally {
+                        closeIterable(delegated);
+                    }
+                    return;
+                }
                 context.schedulerSafepoint();
                 emitter.emit(value);
                 return;
@@ -5242,12 +4707,6 @@ public final class OresEvalRootNode extends RootNode {
                 for (Object item : map.values()) cases.add(requireSelectCase(item));
                 return new ChannelRuntime.SelectSet(cases);
             }
-            if (value instanceof DynamicStructValue dynamic) {
-                for (Object item : dynamic.fields.values()) {
-                    cases.add(requireSelectCase(item));
-                }
-                return new ChannelRuntime.SelectSet(cases);
-            }
             throw new IllegalArgumentException(
                     "dynamic select requires SelectSet or list/map of SelectCase values");
         }
@@ -5281,9 +4740,6 @@ public final class OresEvalRootNode extends RootNode {
 
             if (!tailBarrier) {
                 if (value instanceof Ast.CallExpr call) {
-                    if (isRuntimeProxyIntrinsic(call)) {
-                        throw new ReturnSignal(eval(call, env));
-                    }
                     if (isBooleanIntrinsicCall(call, env)) {
                         throw new ReturnSignal(evalBooleanIntrinsic(call, env));
                     }
@@ -5313,11 +4769,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Invocation prepareInvocation(Ast.CallExpr call, Env env) {
-            if (isRuntimeProxyIntrinsic(call)) {
-                throw new IllegalStateException(
-                        "rt proxy is a value-producing runtime intrinsic, not an ordinary invocation");
-            }
-
             if (call.callee() instanceof Ast.NameExpr directName
                     && env.lookup(directName.name()) == Env.MISSING) {
                 Ast.FunctionDecl direct = findFunction(directName.name(), call.arguments().size());
@@ -5330,10 +4781,6 @@ public final class OresEvalRootNode extends RootNode {
             if (call.callee() instanceof Ast.MemberExpr methodCall) {
                 Object receiver = eval(methodCall.receiver(), env);
                 List<Object> args = evaluateArguments(call.arguments(), env);
-
-                if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                    return prepareProxyInvocation(call, proxy, args, env);
-                }
 
                 if (receiver instanceof OresObject object) {
                     Ast.MethodDecl method = object.owner.findMethod(
@@ -5448,76 +4895,6 @@ public final class OresEvalRootNode extends RootNode {
             return invokableInvocation(invokable, args);
         }
 
-        private Invocation prepareProxyInvocation(
-                Ast.CallExpr call,
-                ActorRuntime.Proxy<?> proxy,
-                List<Object> args,
-                Env env) {
-            Ast.MemberExpr member = (Ast.MemberExpr) call.callee();
-            if (member.member().equals("dispose")) {
-                if (call.typeArgumentsPresent() || !args.isEmpty()) {
-                    throw new IllegalArgumentException(
-                            "Proxy<T>.dispose() takes no arguments or type arguments");
-                }
-                return invokableInvocation(ignored -> {
-                    proxy.close();
-                    return null;
-                }, List.of());
-            }
-
-            return proxy.read(raw ->
-                    prepareProxyInvocationLocked(
-                            call,
-                            proxy,
-                            raw,
-                            args,
-                            env));
-        }
-
-        private Invocation prepareProxyInvocationLocked(
-                Ast.CallExpr call,
-                ActorRuntime.Proxy<?> proxy,
-                Object raw,
-                List<Object> args,
-                Env env) {
-            Invocation inner = prepareInvocationEvaluated(call, raw, args, env);
-
-            if (inner.kind() != InvocationKind.METHOD) {
-                throw new IllegalArgumentException(
-                        "rt Proxy<T> only exposes direct class methods; callable fields "
-                                + "must remain behind an explicit proxy method");
-            }
-
-            Ast.MethodDecl method = (Ast.MethodDecl) inner.target();
-            if (method.async() || inner.owner().methodContainsPotentialSuspension(method)) {
-                throw new IllegalArgumentException(
-                        "rt Proxy<T> method '" + method.name()
-                                + "' may not suspend or await while an rw-lock is held");
-            }
-
-            Ast.TypeRef receiverType = method.explicitReceiverType();
-            boolean readOnly = receiverType != null
-                    && receiverType.isBorrow()
-                    && !receiverType.mutableBorrow();
-
-            ProxyMethodPlan plan = new ProxyMethodPlan(
-                    proxy, inner, readOnly, method.name());
-            return new Invocation(
-                    this, InvocationKind.PROXY_METHOD, proxy, plan, List.of());
-        }
-
-        private Object executeProxyMethod(ProxyMethodPlan plan) {
-            java.util.function.Function<Object, Object> body = ignored -> {
-                Object result = plan.inner().owner().invoke(plan.inner());
-                return requireProxyBoundaryValue(
-                        plan.proxy(),
-                        result,
-                        "rt proxy method '" + plan.label() + "' result");
-            };
-            return plan.readOnly()
-                    ? plan.proxy().read(body)
-                    : plan.proxy().write(body);
-        }
         private List<Object> evaluateArguments(List<Ast.Expr> arguments, Env env) {
             ArrayList<Object> values = new ArrayList<>(arguments.size());
             for (Ast.Expr argument : arguments) {
@@ -5528,21 +4905,6 @@ public final class OresEvalRootNode extends RootNode {
                 }
             }
             return List.copyOf(values);
-        }
-
-        private boolean isRuntimeProxyIntrinsic(Ast.CallExpr call) {
-            return call.callee() instanceof Ast.NameExpr name
-                    && name.name().equals("$rt$proxy")
-                    && !call.typeArgumentsPresent();
-        }
-
-        private ActorRuntime.Proxy<?> createRuntimeProxy(Object value) {
-            if (!(value instanceof OresObject)
-                    && !(value instanceof DynamicStructValue)) {
-                throw new IllegalArgumentException(
-                        "rt proxy currently accepts class instances or DynamicStruct values");
-            }
-            return context.actors().proxy(value);
         }
 
         private boolean isBooleanIntrinsicCall(Ast.CallExpr call, Env env) {
@@ -5648,6 +5010,19 @@ public final class OresEvalRootNode extends RootNode {
             throw new IllegalArgumentException(name + " operands must be bool");
         }
 
+        private Object applyRuntimeOwnership(String operation, Object value) {
+            return switch (operation) {
+                // Borrow/take/share alter compiler ownership state, not the JVM handle.
+                case "borrow", "take", "share" -> value;
+                // Static ownership checking currently admits rt copy only for proven
+                // Copy values on this convergence branch, so returning the immutable
+                // scalar/value representation is an independent language-level copy.
+                case "copy" -> value;
+                default -> throw new IllegalArgumentException(
+                        "unknown runtime ownership operation 'rt " + operation + "'");
+            };
+        }
+
         private Object eval(Ast.Expr expr, Env env) {
             if (expr instanceof Ast.LiteralExpr literal) {
                 if (literal.value() == null) throw new IllegalArgumentException("standalone null values are forbidden");
@@ -5732,14 +5107,6 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 if (assignment.target() instanceof Ast.MemberExpr target) {
                     Object receiver = eval(target.receiver(), env);
-                    if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                        return proxy.write(raw ->
-                                assignProxyMemberRaw(
-                                        raw,
-                                        target.member(),
-                                        value,
-                                        env));
-                    }
                     if (receiver instanceof OresMutex.Guard<?> guard) receiver = guard.value();
                     if (receiver instanceof OresObject object) {
                         if (!object.fields.containsKey(target.member())) {
@@ -5769,26 +5136,25 @@ public final class OresEvalRootNode extends RootNode {
                         object.fields.put(target.member(), value);
                         return value;
                     }
-                    if (receiver instanceof DynamicStructValue dynamic) {
-                        dynamic.fields.put(target.member(), value);
+                    // Explicit anonymous structs use this mutable map path.
+                    // struct infer values use ReadonlyRecordValue instead.
+                    if (receiver instanceof LinkedHashMap<?, ?> rawRecord) {
+                        @SuppressWarnings("unchecked")
+                        LinkedHashMap<String, Object> record =
+                                (LinkedHashMap<String, Object>) rawRecord;
+                        if (!record.containsKey(target.member())) {
+                            throw new IllegalArgumentException(
+                                    "unknown explicit struct field " + target.member());
+                        }
+                        record.put(target.member(), value);
                         return value;
                     }
-                    throw new IllegalArgumentException("member assignment requires a class instance, DynamicStruct, or mutex guard");
+                    throw new IllegalArgumentException(
+                            "member assignment requires a mutable class or explicit struct");
                 }
                 if (assignment.target() instanceof Ast.IndexExpr target) {
                     Object receiver = eval(target.receiver(), env);
                     Object index = eval(target.index(), env);
-                    if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                        return proxy.write(raw ->
-                                assignProxyIndexRaw(raw, index, value));
-                    }
-                    if (receiver instanceof DynamicStructValue dynamic) {
-                        if (!(index instanceof String key)) {
-                            throw new IllegalArgumentException("DynamicStruct key must be a string");
-                        }
-                        dynamic.fields.put(key, value);
-                        return value;
-                    }
                     if (!(index instanceof Number number)) throw new IllegalArgumentException("array/list index must be an integer");
                     int i = Math.toIntExact(number.longValue());
                     if (receiver instanceof List<?> raw) {
@@ -5796,7 +5162,8 @@ public final class OresEvalRootNode extends RootNode {
                         list.set(i, value);
                         return value;
                     }
-                    throw new IllegalArgumentException("indexed assignment requires a mutable array/list or DynamicStruct");
+                    throw new IllegalArgumentException(
+                            "indexed assignment requires a mutable array/list; struct fields use statically known member assignment");
                 }
                 throw new IllegalArgumentException("unsupported assignment target");
             }
@@ -5858,14 +5225,26 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.SpreadExpr) {
                 throw new IllegalArgumentException("spread expressions are only valid inside call argument lists");
             }
-            if (expr instanceof Ast.CallExpr call) {
-                if (isRuntimeProxyIntrinsic(call)) {
-                    if (call.arguments().size() != 1) {
-                        throw new IllegalArgumentException(
-                                "rt proxy requires exactly one value operand");
+            if (expr instanceof Ast.RuntimeCallExpr runtime) {
+                if (runtime.operation().equals("cooperate")) {
+                    if (!runtime.arguments().isEmpty()) {
+                        throw new IllegalArgumentException("rt cooperate takes no arguments");
                     }
-                    return createRuntimeProxy(eval(call.arguments().getFirst(), env));
+                    if (activeGeneratorEmitter.get() != null) {
+                        AsyncRuntime.cooperateCurrentCarrier();
+                        return null;
+                    }
+                    throw new IllegalStateException(
+                            "rt cooperate reached synchronous evaluation; source suspension lowering was not applied");
                 }
+                if (runtime.arguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "rt " + runtime.operation() + " expects exactly one argument");
+                }
+                Object value = eval(runtime.arguments().getFirst(), env);
+                return applyRuntimeOwnership(runtime.operation(), value);
+            }
+            if (expr instanceof Ast.CallExpr call) {
                 if (isBooleanIntrinsicCall(call, env)) return evalBooleanIntrinsic(call, env);
                 return invoke(prepareInvocation(call, env));
             }
@@ -5873,14 +5252,34 @@ public final class OresEvalRootNode extends RootNode {
             if (expr instanceof Ast.IndexExpr indexed) {
                 Object receiver = eval(indexed.receiver(), env);
                 Object index = eval(indexed.index(), env);
-                return indexValue(receiver, index);
+                if (receiver instanceof Map<?, ?> map) {
+                    if (!(index instanceof String key)) {
+                        throw new IllegalArgumentException("object/map key must be a string");
+                    }
+                    if (!map.containsKey(key)) {
+                        throw new IllegalArgumentException("unknown object/map key " + key);
+                    }
+                    return map.get(key);
+                }
+                if (!(index instanceof Number number)) throw new IllegalArgumentException("array/list index must be an integer");
+                int i = Math.toIntExact(number.longValue());
+                if (receiver instanceof List<?> list) return list.get(i);
+                if (receiver instanceof Object[] array) return array[i];
+                throw new IllegalArgumentException("value is not indexable: " + receiver);
             }
             if (expr instanceof Ast.NewExpr created) {
-                if (created.type().name().equals("DynamicStruct")) {
+                if (created.type().name().equals("Array")
+                        || created.type().name().equals("List")) {
                     if (!created.arguments().isEmpty()) {
-                        throw new IllegalArgumentException("DynamicStruct<T> constructor takes no positional arguments");
+                        throw new IllegalArgumentException(
+                                created.type().name()
+                                        + "<T> constructor takes no positional arguments");
                     }
-                    return new DynamicStructValue();
+                    return new ArrayList<>();
+                }
+                if (created.type().name().equals("DynamicStruct")) {
+                    throw new IllegalArgumentException(
+                            "DynamicStruct has been removed; use struct infer{...} or an explicit closed struct");
                 }
                 HostClassFacade hostClass = hostClasses.get(created.type().name());
                 if (hostClass != null) {
@@ -5936,9 +5335,13 @@ public final class OresEvalRootNode extends RootNode {
                 OresFuture<ChannelRuntime.SelectResult> future =
                         set.selectAsync(policy);
                 if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
-                    return context.actors().ownCurrentActorFuture(future);
+                    return wrapFutureSome(future);
                 }
-                return awaitBlockingChannelFuture(future, "dynamic select");
+                return new OptionValue(
+                        true,
+                        awaitBlockingChannelFuture(
+                                future,
+                                "dynamic select"));
             }
             if (expr instanceof Ast.ListExpr list) {
                 ArrayList<Object> result = new ArrayList<>(list.elements().size());
@@ -5947,24 +5350,34 @@ public final class OresEvalRootNode extends RootNode {
             }
             if (expr instanceof Ast.TupleExpr tuple) return tuple.elements().stream().map(item -> eval(item, env)).toList();
             if (expr instanceof Ast.ObjectExpr object) {
-                boolean dynamicKeys = object.fields().stream().anyMatch(Ast.ObjectField::isDynamic);
                 LinkedHashMap<String, Object> result = new LinkedHashMap<>();
-                for (Ast.ObjectField field : object.fields()) {
-                    String key;
-                    if (field.isDynamic()) {
-                        Object evaluatedKey = eval(field.dynamicName(), env);
-                        if (!(evaluatedKey instanceof String stringKey)) {
-                            throw new IllegalArgumentException("dynamic obj key must evaluate to a string");
+                if (object.explicitStruct()) {
+                    for (Ast.StructFieldSpec field : object.declaredFields()) {
+                        if (result.putIfAbsent(field.name(), UNINITIALIZED_FIELD) != null) {
+                            throw new IllegalArgumentException(
+                                    "duplicate explicit struct field " + field.name());
                         }
-                        key = stringKey;
-                    } else {
-                        key = field.name();
-                    }
-                    if (result.putIfAbsent(key, eval(field.value(), env)) != null) {
-                        throw new IllegalArgumentException("duplicate obj field " + key);
                     }
                 }
-                return dynamicKeys ? new DynamicStructValue(result) : Map.copyOf(result);
+                for (Ast.ObjectField field : object.fields()) {
+                    String key = field.name();
+                    Object value = eval(field.value(), env);
+                    if (object.explicitStruct()) {
+                        if (!result.containsKey(key)) {
+                            throw new IllegalArgumentException(
+                                    "explicit struct initializer contains undeclared field " + key);
+                        }
+                        if (result.get(key) != UNINITIALIZED_FIELD) {
+                            throw new IllegalArgumentException(
+                                    "duplicate explicit struct initializer field " + key);
+                        }
+                        result.put(key, value);
+                    } else if (result.putIfAbsent(key, value) != null) {
+                        throw new IllegalArgumentException("duplicate struct field " + key);
+                    }
+                }
+                if (object.explicitStruct()) return result;
+                return new ReadonlyRecordValue(result);
             }
             if (expr instanceof Ast.LambdaExpr lambda) {
                 boolean nonLexical = lambda.nonLexical() || env.descendantsNonLexical();
@@ -6000,20 +5413,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object member(Object receiver, String name, Env env) {
-            if (receiver instanceof ActorRuntime.Proxy<?> proxy) {
-                return proxy.read(raw -> {
-                    Object value = member(raw, name, env);
-                    if (value instanceof Invokable) {
-                        throw new IllegalArgumentException(
-                                "rt Proxy<T> methods are direct-call-only; invoke '"
-                                        + name + "(...)' instead of extracting the method");
-                    }
-                    return requireProxyBoundaryValue(
-                            proxy,
-                            value,
-                            "rt proxy member '" + name + "'");
-                });
-            }
             if (receiver instanceof HostClassFacade host) {
                 context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
                         "Java host class " + host.className());
@@ -6156,6 +5555,36 @@ public final class OresEvalRootNode extends RootNode {
                 if (!name.equals("new")) throw new IllegalArgumentException("unknown mutex factory member " + name);
                 return (Invokable) factory::create;
             }
+            if (receiver instanceof OresFuture<?> future) {
+                return switch (name) {
+                    case "map" -> (Invokable) args -> {
+                        requireOne(args, "Future.map");
+                        if (!(args.getFirst() instanceof Invokable callback)) {
+                            throw new IllegalArgumentException(
+                                    "Future.map expects one callable");
+                        }
+                        return chainFuture(future, callback, false, false);
+                    };
+                    case "compose", "flatMap" -> (Invokable) args -> {
+                        requireOne(args, "Future." + name);
+                        if (!(args.getFirst() instanceof Invokable callback)) {
+                            throw new IllegalArgumentException(
+                                    "Future." + name + " expects one callable");
+                        }
+                        return chainFuture(future, callback, true, false);
+                    };
+                    case "onSuccess" -> (Invokable) args -> {
+                        requireOne(args, "Future.onSuccess");
+                        if (!(args.getFirst() instanceof Invokable callback)) {
+                            throw new IllegalArgumentException(
+                                    "Future.onSuccess expects one callable");
+                        }
+                        return chainFuture(future, callback, false, true);
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown Future instance member " + name);
+                };
+            }
             if (receiver instanceof FutureFactory) {
                 return switch (name) {
                     case "all" -> (Invokable) args -> {
@@ -6254,15 +5683,52 @@ public final class OresEvalRootNode extends RootNode {
                 }
                 throw new IllegalArgumentException("unknown member " + object.klass.name() + "." + name);
             }
-            if (receiver instanceof DynamicStructValue dynamic) {
-                if (!dynamic.fields.containsKey(name)) {
-                    throw new IllegalArgumentException("unknown DynamicStruct member " + name);
-                }
-                return dynamic.fields.get(name);
+            if (receiver instanceof List<?> rawList) {
+                return switch (name) {
+                    case "size" -> (long) rawList.size();
+                    case "get" -> (Invokable) args -> {
+                        requireOne(args, "List.get");
+                        Object index = args.getFirst();
+                        if (!(index instanceof Number number)) {
+                            throw new IllegalArgumentException(
+                                    "List.get index must be an integer");
+                        }
+                        return rawList.get(Math.toIntExact(number.longValue()));
+                    };
+                    case "add" -> (Invokable) args -> {
+                        requireOne(args, "List.add");
+                        @SuppressWarnings("unchecked")
+                        List<Object> list = (List<Object>) rawList;
+                        list.add(args.getFirst());
+                        return null;
+                    };
+                    case "set" -> (Invokable) args -> {
+                        if (args.size() != 2) {
+                            throw new IllegalArgumentException(
+                                    "List.set expects exactly 2 argument(s)");
+                        }
+                        Object index = args.getFirst();
+                        if (!(index instanceof Number number)) {
+                            throw new IllegalArgumentException(
+                                    "List.set index must be an integer");
+                        }
+                        @SuppressWarnings("unchecked")
+                        List<Object> list = (List<Object>) rawList;
+                        list.set(Math.toIntExact(number.longValue()), args.get(1));
+                        return null;
+                    };
+                    default -> throw new IllegalArgumentException(
+                            "unknown List member " + name);
+                };
             }
             if (receiver instanceof Map<?, ?> map) {
-                if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
-                return map.get(name);
+                if (!map.containsKey(name)) throw new IllegalArgumentException("unknown struct/map member " + name);
+                Object value = map.get(name);
+                if (value == UNINITIALIZED_FIELD) {
+                    throw new IllegalArgumentException(
+                            "explicit struct field '" + name + "' is read before initialization");
+                }
+                return value;
             }
             InteropLibrary foreign = InteropLibrary.getUncached(receiver);
             if (foreign.hasMembers(receiver)) {
@@ -7244,7 +6710,6 @@ public final class OresEvalRootNode extends RootNode {
             if (name.equals("complex") || name.equals("complex64") || name.equals("complex128")) return value instanceof Complex;
             if (name.equals("Option")) return value instanceof OptionValue;
             if (name.equals("Result")) return value instanceof ResultValue;
-            if (name.equals("DynamicStruct")) return value instanceof DynamicStructValue;
             if (name.equals("Array") || name.equals("List")) return value instanceof List<?>;
             if (name.equals("Generator") || name.equals("Iterator")) return value instanceof GeneratorRuntime.Generator<?>;
             if (name.equals("AsyncGenerator") || name.equals("AsyncIterator")) return value instanceof GeneratorRuntime.AsyncGenerator<?>;
@@ -7276,7 +6741,6 @@ public final class OresEvalRootNode extends RootNode {
             if (value instanceof GeneratorRuntime.Generator<?>) return "Iterator";
             if (value instanceof GeneratorRuntime.AsyncGenerator<?>) return "AsyncIterator";
             if (value instanceof GeneratorRuntime.Step<?>) return "IteratorResult";
-            if (value instanceof DynamicStructValue) return "DynamicStruct";
             if (value instanceof List<?>) return "List";
             if (value instanceof String) return "string";
             if (value instanceof Boolean) return "bool";
@@ -7494,7 +6958,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Map<?, ?> structuralFields(Object value) {
-            if (value instanceof DynamicStructValue dynamic) return dynamic.fields;
             if (value instanceof Map<?, ?> map) return map;
             return null;
         }
@@ -7632,20 +7095,6 @@ public final class OresEvalRootNode extends RootNode {
                 return shaped;
             }
 
-            if (declared.name().equals("DynamicStruct")) {
-                if (declared.arguments().size() != 1 || !(value instanceof DynamicStructValue dynamic)) {
-                    throw returnTypeMismatch(callable, declared, value);
-                }
-                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
-                    shapeReturnedValue(
-                            declared.arguments().getFirst(),
-                            entry.getValue(),
-                            callable + "[" + entry.getKey() + "]",
-                            resolving);
-                }
-                return value;
-            }
-
             if (declared.name().equals("bool") || declared.name().equals("Bool")) {
                 if (!(value instanceof Boolean)) throw returnTypeMismatch(callable, declared, value);
                 return value;
@@ -7768,15 +7217,14 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object destructureMember(Object value, String name) {
-            if (value instanceof DynamicStructValue dynamic) {
-                if (!dynamic.fields.containsKey(name)) {
-                    throw new IllegalArgumentException("object destructure missing member " + name);
-                }
-                return dynamic.fields.get(name);
-            }
             if (value instanceof Map<?, ?> map) {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("object destructure missing member " + name);
-                return map.get(name);
+                Object member = map.get(name);
+                if (member == UNINITIALIZED_FIELD) {
+                    throw new IllegalArgumentException(
+                            "explicit struct field '" + name + "' is destructured before initialization");
+                }
+                return member;
             }
             if (value instanceof OresObject object) {
                 if (!object.fields.containsKey(name)) throw new IllegalArgumentException("object destructure missing field " + name);
@@ -7912,13 +7360,6 @@ public final class OresEvalRootNode extends RootNode {
                 for (Object item : set) if (containsLiveMutexGuard(item, seen)) return true;
                 return false;
             }
-            if (value instanceof DynamicStructValue dynamic) {
-                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
-                    if (containsLiveMutexGuard(entry.getKey(), seen)
-                            || containsLiveMutexGuard(entry.getValue(), seen)) return true;
-                }
-                return false;
-            }
             if (value instanceof Map<?, ?> map) {
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
                     if (containsLiveMutexGuard(entry.getKey(), seen)
@@ -7984,13 +7425,6 @@ public final class OresEvalRootNode extends RootNode {
                 for (Object item : set) releaseMutexGuardsInValue(item, failed, seen);
                 return;
             }
-            if (value instanceof DynamicStructValue dynamic) {
-                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
-                    releaseMutexGuardsInValue(entry.getKey(), failed, seen);
-                    releaseMutexGuardsInValue(entry.getValue(), failed, seen);
-                }
-                return;
-            }
             if (value instanceof Map<?, ?> map) {
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
                     releaseMutexGuardsInValue(entry.getKey(), failed, seen);
@@ -8040,12 +7474,23 @@ public final class OresEvalRootNode extends RootNode {
         @Override public String toString(){return real+(imaginary<0?"":"+")+imaginary+"i";}
     }
 
-    private static final class DynamicStructValue implements OresMutex.SharedState {
-        private final LinkedHashMap<String, Object> fields;
-        private DynamicStructValue() { this.fields = new LinkedHashMap<>(); }
-        private DynamicStructValue(Map<String, Object> initial) { this.fields = new LinkedHashMap<>(initial); }
+    /**
+     * Runtime provenance for struct infer. It behaves as a Map for existing
+     * structural operations while remaining immutable across aliases and async
+     * detachment/copy boundaries.
+     */
+    private static final class ReadonlyRecordValue
+            extends java.util.AbstractMap<String, Object>
+            implements OresMutex.SharedState {
+        private final Map<String, Object> fields;
+        private ReadonlyRecordValue(Map<String, Object> initial) {
+            this.fields = Map.copyOf(initial);
+        }
+        @Override public Set<Entry<String, Object>> entrySet() { return fields.entrySet(); }
+        @Override public Object get(Object key) { return fields.get(key); }
+        @Override public boolean containsKey(Object key) { return fields.containsKey(key); }
         @Override public Iterable<?> sharedStateChildren() { return fields.values(); }
-        @Override public String toString() { return "DynamicStruct" + fields; }
+        @Override public String toString() { return "struct infer" + fields; }
     }
 
     private static final class OresObject implements OresMutex.SharedState {
@@ -8183,15 +7628,6 @@ public final class OresEvalRootNode extends RootNode {
             if (value instanceof OresObject object) {
                 for (Object field : object.fields.values()) {
                     if (!runtimeSharedSafe(field, seen)) return false;
-                }
-                return true;
-            }
-            if (value instanceof DynamicStructValue dynamic) {
-                for (Map.Entry<String, Object> entry : dynamic.fields.entrySet()) {
-                    if (!runtimeSharedSafe(entry.getKey(), seen)
-                            || !runtimeSharedSafe(entry.getValue(), seen)) {
-                        return false;
-                    }
                 }
                 return true;
             }

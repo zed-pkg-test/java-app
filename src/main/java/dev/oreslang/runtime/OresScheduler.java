@@ -55,7 +55,7 @@ public final class OresScheduler implements AutoCloseable {
     }
 
     /** Result of one resumable task turn. */
-    public sealed interface Step<T> permits Done, Await { }
+    public sealed interface Step<T> permits Done, Await, Cooperate { }
 
     /** The async task has produced its final value. */
     public record Done<T>(T value) implements Step<T> { }
@@ -69,6 +69,12 @@ public final class OresScheduler implements AutoCloseable {
             Objects.requireNonNull(future, "future");
         }
     }
+
+    /**
+     * Cooperative scheduler handoff. This produces no language value and
+     * resumes the same task only after the current carrier turn has unwound.
+     */
+    public record Cooperate<T>() implements Step<T> { }
 
     /**
      * Input delivered to a compiler-generated state machine when it starts or
@@ -266,6 +272,11 @@ public final class OresScheduler implements AutoCloseable {
 
     public static <T> Step<T> await(OresFuture<?> future) {
         return new Await<>(Objects.requireNonNull(future, "future"));
+    }
+
+    /** Lowering target for source-level `rt cooperate`. */
+    public static <T> Step<T> cooperate() {
+        return new Cooperate<>();
     }
 
     /**
@@ -487,6 +498,11 @@ public final class OresScheduler implements AutoCloseable {
                     return;
                 }
 
+                if (step instanceof Cooperate<?>) {
+                    armCooperate();
+                    return;
+                }
+
                 failTerminal(new IllegalStateException(
                         "unknown OresScheduler task step " + step.getClass().getName()));
             } finally {
@@ -508,6 +524,20 @@ public final class OresScheduler implements AutoCloseable {
             executing.set(false);
             publishTerminalIfReady();
             scheduleReadyResume();
+        }
+
+        private void armCooperate() {
+            Resume resume = Resume.completed(null, null);
+            if (!pendingResume.compareAndSet(null, resume)) {
+                failTerminal(new IllegalStateException(
+                        "cooperate attempted to publish more than one resume"));
+                return;
+            }
+            if (!phase.compareAndSet(RUNNING, WAITING)) {
+                pendingResume.compareAndSet(resume, null);
+            }
+            // afterCarrierTurn() owns requeueing so this dispatch fully
+            // unwinds before the continuation becomes runnable again.
         }
 
         private void armAwait(OresFuture<?> awaited) {

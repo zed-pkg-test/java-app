@@ -163,7 +163,7 @@ final class ModulesNamespacesCallableSemanticsTest {
     }
 
     @Test
-    void moduleContractFieldsRequireExactBindingSemantics() {
+    void moduleContractFieldsCompareBindingCapabilitiesNotKeywordSpelling() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define contract Config as
                   val String name;
@@ -171,14 +171,44 @@ final class ModulesNamespacesCallableSemanticsTest {
                 end
 
                 define module good conforms Config as
-                  pub val String name = "x";
+                  pub const mut String name = "x";
                   pub let int capacity = 10;
+                end
+                """)));
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define contract Config as
+                  const mut String name;
+                end
+
+                define module good conforms Config as
+                  pub val String name = "x";
+                end
+                """)));
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define contract Config as
+                  let mut String name;
+                end
+
+                define module good conforms Config as
+                  pub let mut String name = "x";
                 end
                 """)));
 
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define contract Config as
                   val String name;
+                end
+
+                define module bad conforms Config as
+                  pub let mut String name = "x";
+                end
+                """)));
+
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                define contract Config as
+                  let mut String name;
                 end
 
                 define module bad conforms Config as

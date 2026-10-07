@@ -144,7 +144,7 @@ final class ActorCapabilityIsolationTest {
     }
 
     @Test
-    void sharedActorDoesNotImplicitlyReceiveWritableSharedMemoryAuthority() {
+    void sharedActorMayUseTransitiveSharedStateWhenParentPolicyAllowsIt() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
                 type SharedInt = SharedMutex<int>;
 
@@ -157,11 +157,8 @@ final class ActorCapabilityIsolationTest {
                 }
                 """));
 
-        SecurityException denied = assertThrows(
-                SecurityException.class,
-                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
-
-        assertTrue(denied.getMessage().contains("SHARED_MEMORY"));
+        assertDoesNotThrow(() ->
+                CapabilityChecker.check(program, IsolatePolicy.developer()));
     }
 
     @Test
@@ -203,15 +200,11 @@ final class ActorCapabilityIsolationTest {
                                     IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
                                     "indirect-helper-readonly-share"));
 
-            var sharedWrite = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
+            var shared = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
                 OresContext.requireEffectiveCapability(
                         IsolatePolicy.developer(),
                         IsolatePolicy.Capability.SHARED_MEMORY,
                         "shared-actor-shared-memory");
-                context.self().stop();
-            });
-
-            var sharedReadonly = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
                 OresContext.requireEffectiveCapability(
                         IsolatePolicy.developer(),
                         IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
@@ -219,54 +212,19 @@ final class ActorCapabilityIsolationTest {
                 context.self().stop();
             });
 
-            var sharedProxy = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
-                OresContext.requireEffectiveCapability(
-                        IsolatePolicy.developer(),
-                        IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
-                        "shared-actor-proxy");
-                context.self().stop();
-            });
-
             privateSharedMemory.send("check");
             privateReadonlyShare.send("check");
-            sharedWrite.send("check");
-            sharedReadonly.send("check");
-            sharedProxy.send("check");
+            shared.send("check");
 
             assertTrue(privateSharedMemory.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(privateReadonlyShare.awaitTermination(2, TimeUnit.SECONDS));
-            assertTrue(sharedWrite.awaitTermination(2, TimeUnit.SECONDS));
-            assertTrue(sharedReadonly.awaitTermination(2, TimeUnit.SECONDS));
-            assertTrue(sharedProxy.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
 
             assertInstanceOf(SecurityException.class, privateSharedMemory.failure().orElseThrow());
             assertInstanceOf(SecurityException.class, privateReadonlyShare.failure().orElseThrow());
-            assertInstanceOf(SecurityException.class, sharedWrite.failure().orElseThrow());
-            assertTrue(sharedReadonly.failure().isEmpty());
-            assertTrue(sharedProxy.failure().isEmpty());
+            assertTrue(shared.failure().isEmpty());
         }
     }
-
-
-    @Test
-    void trustedHostSharedActorStillCannotGainAmbientSharedWriteAuthority() throws Exception {
-        try (ActorRuntime runtime = new ActorRuntime(IsolatePolicy.developer())) {
-            var shared = runtime.<String>spawnSharedTrusted(
-                    IsolatePolicy.developer(),
-                    factoryContext -> (message, context) -> {
-                        OresContext.requireEffectiveCapability(
-                                IsolatePolicy.developer(),
-                                IsolatePolicy.Capability.SHARED_MEMORY,
-                                "trusted-host-shared-memory");
-                        context.self().stop();
-                    });
-
-            shared.send("check");
-            assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
-            assertInstanceOf(SecurityException.class, shared.failure().orElseThrow());
-        }
-    }
-
     @Test
     void privateActorCannotLaunderSharedMemoryThroughFunctionValue() {
         Ast.Program program = TypeChecker.check(Parser.parse("""

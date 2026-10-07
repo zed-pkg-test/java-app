@@ -350,7 +350,6 @@ public final class ActorRuntime implements AutoCloseable {
     private final Object runtimeLifecycleLock = new Object();
     private final Set<SyncCell<?>> syncCells = ConcurrentHashMap.newKeySet();
     private final Set<Shared<?>> sharedValues = ConcurrentHashMap.newKeySet();
-    private final Set<Proxy<?>> sharedProxies = ConcurrentHashMap.newKeySet();
     private final IsolatePolicy policyCeiling;
     private final DispatcherConfig dispatcherConfig;
     private final TurnExecutor turnExecutor;
@@ -371,8 +370,6 @@ public final class ActorRuntime implements AutoCloseable {
     private final ExecutorService untrustedDispatcher;
     private final ThreadLocal<ActorCell<?>> currentActor = new ThreadLocal<>();
     private final ThreadLocal<SyncCell<?>> currentSyncCell = new ThreadLocal<>();
-    private record ProxyLockScope(ProxyRwLock lock, boolean write) { }
-    private final ThreadLocal<ProxyLockScope> currentProxyLock = new ThreadLocal<>();
     private final ThreadLocal<Boolean> forceCancellationCallback = new ThreadLocal<>();
 
     public ActorRuntime() {
@@ -796,12 +793,11 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     /**
-     * Legacy host/runtime synchronized shared-memory cell.
+     * Explicit synchronized shared-memory cell.
      *
-     * <p>Actor code cannot access this capability. Actor fields are owned by
-     * their actor domain and cross-actor mutation uses messages/channels or the
-     * narrower explicit rt Proxy capability. SyncCell remains for embedding and
-     * runtime-internal compatibility code that holds SHARED_MEMORY.</p>
+     * Actor fields do not use this: a mailbox turn already provides exclusive
+     * mutation of actor-owned state. SyncCell is for state intentionally shared
+     * by multiple SHARED actors.
      */
     public final class SyncCell<T> implements AutoCloseable {
         private final ReentrantLock lock = new ReentrantLock(true);
@@ -826,7 +822,6 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         public T snapshot() {
-            requireSharedMemoryAuthority("SyncCell.snapshot");
             rejectPrivateActorSharedMemoryAccess("SyncCell.snapshot");
             boolean entered = enterSyncCell(this);
             lock.lock();
@@ -841,7 +836,7 @@ public final class ActorRuntime implements AutoCloseable {
 
         public <R> R read(Function<? super T, ? extends R> reader) {
             Objects.requireNonNull(reader);
-            requireSharedMemoryAuthority("SyncCell.read");
+            requireSharedActorTurn();
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -860,7 +855,7 @@ public final class ActorRuntime implements AutoCloseable {
         @SuppressWarnings("unchecked")
         public T update(UnaryOperator<T> updater) {
             Objects.requireNonNull(updater);
-            requireSharedMemoryAuthority("SyncCell.update");
+            requireSharedActorTurn();
             boolean entered = enterSyncCell(this);
             lock.lock();
             try {
@@ -888,7 +883,6 @@ public final class ActorRuntime implements AutoCloseable {
 
         @Override
         public void close() {
-            requireSharedMemoryAuthority("SyncCell.close");
             rejectPrivateActorSharedMemoryAccess("SyncCell.close");
             boolean entered = enterSyncCell(this);
             try {
@@ -915,403 +909,6 @@ public final class ActorRuntime implements AutoCloseable {
         private void invalidateFromRuntime() {
             cellClosed.set(true);
             syncCells.remove(this);
-        }
-    }
-
-    /**
-     * Explicit synchronized shared-mutable capability created by source-level
-     * {@code rt proxy}. This is an escape hatch, not the ordinary actor memory
-     * model: normal actor state remains single-owner and mailbox-serialized.
-     *
-     * <p>The fair read/write lock belongs to the proxy, never to a carrier
-     * thread. Source code cannot unwrap the target. The compiler/evaluator uses
-     * read() for proven read-only access and write() for mutation or methods
-     * whose receiver effects are not proven read-only.</p>
-     */
-    public final class Proxy<T> implements AutoCloseable {
-        private static final long HANDLE_BYTES = 96L;
-
-        /**
-         * Semantic allocation provenance for the synchronized target.
-         *
-         * <p>Once rt proxy consumes an actor-owned value, its lifetime is no
-         * longer tied to that actor's local heap retirement. The current JVM
-         * backend realizes this as a strong ActorRuntime root. Native/arena
-         * lowering MUST promote/move the target into a proxy/runtime-owned
-         * region before publishing this capability.</p>
-         */
-        public enum TargetProvenance {
-            HOST_RUNTIME,
-            PROMOTED_FROM_SHARED_ACTOR
-        }
-
-        /**
-         * Runtime-owned lease facade. The lease contains synchronization
-         * authority but never exposes the raw target to source code.
-         *
-         * <p>Acquisition may complete on any runtime thread, but read/write
-         * callbacks are invoked only by the caller after its scheduler resumes.
-         * This keeps guest code off completion threads.</p>
-         */
-        public final class Access implements AutoCloseable {
-            private final ProxyRwLock.Lease lease;
-            private final boolean writeCapability;
-            private final AtomicBoolean accessClosed = new AtomicBoolean();
-
-            private Access(ProxyRwLock.Lease lease, boolean writeCapability) {
-                this.lease = lease;
-                this.writeCapability = writeCapability;
-            }
-
-            public boolean writeCapable() {
-                return writeCapability;
-            }
-
-            public <R> R read(Function<? super T, ? extends R> reader) {
-                return apply(reader, false);
-            }
-
-            public <R> R write(Function<? super T, ? extends R> writer) {
-                if (!writeCapability) {
-                    throw new IllegalStateException(
-                            "rt Proxy read lease cannot be used for mutation");
-                }
-                return apply(writer, true);
-            }
-
-            private <R> R apply(
-                    Function<? super T, ? extends R> operation,
-                    boolean writeOperation) {
-                Objects.requireNonNull(operation, "operation");
-                if (accessClosed.get()) {
-                    throw new IllegalStateException("rt Proxy access lease is closed");
-                }
-                requireProxyAccess(writeOperation ? "write rt proxy" : "read rt proxy");
-
-                ProxyLockScope held = currentProxyLock.get();
-                boolean entered = held == null;
-                if (entered) {
-                    currentProxyLock.set(new ProxyLockScope(lock, writeCapability));
-                } else {
-                    validateProxyLockNesting(lock, writeOperation);
-                }
-
-                try {
-                    T live = requireOpenTarget();
-                    if (writeOperation) writeAcquisitions.incrementAndGet();
-                    else readAcquisitions.incrementAndGet();
-                    return operation.apply(live);
-                } finally {
-                    if (entered) currentProxyLock.remove();
-                }
-            }
-
-            @Override
-            public void close() {
-                if (!accessClosed.compareAndSet(false, true)) return;
-                if (lease != null) lease.close();
-            }
-        }
-
-        private final UUID id = UUID.randomUUID();
-        private final ProxyRwLock lock;
-        private final TargetProvenance targetProvenance;
-        private final ActorId sourceActorId;
-        private final Object sourceExecutionDomain;
-        private final AtomicBoolean proxyClosed = new AtomicBoolean();
-        private final AtomicLong readAcquisitions = new AtomicLong();
-        private final AtomicLong writeAcquisitions = new AtomicLong();
-        private volatile T target;
-        private long reservedBytes = HANDLE_BYTES;
-
-        private Proxy(
-                T target,
-                ProxyRwLock lock,
-                TargetProvenance targetProvenance,
-                ActorId sourceActorId,
-                Object sourceExecutionDomain) {
-            this.target = Objects.requireNonNull(target, "proxy target");
-            this.lock = Objects.requireNonNull(lock, "proxy lock");
-            this.targetProvenance =
-                    Objects.requireNonNull(targetProvenance, "targetProvenance");
-            this.sourceActorId = sourceActorId;
-            this.sourceExecutionDomain = sourceExecutionDomain;
-        }
-
-        public UUID id() { return id; }
-        public TargetProvenance targetProvenance() { return targetProvenance; }
-        public Optional<ActorId> sourceActorId() {
-            return Optional.ofNullable(sourceActorId);
-        }
-        public boolean promotedFromActorDomain() {
-            return targetProvenance == TargetProvenance.PROMOTED_FROM_SHARED_ACTOR;
-        }
-        public boolean closed() { return proxyClosed.get(); }
-        public long readAcquisitions() { return readAcquisitions.get(); }
-        public long writeAcquisitions() { return writeAcquisitions.get(); }
-        /** Exact number of logical reader/writer waiters queued for this lock domain. */
-        public int queuedWaiters() { return lock.queuedWaiters(); }
-
-        /**
-         * Cooperatively acquire read authority. A pending future contains no
-         * guest callback and is safe for OresScheduler/actor continuation
-         * suspension.
-         */
-        public OresFuture<Access> acquireReadAsync() {
-            return acquireAsync(false);
-        }
-
-        /**
-         * Cooperatively acquire write authority. A queued writer is FIFO-ordered
-         * ahead of readers that arrive later, bounding writer starvation.
-         */
-        public OresFuture<Access> acquireWriteAsync() {
-            return acquireAsync(true);
-        }
-
-        private OresFuture<Access> acquireAsync(boolean write) {
-            requireProxyAccess(write ? "write rt proxy" : "read rt proxy");
-            requireOpenTarget();
-
-            ProxyLockScope held = currentProxyLock.get();
-            if (held != null) {
-                validateProxyLockNesting(lock, write);
-                return OresFuture.completed(new Access(null, write));
-            }
-
-            OresFuture<ProxyRwLock.Lease> leaseFuture = lock.acquireAsync(write);
-            OresFuture<Access> result =
-                    new OresFuture<>(() -> leaseFuture.cancel(false));
-            leaseFuture.whenCompleteRuntime((lease, failure) -> {
-                if (failure != null) {
-                    result.failFromRuntime(OresFuture.unwrap(failure));
-                    return;
-                }
-                if (lease == null) {
-                    result.failFromRuntime(
-                            new IllegalStateException("rt Proxy lock produced a null lease"));
-                    return;
-                }
-                Access access = new Access(lease, write);
-                if (!result.completeFromRuntime(access)) {
-                    access.close();
-                }
-            });
-            return result;
-        }
-
-        private Access acquireSync(boolean write) {
-            OresFuture<Access> future = acquireAsync(write);
-            if (!future.isDone()
-                    && (ActorRuntime.inActorExecution()
-                            || OresScheduler.current() != null)) {
-                future.cancel(false);
-                throw new IllegalStateException(
-                        "contended rt Proxy access cannot block an actor/source carrier; "
-                                + "use the cooperative evaluator/acquire*Async path");
-            }
-            return future.join();
-        }
-
-        public <R> R read(Function<? super T, ? extends R> reader) {
-            Objects.requireNonNull(reader, "reader");
-            try (Access access = acquireSync(false)) {
-                return access.read(reader);
-            }
-        }
-
-        public <R> R write(Function<? super T, ? extends R> writer) {
-            Objects.requireNonNull(writer, "writer");
-            try (Access access = acquireSync(true)) {
-                return access.write(writer);
-            }
-        }
-
-        /**
-         * Create a nested facade sharing the same logical lock domain.
-         */
-        @SuppressWarnings("unchecked")
-        public <R> Proxy<R> child(R nested) {
-            requireProxyAccess("derive rt proxy view");
-            if (nested == null) throw new IllegalArgumentException("cannot proxy a null nested value");
-
-            synchronized (lock) {
-                for (Proxy<?> existing : sharedProxies) {
-                    if (existing.lock == lock
-                            && existing.target == nested
-                            && !existing.proxyClosed.get()) {
-                        return (Proxy<R>) existing;
-                    }
-                }
-
-                reserveSharedRuntimeBytes(HANDLE_BYTES, "shared proxy child handle");
-                Proxy<R> child = new Proxy<>(
-                        nested,
-                        lock,
-                        targetProvenance,
-                        sourceActorId,
-                        sourceExecutionDomain);
-                sharedProxies.add(child);
-                if (closed.get()) {
-                    child.closeFromRuntime();
-                    throw new IllegalStateException("actor runtime is closed");
-                }
-                return child;
-            }
-        }
-
-        private T requireOpenTarget() {
-            T live = target;
-            if (proxyClosed.get() || live == null || closed.get()) {
-                throw new IllegalStateException("rt proxy is closed");
-            }
-            return live;
-        }
-
-        private boolean ownedBy(ActorRuntime runtime) {
-            return ActorRuntime.this == runtime;
-        }
-
-        @Override
-        public void close() {
-            requireProxyAccess("close rt proxy");
-            closeWithWriteLease();
-        }
-
-        /**
-         * Cooperative close used by source-level Proxy<T>.dispose(). The
-         * completion callback mutates only runtime state; no guest code runs on
-         * the thread that grants the lease.
-         */
-        public OresFuture<Void> closeAsync() {
-            requireProxyAccess("close rt proxy");
-            if (proxyClosed.get()) return OresFuture.completed(null);
-            OresFuture<Access> accessFuture = acquireWriteAsync();
-            OresFuture<Void> result =
-                    new OresFuture<>(() -> accessFuture.cancel(false));
-            accessFuture.whenCompleteRuntime((access, failure) -> {
-                if (failure != null) {
-                    result.failFromRuntime(OresFuture.unwrap(failure));
-                    return;
-                }
-                try (Access granted = access) {
-                    granted.write(ignored -> {
-                        closeUnderWriteLease();
-                        return null;
-                    });
-                    result.completeFromRuntime(null);
-                } catch (RuntimeException | Error closeFailure) {
-                    result.failFromRuntime(closeFailure);
-                }
-            });
-            return result;
-        }
-
-        private void closeFromRuntime() {
-            /*
-             * Runtime teardown must remain bounded even if guest code is still
-             * inside an uncooperative proxy critical section. Revoke new access
-             * immediately, fail queued waiters at the runtime level, and defer
-             * dropping the strong target root until the last active logical
-             * lease leaves. No carrier/control thread blocks on that lease.
-             *
-             * ActorRuntime.close() zeros aggregate shared-memory accounting
-             * after revocation, so this delayed retirement intentionally does
-             * not subtract quota a second time.
-             */
-            if (!proxyClosed.compareAndSet(false, true)) return;
-            sharedProxies.remove(this);
-            lock.whenIdle(() -> retireTarget(false));
-        }
-
-        private void closeWithWriteLease() {
-            try (Access access = acquireSync(true)) {
-                access.write(ignored -> {
-                    closeUnderWriteLease();
-                    return null;
-                });
-            }
-        }
-
-        private void closeUnderWriteLease() {
-            if (!proxyClosed.compareAndSet(false, true)) return;
-            sharedProxies.remove(this);
-            retireTarget(true);
-        }
-
-        private void retireTarget(boolean releaseBudget) {
-            target = null;
-            long bytes = reservedBytes;
-            reservedBytes = 0L;
-            if (releaseBudget && bytes != 0L) releaseSharedRuntimeBytes(bytes);
-        }
-
-        private void failPendingWaiters(Throwable failure) {
-            lock.failWaiters(failure);
-        }
-
-        @Override
-        public String toString() {
-            return "Proxy[" + id + ",closed=" + proxyClosed.get() + "]";
-        }
-    }
-
-    public <T> Proxy<T> proxy(T value) {
-        requireProxyAccess("create rt proxy");
-        if (value instanceof Proxy<?>) {
-            throw new IllegalArgumentException("rt proxy cannot wrap an existing proxy");
-        }
-
-        ActorId sourceActorId = currentActorId().orElse(null);
-        Object sourceExecutionDomain = currentActorExecutionDomain();
-        Proxy.TargetProvenance provenance = sourceActorId == null
-                ? Proxy.TargetProvenance.HOST_RUNTIME
-                : Proxy.TargetProvenance.PROMOTED_FROM_SHARED_ACTOR;
-
-        reserveSharedRuntimeBytes(Proxy.HANDLE_BYTES, "shared proxy handle");
-        Proxy<T> proxy = new Proxy<>(
-                value,
-                new ProxyRwLock(),
-                provenance,
-                sourceActorId,
-                sourceExecutionDomain);
-        sharedProxies.add(proxy);
-        if (closed.get()) {
-            proxy.closeFromRuntime();
-            throw new IllegalStateException("actor runtime is closed");
-        }
-        return proxy;
-    }
-
-    private void validateProxyLockNesting(
-            ProxyRwLock lock,
-            boolean write) {
-        ProxyLockScope held = currentProxyLock.get();
-        if (held == null) return;
-        if (held.lock() != lock) {
-            throw new IllegalStateException(
-                    "nested synchronization across different rt Proxy values is forbidden; "
-                            + "snapshot one proxy first or route mutation through an owner actor");
-        }
-        if (write && !held.write()) {
-            throw new IllegalStateException(
-                    "cannot upgrade an rt Proxy read lock to a write lock; "
-                            + "finish the read section before mutating");
-        }
-    }
-
-    private void requireProxyAccess(String operation) {
-        requireCallerRuntimeAffinity(operation);
-        ActorKind kind = currentActorKind();
-        if (kind != null && kind != ActorKind.SHARED) {
-            throw new SecurityException(
-                    operation + " requires a SHARED actor; private/untrusted actors cannot hold synchronized shared proxies");
-        }
-        IsolatePolicy callerPolicy = currentActorPolicy();
-        if (callerPolicy != null) {
-            callerPolicy.require(IsolatePolicy.Capability.ACTOR_SHARED_PROXY, operation);
-        } else {
-            policyCeiling.require(IsolatePolicy.Capability.ACTOR_SHARED_PROXY, operation);
         }
     }
 
@@ -2911,24 +2508,16 @@ public final class ActorRuntime implements AutoCloseable {
             effectivePolicy = policy.withoutCapabilities(
                     IsolatePolicy.Capability.SHARED_MEMORY,
                     IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                    IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
                     IsolatePolicy.Capability.JAVA_INTEROP,
                     IsolatePolicy.Capability.JAVA_SOURCE_INTEROP);
-        } else if (kind == ActorKind.SHARED) {
-            /*
-             * Every actor owns its mutable state, including host-created shared
-             * actors. Broad SHARED_MEMORY is runtime/host authority only; it is
-             * never ambient actor authority. Cross-actor mutation is mailbox/
-             * channel based, with rt Proxy<T> as the explicit synchronized
-             * capability escape hatch under ACTOR_SHARED_PROXY.
-             */
-            effectivePolicy = policy.withoutCapabilities(
-                    IsolatePolicy.Capability.SHARED_MEMORY);
         } else {
             effectivePolicy = policy;
         }
         requireWithinCeiling(effectivePolicy);
         requireWithinCallerPolicy(effectivePolicy);
+        if (kind == ActorKind.SHARED) {
+            effectivePolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "shared actor spawn");
+        }
         policy = effectivePolicy;
         if (!trustedFactory) {
             requireStatelessActorFactory(behaviorFactory);
@@ -2985,17 +2574,6 @@ public final class ActorRuntime implements AutoCloseable {
      * is rejected so a bounded dispatcher cannot be starved by callers waiting
      * on actors scheduled onto the same runtime.
      */
-
-    private IsolatePolicy sourceActorPolicy(
-            ActorKind kind,
-            IsolatePolicy requested) {
-        Objects.requireNonNull(kind, "kind");
-        Objects.requireNonNull(requested, "requested");
-        return kind == ActorKind.SHARED
-                ? requested.withoutCapabilities(IsolatePolicy.Capability.SHARED_MEMORY)
-                : requested;
-    }
-
     public <M, R> R invoke(
             ActorKind kind,
             M message,
@@ -3014,7 +2592,7 @@ public final class ActorRuntime implements AutoCloseable {
                             + "use mailbox-oriented actor composition");
         }
 
-        IsolatePolicy policy = sourceActorPolicy(kind, defaultSpawnPolicy());
+        IsolatePolicy policy = defaultSpawnPolicy();
         CompletableFuture<R> completion = new CompletableFuture<>();
         ActorRef<M> ref = spawnInternal(
                 kind,
@@ -3125,7 +2703,22 @@ public final class ActorRuntime implements AutoCloseable {
                             + "use mailbox-oriented actor composition");
         }
 
-        IsolatePolicy policy = sourceActorPolicy(kind, defaultSpawnPolicy());
+        IsolatePolicy policy = defaultSpawnPolicy();
+
+        /*
+         * The guest result is deliberately staged separately from the Future
+         * exposed to the caller. A one-shot actor may compute its result while
+         * its carrier still owns a TruffleContext. Publishing that result here
+         * would let an awaiting root frame resume, return from Context.eval(),
+         * and close the Polyglot Context before TurnExecutor.execute(...) has
+         * crossed its leave boundary.
+         *
+         * ActorCell.finalizedFuture is settled only after carrierActive is
+         * false, scheduled is clear, actor teardown is complete, and the
+         * TurnExecutor has returned. The externally visible Future therefore
+         * becomes terminal only after that barrier.
+         */
+        OresFuture<R> staged = new OresFuture<>();
         OresFuture<R> completion = new OresFuture<>();
 
         ActorRef<M> ref = spawnInternal(
@@ -3146,14 +2739,14 @@ public final class ActorRuntime implements AutoCloseable {
                                     (value, failure) -> {
                                         try {
                                             if (failure != null) {
-                                                completion.failFromRuntime(
+                                                staged.failFromRuntime(
                                                         OresFuture.unwrap(failure));
                                             } else {
                                                 R frozen = (R) freeze(value);
-                                                completion.completeFromRuntime(frozen);
+                                                staged.completeFromRuntime(frozen);
                                             }
                                         } catch (Throwable callbackFailure) {
-                                            completion.failFromRuntime(callbackFailure);
+                                            staged.failFromRuntime(callbackFailure);
                                         } finally {
                                             turnContext.self().stop();
                                         }
@@ -3162,28 +2755,68 @@ public final class ActorRuntime implements AutoCloseable {
                         }
 
                         R frozen = (R) freeze(result);
-                        completion.completeFromRuntime(frozen);
+                        staged.completeFromRuntime(frozen);
                         turnContext.self().stop();
                     } catch (VirtualMachineError fatal) {
-                        completion.failFromRuntime(fatal);
+                        staged.failFromRuntime(fatal);
                         throw fatal;
                     } catch (ThreadDeath fatal) {
-                        completion.failFromRuntime(fatal);
+                        staged.failFromRuntime(fatal);
                         throw fatal;
                     } catch (LinkageError fatal) {
-                        completion.failFromRuntime(fatal);
+                        staged.failFromRuntime(fatal);
                         throw fatal;
                     } catch (Throwable failure) {
-                        completion.failFromRuntime(failure);
+                        staged.failFromRuntime(failure);
                         turnContext.self().stop();
                     }
                 },
                 true);
 
+        @SuppressWarnings("unchecked")
+        ActorCell<M> cell = (ActorCell<M>) actors.get(ref.id());
+        if (cell == null) {
+            completion.failFromRuntime(
+                    new IllegalStateException(
+                            "one-shot actor disappeared before finalization barrier registration"));
+            return completion;
+        }
+
+        cell.finalizedFuture.whenCompleteRuntime((ignored, barrierFailure) -> {
+            if (completion.isDone()) return;
+
+            Object terminal = staged.runtimeTerminalStateOrNull();
+            if (terminal != null) {
+                Throwable failure = OresFuture.runtimeTerminalFailure(terminal);
+                if (failure == null) {
+                    completion.completeFromRuntime(
+                            (R) OresFuture.runtimeTerminalValue(terminal));
+                } else if (failure instanceof CancellationException) {
+                    completion.cancel(false);
+                } else {
+                    completion.failFromRuntime(failure);
+                }
+                return;
+            }
+
+            Throwable termination = ref.terminationCause.get();
+            if (termination instanceof CancellationException) {
+                completion.cancel(false);
+            } else if (termination != null) {
+                completion.failFromRuntime(termination);
+            } else if (barrierFailure != null) {
+                completion.failFromRuntime(OresFuture.unwrap(barrierFailure));
+            } else {
+                completion.failFromRuntime(
+                        new IllegalStateException(
+                                "one-shot actor finalized before producing a result"));
+            }
+        });
+
         try {
             send(ref, message);
         } catch (Throwable failure) {
-            completion.failFromRuntime(failure);
+            staged.failFromRuntime(failure);
             try {
                 if (ref.isAlive()) stop(ref);
             } catch (RuntimeException cleanup) {
@@ -3224,7 +2857,13 @@ public final class ActorRuntime implements AutoCloseable {
     public <T> SyncCell<T> syncCell(T initialValue) {
         requireCallerRuntimeAffinity("create shared SyncCell values");
         if (closed.get()) throw new IllegalStateException("actor runtime is closed");
-        requireSharedMemoryAuthority("SyncCell creation");
+        IsolatePolicy callerPolicy = currentActorPolicy();
+        if (callerPolicy != null) {
+            callerPolicy.require(IsolatePolicy.Capability.SHARED_MEMORY, "SyncCell");
+        } else {
+            policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, "SyncCell");
+        }
+        rejectPrivateActorSharedMemoryAccess("SyncCell creation");
         SyncCell<T> cell = new SyncCell<>(initialValue);
         syncCells.add(cell);
         if (closed.get()) {
@@ -3252,20 +2891,17 @@ public final class ActorRuntime implements AutoCloseable {
         if (entered) currentSyncCell.remove();
     }
 
-    private void requireSharedMemoryAuthority(String operation) {
-        if (currentActorKind() != null) {
-            throw new SecurityException(
-                    operation + " is host/runtime-only legacy shared memory; "
-                            + "actors must use ownership/messages, immutable publication, "
-                            + "or ACTOR_SHARED_PROXY");
-        }
-        policyCeiling.require(IsolatePolicy.Capability.SHARED_MEMORY, operation);
-    }
-
     private void rejectPrivateActorSharedMemoryAccess(String operation) {
         ActorCell<?> current = currentActor.get();
         if (current != null && isPrivateKind(current.kind)) {
             throw new IllegalStateException("private actors cannot access synchronized shared memory via " + operation);
+        }
+    }
+
+    private void requireSharedActorTurn() {
+        ActorCell<?> cell = currentActor.get();
+        if (cell == null || cell.kind != ActorKind.SHARED) {
+            throw new IllegalStateException("shared state mutation requires a shared actor mailbox turn");
         }
     }
 
@@ -3844,34 +3480,6 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("MutexGuard<T> is lexical and cannot cross actor mailboxes");
         }
-        if (value instanceof Proxy<?> proxy) {
-            if (target.kind != ActorKind.SHARED) {
-                throw new SecurityException("rt Proxy<T> may only be delivered to SHARED actors");
-            }
-            if (!proxy.ownedBy(this) || proxy.closed()) {
-                throw new IllegalArgumentException(
-                        "rt Proxy<T> belongs to a different/closed ActorRuntime");
-            }
-            ActorKind senderKind = currentActorKind();
-            if (senderKind != null && senderKind != ActorKind.SHARED) {
-                throw new SecurityException(
-                        "private/untrusted actors cannot send rt Proxy<T>");
-            }
-            IsolatePolicy senderPolicy = currentActorPolicy();
-            if (senderPolicy != null) {
-                senderPolicy.require(
-                        IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
-                        "rt Proxy actor send");
-            } else {
-                policyCeiling.require(
-                        IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
-                        "rt Proxy host send");
-            }
-            target.policy.require(
-                    IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
-                    "rt Proxy actor receive");
-            return;
-        }
         if (value instanceof OresMutex.Shared<?> sharedMutex) {
             if (target.kind != ActorKind.SHARED) {
                 throw new SecurityException("private actors cannot receive SharedMutex<T>");
@@ -3898,30 +3506,7 @@ public final class ActorRuntime implements AutoCloseable {
             requireMutexTransport(target, shared.value(), visiting, depth + 1);
             return;
         }
-        if (value instanceof SyncCell<?> cell) {
-            if (!cell.ownedBy(this) || cell.closed()) {
-                throw new IllegalArgumentException(
-                        "SyncCell belongs to a different/closed ActorRuntime");
-            }
-            if (target.kind != ActorKind.SHARED) {
-                throw new SecurityException(
-                        "private/untrusted actors cannot receive SyncCell<T>");
-            }
-            IsolatePolicy senderPolicy = currentActorPolicy();
-            if (senderPolicy != null) {
-                senderPolicy.require(
-                        IsolatePolicy.Capability.SHARED_MEMORY,
-                        "SyncCell actor send");
-            } else {
-                policyCeiling.require(
-                        IsolatePolicy.Capability.SHARED_MEMORY,
-                        "SyncCell host send");
-            }
-            target.policy.require(
-                    IsolatePolicy.Capability.SHARED_MEMORY,
-                    "SyncCell actor receive");
-            return;
-        }
+        if (value instanceof SyncCell<?>) return;
         if (visiting.put(value, Boolean.TRUE) != null) {
             throw new IllegalArgumentException("cyclic values cannot cross actor boundaries");
         }
@@ -4117,14 +3702,6 @@ public final class ActorRuntime implements AutoCloseable {
             if (cell.closed()) throw new IllegalArgumentException("SyncCell is closed");
             return;
         }
-        if (value instanceof Proxy<?> proxy) {
-            if (!proxy.ownedBy(this)) {
-                throw new IllegalArgumentException(
-                        "rt Proxy<T> belongs to a different ActorRuntime");
-            }
-            if (proxy.closed()) throw new IllegalArgumentException("rt Proxy<T> is closed");
-            return;
-        }
         if (value instanceof OresMutex.Shared<?>) {
             // Runtime affinity is reserved atomically immediately before mailbox admission.
             return;
@@ -4249,7 +3826,6 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof ActorRuntime.ActorRef<?>
                 || value instanceof Shared<?>
                 || value instanceof SyncCell<?>
-                || value instanceof Proxy<?>
                 || value instanceof OresMutex.Lock<?>
                 || value instanceof OresMutex.Guard<?>) {
             throw new SecurityException(
@@ -4300,10 +3876,6 @@ public final class ActorRuntime implements AutoCloseable {
         }
         if (value instanceof ActorRuntime.SyncCell<?>) {
             throw new IllegalArgumentException("SyncCell is mutable shared state and cannot be wrapped as Shared");
-        }
-        if (value instanceof Proxy<?>) {
-            throw new IllegalArgumentException(
-                    "rt Proxy<T> is synchronized shared mutable state and cannot be wrapped as Shared");
         }
         if (value instanceof OresMutex.Shared<?>) {
             throw new IllegalArgumentException("SharedMutex is mutable shared state and cannot be wrapped as Shared");
@@ -4378,7 +3950,6 @@ public final class ActorRuntime implements AutoCloseable {
                 || value instanceof ActorRuntime.ActorRef<?>
                 || value instanceof Shared<?>
                 || value instanceof SyncCell<?>
-                || value instanceof Proxy<?>
                 || value instanceof OresMutex.Shared<?>) {
             return;
         }
@@ -4453,7 +4024,6 @@ public final class ActorRuntime implements AutoCloseable {
                 || value instanceof ActorRuntime.ActorGroupJoinCapability
                 || value instanceof Shared<?>
                 || value instanceof SyncCell<?>
-                || value instanceof Proxy<?>
                 || value instanceof OresMutex.Lock<?>
                 || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException(
@@ -4496,7 +4066,6 @@ public final class ActorRuntime implements AutoCloseable {
         if (value instanceof ActorRuntime.ActorRef<?> ref) return ref;
         if (value instanceof ActorRuntime.ActorGroupJoinCapability capability) return capability;
         if (value instanceof ActorRuntime.SyncCell<?> cell) return cell;
-        if (value instanceof ActorRuntime.Proxy<?> proxy) return proxy;
         if (value instanceof OresMutex.Shared<?> sharedMutex) return sharedMutex;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
             throw new IllegalArgumentException("actor-local mutex state cannot cross actor boundaries");
@@ -4613,7 +4182,6 @@ public final class ActorRuntime implements AutoCloseable {
         if (scalar >= 0) return requireWithinLimit(scalar, limit);
         if (value instanceof Shared<?>) return requireWithinLimit(48L, limit);
         if (value instanceof ActorRuntime.SyncCell<?>) return requireWithinLimit(64L, limit);
-        if (value instanceof ActorRuntime.Proxy<?>) return requireWithinLimit(96L, limit);
         if (value instanceof OresMutex.Shared<?>) return requireWithinLimit(64L, limit);
         if (value instanceof ActorRuntime.ActorGroupJoinCapability) return requireWithinLimit(48L, limit);
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
@@ -4682,7 +4250,6 @@ public final class ActorRuntime implements AutoCloseable {
         if (scalar >= 0) return scalar;
         if (value instanceof Shared<?>) return 48L;
         if (value instanceof ActorRuntime.SyncCell<?>) return 64L;
-        if (value instanceof ActorRuntime.Proxy<?>) return 96L;
         if (value instanceof OresMutex.Shared<?>) return 64L;
         if (value instanceof ActorRuntime.ActorGroupJoinCapability) return 48L;
         if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>) {
@@ -4907,11 +4474,6 @@ public final class ActorRuntime implements AutoCloseable {
     @Override
     public void close() {
         requireSupervisorContext("close an ActorRuntime");
-        if (currentProxyLock.get() != null) {
-            throw new IllegalStateException(
-                    "ActorRuntime cannot close from inside an rt Proxy critical section; "
-                            + "finish the proxy access before closing the runtime");
-        }
 
         final boolean firstClose;
         final List<ActorCell<?>> snapshot;
@@ -4922,18 +4484,6 @@ public final class ActorRuntime implements AutoCloseable {
         for (ActorCell<?> cell : snapshot) cell.stop();
 
         if (firstClose) {
-            // Pending proxy acquisitions are scheduler waiters, not carrier
-            // blockers. Fail them promptly during teardown so no suspended
-            // actor/root task remains retained behind a lock request.
-            Set<ProxyRwLock> proxyLocks = java.util.Collections.newSetFromMap(
-                    new IdentityHashMap<>());
-            for (Proxy<?> proxy : List.copyOf(sharedProxies)) {
-                if (proxyLocks.add(proxy.lock)) {
-                    proxy.lock.failWaiters(
-                            new CancellationException("ActorRuntime closed while waiting for rt Proxy"));
-                }
-            }
-
             // Stop executor carriers so queued work is rejected/removed and
             // blocked host-side executor operations can wake. This interrupt is
             // backend shutdown mechanics only; it is never an actor
@@ -4991,8 +4541,6 @@ public final class ActorRuntime implements AutoCloseable {
         syncCells.clear();
         for (Shared<?> shared : List.copyOf(sharedValues)) shared.closeFromRuntime();
         sharedValues.clear();
-        for (Proxy<?> proxy : List.copyOf(sharedProxies)) proxy.closeFromRuntime();
-        sharedProxies.clear();
         sharedMemoryBytes.set(0L);
 
         if (interrupted) Thread.currentThread().interrupt();
@@ -5095,6 +4643,8 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorCell<?> parent;
         private final Set<ActorCell<?>> children = ConcurrentHashMap.newKeySet();
         private final Set<OresFuture<?>> pendingOperations = ConcurrentHashMap.newKeySet();
+        /** Settles only after the actor has fully crossed its TurnExecutor boundary. */
+        private final OresFuture<Void> finalizedFuture = new OresFuture<>();
         /** Mailbox transport is a bounded Oreslang channel of runtime envelopes. */
         private final ChannelRuntime.Channel<MessageEnvelope> mailbox;
         private final ActorMemorySlice memorySlice;
@@ -5261,6 +4811,7 @@ public final class ActorRuntime implements AutoCloseable {
             }
             unregisterActor(this);
             if (parent != null) parent.childFinalized(this);
+            finalizedFuture.completeFromRuntime(null);
             lifecycleLock.notifyAll();
         }
 

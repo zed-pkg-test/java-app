@@ -146,8 +146,8 @@ final class PrivateActorIsolationTest {
             var syncCell = runtime.syncCell(1);
             var sharedMutex = OresMutex.shared(new int[]{1});
 
-            assertThrows(SecurityException.class, () -> privateRef.send(syncCell));
-            assertThrows(SecurityException.class, () -> privateRef.send(sharedMutex));
+            assertThrows(IllegalArgumentException.class, () -> privateRef.send(syncCell));
+            assertThrows(RuntimeException.class, () -> privateRef.send(sharedMutex));
             privateRef.stop();
         }
     }
@@ -295,7 +295,7 @@ final class PrivateActorIsolationTest {
                             childContext -> (childMessage, childTurn) -> { });
                     throw new AssertionError("private actor spawned shared child");
                 } catch (SecurityException expected) {
-                    // Private actors cannot escalate into a less-confined actor kind.
+                    if (!expected.getMessage().contains("SHARED_MEMORY")) throw expected;
                 }
                 context.self().stop();
             });

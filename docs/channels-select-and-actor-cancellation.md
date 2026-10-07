@@ -113,6 +113,13 @@ val Channel<int> input = Channel.new<int>(64);
 
 Capacity zero is a rendezvous/unbuffered channel.
 
+Channel payloads are data, not executable capabilities. `Fnc<...>` / function
+values cannot be channel element types, including when nested inside Options,
+tuples, records, collections, or nominal objects with callable state. A closure
+may capture execution-domain-local authority, so moving it through a channel
+would make the transport boundary depend on hidden capture state. Keep callbacks
+local and send explicit data describing the requested operation instead.
+
 ### Blocking/suspending forms
 
 ```ores
@@ -199,6 +206,14 @@ one level inside the arm. The same rules apply to `nb select` and `try select`.
 Legacy unbraced arms are rejected by the parser; `oresfmt` migrates them.
 
 A select may include one `default: { ... }` arm.
+
+A static select arm is a non-throwing control-flow boundary. An ordinary
+`throw` may be handled by a local `try/catch`, or absorbed by a called
+`trap` callable before control returns to the arm, but an ordinary throw that
+can escape the selected arm is rejected by the compiler. `raise` and `panic`
+are distinct nonlocal control signals and bypass select; runtime
+cancellation/termination likewise retains its runtime control identity rather
+than becoming normal select completion.
 
 ### Deterministic selection policy
 
@@ -307,8 +322,8 @@ val Array<SelectCase> cases = [
   SelectCase.write(b, 42)
 ];
 
-val SelectResult result = select from cases;
-val Future<SelectResult> pending = nb select from cases;
+val Option<SelectResult> result = select from cases;
+val Future<Option<SelectResult>> pending = nb select from cases;
 val Option<SelectResult> ready = try select from cases;
 ```
 
@@ -316,7 +331,7 @@ A reusable set can retain its fairness cursor:
 
 ```ores
 val set = SelectSet.new(cases);
-val result = select from set;
+val Option<SelectResult> result = select from set;
 ```
 
 Runtime list/array and map values are accepted. For maps, value iteration order
@@ -333,11 +348,25 @@ nb select first from cases
 try select from cases
 ```
 
+`select from` is a blocking source expression, but "blocking" means the
+current Ores continuation yields to its scheduler/actor pool while the select is
+pending; it does not park a carrier thread. Once a case commits, the continuation
+resumes and the expression returns `Some(SelectResult)`.
+
+`nb select from` registers the same arbitration and returns immediately with
+the native Ores `Future<Option<SelectResult>>`. Awaiting that Future follows the
+same scheduler resumption path. `try select from` is an immediate probe: it
+returns `None` when no case is ready and leaves no registration behind.
+
 `SelectResult` exposes:
 
 - `index`
 - `operation` (`read`, `write`, or `default`)
 - `value` for a read result
+
+The outer `Option` is intentionally part of the language-facing selection
+contract. It also composes uniformly with `trap` and Future APIs; the runtime
+must not flatten nested `Option` values.
 
 ## Cancellation
 

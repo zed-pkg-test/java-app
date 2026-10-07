@@ -104,6 +104,9 @@ public final class CapabilityChecker {
         if (!callableStack.add(fn)) return;
         try {
             IsolatePolicy effective = actorPolicy(fn.actorKind(), policy);
+            if (fn.actorKind() == Ast.ActorKind.SHARED) {
+                require(effective, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor fnc " + fn.name());
+            }
             checkCallableTypes(fn.parameters(), fn.returnType(), effective);
             checkStatements(fn.body(), effective);
         } finally {
@@ -169,10 +172,16 @@ public final class CapabilityChecker {
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.FunctionDecl fn) {
                     IsolatePolicy actorPolicy = actorPolicy(fn.actorKind(), policy);
+                    if (fn.actorKind() == Ast.ActorKind.SHARED) {
+                        require(actorPolicy, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor fnc " + fn.name());
+                    }
                     checkCallableTypes(fn.parameters(), fn.returnType(), actorPolicy);
                     checkStatements(fn.body(), actorPolicy);
                 } else if (declaration instanceof Ast.ClassDecl klass) {
                     IsolatePolicy actorPolicy = actorPolicy(klass.actorKind(), policy);
+                    if (klass.actorKind() == Ast.ActorKind.SHARED) {
+                        require(actorPolicy, IsolatePolicy.Capability.SHARED_MEMORY, "shared actor " + klass.name());
+                    }
                     for (Ast.TypeRef parent : klass.parents()) checkType(parent, actorPolicy);
                     for (Ast.TypeRef iface : klass.interfaces()) checkType(iface, actorPolicy);
                     for (Ast.FieldDecl field : klass.fields()) {
@@ -207,13 +216,10 @@ public final class CapabilityChecker {
             Ast.ActorKind kind,
             IsolatePolicy parent) {
         return switch (kind) {
-            case NONE -> parent;
-            case SHARED -> parent.withoutCapabilities(
-                    IsolatePolicy.Capability.SHARED_MEMORY);
+            case NONE, SHARED -> parent;
             case PRIVATE -> parent.withoutCapabilities(
                     IsolatePolicy.Capability.SHARED_MEMORY,
                     IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                    IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
                     IsolatePolicy.Capability.JAVA_INTEROP,
                     IsolatePolicy.Capability.JAVA_SOURCE_INTEROP);
             case UNTRUSTED -> {
@@ -245,9 +251,6 @@ public final class CapabilityChecker {
 
         if (type.name().equals("SharedMutex")) {
             require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex<T>");
-        }
-        if (type.name().equals("Proxy")) {
-            require(policy, IsolatePolicy.Capability.ACTOR_SHARED_PROXY, "Proxy<T>");
         }
         String javaClass = javaImports.get(type.name());
         if (javaClass != null) {
@@ -380,14 +383,18 @@ public final class CapabilityChecker {
             Ast.FunctionDecl referenced = findFunction(n.name());
             if (referenced != null) checkReferencedFunction(referenced, policy);
         }
-        else if (expr instanceof Ast.CallExpr c) {
-            if (c.callee() instanceof Ast.NameExpr runtimeOp
-                    && runtimeOp.name().equals("$rt$proxy")) {
-                require(
-                        policy,
-                        IsolatePolicy.Capability.ACTOR_SHARED_PROXY,
-                        "rt proxy");
+        else if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (!Set.of("copy", "take", "borrow", "share", "cooperate").contains(runtime.operation())) {
+                throw new SecurityException(
+                        "runtime intrinsic 'rt " + runtime.operation() + "' is not admitted on this compiler head");
             }
+            if (runtime.operation().equals("cooperate") && isZeroAuthorityAdversarial(policy)) {
+                throw new SecurityException(
+                        "untrusted actor cannot use rt cooperate until continuation quota state survives scheduler handoffs");
+            }
+            for (Ast.Expr argument : runtime.arguments()) checkExpr(argument, policy);
+        }
+        else if (expr instanceof Ast.CallExpr c) {
             String target = memberPath(c.callee());
             if (isZeroAuthorityAdversarial(policy) && target != null) {
                 String root = target.contains(".")

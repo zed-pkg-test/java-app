@@ -284,22 +284,34 @@ primary         = literal
                 | tuple_literal
                 | array_literal
                 | legacy_array_literal
-                | object_literal
+                | inferred_struct_literal
+                | explicit_struct_literal
                 | "(" expression ")" ;
 
 lambda          = [ "nlex" ] ( pipe_lambda | typed_legacy_lambda ) ;
-pipe_lambda     = "|" [ lambda_param { "," lambda_param } ] "|" "->" block ;
+pipe_lambda     = "|" [ lambda_param { "," lambda_param } ] "|" "->" lambda_body ;
 lambda_param    = IDENT | type_ref IDENT ;
 typed_legacy_lambda
-                = "(" [ param_list ] ")" "->" block ;
+                = "(" [ param_list ] ")" "->" lambda_body ;
+lambda_body     = block | expression ;
 
 tuple_literal   = "(" expression "," expression { "," expression } ")" ;
 array_literal   = "arr" "[" [ expression { "," expression } ] "]" ;
 legacy_array_literal = "[" [ expression { "," expression } ] "]" ;
-object_literal  = "obj" "{" [ object_field { "," object_field } ] "}" ;
-object_field    = static_object_key ":" expression
-                | "`" expression "`" ":" expression ;
-static_object_key
+inferred_struct_literal
+                = ( "struct" "infer" | "infer" "struct" )
+                  "{" [ struct_value_field { "," struct_value_field } ] "}" ;
+explicit_struct_literal
+                = "struct" "{"
+                  [ struct_field_spec { "," struct_field_spec } ]
+                  "}" "{"
+                  [ struct_value_field { "," struct_value_field } ]
+                  "}" ;
+struct_field_spec
+                = static_struct_key ":" type_ref ;
+struct_value_field
+                = static_struct_key ":" expression ;
+static_struct_key
                 = member_name | STRING_LITERAL ;
 
 literal         = INT_LITERAL | FLOAT_LITERAL | IMAG_LITERAL | STRING_LITERAL
@@ -436,13 +448,14 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      and single-fi "else if" as aliases. All forms lower to the same semantics.
    - "loop" and "block" are contextual statement keywords: outside the
      statement-plus-"{" form they remain legal callable names/references.
-   - Single- and double-quoted object keys are equivalent static string keys.
-     Reserved stop/do/done are legal static object/map/member keys.
-   - A backtick-delimited object key evaluates its enclosed expression at
-     runtime and requires a string value.
-   - An obj{} literal containing any dynamic key has DynamicStruct<T> type,
-     where T is the joined value type. DynamicStruct<T> accepts arbitrary
-     string keys and values assignable to T.
+   - Single- and double-quoted struct keys are equivalent static field names.
+     Reserved stop/do/done are legal static struct/member keys.
+   - Anonymous structs always have a closed compile-time-known field set.
+     struct infer{...} is canonical; infer struct {...} is an equivalent
+     compatibility spelling. Computed/backtick struct keys are rejected.
+   - DynamicStruct<T> and obj{...} are not language value forms. Open-ended
+     keyed collections must use a dedicated collection abstraction rather than
+     changing an anonymous struct's shape at runtime.
    - Each source file is a separately versioned compilation/code unit and is the
      default package identity when no explicit namespace is declared.
    - Source namespaces are flat: namespace a.b; is illegal.
@@ -545,15 +558,20 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      typed iterator snapshot without runtime type discovery. Object rest is
      allowed only when the source has a statically known record shape; its type
      is the compile-time record obtained by omitting all explicitly selected
-     members. DynamicStruct/object shapes with unknown keys cannot use rest
-     destructuring because AOT compilation must know the complete remainder type
-     without runtime reflection.
+     members. Anonymous struct shapes are always statically known, so object
+     rest destructuring never depends on runtime-discovered fields.
    - Sequence destructuring targets returned arrays/lists, finite tuple types,
      and statically typed iterable classes; object destructuring targets returned
      record/map-like values.
    - Destructuring is not currently permitted in callable parameter lists.
-   - Lambdas always have braces. Non-void lambdas must use explicit return and
-     return on every path when a contextual function result type is known.
+   - Lambdas may use either a braced block or a single expression body. A braced
+     lambda never implicitly returns its final statement: non-void block lambdas
+     must use explicit return and return on every path when a contextual result
+     type is known. An expression-bodied lambda returns its sole expression.
+   - A statement/declaration containing an expression-bodied lambda requires an
+     explicit ';' terminator; a newline is not an implicit terminator in that
+     case. Only an immediate '{' after '->' starts a lambda block, so prefixed
+     expressions such as future struct{...}{...} literals remain unambiguous.
    - named class/interface types are nominal by default.
    - structural Type name is the canonical opt-in for structural parameter
      typing. @Structural, name structural Type, and @AllowStructural(name) remain
@@ -572,7 +590,8 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - [Symbol.iterator]() may provide iterator behavior for for-of.
    - standalone null values are illegal.
    - null is a type marker only directly inside Option<null>.
-   - inline obj{} / arr[] values cannot be subclassed; extend Object/List.
+   - anonymous struct / arr[] values cannot be subclassed; extend Object/List
+     when nominal inheritance is required.
    - "structural" is contextual in parameter and callable-modifier positions, not globally reserved.
      Structural views are read-only borrows: they cannot be mut, cross async
      suspension, cross actor mailbox boundaries, or erase actor identity.

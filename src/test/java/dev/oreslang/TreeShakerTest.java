@@ -219,4 +219,100 @@ final class TreeShakerTest {
                 }
                 """, BuildOptions.executable(Map.of("use_a", "true"))));
     }
+
+    @Test
+    void treeShakingPreservesExplicitReferentMutability() {
+        TreeShaker.Result result = OresCompiler.compileForBuild("""
+                define class Child as
+                  pub let int value = 0;
+                end
+
+                define class Holder as
+                  pub const mut Child stable = new Child();
+                  pub let mut Child replaceable = new Child();
+                end
+
+                pub routine main(): void {
+                  val Holder holder = new Holder();
+                  holder.stable.value = 1;
+                  holder.replaceable.value = 2;
+                  return;
+                }
+                """, BuildOptions.executable(Map.of()));
+
+        Ast.ClassDecl holder = result.program().modules().stream()
+                .flatMap(module -> module.declarations().stream())
+                .filter(Ast.ClassDecl.class::isInstance)
+                .map(Ast.ClassDecl.class::cast)
+                .filter(klass -> klass.name().equals("Holder"))
+                .findFirst()
+                .orElseThrow();
+
+        Ast.FieldDecl stable = holder.fields().stream()
+                .filter(field -> field.name().equals("stable"))
+                .findFirst().orElseThrow();
+        Ast.FieldDecl replaceable = holder.fields().stream()
+                .filter(field -> field.name().equals("replaceable"))
+                .findFirst().orElseThrow();
+
+        assertEquals(Ast.BindingKind.CONST, stable.bindingKind());
+        assertTrue(stable.mutableReferent(), "const mut must survive tree rewriting");
+        assertEquals(Ast.BindingKind.LET, replaceable.bindingKind());
+        assertTrue(replaceable.mutableReferent(), "let mut must survive tree rewriting");
+    }
+
+
+    @Test
+    void treeShakingPreservesLocalSelectAndForOfMutability() {
+        TreeShaker.Result result = OresCompiler.compileForBuild("""
+                pub routine main(): void {
+                  const mut local = struct{foo: string}{foo: "a"};
+                  local.foo = "b";
+
+                  for let mut item of arr[1] do
+                    item = 2;
+                  done
+
+                  val Channel<int> input = Channel.new<int>(1);
+                  select {
+                    case val message = readch(input) -> { }
+                    default: { }
+                  }
+                  return;
+                }
+                """, BuildOptions.executable(Map.of()));
+
+        Ast.FunctionDecl main = result.program().modules().stream()
+                .flatMap(module -> module.declarations().stream())
+                .filter(Ast.FunctionDecl.class::isInstance)
+                .map(Ast.FunctionDecl.class::cast)
+                .filter(function -> function.name().equals("main"))
+                .findFirst().orElseThrow();
+
+        Ast.BindingStmt local = main.body().stream()
+                .filter(Ast.BindingStmt.class::isInstance)
+                .map(Ast.BindingStmt.class::cast)
+                .filter(binding -> binding.name().equals("local"))
+                .findFirst().orElseThrow();
+        assertEquals(Ast.BindingKind.CONST, local.kind());
+        assertTrue(local.mutableReferent());
+
+        Ast.ForOfStmt loop = main.body().stream()
+                .filter(Ast.ForOfStmt.class::isInstance)
+                .map(Ast.ForOfStmt.class::cast)
+                .findFirst().orElseThrow();
+        assertEquals(Ast.BindingKind.LET, loop.bindingKind());
+        assertTrue(loop.mutableReferent());
+
+        Ast.SelectStmt selected = main.body().stream()
+                .filter(Ast.SelectStmt.class::isInstance)
+                .map(Ast.SelectStmt.class::cast)
+                .findFirst().orElseThrow();
+        Ast.SelectArm read = selected.arms().stream()
+                .filter(arm -> arm.operation() == Ast.ChannelOperation.READ)
+                .findFirst().orElseThrow();
+        assertEquals(Ast.BindingKind.VAL, read.bindingKind());
+        assertTrue(read.mutableReferent());
+    }
+
 }

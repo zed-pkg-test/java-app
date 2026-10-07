@@ -47,7 +47,7 @@ final class OwnershipAndClosureTest {
                           return;
                         }
                         """)));
-        assertTrue(error.getMessage().contains("immutable parameter/binding"));
+        assertTrue(error.getMessage().contains("read-only binding"));
     }
 
     @Test
@@ -73,6 +73,52 @@ final class OwnershipAndClosureTest {
     }
 
     @Test
+    void explicitMutableMethodReceiverMayMutateSelf() throws Exception {
+        String output = run("""
+                define class Counter as
+                  pub let int value = 0;
+
+                  pub bump(self &mut Counter)(): void {
+                    self.value = self.value + 1;
+                    return;
+                  }
+                end
+
+                pub routine main(): void {
+                  let mut Counter counter = new Counter();
+                  counter.bump();
+                  counter.bump();
+                  stdio.stdout.write(counter.value);
+                  return;
+                }
+                """);
+        assertEquals("2", output);
+    }
+
+    @Test
+    void explicitMutableMethodReceiverRejectsImmutableOwner() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Counter as
+                          pub let int value = 0;
+
+                          pub bump(self &mut Counter)(): void {
+                            self.value = self.value + 1;
+                            return;
+                          }
+                        end
+
+                        fnc bad(): void {
+                          const Counter counter = new Counter();
+                          counter.bump();
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().contains("mutable method receiver"));
+    }
+
+    @Test
     void mutableBorrowAllowsMutationWithoutMovingOwner() throws Exception {
         String output = run("""
                 define class Bar as
@@ -85,7 +131,7 @@ final class OwnershipAndClosureTest {
                 }
 
                 pub routine main(): void {
-                  let Bar b = new Bar();
+                  let mut Bar b = new Bar();
                   change(&mut b);
                   stdio.stdout.write(b.foo);
                   return;
@@ -242,7 +288,7 @@ final class OwnershipAndClosureTest {
                 }
 
                 fnc ok(): void {
-                  let Bar b = new Bar();
+                  let mut Bar b = new Bar();
                   if true; do
                     val &Bar read = &b;
                     stdio.println(read.foo);
@@ -333,6 +379,63 @@ final class OwnershipAndClosureTest {
     }
 
     @Test
+    void nestedExpressionLambdaTransitivelyMovesOuterMoveOnlyCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub val int value = 7;
+                        end
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          val (() => (() => int)) outer = || -> || -> box.value;
+                          stdio.println(box.value);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("use of moved value 'box'"));
+    }
+
+    @Test
+    void nestedBlockLambdaTransitivelyMovesOuterMoveOnlyCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub val int value = 7;
+                        end
+
+                        fnc bad(): void {
+                          let Box box = new Box();
+                          val (() => (() => int)) outer = || -> {
+                            return || -> {
+                              return box.value;
+                            };
+                          };
+                          stdio.println(box.value);
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("use of moved value 'box'"));
+    }
+
+    @Test
+    void explicitNlexNestedLambdaDoesNotCreateTransitiveCapture() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                TypeChecker.check(Parser.parse("""
+                        fnc bad(): void {
+                          val int outer_value = 7;
+                          val (() => (() => int)) outer = || -> nlex || -> outer_value;
+                          return;
+                        }
+                        """)));
+
+        assertTrue(error.getMessage().contains("outer_value")
+                || error.getMessage().contains("unknown name"));
+    }
+
+    @Test
     void actorSelfBoundMethodCannotEscapeMailboxTurn() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
                 TypeChecker.check(Parser.parse("""
@@ -348,6 +451,75 @@ final class OwnershipAndClosureTest {
                         """)));
 
         assertTrue(error.getMessage().contains("cannot escape its mailbox turn as a bound method"));
+    }
+
+
+    @Test
+    void ordinaryClassFieldProjectionIsAReadNotAnImplicitPartialMove() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Child as
+                  pub let String value = "a";
+                end
+
+                define class Holder as
+                  pub val Child child = new Child();
+                end
+
+                fnc ok(): void {
+                  val Holder holder = new Holder();
+                  val Child alias = holder.child;
+                  alias.value = "alias";
+                  holder.child.value = "owner";
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void ordinaryRecordFieldProjectionIsAReadNotAnImplicitPartialMove() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc seed(): string { return "a"; }
+
+                fnc ok(): void {
+                  val outer = obj{inner: obj{value: seed()}};
+                  val alias = outer.inner;
+                  alias.value = "alias";
+                  outer.inner.value = "owner";
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void ordinaryIndexedProjectionIsAReadNotAnImplicitPartialMove() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc seed(): string { return "a"; }
+
+                fnc ok(): void {
+                  val items = arr[obj{value: seed()}];
+                  val alias = items[0];
+                  alias.value = "alias";
+                  items[0].value = "owner";
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void copyFieldAndIndexedElementExtractionRemainLegal() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Numbers as
+                  pub val int answer = 42;
+                end
+
+                fnc ok(): int {
+                  val Numbers numbers = new Numbers();
+                  val int from_field = numbers.answer;
+                  val values = arr[1, 2, 3];
+                  val int from_index = values[1];
+                  return from_field + from_index;
+                }
+                """)));
     }
 
     private static String run(String program) throws Exception {

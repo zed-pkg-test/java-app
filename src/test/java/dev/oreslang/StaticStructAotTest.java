@@ -1,0 +1,158 @@
+package dev.oreslang;
+
+import dev.oreslang.parser.Lexer;
+import dev.oreslang.parser.Parser;
+import dev.oreslang.parser.Token;
+import dev.oreslang.types.OwnershipChecker;
+import dev.oreslang.types.TypeChecker;
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.Source;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+final class StaticStructAotTest {
+
+    @Test
+    void reservedWordsRemainCallableNamesAndStaticStructKeys() {
+        var tokens = new Lexer("stop do done").scan();
+        assertEquals(Token.Type.STOP, tokens.get(0).type());
+        assertEquals(Token.Type.DO, tokens.get(1).type());
+        assertEquals(Token.Type.DONE, tokens.get(2).type());
+
+        assertDoesNotThrow(() -> check("""
+                define module app
+                  fnc stop(): int { return 1; }
+                  routine do(): int { return 2; }
+                  fnc done(): int { return 3; }
+
+                  pub fnc main(): int {
+                    const values = struct infer{stop: 4, 'do': 5, "done": 6};
+                    return stop() + do() + done()
+                        + values["stop"] + values["do"] + values["done"];
+                  }
+                end
+                """));
+    }
+
+    @Test
+    void bothInferredStructSpellingsAreClosedAndEquivalent() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  const left = struct infer{foo: "bar", answer: 42};
+                  const right = infer struct {foo: "bar", answer: 42};
+                  stdio.stdout.write(left.foo);
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(right.answer);
+                  return;
+                }
+                """);
+
+        assertEquals("bar:42", output);
+    }
+
+    @Test
+    void objLiteralIsRemovedWithStructMigrationDiagnostic() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        fnc bad(): void {
+                          const value = obj{foo: 1};
+                          return;
+                        }
+                        """));
+
+        assertTrue(error.getMessage().contains("obj{...} has been removed"), error.getMessage());
+        assertTrue(error.getMessage().contains("struct infer"), error.getMessage());
+    }
+
+    @Test
+    void computedStructKeysAreRejectedForAotShape() {
+        IllegalArgumentException first = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        fnc bad(string key): void {
+                          const value = struct infer{`key`: 1};
+                          return;
+                        }
+                        """));
+        assertTrue(first.getMessage().contains("statically named"), first.getMessage());
+
+        IllegalArgumentException second = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("""
+                        fnc bad(string key): void {
+                          const value = struct{foo: int}{`key`: 1};
+                          return;
+                        }
+                        """));
+        assertTrue(second.getMessage().contains("statically named")
+                        || second.getMessage().contains("declared fields"),
+                second.getMessage());
+    }
+
+    @Test
+    void dynamicStructTypeIsRemovedEvenWithoutConstruction() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        fnc bad(DynamicStruct<int> value): void {
+                          return;
+                        }
+                        """));
+
+        assertTrue(error.getMessage().contains("DynamicStruct has been removed"), error.getMessage());
+        assertTrue(error.getMessage().contains("AOT"), error.getMessage());
+    }
+
+    @Test
+    void inferredStructCannotGainFieldsOrMutationAuthority() {
+        assertThrows(IllegalArgumentException.class, () -> check("""
+                fnc bad(): void {
+                  const value = struct infer{foo: "bar"};
+                  value.bar = 1;
+                  return;
+                }
+                """));
+
+        IllegalArgumentException mutation = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        fnc bad(): void {
+                          const mut value = struct infer{foo: "bar"};
+                          value.foo = "baz";
+                          return;
+                        }
+                        """));
+        assertTrue(mutation.getMessage().contains("readonly")
+                        || mutation.getMessage().contains("struct infer"),
+                mutation.getMessage());
+    }
+
+    private static dev.oreslang.ast.Ast.Program check(String source) {
+        var program = Parser.parse(source);
+        TypeChecker.check(program);
+        OwnershipChecker.check(program);
+        return program;
+    }
+
+    private static String run(String program) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Source source = Source.newBuilder(
+                        OresLanguage.ID,
+                        program,
+                        "static-struct-aot.ores")
+                .mimeType(OresLanguage.MIME_TYPE)
+                .build();
+        try (Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false)
+                .out(output)
+                .build()) {
+            context.eval(source);
+        }
+        return output.toString(StandardCharsets.UTF_8);
+    }
+}
