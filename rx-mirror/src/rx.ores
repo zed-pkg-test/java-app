@@ -17,10 +17,24 @@ fnc marked(Channel<bool> marker): bool {
   return false;
 }
 
+// A source-level notification view: cancelled is distinct from natural end.
+define class StreamEvent<T> as
+  val String kind;
+  val Option<T> value;
+  constructor(String kind, Option<T> value) {
+    self.kind = kind;
+    self.value = value;
+  }
+  pub is_next(): bool { return self.kind == "next"; }
+  pub is_complete(): bool { return self.kind == "complete"; }
+  pub is_cancelled(): bool { return self.kind == "cancelled"; }
+end
+
 define class Subscription<T> as
   val Channel<bool> cancelled = Channel.new<bool>(1);
   val Channel<bool> finished = Channel.new<bool>(1);
   val Channel<bool> pulling = Channel.new<bool>(1);
+  val Channel<bool> disposed = Channel.new<bool>(1);
 
   pub next(): Option<T> {
     if marked(self.cancelled) || marked(self.finished); then
@@ -35,7 +49,7 @@ define class Subscription<T> as
       val Option<T> frame = self.pull();
       if frame.is_none(); then
         try writech self.finished, true;
-        self.dispose();
+        self.dispose_once();
       fi
       try writech settled, true;
       if marked(self.cancelled); then
@@ -44,13 +58,13 @@ define class Subscription<T> as
       return frame;
     } catch (err) {
       try writech self.finished, true;
-      self.dispose();
+      self.dispose_once();
       val Result<Option<T>, Object> failure = Err(err);
       return failure.expect("rx_channels upstream failed");
     } finally {
       if !marked(settled); then
         try writech self.finished, true;
-        self.dispose();
+        self.dispose_once();
       fi
       try readch self.pulling;
     }
@@ -64,11 +78,39 @@ define class Subscription<T> as
     return;
   }
 
+  // All termination paths share one cleanup claim, including pending-pull
+  // cancellation, natural completion, and the panic/finally path.
+  pub dispose_once(): void {
+    if !(try writech self.disposed, true); then
+      return;
+    fi
+    self.dispose();
+    return;
+  }
+
+  pub is_cancelled(): bool { return marked(self.cancelled); }
+  pub is_complete(): bool { return marked(self.finished) && !marked(self.cancelled); }
+
+  pub next_event(): StreamEvent<T> {
+    val Option<T> frame = self.next();
+    if frame.is_some(); then
+      return new StreamEvent<T>("next", frame);
+    fi
+    val Option<T> empty = None;
+    if marked(self.cancelled); then
+      return new StreamEvent<T>("cancelled", empty);
+    fi
+    return new StreamEvent<T>("complete", empty);
+  }
+
   pub cancel(): bool {
+    if marked(self.cancelled) || marked(self.finished); then
+      return false;
+    fi
     if !(try writech self.cancelled, true); then
       return false;
     fi
-    self.dispose();
+    self.dispose_once();
     return true;
   }
 end
@@ -87,7 +129,7 @@ end
 
 define class ValuesObservable<T> extends Observable<T> as
   val Array<T> values;
-  constructor(Array<T> values) { self.values = values; }
+  constructor(Array<T> values) { self.values = rt copy values; }
   pub subscribe(): Subscription<T> { return new ValuesSubscription<T>(self.values); }
 end
 
@@ -158,6 +200,38 @@ pub fnc from_channel<T>(Channel<Option<T>> input): Observable<T> {
 
 pub fnc from_values<T>(Array<T> values): Observable<T> {
   return new ValuesObservable<T>(values);
+}
+
+// Prefer this owned, checked sender when frame-protocol safety matters.
+// Raw send(channel)/complete(channel) remain legacy unchecked helpers.
+define class FramedSender<T> as
+  val Channel<Option<T>> output;
+  val Channel<bool> terminal = Channel.new<bool>(1);
+
+  constructor(Channel<Option<T>> output) { self.output = output; }
+
+  pub is_complete(): bool { return marked(self.terminal); }
+
+  pub send(T value): Future<void> {
+    if marked(self.terminal); then
+      val Result<bool, String> failure = Err("send after completion");
+      failure.expect("rx_channels.FramedSender.send");
+    fi
+    return nb writech self.output, Some(value);
+  }
+
+  pub complete(): Future<void> {
+    if !(try writech self.terminal, true); then
+      val Result<bool, String> failure = Err("duplicate completion");
+      failure.expect("rx_channels.FramedSender.complete");
+    fi
+    val Option<T> end_frame = None;
+    return nb writech self.output, end_frame;
+  }
+end
+
+pub fnc framed_sender<T>(Channel<Option<T>> output): FramedSender<T> {
+  return new FramedSender<T>(output);
 }
 
 pub fnc send<T>(Channel<Option<T>> output, T value): Future<void> {
@@ -404,9 +478,22 @@ pub fnc from_future<T>(Future<T> pending): Observable<T> {
   return new FutureObservable<T>(pending);
 }
 
+// Compatibility view: empty is None. Use first_required for a failed
+// stream-style first() when no element exists.
 pub fnc first<T>(Observable<T> source): Option<T> {
   val Subscription<T> sub = source.subscribe();
-  val Option<T> value = sub.next();
-  sub.cancel();
-  return value;
+  try {
+    return sub.next();
+  } finally {
+    sub.cancel();
+  }
+}
+
+pub fnc first_required<T>(Observable<T> source): T {
+  val Option<T> value = first(source);
+  if value.is_none(); then
+    val Result<T, String> failure = Err("empty stream");
+    return failure.expect("rx_channels.first_required");
+  fi
+  return value.unwrap();
 }
