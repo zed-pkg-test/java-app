@@ -86,44 +86,62 @@ pub fnc utf8_sequence_length(List<int> bytes, int index): int {
   return expected_width;
 }
 
-pub fnc utf8_is_valid(List<int> bytes): bool {
+// A single index-only scan avoids repeatedly moving an owned List<int> into
+// a helper from inside a loop. Shared Ores buffers use explicit borrow contracts
+// when the compiler provides cross-file borrow-signature lowering.
+// Returns Unicode scalar count, or -1 for invalid UTF-8.
+fnc utf8_scan(List<int> bytes): int {
   let int i = 0;
-
-  loop do
-    if i >= bytes.length then
-      break;
-    fi
-
-    let int width = utf8_sequence_length(bytes, i);
-    if width < 1 then
-      return false;
-    fi
-
-    i = i + width;
-  done
-
-  return true;
-}
-
-pub fnc utf8_codepoint_count(List<int> bytes): int {
   let int count = 0;
-  let int i = 0;
-
   loop do
     if i >= bytes.length then
       break;
     fi
 
-    let int width = utf8_sequence_length(bytes, i);
-    if width < 1 then
+    let int first = bytes[i];
+    let int width = utf8_expected_width(first);
+    if width < 1 || width > bytes.length - i then
       return -1;
     fi
+
+    let int j = 1;
+    loop do
+      if j >= width then
+        break;
+      fi
+      let int next = bytes[i + j];
+      if next < 128 || next > 191 then
+        return -1;
+      fi
+      if j == 1 then
+        if first == 224 && next < 160 then
+          return -1;
+        fi
+        if first == 237 && next > 159 then
+          return -1;
+        fi
+        if first == 240 && next < 144 then
+          return -1;
+        fi
+        if first == 244 && next > 143 then
+          return -1;
+        fi
+      fi
+      j = j + 1;
+    done
 
     count = count + 1;
     i = i + width;
   done
-
   return count;
+}
+
+pub fnc utf8_is_valid(List<int> bytes): bool {
+  return utf8_scan(bytes) >= 0;
+}
+
+pub fnc utf8_codepoint_count(List<int> bytes): int {
+  return utf8_scan(bytes);
 }
 
 pub fnc utf8_append_codepoint(
