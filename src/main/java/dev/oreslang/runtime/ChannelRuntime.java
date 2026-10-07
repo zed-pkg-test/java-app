@@ -413,7 +413,12 @@ public final class ChannelRuntime {
         }
 
         private void selected(int index, SelectPolicy policy) {
-            if (policy == SelectPolicy.FAIR && !cases.isEmpty()) {
+            if (policy == SelectPolicy.FAIR
+                    && !cases.isEmpty()
+                    && !(cases.get(index) instanceof DefaultCase)) {
+                // default is an idle probe, not a readiness winner. Letting it
+                // advance the cursor would make repeated empty polls bias which
+                // real arm wins when work eventually arrives.
                 fairCursor.set((index + 1L) % cases.size());
             }
         }

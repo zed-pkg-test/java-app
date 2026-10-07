@@ -241,7 +241,9 @@ select { ... }       // FAIR
 FAIR is deterministic round-robin over a stable select site/set. If more than
 one case is simultaneously ready, the next fairness cursor chooses the first
 probe position. Static select sites retain a rotation ticket across repeated
-executions; reusable dynamic SelectSet values retain their own cursor.
+executions; reusable dynamic SelectSet/SelectPlan values retain their own
+cursor. A `default` probe does not advance that cursor because it is an idle
+fallback rather than a readiness winner.
 
 Explicit strict priority:
 
@@ -389,13 +391,19 @@ returns `None` when no case is ready and leaves no registration behind.
 
 - `index`
 - `operation` (`read`, `write`, `await`, `timeout`, `cancelled`, or `default`)
-- `value: T` for compatibility/introspection; pattern matching is preferred
-  because the zero-payload variants do not contain a value
+- `value` as the legacy erased compatibility/introspection field
+- `payload: Option<T>` as the sound typed field; it is `Some(T)` for
+  `Read`/`Await` and `None` for `Write`/`Timeout`/`Cancelled`/`Default`
 
 Its constructor patterns are `Read(T)`, `Await(T)`, `Write`, `Timeout`,
 `Cancelled`, and `Default`. `T` is the union of value-producing readiness
 cases in the set/plan. For example, a `Channel<string>` read plus a
 `Future<int>` await yields `Select<string | int>`.
+
+Dynamic `SelectCase.await` currently requires a value-producing
+`Future<T>`; `Future<void>` is rejected because `Select<T>` has no unit-value
+representation yet. Static `when await future` still accepts `Future<void>`
+when the arm does not bind a result.
 
 A typical consumer is therefore:
 

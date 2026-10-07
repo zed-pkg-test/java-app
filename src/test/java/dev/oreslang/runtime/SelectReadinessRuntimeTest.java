@@ -205,6 +205,34 @@ final class SelectReadinessRuntimeTest {
         assertEquals(ChannelRuntime.SelectOperation.CANCELLED, fair.operation());
     }
 
+
+    @Test
+    void repeatedDefaultProbesDoNotBiasFairCursor() {
+        ChannelRuntime.Channel<Integer> first = new ChannelRuntime.Channel<>(2);
+        ChannelRuntime.Channel<Integer> second = new ChannelRuntime.Channel<>(2);
+        ChannelRuntime.SelectPlan plan = new ChannelRuntime.SelectPlan(List.of(
+                ChannelRuntime.read(first),
+                ChannelRuntime.defaultCase(),
+                ChannelRuntime.read(second)));
+
+        for (int i = 0; i < 5; i++) {
+            ChannelRuntime.SelectResult idle =
+                    plan.trySelect(ChannelRuntime.SelectPolicy.FAIR).orElseThrow();
+            assertEquals(ChannelRuntime.SelectOperation.DEFAULT, idle.operation());
+        }
+
+        assertTrue(first.tryWrite(1));
+        assertTrue(second.tryWrite(2));
+
+        ChannelRuntime.SelectResult firstReady =
+                plan.trySelect(ChannelRuntime.SelectPolicy.FAIR).orElseThrow();
+        ChannelRuntime.SelectResult secondReady =
+                plan.trySelect(ChannelRuntime.SelectPolicy.FAIR).orElseThrow();
+
+        assertEquals(0, firstReady.index());
+        assertEquals(2, secondReady.index());
+    }
+
     @Test
     void defaultBeatsOnlyUnreadyReadinessCases() {
         OresFuture<Integer> pending = new OresFuture<>();
