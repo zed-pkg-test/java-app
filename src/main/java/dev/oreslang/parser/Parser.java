@@ -2804,6 +2804,11 @@ public final class Parser {
                 && reservedCallableNameFollowedByInvocation(current)) {
             return new Ast.NameExpr(advance().lexeme());
         }
+        if (isContextualIdentifier("infer") && checkNext(STRUCT)) {
+            advance(); // contextual infer
+            consume(STRUCT, "expected 'struct' after infer");
+            return parseObjectLiteral(Ast.ObjectKind.INFERRED_STRUCT, List.of());
+        }
         if (match(IDENT, SHARED, UNTRUSTED)) {
             return new Ast.NameExpr(previous().lexeme());
         }
@@ -2818,10 +2823,6 @@ public final class Parser {
             throw error(previous(),
                     "obj{...} has been removed; use struct infer{...} for a closed inferred struct "
                             + "or struct{field: Type,...}{...} for an explicit closed struct");
-        }
-        if (match(INFER)) {
-            consume(STRUCT, "infer in expression position must be followed by struct");
-            return parseObjectLiteral(Ast.ObjectKind.INFERRED_STRUCT, List.of());
         }
         if (match(STRUCT)) {
             if (matchContextualKeyword("infer") || match(INFER)) {

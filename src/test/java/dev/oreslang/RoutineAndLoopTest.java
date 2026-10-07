@@ -140,7 +140,7 @@ final class RoutineAndLoopTest {
                 }
 
                 fnc main(): void {
-                  val branded = obj{markerBrand: "marking/branding"};
+                  const branded = struct infer{markerBrand: "marking/branding"};
                   stdio.println(structural(branded));
                   return;
                 }
@@ -156,7 +156,7 @@ final class RoutineAndLoopTest {
                 }
 
                 fnc main(): void {
-                  val branded = obj{markerBrand: "marking/branding"};
+                  const branded = struct infer{markerBrand: "marking/branding"};
                   stdio.println(nominal(branded));
                   return;
                 }

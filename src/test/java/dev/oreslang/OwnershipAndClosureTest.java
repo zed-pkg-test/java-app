@@ -481,7 +481,7 @@ final class OwnershipAndClosureTest {
                 fnc seed(): string { return "a"; }
 
                 fnc ok(): void {
-                  val outer = obj{inner: obj{value: seed()}};
+                  val outer = struct{inner: {value: string}}{inner: struct{value: string}{value: seed()}};
                   val alias = outer.inner;
                   alias.value = "alias";
                   outer.inner.value = "owner";
@@ -496,7 +496,7 @@ final class OwnershipAndClosureTest {
                 fnc seed(): string { return "a"; }
 
                 fnc ok(): void {
-                  val items = arr[obj{value: seed()}];
+                  val items = arr[struct{value: string}{value: seed()}];
                   val alias = items[0];
                   alias.value = "alias";
                   items[0].value = "owner";

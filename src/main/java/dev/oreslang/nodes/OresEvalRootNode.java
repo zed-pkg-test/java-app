@@ -3653,11 +3653,11 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof Map<?, ?> map) {
                 if (!(index instanceof String key)) {
                     throw new IllegalArgumentException(
-                            "object/map key must be a string");
+                            "struct/map key must be a string");
                 }
                 if (!map.containsKey(key)) {
                     throw new IllegalArgumentException(
-                            "unknown object/map key " + key);
+                            "unknown struct/map key " + key);
                 }
                 Object value = map.get(key);
                 if (value == UNINITIALIZED_FIELD) {
@@ -5254,12 +5254,17 @@ public final class OresEvalRootNode extends RootNode {
                 Object index = eval(indexed.index(), env);
                 if (receiver instanceof Map<?, ?> map) {
                     if (!(index instanceof String key)) {
-                        throw new IllegalArgumentException("object/map key must be a string");
+                        throw new IllegalArgumentException("struct/map key must be a string");
                     }
                     if (!map.containsKey(key)) {
-                        throw new IllegalArgumentException("unknown object/map key " + key);
+                        throw new IllegalArgumentException("unknown struct/map key " + key);
                     }
-                    return map.get(key);
+                    Object value = map.get(key);
+                    if (value == UNINITIALIZED_FIELD) {
+                        throw new IllegalArgumentException(
+                                "explicit struct field '" + key + "' is read before initialization");
+                    }
+                    return value;
                 }
                 if (!(index instanceof Number number)) throw new IllegalArgumentException("array/list index must be an integer");
                 int i = Math.toIntExact(number.longValue());
@@ -5798,7 +5803,22 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object unwrapHostArgument(Object value) {
-            return value instanceof HostObjectFacade host ? host.value() : value;
+            if (value instanceof HostObjectFacade host) return host.value();
+            if (value instanceof Map<?, ?> map) {
+                // Never hand Java a mutable alias to anonymous struct storage.
+                // A host call may observe the snapshot, but cannot add/remove
+                // fields behind the compiler's closed-shape invariant.
+                LinkedHashMap<Object, Object> snapshot = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    if (entry.getValue() == UNINITIALIZED_FIELD) {
+                        throw new IllegalArgumentException(
+                                "cannot pass a partially initialized explicit struct to Java interop");
+                    }
+                    snapshot.put(entry.getKey(), entry.getValue());
+                }
+                return java.util.Collections.unmodifiableMap(snapshot);
+            }
+            return value;
         }
 
         private RuntimeException hostInteropError(String operation, Exception failure) {
@@ -7484,7 +7504,10 @@ public final class OresEvalRootNode extends RootNode {
             implements OresMutex.SharedState {
         private final Map<String, Object> fields;
         private ReadonlyRecordValue(Map<String, Object> initial) {
-            this.fields = Map.copyOf(initial);
+            // Preserve declaration/inference order deterministically for AOT
+            // layout, diagnostics and structural traversal.
+            this.fields = java.util.Collections.unmodifiableMap(
+                    new LinkedHashMap<>(initial));
         }
         @Override public Set<Entry<String, Object>> entrySet() { return fields.entrySet(); }
         @Override public Object get(Object key) { return fields.get(key); }

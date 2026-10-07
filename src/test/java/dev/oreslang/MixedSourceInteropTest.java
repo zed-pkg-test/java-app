@@ -109,6 +109,45 @@ final class MixedSourceInteropTest {
     }
 
     @Test
+    void javaInteropCannotGrowClosedStructShape() throws Exception {
+        Path source = temp.resolve("closed-struct-interop.ores");
+        Files.writeString(source, """
+                java {
+                  final class StructProbe {
+                    @SuppressWarnings({"rawtypes", "unchecked"})
+                    public static boolean shapeIsProtected(java.util.Map value) {
+                      try {
+                        value.put("injected", 99);
+                        return false;
+                      } catch (UnsupportedOperationException expected) {
+                        return true;
+                      }
+                    }
+                  }
+                }
+
+                pub fnc main(): void {
+                  val value = struct{foo: int}{foo: 7};
+                  stdio.println(StructProbe.shapeIsProtected(value));
+                  stdio.println(value.foo);
+                  return;
+                }
+                """);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        LinkedProgramRunner.run(
+                source,
+                trustedMixedPolicy(),
+                ExecutionProfile.serverJit(),
+                Set.of(),
+                out,
+                new ByteArrayOutputStream());
+
+        String output = out.toString(StandardCharsets.UTF_8).replace("\r\n", "\n");
+        assertTrue(output.contains("true\n7\n"), output);
+    }
+
+    @Test
     void javaCallsOresAndPreservesJavaObjectIdentity() throws Exception {
         Path source = temp.resolve("MixedDemo.java");
         Files.writeString(source, """

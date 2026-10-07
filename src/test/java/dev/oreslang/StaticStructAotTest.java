@@ -109,6 +109,54 @@ final class StaticStructAotTest {
     }
 
     @Test
+    void dynamicStructCannotHideBehindAliasesOrGenericWrappers() {
+        IllegalArgumentException alias = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        type Legacy = DynamicStruct<int>;
+
+                        fnc bad(Legacy value): void {
+                          return;
+                        }
+                        """));
+        assertTrue(alias.getMessage().contains("DynamicStruct has been removed"), alias.getMessage());
+
+        IllegalArgumentException nested = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        fnc bad(Option<DynamicStruct<int>> value): void {
+                          return;
+                        }
+                        """));
+        assertTrue(nested.getMessage().contains("DynamicStruct has been removed"), nested.getMessage());
+    }
+
+    @Test
+    void duplicateStaticKeysAreRejectedAfterCanonicalization() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> check("""
+                        fnc bad(): void {
+                          const value = struct infer{foo: 1, "foo": 2};
+                          return;
+                        }
+                        """));
+        assertTrue(failure.getMessage().contains("duplicate"), failure.getMessage());
+    }
+
+    @Test
+    void inferredStructPreservesDeterministicFieldOrderAtRuntime() throws Exception {
+        String output = run("""
+                pub routine main(): void {
+                  const value = struct infer{first: 1, second: 2, third: 3};
+                  stdio.stdout.write(value);
+                  return;
+                }
+                """);
+        assertEquals("struct infer{first=1, second=2, third=3}", output);
+    }
+
+    @Test
     void inferredStructCannotGainFieldsOrMutationAuthority() {
         assertThrows(IllegalArgumentException.class, () -> check("""
                 fnc bad(): void {

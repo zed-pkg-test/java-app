@@ -30,7 +30,7 @@ final class PolyglotFeatureTest {
                     let answer = math.add(1, 2);
                     answer = answer + 4;
                     val values = arr[answer, 9];
-                    val person = obj{name: "ores"};
+                    const person = struct infer{name: "ores"};
                     val inherited = new B();
                     stdio.println(values[0]);
                     stdio.println(person.name);
