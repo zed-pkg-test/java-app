@@ -170,8 +170,7 @@ pub(crate) fn normalize(source: &str) -> Result<String, FormatError> {
             let operation = tokens.get(arm + 1).map(|t| t.text);
             let read = operation == Some("readch");
             let await_future = operation == Some("await");
-            let readiness_without_colon =
-                matches!(operation, Some("timeout" | "cancelled"));
+            let readiness_without_colon = matches!(operation, Some("timeout" | "cancelled"));
             if matches!(arm_keyword, "when" | "case")
                 && !matches!(
                     operation,

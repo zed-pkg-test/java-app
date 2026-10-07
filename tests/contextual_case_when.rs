@@ -96,7 +96,6 @@ fn contextual_assignments_in_legacy_unbraced_arms_are_not_arm_boundaries() {
     assert!(is_formatted(&formatted).unwrap());
 }
 
-
 #[test]
 fn formats_all_readiness_select_arm_kinds_and_canonicalizes_case() {
     let src = r#"do select {
