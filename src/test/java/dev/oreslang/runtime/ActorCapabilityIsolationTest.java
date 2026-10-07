@@ -226,31 +226,29 @@ final class ActorCapabilityIsolationTest {
         }
     }
     @Test
-    void privateActorCannotLaunderSharedMemoryThroughOwnMethodValue() {
-        Ast.Program program = TypeChecker.check(Parser.parse("""
-                isoactor PrivateWorker {
-                  pub fnc build_shared(): void {
-                    val shared = SharedMutex.new(1);
-                    stdio.println(shared);
-                    return;
-                  }
+    void privateActorCallbackCannotCaptureBorrowedSelf() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        isoactor PrivateWorker {
+                          pub fnc build_shared(): void {
+                            val shared = SharedMutex.new(1);
+                            stdio.println(shared);
+                            return;
+                          }
 
-                  pub fnc run(): void {
-                    val callback = || -> {
-                      self.build_shared();
-                      return;
-                    };
-                    callback();
-                    return;
-                  }
-                }
-                """));
+                          pub fnc run(): void {
+                            val callback = || -> {
+                              self.build_shared();
+                              return;
+                            };
+                            callback();
+                            return;
+                          }
+                        }
+                        """)));
 
-        SecurityException error = assertThrows(
-                SecurityException.class,
-                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
-
-        assertTrue(error.getMessage().contains("SHARED_MEMORY"));
+        assertTrue(error.getMessage().contains("closure cannot capture borrowed value 'self'"));
     }
 
     @Test
