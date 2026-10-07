@@ -1,2 +1,0 @@
-service_name = "litegraph-gpu-host"
-json_stdio = true
