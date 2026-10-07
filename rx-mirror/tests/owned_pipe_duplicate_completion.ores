@@ -1,0 +1,9 @@
+import * as rx_channels from '../src/rx.ores';
+import class FramedPipe from '../src/rx.ores';
+pub async fnc main(): void {
+  val FramedPipe<int> pipe = rx_channels.framed_pipe<int>(1);
+  val Future<void> finished = pipe.complete();
+  await finished;
+  pipe.complete();
+  return;
+}
