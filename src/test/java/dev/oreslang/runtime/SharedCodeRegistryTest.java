@@ -99,13 +99,13 @@ final class SharedCodeRegistryTest {
 
             long before = SharedCodeRegistry.process().parseInvocations("actor-image.ores", MINIMAL_PROGRAM);
             assertDoesNotThrow(a::start);
-            long afterFirst = SharedCodeRegistry.process().parseInvocations(a.source());
+            long afterFirst = SharedCodeRegistry.process().parseInvocations("actor-image.ores", MINIMAL_PROGRAM);
             assertEquals(before + 1, afterFirst,
                     "first evaluation should populate the shared parse/call-target cache");
 
             assertDoesNotThrow(b::start);
             assertEquals(afterFirst,
-                    SharedCodeRegistry.process().parseInvocations(a.source()),
+                    SharedCodeRegistry.process().parseInvocations("actor-image.ores", MINIMAL_PROGRAM),
                     "second context must reuse the cached parsed call target");
 
             first.retire(a.id());
