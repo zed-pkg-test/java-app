@@ -236,7 +236,10 @@ final class ActorCapabilityIsolationTest {
                   }
 
                   pub fnc run(): void {
-                    val callback = self.build_shared;
+                    val callback = || -> {
+                      self.build_shared();
+                      return;
+                    };
                     callback();
                     return;
                   }

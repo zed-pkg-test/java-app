@@ -40,7 +40,10 @@ isoactor InvalidPrivateCounter {
 
   // First-class function values must be scanned under the actor policy.
   pub fnc try_callback_indirection(): void {
-    val callback = self.make_shared_cell;
+    val callback = || -> {
+      self.make_shared_cell();
+      return;
+    };
     callback();
     return;
   }
