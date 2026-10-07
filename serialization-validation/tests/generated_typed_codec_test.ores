@@ -87,8 +87,8 @@ fnc encode_user(User user): Result<List<int>, EncodeError> {
   return encode(value_object(members), default_encode_options());
 }
 
-pub fnc run_generated_typed_codec_tests(): void {
-  val List<int> input = new List<int>(
+fnc user_json_bytes(): List<int> {
+  return new List<int>(
     123,
     34, 100, 105, 115, 112, 108, 97, 121, 78, 97, 109, 101, 34,
     58,
@@ -99,14 +99,19 @@ pub fnc run_generated_typed_codec_tests(): void {
     52, 50,
     125
   );
+}
 
-  let Result<User, ObjectCodecError> typed = decode_user(rt copy input);
+pub fnc run_generated_typed_codec_tests(): void {
+  val List<int> input = user_json_bytes();
+  val int expected_length = input.length;
+
+  let Result<User, ObjectCodecError> typed = decode_user(user_json_bytes());
   require_true(typed.is_err() == false, "generated typed decoder must succeed");
   val User typed_user = typed.unwrap();
   require_int(typed_user.age, 42, "generated typed decoder age");
 
   let Result<DecodedObject, ObjectCodecError> projected = decode_json_object(
-    rt copy input,
+    input,
     default_decode_options(),
     user_metadata(),
     default_validation_options()
@@ -140,6 +145,6 @@ pub fnc run_generated_typed_codec_tests(): void {
   val User user = new User(new Utf8Text(new List<int>(65, 108, 101, 120)), age.value);
   val Result<List<int>, EncodeError> encoded = encode_user(user);
   require_true(encoded.is_err() == false, "generated typed encoder must succeed");
-  require_int(encoded.unwrap().length, input.length, "generated typed JSON output length");
+  require_int(encoded.unwrap().length, expected_length, "generated typed JSON output length");
   return;
 }
