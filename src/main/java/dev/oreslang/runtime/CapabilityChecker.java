@@ -480,7 +480,6 @@ public final class CapabilityChecker {
         else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
         else if (expr instanceof Ast.ObjectExpr e) {
             for (Ast.ObjectField f : e.fields()) {
-                if (f.isDynamic()) checkExpr(f.dynamicName(), policy);
                 checkExpr(f.value(), policy);
             }
         }
