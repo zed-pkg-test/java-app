@@ -363,9 +363,12 @@ val SelectSet<int> set = SelectSet.new(cases);
 val Option<Select<int>> result = select from set;
 ```
 
-Runtime list/array and map values are accepted. For maps, value iteration order
-defines the case order used by `first` and the initial deterministic fair
-ordering.
+A single `SelectCase<T>`, runtime list/array, and map values are accepted in
+addition to `SelectSet<T>` and `SelectPlan<T>`. `SelectSet.new(plan)`
+creates a new snapshot set with an independent fairness cursor; `select from
+plan` executes the plan directly and preserves its cursor. For maps, value
+iteration order defines the case order used by `first` and the initial
+deterministic fair ordering.
 
 Dynamic policies use the same spellings:
 

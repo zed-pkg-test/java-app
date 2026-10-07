@@ -275,6 +275,36 @@ final class DynamicSelectOptionLanguageTest {
                 () -> OresCompiler.parseAndTypeCheck(unsoundlyAssumedCorrelation));
     }
 
+
+    @Test
+    void singleSelectCaseAndPlanToSetSnapshotMatchTypecheckerSurface() throws Exception {
+        String program = """
+                pub fnc main(): void {
+                  val Channel<int> first = Channel.new<int>(1);
+                  writech first, 41;
+
+                  val Option<Select<int>> direct =
+                      try select first from SelectCase.read(first);
+                  stdio.stdout.write(direct.unwrap().payload.unwrap());
+
+                  val Channel<int> second = Channel.new<int>(1);
+                  writech second, 42;
+                  val SelectPlan<int> plan =
+                      SelectPlan.new(SelectCase.read(second));
+                  val SelectSet<int> set = SelectSet.new(plan);
+                  val Option<Select<int>> snapped =
+                      try select first from set;
+
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(snapped.unwrap().payload.unwrap());
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+        assertEquals("41:42", run(program));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "select-option.ores")

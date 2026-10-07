@@ -4776,6 +4776,12 @@ public final class OresEvalRootNode extends RootNode {
 
         private ChannelRuntime.SelectSet asSelectSet(Object value) {
             if (value instanceof ChannelRuntime.SelectSet set) return set;
+            if (value instanceof ChannelRuntime.SelectPlan plan) {
+                return new ChannelRuntime.SelectSet(plan.cases());
+            }
+            if (value instanceof ChannelRuntime.SelectCase selectCase) {
+                return new ChannelRuntime.SelectSet(List.of(selectCase));
+            }
 
             ArrayList<ChannelRuntime.SelectCase> cases = new ArrayList<>();
             if (value instanceof List<?> list) {
@@ -4793,7 +4799,7 @@ public final class OresEvalRootNode extends RootNode {
                 return new ChannelRuntime.SelectSet(cases);
             }
             throw new IllegalArgumentException(
-                    "dynamic select requires SelectSet or list/map of SelectCase values");
+                    "dynamic select requires SelectCase, SelectPlan, SelectSet, or list/map of SelectCase values");
         }
 
         private ChannelRuntime.SelectCase requireSelectCase(Object value) {
@@ -8020,6 +8026,9 @@ public final class OresEvalRootNode extends RootNode {
             if (source instanceof ChannelRuntime.SelectSet set) {
                 return new ChannelRuntime.SelectPlan(set.cases());
             }
+            if (source instanceof ChannelRuntime.SelectCase selectCase) {
+                return new ChannelRuntime.SelectPlan(List.of(selectCase));
+            }
             if (source instanceof List<?> list) {
                 ArrayList<ChannelRuntime.SelectCase> cases = new ArrayList<>(list.size());
                 for (Object item : list) cases.add(owner.requireSelectCase(item));
@@ -8039,7 +8048,7 @@ public final class OresEvalRootNode extends RootNode {
                 return new ChannelRuntime.SelectPlan(cases);
             }
             throw new IllegalArgumentException(
-                    "SelectPlan.new expects SelectSet or list/map of SelectCase values");
+                    "SelectPlan.new expects SelectCase, SelectSet, SelectPlan, or list/map of SelectCase values");
         }
     }
 
