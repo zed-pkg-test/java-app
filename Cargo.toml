@@ -1,14 +1,27 @@
 [package]
-name = "litegraph-node"
+name = "oreslang-format"
 version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+edition = "2024"
+rust-version = "1.85"
+description = "The canonical formatter for Oreslang source files"
+license = "MIT"
+repository = "https://github.com/ores-truffle-oreslang/oreslang-format"
+keywords = ["oreslang", "formatter", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
-[dependencies]
-async-trait = "0.1"
-axum = "0.8"
-litegraph-gpu-host = { path = "vendor/litegraph-gpu-host" }
-litegraph-modeld = { path = "vendor/litegraph-modeld" }
-litegraph-runtime = { path = "vendor/litegraph-runtime" }
-serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+[lib]
+name = "oreslang_format"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oresfmt"
+path = "src/bin/oresfmt.rs"
+
+[[bin]]
+name = "oreslang-format"
+path = "src/bin/oreslang-format.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
