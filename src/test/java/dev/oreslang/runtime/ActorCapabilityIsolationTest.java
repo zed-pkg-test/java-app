@@ -71,17 +71,17 @@ final class ActorCapabilityIsolationTest {
     }
 
     @Test
-    void privateActorCannotLaunderSharedMemoryThroughOrdinaryHelperFunction() {
+    void privateActorCannotLaunderSharedMemoryThroughOwnHelperMethod() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
-                fnc build_shared(): void {
-                  val shared = SharedMutex.new(1);
-                  stdio.println(shared);
-                  return;
-                }
-
                 isoactor PrivateWorker {
+                  pub fnc build_shared(): void {
+                    val shared = SharedMutex.new(1);
+                    stdio.println(shared);
+                    return;
+                  }
+
                   pub fnc run(): void {
-                    build_shared();
+                    self.build_shared();
                     return;
                   }
                 }
@@ -226,17 +226,17 @@ final class ActorCapabilityIsolationTest {
         }
     }
     @Test
-    void privateActorCannotLaunderSharedMemoryThroughFunctionValue() {
+    void privateActorCannotLaunderSharedMemoryThroughOwnMethodValue() {
         Ast.Program program = TypeChecker.check(Parser.parse("""
-                fnc build_shared(): void {
-                  val shared = SharedMutex.new(1);
-                  stdio.println(shared);
-                  return;
-                }
-
                 isoactor PrivateWorker {
+                  pub fnc build_shared(): void {
+                    val shared = SharedMutex.new(1);
+                    stdio.println(shared);
+                    return;
+                  }
+
                   pub fnc run(): void {
-                    val callback = build_shared;
+                    val callback = self.build_shared;
                     callback();
                     return;
                   }

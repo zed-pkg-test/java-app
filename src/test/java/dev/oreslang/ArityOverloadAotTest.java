@@ -323,12 +323,20 @@ final class ArityOverloadAotTest {
                     return self.base + delta;
                   }
 
+                  private call0(Fnc<int> callback) : int {
+                    return callback();
+                  }
+
+                  private call1(Fnc<int, int> callback) : int {
+                    return callback(5);
+                  }
+
                   pub via_self0() : int {
-                    return call0(self.pick);
+                    return self.call0(self.pick);
                   }
 
                   pub via_self1() : int {
-                    return call1(self.pick);
+                    return self.call1(self.pick);
                   }
 
                   pub static fnc select() : int {

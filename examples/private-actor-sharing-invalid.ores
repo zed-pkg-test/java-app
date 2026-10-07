@@ -3,12 +3,6 @@
 
 type SharedCounterCell = SharedMutex<int>;
 
-fnc make_shared_cell(): void {
-  val shared = SharedMutex.new(10);
-  stdio.println(shared.is_poisoned());
-  return;
-}
-
 define class Helpers as
   pub static fnc make_shared(): void {
     val shared = SharedMutex.new(11);
@@ -18,6 +12,14 @@ define class Helpers as
 end
 
 isoactor InvalidPrivateCounter {
+  // Actor-owned helper: compile-valid under the lexical boundary but still
+  // capability-invalid because PRIVATE actors cannot regain SHARED_MEMORY.
+  pub fnc make_shared_cell(): void {
+    val shared = SharedMutex.new(10);
+    stdio.println(shared.is_poisoned());
+    return;
+  }
+
   // Type-alias laundering must be rejected.
   pub fnc accept_alias(SharedCounterCell cell): void {
     return;
@@ -32,13 +34,13 @@ isoactor InvalidPrivateCounter {
 
   // Direct helper indirection must not regain SHARED_MEMORY.
   pub fnc try_helper_indirection(): void {
-    make_shared_cell();
+    self.make_shared_cell();
     return;
   }
 
   // First-class function values must be scanned under the actor policy.
   pub fnc try_callback_indirection(): void {
-    val callback = make_shared_cell;
+    val callback = self.make_shared_cell;
     callback();
     return;
   }

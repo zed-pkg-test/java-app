@@ -224,13 +224,15 @@ final class GeneratorLanguageTest {
                 }
 
                 define class Bag as
-                  pub [Symbol.asyncIterator](): AsyncGenerator<int> {
-                    return stream();
+                  val AsyncIterator<int> source;
+
+                  pub [Symbol.asyncIterator](): AsyncIterator<int> {
+                    return self.source;
                   }
                 end
 
                 pub async routine main(): void {
-                  val bag = new Bag();
+                  val bag = new Bag(stream());
                   for await const item of bag {
                     stdio.stdout.write(item);
                   }
