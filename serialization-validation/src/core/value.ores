@@ -114,13 +114,12 @@ pub fnc value_number_lexeme(List<int> lexeme): Value {
 }
 
 pub fnc int_to_decimal_bytes(int value): List<int> {
-  let List<int> output = new List<int>();
-
+  // Do not move the accumulator along an early-return path and later reuse it.
   if value == 0 then
-    output.push(48);
-    return output;
+    return new List<int>(48);
   fi
 
+  let List<int> output = new List<int>();
   let int current = value;
   if current < 0 then
     output.push(45);
