@@ -105,6 +105,61 @@ final class DynamicSelectOptionLanguageTest {
         assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
     }
 
+    @Test
+    void typedSelectResultSupportsPatternMatchingAcrossReadinessKinds() throws Exception {
+        String program = """
+                async fnc ready(): int {
+                  return 9;
+                }
+
+                pub fnc main(): void {
+                  val Channel<int> messages = Channel.new<int>(1);
+                  writech messages, 7;
+                  val Future<int> future = ready();
+                  val CancellationToken token = CancellationToken.new();
+
+                  val SelectPlan<int> plan = SelectPlan.new([
+                    SelectCase.read(messages),
+                    SelectCase.await(future),
+                    SelectCase.timeout(1000000000),
+                    SelectCase.cancelled(token)
+                  ]);
+
+                  val Option<Select<int>> result = try select first from plan;
+
+                  match result over
+                    on Some(Read(int value)) -> {
+                      stdio.stdout.write("read:");
+                      stdio.stdout.write(value);
+                    }
+                    on Some(Await(int value)) -> {
+                      stdio.stdout.write("await:");
+                      stdio.stdout.write(value);
+                    }
+                    on Some(Write) -> {
+                      stdio.stdout.write("write");
+                    }
+                    on Some(Timeout) -> {
+                      stdio.stdout.write("timeout");
+                    }
+                    on Some(Cancelled) -> {
+                      stdio.stdout.write("cancelled");
+                    }
+                    on Some(Default) -> {
+                      stdio.stdout.write("default");
+                    }
+                    on None -> {
+                      stdio.stdout.write("none");
+                    }
+                  end
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+        assertEquals("read:7", run(program));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "select-option.ores")

@@ -95,7 +95,7 @@ public final class TypeChecker {
         Set<String> localNames = new HashSet<>(Set.of(
                 "stdio", "process", "actor", "fs", "File", "network", "net", "http", "env",
                 "print", "Some", "None", "Ok", "Err", "And", "Or", "Xor", "BooleanOps",
-                "Mutex", "SharedMutex", "Channel", "CancellationToken", "SelectCase", "SelectSet", "SelectPlan", "SelectResult", "Object", "List", "Option", "Result", "Future",
+                "Mutex", "SharedMutex", "Channel", "CancellationToken", "SelectCase", "SelectSet", "SelectPlan", "Select", "SelectResult", "Object", "List", "Option", "Result", "Future",
                 "Iterator", "AsyncIterator", "IteratorResult", "Generator", "AsyncGenerator",
                 "int", "uint", "float", "decimal", "complex", "bool", "boolean", "String", "void",
                 "self", "null"));
@@ -1685,10 +1685,10 @@ public final class TypeChecker {
                         if (call.arguments().size() != 1) {
                             throw new IllegalArgumentException("SelectCase.read expects one Channel<T>");
                         }
-                        channelElementType(
+                        Type element = channelElementType(
                                 typeOf(call.arguments().getFirst(), env, generics, self),
                                 "SelectCase.read");
-                        yield new Named("SelectCase", List.of());
+                        yield new Named("SelectCase", List.of(element));
                     }
                     case "write" -> {
                         if (call.arguments().size() != 2) {
@@ -1702,7 +1702,7 @@ public final class TypeChecker {
                                 typeOf(call.arguments().get(1), env, generics, self),
                                 element,
                                 "SelectCase.write value");
-                        yield new Named("SelectCase", List.of());
+                        yield new Named("SelectCase", List.of(Primitive.VOID));
                     }
                     case "await" -> {
                         if (call.arguments().size() != 1) {
@@ -1716,7 +1716,7 @@ public final class TypeChecker {
                             throw new IllegalArgumentException(
                                     "SelectCase.await expects Future<T>; got " + awaited);
                         }
-                        yield new Named("SelectCase", List.of());
+                        yield new Named("SelectCase", List.of(future.arguments().getFirst()));
                     }
                     case "timeout" -> {
                         if (call.arguments().size() != 1) {
@@ -1727,7 +1727,7 @@ public final class TypeChecker {
                                 typeOf(call.arguments().getFirst(), env, generics, self),
                                 Primitive.INT,
                                 "SelectCase.timeout nanoseconds");
-                        yield new Named("SelectCase", List.of());
+                        yield new Named("SelectCase", List.of(Primitive.VOID));
                     }
                     case "cancelled" -> {
                         if (call.arguments().size() != 1) {
@@ -1740,13 +1740,13 @@ public final class TypeChecker {
                             throw new IllegalArgumentException(
                                     "SelectCase.cancelled expects CancellationToken; got " + token);
                         }
-                        yield new Named("SelectCase", List.of());
+                        yield new Named("SelectCase", List.of(Primitive.VOID));
                     }
                     case "default" -> {
                         if (!call.arguments().isEmpty()) {
                             throw new IllegalArgumentException("SelectCase.default expects no arguments");
                         }
-                        yield new Named("SelectCase", List.of());
+                        yield new Named("SelectCase", List.of(Primitive.VOID));
                     }
                     default -> throw new IllegalArgumentException(
                             "unknown SelectCase constructor '" + selectCaseCall.member() + "'");
@@ -1764,8 +1764,8 @@ public final class TypeChecker {
                     throw new IllegalArgumentException(
                             "SelectSet.new expects one list/map of SelectCase values");
                 }
-                typeOf(call.arguments().getFirst(), env, generics, self);
-                return new Named("SelectSet", List.of());
+                Type source = deref(typeOf(call.arguments().getFirst(), env, generics, self));
+                return new Named("SelectSet", List.of(selectPayloadType(source)));
             }
 
             if (call.callee() instanceof Ast.MemberExpr selectPlanCall
@@ -1780,28 +1780,7 @@ public final class TypeChecker {
                             "SelectPlan.new expects SelectSet or list/map of SelectCase values");
                 }
                 Type source = deref(typeOf(call.arguments().getFirst(), env, generics, self));
-                if (source instanceof Named named
-                        && (named.name().equals("SelectSet")
-                            || named.name().equals("SelectPlan"))) {
-                    return new Named("SelectPlan", List.of());
-                }
-                if (source instanceof ListType list) {
-                    Type element = deref(list.element());
-                    if (element != Unknown.INSTANCE
-                            && (!(element instanceof Named named)
-                                || !named.name().equals("SelectCase"))) {
-                        throw new IllegalArgumentException(
-                                "SelectPlan.new list elements must be SelectCase; got " + element);
-                    }
-                    return new Named("SelectPlan", List.of());
-                }
-                // Map/object values are validated at runtime until map value
-                // generics become first-class in the checker.
-                if (source instanceof Record || source == Unknown.INSTANCE) {
-                    return new Named("SelectPlan", List.of());
-                }
-                throw new IllegalArgumentException(
-                        "SelectPlan.new expects SelectSet or list/map of SelectCase values; got " + source);
+                return new Named("SelectPlan", List.of(selectPayloadType(source)));
             }
 
             if (call.callee() instanceof Ast.MemberExpr futureCall
@@ -2256,13 +2235,14 @@ public final class TypeChecker {
 
             Type selectedReceiver = deref(receiver);
             if (selectedReceiver instanceof Named selected
-                    && selected.name().equals("SelectResult")) {
+                    && selected.name().equals("Select")
+                    && selected.arguments().size() == 1) {
                 return switch (member.member()) {
                     case "index" -> Primitive.INT;
                     case "operation" -> Primitive.STRING;
-                    case "value" -> Unknown.INSTANCE;
+                    case "value" -> selected.arguments().getFirst();
                     default -> throw new IllegalArgumentException(
-                            "unknown SelectResult member '" + member.member() + "'");
+                            "unknown Select<T> member '" + member.member() + "'");
                 };
             }
 
@@ -2518,11 +2498,9 @@ public final class TypeChecker {
             };
         }
         if (expr instanceof Ast.DynamicSelectExpr selected) {
-            // Dynamic select accepts a SelectSet directly or a runtime
-            // list/map of SelectCase values. The exact case element type may
-            // remain Unknown until collection generic constraints are richer.
-            typeOf(selected.cases(), env, generics, self);
-            Type result = new Named("SelectResult", List.of());
+            Type source = deref(typeOf(selected.cases(), env, generics, self));
+            Type payload = selectPayloadType(source);
+            Type result = new Named("Select", List.of(payload));
             Type optional = new Named("Option", List.of(result));
             return switch (selected.mode()) {
                 case BLOCKING, IMMEDIATE -> optional;
@@ -2591,6 +2569,32 @@ public final class TypeChecker {
             return new Function(parameters, result);
         }
         return Unknown.INSTANCE;
+    }
+
+    private Type selectPayloadType(Type source) {
+        source = deref(source);
+        if (source == Unknown.INSTANCE) return Unknown.INSTANCE;
+        if (source instanceof ListType list) return selectPayloadType(list.element());
+        if (source instanceof Union union) {
+            ArrayList<Type> payloads = new ArrayList<>();
+            for (Type option : union.options()) {
+                Type payload = selectPayloadType(option);
+                if (payload != Primitive.VOID) payloads.add(payload);
+            }
+            return payloads.isEmpty() ? Primitive.VOID : Types.unionOf(payloads);
+        }
+        if (source instanceof Named named) {
+            if ((named.name().equals("SelectCase")
+                    || named.name().equals("SelectSet")
+                    || named.name().equals("SelectPlan"))
+                    && named.arguments().size() == 1) {
+                return named.arguments().getFirst();
+            }
+        }
+        if (source instanceof Record) return Unknown.INSTANCE;
+        throw new IllegalArgumentException(
+                "dynamic select requires SelectPlan<T>, SelectSet<T>, or a collection of SelectCase<T>; got "
+                        + source);
     }
 
     private Type channelElementType(Type channel, String where) {
@@ -3212,7 +3216,8 @@ public final class TypeChecker {
         if (named.name().equals("Mutex") || named.name().equals("MutexGuard") || named.name().equals("Future")
                 || named.name().equals("Channel") || named.name().equals("CancellationToken")
                 || named.name().equals("SelectCase") || named.name().equals("SelectSet")
-                || named.name().equals("SelectPlan") || named.name().equals("SelectResult")
+                || named.name().equals("SelectPlan") || named.name().equals("Select")
+                || named.name().equals("SelectResult")
                 || named.name().equals("Iterator") || named.name().equals("AsyncIterator")) {
             throw new IllegalArgumentException(
                     where + " cannot use " + named.name()
@@ -3505,6 +3510,11 @@ public final class TypeChecker {
                         ? List.of(named.arguments().get(0)) : null;
                 case "Err" -> named.name().equals("Result") && named.arguments().size() == 2
                         ? List.of(named.arguments().get(1)) : null;
+                case "Read", "Await" -> named.name().equals("Select") && named.arguments().size() == 1
+                        ? List.of(named.arguments().getFirst()) : null;
+                case "Write", "Timeout", "Cancelled", "Default" ->
+                        named.name().equals("Select") && named.arguments().size() == 1
+                                ? List.of() : null;
                 default -> null;
             };
             if (args == null) {
@@ -3673,6 +3683,13 @@ public final class TypeChecker {
         return false;
     }
 
+    private boolean isSelectConstructor(String constructor) {
+        return switch (constructor) {
+            case "Read", "Write", "Await", "Timeout", "Cancelled", "Default" -> true;
+            default -> false;
+        };
+    }
+
     private boolean patternsProvablyDisjoint(
             Ast.Pattern left, Ast.Pattern right, Type subject, Set<String> generics, Type self) {
         if (left instanceof Ast.WildcardPattern || right instanceof Ast.WildcardPattern
@@ -3686,6 +3703,12 @@ public final class TypeChecker {
                         || (a.constructor().equals("None") && b.constructor().equals("Some"))
                         || (a.constructor().equals("Ok") && b.constructor().equals("Err"))
                         || (a.constructor().equals("Err") && b.constructor().equals("Ok"))) return true;
+                if (subject instanceof Named selected
+                        && selected.name().equals("Select")
+                        && isSelectConstructor(a.constructor())
+                        && isSelectConstructor(b.constructor())) {
+                    return true;
+                }
             }
             return false;
         }
@@ -3758,21 +3781,84 @@ public final class TypeChecker {
             }
             return yes && no;
         }
-        if (subject instanceof Named named && named.name().equals("Option")) {
-            boolean some = false, none = false;
-            for (Ast.MatchArm arm : arms) if (arm.guard() == null && arm.pattern() instanceof Ast.ConstructorPattern c) {
-                some |= c.constructor().equals("Some");
-                none |= c.constructor().equals("None");
+        if (subject instanceof Named named
+                && named.name().equals("Option")
+                && named.arguments().size() == 1) {
+            boolean none = false;
+            ArrayList<Ast.MatchArm> someArms = new ArrayList<>();
+            for (Ast.MatchArm arm : arms) {
+                if (arm.guard() != null || !(arm.pattern() instanceof Ast.ConstructorPattern c)) continue;
+                if (c.constructor().equals("None") && c.arguments().isEmpty()) {
+                    none = true;
+                } else if (c.constructor().equals("Some") && c.arguments().size() == 1) {
+                    someArms.add(new Ast.MatchArm(
+                            c.arguments().getFirst(),
+                            null,
+                            List.of()));
+                }
             }
+            boolean some = !someArms.isEmpty()
+                    && matchProvablyExhaustive(
+                            someArms,
+                            named.arguments().getFirst(),
+                            generics,
+                            self);
             return some && none;
         }
-        if (subject instanceof Named named && named.name().equals("Result")) {
-            boolean ok = false, err = false;
-            for (Ast.MatchArm arm : arms) if (arm.guard() == null && arm.pattern() instanceof Ast.ConstructorPattern c) {
-                ok |= c.constructor().equals("Ok");
-                err |= c.constructor().equals("Err");
+        if (subject instanceof Named named
+                && named.name().equals("Result")
+                && named.arguments().size() == 2) {
+            ArrayList<Ast.MatchArm> okArms = new ArrayList<>();
+            ArrayList<Ast.MatchArm> errArms = new ArrayList<>();
+            for (Ast.MatchArm arm : arms) {
+                if (arm.guard() != null || !(arm.pattern() instanceof Ast.ConstructorPattern c)
+                        || c.arguments().size() != 1) continue;
+                if (c.constructor().equals("Ok")) {
+                    okArms.add(new Ast.MatchArm(c.arguments().getFirst(), null, List.of()));
+                }
+                if (c.constructor().equals("Err")) {
+                    errArms.add(new Ast.MatchArm(c.arguments().getFirst(), null, List.of()));
+                }
             }
+            boolean ok = !okArms.isEmpty()
+                    && matchProvablyExhaustive(
+                            okArms,
+                            named.arguments().get(0),
+                            generics,
+                            self);
+            boolean err = !errArms.isEmpty()
+                    && matchProvablyExhaustive(
+                            errArms,
+                            named.arguments().get(1),
+                            generics,
+                            self);
             return ok && err;
+        }
+        if (subject instanceof Named named
+                && named.name().equals("Select")
+                && named.arguments().size() == 1) {
+            Type payload = named.arguments().getFirst();
+            boolean read = false;
+            boolean write = false;
+            boolean await = false;
+            boolean timeout = false;
+            boolean cancelled = false;
+            boolean defaultCase = false;
+            for (Ast.MatchArm arm : arms) {
+                if (arm.guard() != null || !(arm.pattern() instanceof Ast.ConstructorPattern c)) continue;
+                switch (c.constructor()) {
+                    case "Read" -> read |= c.arguments().size() == 1
+                            && patternCoversType(c.arguments().getFirst(), payload, generics, self);
+                    case "Await" -> await |= c.arguments().size() == 1
+                            && patternCoversType(c.arguments().getFirst(), payload, generics, self);
+                    case "Write" -> write |= c.arguments().isEmpty();
+                    case "Timeout" -> timeout |= c.arguments().isEmpty();
+                    case "Cancelled" -> cancelled |= c.arguments().isEmpty();
+                    case "Default" -> defaultCase |= c.arguments().isEmpty();
+                    default -> { }
+                }
+            }
+            return read && write && await && timeout && cancelled && defaultCase;
         }
         return false;
     }
@@ -3806,6 +3892,19 @@ public final class TypeChecker {
                         self)) return false;
             }
             return true;
+        }
+        if (pattern instanceof Ast.ConstructorPattern constructor
+                && subject instanceof Named named) {
+            if (named.name().equals("Option") && named.arguments().size() == 1) {
+                if (constructor.constructor().equals("Some")
+                        && constructor.arguments().size() == 1) {
+                    return false;
+                }
+                return false;
+            }
+            if (named.name().equals("Select") && named.arguments().size() == 1) {
+                return false;
+            }
         }
         if (pattern instanceof Ast.LiteralPattern literal
                 && subject instanceof StringLiteral stringLiteral
@@ -5761,6 +5860,23 @@ public final class TypeChecker {
                 Type element = resolve(ref.arguments().getFirst(), generics, self);
                 yield new Named("Future", List.of(element));
             }
+            case "SelectCase", "SelectSet", "SelectPlan", "Select" -> {
+                if (ref.inferArguments() || ref.arguments().size() > 1) {
+                    throw new IllegalArgumentException(
+                            ref.name() + " accepts zero (legacy erased) or one explicit type argument");
+                }
+                yield new Named(
+                        ref.name(),
+                        List.of(ref.arguments().isEmpty()
+                                ? Unknown.INSTANCE
+                                : resolve(ref.arguments().getFirst(), generics, self)));
+            }
+            case "SelectResult" -> {
+                if (ref.inferArguments() || !ref.arguments().isEmpty()) {
+                    throw new IllegalArgumentException("SelectResult is the legacy erased select-result spelling and takes no type arguments");
+                }
+                yield new Named("Select", List.of(Unknown.INSTANCE));
+            }
             case "CancellationToken" -> {
                 if (ref.inferArguments() || !ref.arguments().isEmpty()) {
                     throw new IllegalArgumentException(
@@ -5860,6 +5976,14 @@ public final class TypeChecker {
         if (actual instanceof Generic actualGeneric) {
             return expected instanceof Generic expectedGeneric
                     && actualGeneric.name().equals(expectedGeneric.name());
+        }
+        if (actual instanceof Named sourceNamed && expected instanceof Named targetNamed) {
+            if (sourceNamed.name().equals("Select") && targetNamed.name().equals("SelectResult")) {
+                return true;
+            }
+            if (sourceNamed.name().equals("SelectResult") && targetNamed.name().equals("Select")) {
+                return true;
+            }
         }
         if (actual instanceof Union source) {
             return source.options().stream().allMatch(option -> assignable(option, expected));

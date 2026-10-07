@@ -6856,9 +6856,52 @@ public final class OresEvalRootNode extends RootNode {
                     if (!(value instanceof ResultValue result) || result.ok() || constructor.arguments().size() != 1) return false;
                     return patternMatches(constructor.arguments().getFirst(), result.value(), bindings);
                 }
+
+                String selectOperation = selectOperationName(value);
+                if (selectOperation != null) {
+                    return switch (name) {
+                        case "Read" -> selectOperation.equals("read")
+                                && constructor.arguments().size() == 1
+                                && patternMatches(
+                                        constructor.arguments().getFirst(),
+                                        selectResultValue(value),
+                                        bindings);
+                        case "Await" -> selectOperation.equals("await")
+                                && constructor.arguments().size() == 1
+                                && patternMatches(
+                                        constructor.arguments().getFirst(),
+                                        selectResultValue(value),
+                                        bindings);
+                        case "Write" -> selectOperation.equals("write")
+                                && constructor.arguments().isEmpty();
+                        case "Timeout" -> selectOperation.equals("timeout")
+                                && constructor.arguments().isEmpty();
+                        case "Cancelled" -> selectOperation.equals("cancelled")
+                                && constructor.arguments().isEmpty();
+                        case "Default" -> selectOperation.equals("default")
+                                && constructor.arguments().isEmpty();
+                        default -> false;
+                    };
+                }
                 return false;
             }
             return false;
+        }
+
+        private String selectOperationName(Object value) {
+            if (value instanceof SelectResultValue selected) {
+                return selected.operation();
+            }
+            if (value instanceof ChannelRuntime.SelectResult selected) {
+                return selected.operation().name().toLowerCase(java.util.Locale.ROOT);
+            }
+            return null;
+        }
+
+        private Object selectResultValue(Object value) {
+            if (value instanceof SelectResultValue selected) return selected.value();
+            if (value instanceof ChannelRuntime.SelectResult selected) return selected.value();
+            throw new IllegalArgumentException("value is not a select result");
         }
 
         private boolean structuralPatternMatches(Object value, Ast.TypeRef target) {
