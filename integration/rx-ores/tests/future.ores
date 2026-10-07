@@ -7,7 +7,7 @@ pub async fnc main(): void {
   writech input, 42;
 
   val Observable<int> source = rx.from_future(pending);
-  val Subscription<int> sub = source.subscribe();
+  let Subscription<int> sub = source.subscribe();
   stdio.println(sub.next().unwrap());
   stdio.println(sub.next().is_none());
   return;

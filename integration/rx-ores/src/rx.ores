@@ -9,7 +9,7 @@ define class Subscription<T> as
   let bool finished = false;
   let bool pulling = false;
 
-  pub next(): Option<T> {
+  pub next(mut self)(): Option<T> {
     if self.cancelled || self.finished; then
       return None;
     fi
@@ -36,15 +36,15 @@ define class Subscription<T> as
     }
   }
 
-  pub pull(): Option<T> {
+  pub pull(mut self)(): Option<T> {
     return None;
   }
 
-  pub dispose(): void {
+  pub dispose(mut self)(): void {
     return;
   }
 
-  pub cancel(): bool {
+  pub cancel(mut self)(): bool {
     if self.cancelled || self.finished; then
       return false;
     fi
@@ -74,7 +74,7 @@ define class ValuesSubscription<T> extends Subscription<T> as
     self.size = size;
   }
 
-  pub pull(): Option<T> {
+  pub pull(mut self)(): Option<T> {
     if self.cursor >= self.size; then
       return None;
     fi
@@ -108,7 +108,7 @@ define class FutureSubscription<T> extends Subscription<T> as
     self.pending = pending;
   }
 
-  pub pull(): Option<T> {
+  pub pull(mut self)(): Option<T> {
     if self.emitted; then
       return None;
     fi
@@ -151,7 +151,7 @@ define class MapSubscription<A, B> extends Subscription<B> as
     return Some(self.transform(frame.unwrap()));
   }
 
-  pub dispose(): void {
+  pub dispose(mut self)(): void {
     self.upstream.cancel();
     return;
   }
@@ -166,7 +166,7 @@ define class FilterSubscription<T> extends Subscription<T> as
     self.predicate = predicate;
   }
 
-  pub pull(): Option<T> {
+  pub pull(mut self)(): Option<T> {
     loop {
       val Option<T> frame = self.upstream.next();
       if frame.is_none(); then
@@ -179,7 +179,7 @@ define class FilterSubscription<T> extends Subscription<T> as
     }
   }
 
-  pub dispose(): void {
+  pub dispose(mut self)(): void {
     self.upstream.cancel();
     return;
   }
@@ -198,7 +198,7 @@ define class TakeSubscription<T> extends Subscription<T> as
     self.remaining = count;
   }
 
-  pub pull(): Option<T> {
+  pub pull(mut self)(): Option<T> {
     if self.remaining == 0; then
       self.upstream.cancel();
       return None;
@@ -217,7 +217,7 @@ define class TakeSubscription<T> extends Subscription<T> as
     return frame;
   }
 
-  pub dispose(): void {
+  pub dispose(mut self)(): void {
     self.upstream.cancel();
     return;
   }
@@ -278,7 +278,7 @@ pub fnc take<T>(Observable<T> source, int count): Observable<T> {
 }
 
 pub fnc first<T>(Observable<T> source): Option<T> {
-  val Subscription<T> sub = source.subscribe();
+  let Subscription<T> sub = source.subscribe();
   val Option<T> value = sub.next();
   sub.cancel();
   return value;

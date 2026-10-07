@@ -11,7 +11,7 @@ pub async fnc main(): void {
   };
   val Observable<int> selected = rx.filter(doubled, large);
   val Observable<int> limited = rx.take(selected, 2);
-  val Subscription<int> sub = limited.subscribe();
+  let Subscription<int> sub = limited.subscribe();
 
   stdio.println(sub.next().unwrap());
   stdio.println(sub.next().unwrap());
