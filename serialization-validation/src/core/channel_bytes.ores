@@ -52,11 +52,7 @@ pub async fnc collect_bytes_from_channel(
     val Future<Option<List<int>>> pending = nb readch input;
     val Option<List<int>> frame = await pending;
     if frame.is_none() then
-      return new ByteStreamResult(
-        true,
-        output,
-        new ByteStreamError("", 0, "")
-      );
+      break;
     fi
 
     val List<int> chunk = frame.unwrap();
@@ -91,4 +87,7 @@ pub async fnc collect_bytes_from_channel(
       output.push(byte);
     done
   done
+
+  // Transfer the buffer exactly once, after the loop completes at EOF.
+  return new ByteStreamResult(true, output, new ByteStreamError("", 0, ""));
 }
