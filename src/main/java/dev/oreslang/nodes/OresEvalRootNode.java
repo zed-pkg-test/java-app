@@ -2561,8 +2561,6 @@ public final class OresEvalRootNode extends RootNode {
                                     return;
                                 }
                                 try {
-                                    ChannelRuntime.SelectSet set =
-                                            asSelectSet(cases);
                                     ChannelRuntime.SelectPolicy policy =
                                             runtimeSelectPolicy(
                                                     selected.policy());
@@ -2570,7 +2568,9 @@ public final class OresEvalRootNode extends RootNode {
                                             == Ast.WaitMode.IMMEDIATE) {
                                         java.util.Optional<
                                                 ChannelRuntime.SelectResult> result =
-                                                set.trySelect(policy);
+                                                cases instanceof ChannelRuntime.SelectPlan plan
+                                                        ? plan.trySelect(policy)
+                                                        : asSelectSet(cases).trySelect(policy);
                                         continuation.accept(
                                                 t,
                                                 result.isPresent()
@@ -2585,7 +2585,9 @@ public final class OresEvalRootNode extends RootNode {
                                     }
                                     OresFuture<
                                             ChannelRuntime.SelectResult> future =
-                                            set.selectAsync(policy);
+                                            cases instanceof ChannelRuntime.SelectPlan plan
+                                                    ? plan.selectAsync(policy)
+                                                    : asSelectSet(cases).selectAsync(policy);
                                     if (selected.mode()
                                             == Ast.WaitMode.NONBLOCKING) {
                                         continuation.accept(
@@ -5128,6 +5130,7 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("CancellationToken")) return CancellationTokenFactory.INSTANCE;
                 if (name.name().equals("SelectCase")) return new SelectCaseFactory();
                 if (name.name().equals("SelectSet")) return new SelectSetFactory(this);
+                if (name.name().equals("SelectPlan")) return new SelectPlanFactory(this);
                 if (name.name().equals("Future")) return FutureFactory.INSTANCE;
                 if (name.name().equals("BooleanOps") && !modules.containsKey("BooleanOps")) {
                     return BooleanOpsNamespace.INSTANCE;
@@ -5413,8 +5416,31 @@ public final class OresEvalRootNode extends RootNode {
                 return evalChannelOperation(channelOp, env);
             }
             if (expr instanceof Ast.DynamicSelectExpr selected) {
-                ChannelRuntime.SelectSet set = asSelectSet(eval(selected.cases(), env));
+                Object source = eval(selected.cases(), env);
                 ChannelRuntime.SelectPolicy policy = runtimeSelectPolicy(selected.policy());
+
+                if (source instanceof ChannelRuntime.SelectPlan plan) {
+                    if (selected.mode() == Ast.WaitMode.IMMEDIATE) {
+                        java.util.Optional<ChannelRuntime.SelectResult> result =
+                                plan.trySelect(policy);
+                        return result.isPresent()
+                                ? new OptionValue(true, result.get())
+                                : new OptionValue(false, null);
+                    }
+
+                    OresFuture<ChannelRuntime.SelectResult> future =
+                            plan.selectAsync(policy);
+                    if (selected.mode() == Ast.WaitMode.NONBLOCKING) {
+                        return wrapFutureSome(future);
+                    }
+                    return new OptionValue(
+                            true,
+                            awaitBlockingChannelFuture(
+                                    future,
+                                    "dynamic select plan"));
+                }
+
+                ChannelRuntime.SelectSet set = asSelectSet(source);
                 if (selected.mode() == Ast.WaitMode.IMMEDIATE) {
                     java.util.Optional<ChannelRuntime.SelectResult> result =
                             set.trySelect(policy);
@@ -5653,6 +5679,12 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof SelectSetFactory factory) {
                 if (!name.equals("new")) {
                     throw new IllegalArgumentException("unknown SelectSet factory member " + name);
+                }
+                return (Invokable) factory::create;
+            }
+            if (receiver instanceof SelectPlanFactory factory) {
+                if (!name.equals("new")) {
+                    throw new IllegalArgumentException("unknown SelectPlan factory member " + name);
                 }
                 return (Invokable) factory::create;
             }
@@ -7916,6 +7948,37 @@ public final class OresEvalRootNode extends RootNode {
         private Object create(List<Object> args) {
             requireOne(args, "SelectSet.new");
             return owner.asSelectSet(args.getFirst());
+        }
+    }
+
+    private record SelectPlanFactory(Evaluator owner) {
+        private Object create(List<Object> args) {
+            requireOne(args, "SelectPlan.new");
+            Object source = args.getFirst();
+            if (source instanceof ChannelRuntime.SelectPlan plan) return plan;
+            if (source instanceof ChannelRuntime.SelectSet set) {
+                return new ChannelRuntime.SelectPlan(set.cases());
+            }
+            if (source instanceof List<?> list) {
+                ArrayList<ChannelRuntime.SelectCase> cases = new ArrayList<>(list.size());
+                for (Object item : list) cases.add(owner.requireSelectCase(item));
+                return new ChannelRuntime.SelectPlan(cases);
+            }
+            if (source instanceof Map<?, ?> map) {
+                ArrayList<ChannelRuntime.SelectCase> cases = new ArrayList<>(map.size());
+                for (Object item : map.values()) cases.add(owner.requireSelectCase(item));
+                return new ChannelRuntime.SelectPlan(cases);
+            }
+            if (source instanceof DynamicStructValue dynamic) {
+                ArrayList<ChannelRuntime.SelectCase> cases =
+                        new ArrayList<>(dynamic.fields.size());
+                for (Object item : dynamic.fields.values()) {
+                    cases.add(owner.requireSelectCase(item));
+                }
+                return new ChannelRuntime.SelectPlan(cases);
+            }
+            throw new IllegalArgumentException(
+                    "SelectPlan.new expects SelectSet or list/map of SelectCase values");
         }
     }
 

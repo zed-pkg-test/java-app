@@ -48,6 +48,63 @@ final class DynamicSelectOptionLanguageTest {
         assertEquals("true:7:true:9", run(program));
     }
 
+
+    @Test
+    void selectPlanReusesFairCursorAcrossLoopIterations() throws Exception {
+        String program = """
+                pub fnc main(): void {
+                  val Channel<int> first = Channel.new<int>(2);
+                  val Channel<int> second = Channel.new<int>(2);
+                  writech first, 10;
+                  writech first, 11;
+                  writech second, 20;
+                  writech second, 21;
+
+                  val SelectPlan plan = SelectPlan.new([
+                    SelectCase.read(first),
+                    SelectCase.read(second)
+                  ]);
+
+                  val Option<SelectResult> a = try select from plan;
+                  val Option<SelectResult> b = try select from plan;
+
+                  stdio.stdout.write(a.unwrap().index);
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(a.unwrap().value);
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(b.unwrap().index);
+                  stdio.stdout.write(":");
+                  stdio.stdout.write(b.unwrap().value);
+                  return;
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+        assertEquals("0:10:1:20", run(program));
+    }
+
+    @Test
+    void selectPlanAcceptsSelectSetAndHeterogeneousReadinessCases() {
+        String program = """
+                async fnc ready(): int {
+                  return 9;
+                }
+
+                fnc make(): SelectPlan {
+                  val CancellationToken token = CancellationToken.new();
+                  val Future<int> future = ready();
+                  val SelectSet set = SelectSet.new([
+                    SelectCase.await(future),
+                    SelectCase.timeout(1000000),
+                    SelectCase.cancelled(token)
+                  ]);
+                  return SelectPlan.new(set);
+                }
+                """;
+
+        assertDoesNotThrow(() -> OresCompiler.parseAndTypeCheck(program));
+    }
+
     private static String run(String program) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "select-option.ores")

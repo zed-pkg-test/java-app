@@ -95,7 +95,7 @@ public final class TypeChecker {
         Set<String> localNames = new HashSet<>(Set.of(
                 "stdio", "process", "actor", "fs", "File", "network", "net", "http", "env",
                 "print", "Some", "None", "Ok", "Err", "And", "Or", "Xor", "BooleanOps",
-                "Mutex", "SharedMutex", "Channel", "CancellationToken", "SelectCase", "SelectSet", "SelectResult", "Object", "List", "Option", "Result", "Future",
+                "Mutex", "SharedMutex", "Channel", "CancellationToken", "SelectCase", "SelectSet", "SelectPlan", "SelectResult", "Object", "List", "Option", "Result", "Future",
                 "Iterator", "AsyncIterator", "IteratorResult", "Generator", "AsyncGenerator",
                 "int", "uint", "float", "decimal", "complex", "bool", "boolean", "String", "void",
                 "self", "null"));
@@ -1360,7 +1360,10 @@ public final class TypeChecker {
                 return new Named(name.name(), List.of());
             }
             if (name.name().equals("Mutex") || name.name().equals("SharedMutex")
-                    || name.name().equals("Channel") || name.name().equals("SelectCase") || name.name().equals("SelectSet")) return new Named("$" + name.name() + "Factory", List.of());
+                    || name.name().equals("Channel") || name.name().equals("SelectCase")
+                    || name.name().equals("SelectSet") || name.name().equals("SelectPlan")) {
+                return new Named("$" + name.name() + "Factory", List.of());
+            }
             if (name.name().equals("CancellationToken")) return new Named("$CancellationTokenFactory", List.of());
             if (name.name().equals("Future")) return new Named("$FutureFactory", List.of());
             if (name.name().equals("BooleanOps") && !modules.containsKey("BooleanOps")) {
@@ -1763,6 +1766,42 @@ public final class TypeChecker {
                 }
                 typeOf(call.arguments().getFirst(), env, generics, self);
                 return new Named("SelectSet", List.of());
+            }
+
+            if (call.callee() instanceof Ast.MemberExpr selectPlanCall
+                    && selectPlanCall.receiver() instanceof Ast.NameExpr factory
+                    && factory.name().equals("SelectPlan")
+                    && selectPlanCall.member().equals("new")) {
+                if (call.typeArgumentsPresent()) {
+                    throw new IllegalArgumentException("SelectPlan.new does not accept type arguments");
+                }
+                if (call.arguments().size() != 1) {
+                    throw new IllegalArgumentException(
+                            "SelectPlan.new expects SelectSet or list/map of SelectCase values");
+                }
+                Type source = deref(typeOf(call.arguments().getFirst(), env, generics, self));
+                if (source instanceof Named named
+                        && (named.name().equals("SelectSet")
+                            || named.name().equals("SelectPlan"))) {
+                    return new Named("SelectPlan", List.of());
+                }
+                if (source instanceof ListType list) {
+                    Type element = deref(list.element());
+                    if (element != Unknown.INSTANCE
+                            && (!(element instanceof Named named)
+                                || !named.name().equals("SelectCase"))) {
+                        throw new IllegalArgumentException(
+                                "SelectPlan.new list elements must be SelectCase; got " + element);
+                    }
+                    return new Named("SelectPlan", List.of());
+                }
+                // Map/object values are validated at runtime until map value
+                // generics become first-class in the checker.
+                if (source instanceof Record || source == Unknown.INSTANCE) {
+                    return new Named("SelectPlan", List.of());
+                }
+                throw new IllegalArgumentException(
+                        "SelectPlan.new expects SelectSet or list/map of SelectCase values; got " + source);
             }
 
             if (call.callee() instanceof Ast.MemberExpr futureCall
@@ -3173,7 +3212,7 @@ public final class TypeChecker {
         if (named.name().equals("Mutex") || named.name().equals("MutexGuard") || named.name().equals("Future")
                 || named.name().equals("Channel") || named.name().equals("CancellationToken")
                 || named.name().equals("SelectCase") || named.name().equals("SelectSet")
-                || named.name().equals("SelectResult")
+                || named.name().equals("SelectPlan") || named.name().equals("SelectResult")
                 || named.name().equals("Iterator") || named.name().equals("AsyncIterator")) {
             throw new IllegalArgumentException(
                     where + " cannot use " + named.name()

@@ -2460,7 +2460,7 @@ public final class OwnershipChecker {
             case "i8","i16","i32","i64","u8","u16","u32","u64","int","uint","bigint",
                     "f32","f64","float","decimal","complex64","complex128","complex",
                     "bool","Bool","string","String","void","SharedMutex",
-                    "Channel","CancellationToken","SelectCase","SelectSet","OptionUnwrapError" -> true;
+                    "Channel","CancellationToken","SelectCase","SelectSet","SelectPlan","OptionUnwrapError" -> true;
             case "Option" -> type.arguments().size() == 1 && isCopyType(type.arguments().getFirst());
             case "Result" -> type.arguments().size() == 2
                     && isCopyType(type.arguments().get(0))

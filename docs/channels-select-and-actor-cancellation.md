@@ -63,7 +63,7 @@ Runtime-only continuation envelopes use the same mailbox channel but are never
 visible as guest messages. They have bounded reserved headroom so a full user
 mailbox cannot silently discard a resumed `nb select` arm.
 
-Public `Channel<T>`, `SelectCase`, and `SelectSet` values are
+Public `Channel<T>`, `SelectCase`, `SelectSet`, and `SelectPlan` values are
 **execution-domain-local capabilities** in this version. They cannot be sent
 through an actor mailbox or used as actor-callable parameters/results.
 Actor-to-actor communication remains `ActorRef`/mailbox transport. This avoids
@@ -328,7 +328,8 @@ cancellation, ownership, or fairness guarantees.
 
 ## Dynamic select
 
-Static and dynamic select lower to the same runtime `SelectSet` primitive.
+Static select, dynamic `SelectSet`, and reusable `SelectPlan` all lower to the
+same runtime arbitration machinery.
 
 Cases can be assembled at runtime:
 
@@ -386,8 +387,8 @@ returns `None` when no case is ready and leaves no registration behind.
 `SelectResult` exposes:
 
 - `index`
-- `operation` (`read`, `write`, or `default`)
-- `value` for a read result
+- `operation` (`read`, `write`, `await`, `timeout`, `cancelled`, or `default`)
+- `value` for `read` and successful `await` results
 
 The outer `Option` is intentionally part of the language-facing selection
 contract. It also composes uniformly with `trap` and Future APIs; the runtime
@@ -435,8 +436,35 @@ no required per-iteration observable behavior and the referenced channel/value
 bindings are stable. Otherwise the compiler must keep the original lowering.
 
 Dynamic selection can explicitly build a plan after constructing its runtime
-case list. Mutating the source list afterward does not mutate the plan; create a
-new plan for a changed case set. A later versioned dynamic-plan builder may
+case list:
+
+```ores
+val Channel<int> a = Channel.new<int>(16);
+val Channel<int> b = Channel.new<int>(16);
+
+val SelectPlan plan = SelectPlan.new([
+  SelectCase.read(a),
+  SelectCase.read(b)
+]);
+
+loop {
+  val Option<SelectResult> next = select from plan;
+  // The plan object and FAIR cursor are reused. This iteration gets a fresh
+  // winner generation and fresh wait registrations; stale waiters are never
+  // carried into the next iteration.
+}
+```
+
+This is the preferred hot-loop form when the case set is stable. `select from
+plan`, `nb select from plan`, and `try select from plan` execute the plan
+directly; they do not reconstruct a `SelectSet` from its cases on each
+iteration.
+
+`SelectPlan.new(SelectSet.new(cases))` is also valid. Construction snapshots
+the case descriptors. Mutating the source list afterward does not mutate the
+plan; create a new plan for a changed case set. A plan with `SelectCase.timeout`
+treats the timeout as a **relative duration per invocation**, so reusing a plan
+does not reuse an expired deadline. A later versioned dynamic-plan builder may
 support incremental add/remove/rebind without changing this snapshot contract.
 
 ## Cancellation
