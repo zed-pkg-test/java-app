@@ -58,6 +58,7 @@ final class ProxyRwLock {
     private record Grant(Waiter waiter, Lease lease) { }
 
     private final ArrayDeque<Waiter> waiters = new ArrayDeque<>();
+    private final ArrayDeque<Runnable> idleCallbacks = new ArrayDeque<>();
     private int activeReaders;
     private boolean writerActive;
 
@@ -105,19 +106,39 @@ final class ProxyRwLock {
     }
 
     /**
+     * Run an internal retirement callback once no logical lease is active and
+     * no waiter remains queued. The callback is never invoked while the lock's
+     * monitor is held.
+     */
+    void whenIdle(Runnable callback) {
+        Objects.requireNonNull(callback, "callback");
+        boolean runNow;
+        synchronized (this) {
+            runNow = !writerActive && activeReaders == 0 && waiters.isEmpty();
+            if (!runNow) idleCallbacks.addLast(callback);
+        }
+        if (runNow) callback.run();
+    }
+
+    /**
      * Fail all waiters that have not yet been granted. Active lease holders are
      * not force-revoked; their normal finally/close path still releases state.
      */
     void failWaiters(Throwable failure) {
         Objects.requireNonNull(failure, "failure");
         List<Waiter> failed;
+        List<Runnable> idle = List.of();
         synchronized (this) {
             failed = new ArrayList<>(waiters);
             waiters.clear();
+            if (!writerActive && activeReaders == 0) {
+                idle = drainIdleCallbacksLocked();
+            }
         }
         for (Waiter waiter : failed) {
             waiter.future.failFromRuntime(failure);
         }
+        runIdleCallbacks(idle);
     }
 
     private boolean canGrantNow(boolean write) {
@@ -154,6 +175,7 @@ final class ProxyRwLock {
 
     private void release(boolean write) {
         List<Grant> grants;
+        List<Runnable> idle = List.of();
         synchronized (this) {
             if (write) {
                 if (!writerActive) {
@@ -169,8 +191,15 @@ final class ProxyRwLock {
                 activeReaders--;
             }
             grants = drainLocked();
+            if (grants.isEmpty()
+                    && !writerActive
+                    && activeReaders == 0
+                    && waiters.isEmpty()) {
+                idle = drainIdleCallbacksLocked();
+            }
         }
         settleGrants(grants);
+        runIdleCallbacks(idle);
     }
 
     /**
@@ -200,6 +229,26 @@ final class ProxyRwLock {
             grants.add(new Grant(reader, new Lease(false)));
         }
         return grants;
+    }
+
+    private List<Runnable> drainIdleCallbacksLocked() {
+        if (idleCallbacks.isEmpty()) return List.of();
+        ArrayList<Runnable> callbacks = new ArrayList<>(idleCallbacks);
+        idleCallbacks.clear();
+        return callbacks;
+    }
+
+    private static void runIdleCallbacks(List<Runnable> callbacks) {
+        for (Runnable callback : callbacks) {
+            try {
+                callback.run();
+            } catch (VirtualMachineError | ThreadDeath fatal) {
+                throw fatal;
+            } catch (Throwable ignored) {
+                // Retirement callbacks are runtime bookkeeping. One failed
+                // cleanup must not corrupt the logical lock state machine.
+            }
+        }
     }
 
     private void settleGrants(List<Grant> grants) {
