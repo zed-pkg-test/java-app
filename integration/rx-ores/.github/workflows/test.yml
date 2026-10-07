@@ -1,0 +1,58 @@
+name: RX library and benchmark
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Authenticate private sibling repositories
+        env:
+          GH_TOKEN: ${{ secrets.ORES_COMPILER_READ_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo '::error::Set ORES_COMPILER_READ_TOKEN to a read-only token that can read ores-truffle-oreslang repositories.'
+            exit 1
+          fi
+          gh auth setup-git
+
+      - name: Build pinned compiler
+        env:
+          GH_TOKEN: ${{ secrets.ORES_COMPILER_READ_TOKEN }}
+        run: python3 scripts/setup.py
+
+      - name: Test pull/Future variant
+        run: |
+          source .work/env.sh
+          python3 scripts/test.py
+
+      - name: Fetch benchmark peers
+        env:
+          GH_TOKEN: ${{ secrets.ORES_COMPILER_READ_TOKEN }}
+        run: |
+          git clone --depth 1 --branch feat/callback-rx-20261006 \
+            https://github.com/ores-truffle-oreslang/rx-ores-callbacks.git ../rx-ores-callbacks
+          git clone --depth 1 --branch refactor/file-scope-rx-20261006 \
+            https://github.com/ores-truffle-oreslang/rx-oreslang-channels.git ../rx-oreslang-channels
+
+      - name: Validate peer libraries
+        run: |
+          source .work/env.sh
+          ORES_CLASSPATH="$ORES_CLASSPATH" python3 ../rx-ores-callbacks/scripts/test.py
+          ORES_CLASSPATH="$ORES_CLASSPATH" python3 ../rx-oreslang-channels/scripts/test.py
+
+      - name: Benchmark all three variants
+        run: |
+          source .work/env.sh
+          python3 bench/benchmark.py --warmups 2 --runs 7

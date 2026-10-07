@@ -1,0 +1,43 @@
+name: rx-ores-pr3-pointerless
+on:
+  pull_request:
+  push:
+    branches:
+      - ci/rx-ores-pr3-pointerless-20261006
+
+permissions:
+  contents: read
+
+jobs:
+  rx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact source trees
+        run: |
+          test "$(git rev-parse 'HEAD~3^{tree}')" = "0383eabe4f42d49e186338e307c8b5218b71a870"
+          test "$(git rev-parse HEAD:integration/rx-ores)" = "c23130e000d601cc55b508febb26281f5ef2bdc4"
+      - name: Build exact pinned compiler
+        run: |
+          mkdir -p .work
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=.work/rx-classpath.txt
+      - name: Test exact rx-ores PR tree
+        run: |
+          export ORES_CLASSPATH="$PWD/target/classes:$(cat .work/rx-classpath.txt)"
+          python3 integration/rx-ores/scripts/test.py
+          java --enable-native-access=ALL-UNNAMED \
+            -Dpolyglot.engine.WarnInterpreterOnly=false \
+            -cp "$ORES_CLASSPATH" dev.oreslang.launcher.OresMain \
+            --check integration/rx-ores/bench/pipeline.ores
