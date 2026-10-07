@@ -2177,6 +2177,11 @@ public final class ActorRuntime implements AutoCloseable {
                 throw fatal;
             } catch (RuntimeException | Error failure) {
                 completion.failFromRuntime(failure);
+                // A source actor that cannot publish its declared data result
+                // has violated the mailbox boundary. Fail-stop the actor just
+                // as retained-state accounting violations do; continuing would
+                // leave a behavior whose observable contract is already broken.
+                throw failure;
             }
         }
     }
