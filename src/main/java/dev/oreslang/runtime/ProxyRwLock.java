@@ -4,6 +4,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -136,7 +137,15 @@ final class ProxyRwLock {
             }
         }
         for (Waiter waiter : failed) {
-            waiter.future.failFromRuntime(failure);
+            if (failure instanceof CancellationException) {
+                // Teardown cancellation is semantically cancellation, not an
+                // exceptional producer failure. Preserve Future.join()/get()
+                // cancellation behavior rather than wrapping it in
+                // CompletionException/ExecutionException.
+                waiter.future.cancel(false);
+            } else {
+                waiter.future.failFromRuntime(failure);
+            }
         }
         runIdleCallbacks(idle);
     }
