@@ -196,13 +196,13 @@ Canonical explicit no-result static syntax:
 
 ```ores
 do select {
-  case readch incoming: let msg {
+  when readch incoming: let msg {
     stdio.println("Received:", msg);
   }
-  case writech outgoing, payload: {
+  when writech outgoing, payload: {
     stdio.println("Sent payload successfully");
   }
-  case readch shutdown: const signal {
+  when readch shutdown: const signal {
     return;
   }
 }
@@ -249,10 +249,10 @@ Explicit strict priority:
 
 ```ores
 select first {
-  case readch control: const command {
+  when readch control: const command {
     ...
   }
-  case readch data: let value {
+  when readch data: let value {
     ...
   }
 }
@@ -273,13 +273,13 @@ It cannot reverse a case that has already atomically won a readiness race.
 
 ```ores
 do nb select {
-  case readch incoming: let msg {
+  when readch incoming: let msg {
     stdio.println("Received:", msg);
   }
-  case readch payload: const body {
+  when readch payload: const body {
     stdio.println("Received payload:", body);
   }
-  case readch shutdown: const signal {
+  when readch shutdown: const signal {
     return;
   }
 }

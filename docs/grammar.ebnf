@@ -211,15 +211,23 @@ select_stmt     = ( "do" [ "nb" ] | [ select_wait_mode ] )
                   "{" select_arm { select_arm } [ select_default ] "}" ;
 select_wait_mode= "nb" | "try" ;
 select_policy   = "first" | "fair" | "random" ;
-select_arm      = "case" "readch" expression ":"
-                  [ binding_kind IDENT ] { statement }
-                | "case" "writech" expression "," expression ":"
-                  { statement } ;
-select_default  = "default" ":" { statement } ;
+select_arm_kw   = "when" | "case" ;
+select_arm      = select_arm_kw "readch" expression ":"
+                  [ binding_kind IDENT ] block
+                | select_arm_kw "writech" expression "," expression ":"
+                  block
+                | select_arm_kw "await" expression ":"
+                  [ binding_kind IDENT ] block
+                | select_arm_kw "timeout" select_duration block
+                | select_arm_kw "cancelled" expression block ;
+select_duration = ( INT_LITERAL | FLOAT_LITERAL )
+                  ( "ns" | "us" | "ms" | "s" | "m" | "h" ) ;
+select_default  = "default" ":" block ;
 
-(* In select_arm/select_default bodies, the next case/default or the closing
-   brace is a structural arm boundary and is not consumed as a nested
-   statement. At most one default arm is permitted. *)
+(* "when" is canonical inside select; legacy "case" is accepted for source
+   compatibility and oresfmt rewrites it to "when". Every arm body is braced.
+   readch/await may bind a selected value; timeout/cancelled deliberately use no
+   ':' separator before the block. At most one default arm is permitted. *)
 
 for_stmt        = "for" "(" for_of_head ")" loop_body
                 | "for" "(" c_for_head ")" loop_body
