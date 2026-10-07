@@ -2915,6 +2915,13 @@ public final class TypeChecker {
             boolean returnPosition,
             String where) {
         if (returnPosition && type == Primitive.VOID) return;
+        // Data-only synchronized Channel<T> handles are safe across async
+        // task boundaries; actor/mailbox transport remains separately fenced.
+        if (type instanceof Named named && named.name().equals("Channel")
+                && named.arguments().size() == 1
+                && isSharedSafe(named.arguments().getFirst(), new LinkedHashSet<>(), Map.of())) {
+            return;
+        }
         if (type == Primitive.VOID
                 || !isSharedSafe(type, new LinkedHashSet<>(), Map.of())) {
             throw new IllegalArgumentException(
