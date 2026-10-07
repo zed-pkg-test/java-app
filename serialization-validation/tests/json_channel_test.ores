@@ -18,10 +18,11 @@ pub async fnc run_json_channel_tests(): void {
   val Result<DecodedValue, DecodeError> decoded = await decode_task;
 
   require_true(decoded.is_err() == false, "channel JSON should decode");
-  require_int(decoded.unwrap().value.kind, 3, "channel JSON string kind");
-  require_int(decoded.unwrap().value.string_value.bytes.length, 2, "UTF-8 byte length");
-  require_int(decoded.unwrap().value.string_value.bytes[0], 195, "UTF-8 first byte");
-  require_int(decoded.unwrap().value.string_value.bytes[1], 169, "UTF-8 second byte");
+  val DecodedValue payload = decoded.unwrap();
+  require_int(payload.value.kind, 3, "channel JSON string kind");
+  require_int(payload.value.string_value.bytes.length, 2, "UTF-8 byte length");
+  require_int(payload.value.string_value.bytes[0], 195, "UTF-8 first byte");
+  require_int(payload.value.string_value.bytes[1], 169, "UTF-8 second byte");
 
   val Channel<Option<List<int>>> truncated = Channel.new<Option<List<int>>>(2);
   writech truncated, Some(new List<int>(123, 34, 120, 34, 58));
