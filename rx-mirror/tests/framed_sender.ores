@@ -13,8 +13,8 @@ pub async fnc main(): void {
   val StreamEvent<int> item = sub.next_event();
   stdio.println(item.is_next());
   stdio.println(item.value.unwrap());
-  val StreamEvent<int> end = sub.next_event();
-  stdio.println(end.is_complete());
+  val StreamEvent<int> terminal_event = sub.next_event();
+  stdio.println(terminal_event.is_complete());
   stdio.println(sub.is_complete());
   stdio.println(sub.cancel());
   return;
