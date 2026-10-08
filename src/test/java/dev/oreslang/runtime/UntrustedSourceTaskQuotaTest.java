@@ -174,6 +174,85 @@ final class UntrustedSourceTaskQuotaTest {
         }
     }
 
+    @Test
+    void cancellationClosesQuotaAndCannotResumeAnAwaitingGuestTask() throws Exception {
+        AtomicReference<OresFuture<Integer>> taskResult = new AtomicReference<>();
+        AtomicReference<Object> quotaAtFirstResume = new AtomicReference<>();
+        CountDownLatch published = new CountDownLatch(1);
+        CountDownLatch entered = new CountDownLatch(1);
+        AtomicInteger resumes = new AtomicInteger();
+        OresFuture<Integer> producer = new OresFuture<>();
+
+        try (SharedCodeImageStore store = new SharedCodeImageStore();
+             ActorRuntime runtime = new ActorRuntime()) {
+            var image = store.publish("quota-cancel.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            ActorRuntime.ActorCodeExecutor executor = new ActorRuntime.ActorCodeExecutor() {
+                @Override public SharedCodeImageStore.CodeImage codeImage() { return image; }
+                @Override public ActorRuntime.ActorOwnedGuestState initializeActor(
+                        String type, ActorRuntime.ActorContext<Object> context) {
+                    return context.self()::id;
+                }
+                @Override public void receiveActor(String type, ActorRuntime.ActorOwnedGuestState state,
+                        ActorRuntime.ActorInboxMail<Object> mail, ActorRuntime.ActorContext<Object> context) {
+                    taskResult.set(context.runtime().startActorTask(resume -> {
+                        resumes.incrementAndGet();
+                        quotaAtFirstResume.set(currentQuota());
+                        entered.countDown();
+                        if (!resume.initial()) {
+                            throw new AssertionError("cancelled source guest task was resumed");
+                        }
+                        return OresScheduler.await(producer);
+                    }));
+                    published.countDown();
+                }
+            };
+            var actor = runtime.spawnCodeActor(ActorRuntime.ActorKind.UNTRUSTED, executor, "Worker");
+            try {
+                actor.ready().get(5, TimeUnit.SECONDS);
+                actor.send("cancel");
+                assertTrue(published.await(5, TimeUnit.SECONDS));
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                var sourceTask = taskResult.get();
+                assertNotNull(sourceTask);
+                assertNotNull(quotaAtFirstResume.get());
+
+                assertTrue(sourceTask.cancel(false));
+                assertTrue(sourceTask.isCancelled());
+                assertTrue(quotaClosed(quotaAtFirstResume.get()),
+                        "cancelling a logical task must release its quota scope");
+                assertFalse(sourceTask.cancel(false), "task cancellation must settle exactly once");
+
+                producer.completeFromRuntime(42);
+                assertTrue(sourceTask.isCancelled());
+                assertEquals(1, resumes.get(), "a cancelled await cannot run guest code again");
+            } finally {
+                actor.cancel();
+                actor.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static Object currentQuota() {
+        try {
+            Field scope = ActorRuntime.class.getDeclaredField("CURRENT_UNTRUSTED_TASK_QUOTA");
+            scope.setAccessible(true);
+            return ((ThreadLocal<?>) scope.get(null)).get();
+        } catch (ReflectiveOperationException ex) {
+            throw new AssertionError("cannot inspect test-only quota scope", ex);
+        }
+    }
+
+    private static boolean quotaClosed(Object quota) {
+        try {
+            Field closed = quota.getClass().getDeclaredField("closed");
+            closed.setAccessible(true);
+            return closed.getBoolean(quota);
+        } catch (ReflectiveOperationException ex) {
+            throw new AssertionError("cannot inspect test-only quota completion", ex);
+        }
+    }
+
     private static void setActiveQuotaFuel(long fuel) {
         try {
             Field scope = ActorRuntime.class.getDeclaredField("CURRENT_UNTRUSTED_TASK_QUOTA");
