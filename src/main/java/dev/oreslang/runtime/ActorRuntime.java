@@ -6061,8 +6061,13 @@ public final class ActorRuntime implements AutoCloseable {
             if (bytes == 0) return;
             synchronized (lifecycleLock) {
                 long current = sharedMailboxBytes.get();
-                long next = Math.max(0L, current - bytes);
-                sharedMailboxBytes.set(next);
+                if (bytes > current) {
+                    throw new IllegalStateException(
+                            "shared actor mailbox memory accounting underflow for "
+                                    + ref.id()
+                                    + ": release=" + bytes + " used=" + current);
+                }
+                sharedMailboxBytes.set(current - bytes);
                 releaseSharedRuntimeBytes(bytes);
             }
         }
