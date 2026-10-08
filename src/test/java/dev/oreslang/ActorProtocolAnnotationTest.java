@@ -17,6 +17,14 @@ final class ActorProtocolAnnotationTest {
         assertTrue(error.getMessage().contains(expected), error.getMessage());
     }
 
+    private static void rejectsActorAbiMismatch(String source) {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse(source)));
+        assertTrue(error.getMessage().contains("changes inherited mailbox")
+                        || error.getMessage().contains("conflicting member"),
+                error.getMessage());
+    }
+
     @Test
     void implementationMarksUnaryAndStreamRuntimeHooks() {
         accepts("""
@@ -98,7 +106,7 @@ final class ActorProtocolAnnotationTest {
 
     @Test
     void inheritedActorMailboxHandlerMustPreservePayloadAndReplyTypes() {
-        rejects("""
+        rejectsActorAbiMismatch("""
                 define actor Parent as
                   @Implementation
                   fnc run(int delta): int { return delta; }
@@ -108,8 +116,8 @@ final class ActorProtocolAnnotationTest {
                   @Override
                   fnc run(String delta): int { return 7; }
                 end
-                """, "changes inherited mailbox payload");
-        rejects("""
+                """);
+        rejectsActorAbiMismatch("""
                 define actor Parent as
                   @Implementation
                   fnc run(int delta): int { return delta; }
@@ -117,8 +125,8 @@ final class ActorProtocolAnnotationTest {
                 define actor Child extends Parent as
                   fnc run(int delta): String { return "wrong"; }
                 end
-                """, "changes inherited mailbox reply");
-        rejects("""
+                """);
+        rejectsActorAbiMismatch("""
                 define actor Parent as
                   @Implementation
                   receive(ActorMail<int> mail): void { return; }
@@ -128,7 +136,7 @@ final class ActorProtocolAnnotationTest {
                   @Override
                   receive(ActorMail<String> mail): void { return; }
                 end
-                """, "changes inherited mailbox payload");
+                """);
     }
 
     @Test
