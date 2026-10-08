@@ -16,7 +16,9 @@ This directory documents the executable formal-methods layer for Oreslang runtim
 
 `FormalOwnershipDomainModelCheckTest` exhaustively checks the ownership/provenance algebra across root, SHARED, PRIVATE, and UNTRUSTED contexts for primitive, struct, and class values. It is a refinement target for the in-flight allocator/ownership work rather than a claim that every lowering is already on `main`.
 
-`FormalGarbageCollectorLifecycleModelCheckTest` models explicit cleanup, ReferenceQueue notification consumption, retry after cleanup failure, actor-domain retirement, and best-effort context shutdown.\n\n`FormalGcSweepQuantaModelCheckTest` models incremental bounded sweeping with a stable cursor and per-slot cleanup ownership. It proves one sweep quantum claims at most one retired slot, repeated quanta visit every retired slot, cleanup success is terminal, and cleanup failure returns the slot to a retryable state.
+`FormalGarbageCollectorLifecycleModelCheckTest` models explicit cleanup, ReferenceQueue notification consumption, retry after cleanup failure, actor-domain retirement, and best-effort context shutdown.
+
+`FormalGcSweepQuantaModelCheckTest` models incremental bounded sweeping with a stable cursor and per-slot cleanup ownership. It proves one sweep quantum claims at most one retired slot, repeated quanta visit every retired slot, cleanup success is terminal, and cleanup failure returns the slot to a retryable state.
 
 `FormalStructuredCancellationModelCheckTest` models a three-level structured actor tree and proves downward-only lifecycle authority, cancellation cascade, bottom-up termination, and atomic whole-subtree force kill.
 
@@ -47,6 +49,11 @@ The checked invariants are:
 19. **Buffered capacity is invariant.** A capacity-two channel never reaches three buffered values; a full nonblocking write has no state transition.
 20. **Buffered FIFO is conserved.** At every reachable state, admitted order equals the delivered prefix followed by the still-buffered suffix, so modeled messages are neither reordered, duplicated, nor lost.
 21. **Contended proxy acquisition is carrier-releasing.** The cooperative model never lets a waiting actor retain its physical carrier; unlock reserves the grant before scheduling the continuation, and cancellation prevents resurrection.
+
+22. **Promoted storage outlives actor ownership.** Actor stop cannot reclaim storage rooted by a runtime-owned proxy; disposal of the final promoted root makes reclamation legal.
+23. **Proxy locks cannot span suspension or compose implicitly.** Read-to-write upgrades, cross-proxy nested locking, and suspension while locked fail closed in the bounded model; disposed proxies cannot be reacquired.
+
+`FormalActorStorageLifetimeModelCheckTest` explores actor retirement versus promoted-root lifetime. `FormalProxySynchronizationModelCheckTest` explores two proxies, lock modes, suspension and disposal. These are bounded abstract contracts; they do not substitute for concrete runtime refinement tests.
 
 ## Relationship to runtime tests
 

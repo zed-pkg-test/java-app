@@ -16,7 +16,7 @@ public final class Lexer {
         KEYWORDS.put("extends", EXTENDS); KEYWORDS.put("implements", IMPLEMENTS);
         KEYWORDS.put("try", TRY); KEYWORDS.put("catch", CATCH); KEYWORDS.put("finally", FINALLY);
         KEYWORDS.put("end", END); KEYWORDS.put("fi", FI); KEYWORDS.put("if", IF); KEYWORDS.put("do", DO);
-        KEYWORDS.put("else", ELSE); KEYWORDS.put("then", THEN); KEYWORDS.put("new", NEW); KEYWORDS.put("stop", STOP); KEYWORDS.put("done", DONE);
+        KEYWORDS.put("else", ELSE); KEYWORDS.put("then", THEN); KEYWORDS.put("new", NEW); KEYWORDS.put("spawn", SPAWN); KEYWORDS.put("stop", STOP); KEYWORDS.put("done", DONE);
         KEYWORDS.put("await", AWAIT); KEYWORDS.put("rt", RT); KEYWORDS.put("async", ASYNC); KEYWORDS.put("generator", GENERATOR); KEYWORDS.put("nlex", NLEX); KEYWORDS.put("trap", TRAP); KEYWORDS.put("actor", ACTOR); KEYWORDS.put("isoactor", ISOACTOR); KEYWORDS.put("def", DEF); KEYWORDS.put("fnc", FNC); KEYWORDS.put("routine", ROUTINE);
         KEYWORDS.put("for", FOR); KEYWORDS.put("of", OF); KEYWORDS.put("loop", LOOP); KEYWORDS.put("block", BLOCK); KEYWORDS.put("break", BREAK); KEYWORDS.put("continue", CONTINUE); KEYWORDS.put("yield", YIELD); KEYWORDS.put("super", SUPER); KEYWORDS.put("elseif", ELSEIF); KEYWORDS.put("elif", ELSEIF); KEYWORDS.put("switch", SWITCH); KEYWORDS.put("match", MATCH); KEYWORDS.put("matches", MATCHES); KEYWORDS.put("is", IS); KEYWORDS.put("default", DEFAULT);
         KEYWORDS.put("eq", EQ); KEYWORDS.put("neq", NEQ);
@@ -103,6 +103,7 @@ public final class Lexer {
                 if (isAtEnd()) throw error("unterminated string escape");
                 char escaped = advance();
                 value.append(switch (escaped) {
+                    case 'u' -> unicodeEscape();
                     case 'n' -> '\n'; case 'r' -> '\r'; case 't' -> '\t'; case '"' -> '"'; case '\'' -> '\''; case '\\' -> '\\'; default -> escaped;
                 });
             } else value.append(c);
@@ -110,6 +111,20 @@ public final class Lexer {
         if (isAtEnd()) throw error("unterminated string");
         advance();
         tokens.add(new Token(STRING, value.toString(), line, startColumn));
+    }
+
+    private char unicodeEscape() {
+        int code = 0;
+        for (int i = 0; i < 4; i++) {
+            if (isAtEnd()) throw error("incomplete Unicode escape");
+            char digit = advance();
+            int hex = digit >= '0' && digit <= '9' ? digit - '0'
+                    : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10
+                    : digit >= 'A' && digit <= 'F' ? digit - 'A' + 10 : -1;
+            if (hex < 0) throw error("invalid Unicode escape");
+            code = (code << 4) | hex;
+        }
+        return (char) code;
     }
 
     private void number() {

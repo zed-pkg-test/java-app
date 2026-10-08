@@ -226,7 +226,6 @@ public final class TreeShaker {
             }
             if (expression instanceof Ast.ObjectExpr object) {
                 for (Ast.ObjectField field : object.fields()) {
-                    if (field.isDynamic() && containsLambda(field.dynamicName())) return true;
                     if (containsLambda(field.value())) return true;
                 }
             }
@@ -360,15 +359,11 @@ public final class TreeShaker {
             if (expression instanceof Ast.ObjectExpr object) {
                 List<Ast.ObjectField> fields = new ArrayList<>();
                 for (Ast.ObjectField field : object.fields()) {
-                    fields.add(field.isDynamic()
-                            ? Ast.ObjectField.dynamic(
-                                    substitute(field.dynamicName(), substitutions, shadowed),
-                                    substitute(field.value(), substitutions, shadowed))
-                            : Ast.ObjectField.named(
-                                    field.name(),
-                                    substitute(field.value(), substitutions, shadowed)));
+                    fields.add(Ast.ObjectField.named(
+                            field.name(),
+                            substitute(field.value(), substitutions, shadowed)));
                 }
-                return new Ast.ObjectExpr(fields);
+                return new Ast.ObjectExpr(fields, object.kind(), object.declaredFields());
             }
             if (expression instanceof Ast.LambdaExpr lambda) {
                 LinkedHashSet<String> nestedShadowed = new LinkedHashSet<>(shadowed);
@@ -553,7 +548,9 @@ public final class TreeShaker {
                         field.visibility(),
                         field.bindingKind(),
                         field.type(),
-                        initializer);
+                        field.annotations(),
+                        initializer,
+                        field.mutableReferent());
             }
             if (declaration instanceof Ast.ClassDecl klass) {
                 List<Ast.FieldDecl> fields = new ArrayList<>();
@@ -629,7 +626,11 @@ public final class TreeShaker {
                         : evaluate(initializer, module, locals);
                 locals.put(binding.name(), value);
                 return List.of(new Ast.BindingStmt(
-                        binding.kind(), binding.declaredType(), binding.name(), initializer));
+                        binding.kind(),
+                        binding.declaredType(),
+                        binding.name(),
+                        initializer,
+                        binding.mutableReferent()));
             }
             if (statement instanceof Ast.DestructureStmt destructure) {
                 Ast.Expr initializer = rewriteExpression(destructure.initializer(), module, locals);
@@ -738,22 +739,17 @@ public final class TreeShaker {
                     }
                     arms.add(new Ast.SelectArm(
                             arm.operation(),
-                            arm.source() == null
-                                    ? null
-                                    : rewriteExpression(arm.source(), module, locals),
-                            arm.value() == null
-                                    ? null
-                                    : rewriteExpression(arm.value(), module, locals),
-                            arm.timeoutNanos(),
+                            rewriteExpression(arm.channel(), module, locals),
+                            rewriteExpression(arm.value(), module, locals),
                             arm.bindingKind(),
                             arm.bindingName(),
-                            rewriteStatements(arm.body(), module, armLocals)));
+                            rewriteStatements(arm.body(), module, armLocals),
+                            arm.mutableReferent()));
                 }
                 return List.of(new Ast.SelectStmt(
                         selected.mode(),
                         selected.policy(),
-                        arms,
-                        selected.explicitDo()));
+                        arms));
             }
             if (statement instanceof Ast.TryStmt tried) {
                 LinkedHashMap<String, Object> catchLocals = new LinkedHashMap<>(locals);
@@ -785,7 +781,8 @@ public final class TreeShaker {
                         loop.bindingName(),
                         iterable,
                         loop.asyncIteration(),
-                        rewriteStatements(loop.body(), module, bodyLocals)));
+                        rewriteStatements(loop.body(), module, bodyLocals),
+                        loop.mutableReferent()));
             }
             if (statement instanceof Ast.ForStmt loop) {
                 LinkedHashMap<String, Object> loopLocals = new LinkedHashMap<>(locals);
@@ -942,15 +939,11 @@ public final class TreeShaker {
             if (expression instanceof Ast.ObjectExpr object) {
                 List<Ast.ObjectField> fields = new ArrayList<>();
                 for (Ast.ObjectField field : object.fields()) {
-                    fields.add(field.isDynamic()
-                            ? Ast.ObjectField.dynamic(
-                                    rewriteExpression(field.dynamicName(), module, locals),
-                                    rewriteExpression(field.value(), module, locals))
-                            : Ast.ObjectField.named(
-                                    field.name(),
-                                    rewriteExpression(field.value(), module, locals)));
+                    fields.add(Ast.ObjectField.named(
+                            field.name(),
+                            rewriteExpression(field.value(), module, locals)));
                 }
-                return new Ast.ObjectExpr(fields);
+                return new Ast.ObjectExpr(fields, object.kind(), object.declaredFields());
             }
             if (expression instanceof Ast.LambdaExpr lambda) {
                 LinkedHashMap<String, Object> lambdaLocals = new LinkedHashMap<>(locals);
@@ -1176,8 +1169,8 @@ public final class TreeShaker {
                     scanStatements(module, switched.defaultBody(), new LinkedHashSet<>(locals));
                 } else if (statement instanceof Ast.SelectStmt selected) {
                     for (Ast.SelectArm arm : selected.arms()) {
-                        if (arm.source() != null) scanExpression(module, arm.source(), locals);
-                        if (arm.value() != null) scanExpression(module, arm.value(), locals);
+                        scanExpression(module, arm.channel(), locals);
+                        scanExpression(module, arm.value(), locals);
                         LinkedHashSet<String> armLocals =
                                 new LinkedHashSet<>(locals);
                         if (arm.bindingName() != null) {
@@ -1297,8 +1290,10 @@ public final class TreeShaker {
             } else if (expression instanceof Ast.TupleExpr tuple) {
                 for (Ast.Expr element : tuple.elements()) scanExpression(module, element, locals);
             } else if (expression instanceof Ast.ObjectExpr object) {
+                for (Ast.StructFieldSpec field : object.declaredFields()) {
+                    scanType(field.type());
+                }
                 for (Ast.ObjectField field : object.fields()) {
-                    if (field.isDynamic()) scanExpression(module, field.dynamicName(), locals);
                     scanExpression(module, field.value(), locals);
                 }
             } else if (expression instanceof Ast.LambdaExpr lambda) {

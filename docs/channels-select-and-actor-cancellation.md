@@ -63,7 +63,7 @@ Runtime-only continuation envelopes use the same mailbox channel but are never
 visible as guest messages. They have bounded reserved headroom so a full user
 mailbox cannot silently discard a resumed `nb select` arm.
 
-Public `Channel<T>`, `SelectCase`, `SelectSet`, and `SelectPlan` values are
+Public `Channel<T>`, `SelectCase`, and `SelectSet` values are
 **execution-domain-local capabilities** in this version. They cannot be sent
 through an actor mailbox or used as actor-callable parameters/results.
 Actor-to-actor communication remains `ActorRef`/mailbox transport. This avoids
@@ -212,7 +212,7 @@ A read arm may bind with `let`, `val`, or `const`. `const` means the
 selected runtime value is bound immutably; it does not imply the message was a
 compile-time constant.
 
-Every `case` and `default` arm requires its own `{ ... }` body, including
+Every `when` (or legacy `case`) and `default` arm requires its own `{ ... }` body, including
 empty arms. Canonical source uses two spaces per indentation level and no tabs
 for indentation: arms sit one level inside `select`, and their statements sit
 one level inside the arm. The same rules apply to `nb select`, `do nb select`, and `try select`.
@@ -241,9 +241,7 @@ select { ... }       // FAIR
 FAIR is deterministic round-robin over a stable select site/set. If more than
 one case is simultaneously ready, the next fairness cursor chooses the first
 probe position. Static select sites retain a rotation ticket across repeated
-executions; reusable dynamic SelectSet/SelectPlan values retain their own
-cursor. A `default` probe does not advance that cursor because it is an idle
-fallback rather than a readiness winner.
+executions; reusable dynamic SelectSet values retain their own cursor.
 
 Explicit strict priority:
 
@@ -330,8 +328,7 @@ cancellation, ownership, or fairness guarantees.
 
 ## Dynamic select
 
-Static select, dynamic `SelectSet`, and reusable `SelectPlan` all lower to the
-same runtime arbitration machinery.
+Static and dynamic select lower to the same runtime `SelectSet` primitive.
 
 Cases can be assembled at runtime:
 
@@ -344,31 +341,27 @@ val Array<SelectCase> cases = [
   SelectCase.write(b, 42)
 ];
 
-val Option<Select<int>> result = select from cases;
-val Future<Option<Select<int>>> pending = nb select from cases;
-val Option<Select<int>> ready = try select from cases;
+val Option<SelectResult> result = select from cases;
+val Future<Option<SelectResult>> pending = nb select from cases;
+val Option<SelectResult> ready = try select from cases;
 ```
 
 Dynamic selection has **no arm bodies** to handle a consumed channel value;
 `do select from cases` and `do nb select from cases` are deliberately
 rejected rather than register a read and silently discard its outcome.
-Handle the returned `Option<Select<T>>` or `Future<Option<Select<T>>>`
-explicitly, or use braced static `do select` dispatch. `SelectResult` remains
-the legacy erased spelling and is assignment-compatible with `Select<T>`.
+Handle the returned `Option<SelectResult>` or `Future<Option<SelectResult>>`
+explicitly, or use braced static `do select` dispatch.
 
 A reusable set can retain its fairness cursor:
 
 ```ores
-val SelectSet<int> set = SelectSet.new(cases);
-val Option<Select<int>> result = select from set;
+val set = SelectSet.new(cases);
+val Option<SelectResult> result = select from set;
 ```
 
-A single `SelectCase<T>`, runtime list/array, and map values are accepted in
-addition to `SelectSet<T>` and `SelectPlan<T>`. `SelectSet.new(plan)`
-creates a new snapshot set with an independent fairness cursor; `select from
-plan` executes the plan directly and preserves its cursor. For maps, value
-iteration order defines the case order used by `first` and the initial
-deterministic fair ordering.
+Runtime list/array and map values are accepted. For maps, value iteration order
+defines the case order used by `first` and the initial deterministic fair
+ordering.
 
 Dynamic policies use the same spellings:
 
@@ -383,76 +376,18 @@ try select from cases
 `select from` is a blocking source expression, but "blocking" means the
 current Ores continuation yields to its scheduler/actor pool while the select is
 pending; it does not park a carrier thread. Once a case commits, the continuation
-resumes and the expression returns `Some(Select<T>)`.
+resumes and the expression returns `Some(SelectResult)`.
 
 `nb select from` registers the same arbitration and returns immediately with
-the native Ores `Future<Option<Select<T>>>`. Awaiting that Future follows the
+the native Ores `Future<Option<SelectResult>>`. Awaiting that Future follows the
 same scheduler resumption path. `try select from` is an immediate probe: it
 returns `None` when no case is ready and leaves no registration behind.
 
-`Select<T>` is the typed result surface. It exposes:
+`SelectResult` exposes:
 
 - `index`
-- `operation` (`read`, `write`, `await`, `timeout`, `cancelled`, or `default`)
-- `value` as the legacy erased compatibility/introspection field
-- `payload: Option<T>` as the sound typed field; it is `Some(T)` for
-  `Read`/`Await` and `None` for `Write`/`Timeout`/`Cancelled`/`Default`
-
-Its constructor patterns are `Read(T)`, `Await(T)`, `Write`, `Timeout`,
-`Cancelled`, and `Default`. `T` is the union of value-producing readiness
-cases in the set/plan. For example, a `Channel<string>` read plus a
-`Future<int>` await yields `Select<string | int>`.
-
-Dynamic `SelectCase.await` currently requires a value-producing
-`Future<T>`; `Future<void>` is rejected because `Select<T>` has no unit-value
-representation yet. Static `when await future` still accepts `Future<void>`
-when the arm does not bind a result.
-
-For heterogeneous payloads, constructor patterns narrow correctly, but
-`Select<T>` does not yet encode which payload subtype belongs to which
-readiness constructor. The exhaustiveness checker therefore does not infer that
-`Read(string)` plus `Await(int)` covers every theoretical
-`Select<string | int>`; use an explicit fallback until case/payload
-correlation becomes part of the plan type.
-
-A typical consumer is therefore:
-
-```ores
-val result = select from plan;
-
-match result over
-  on Some(Read(string msg)) -> {
-    handle_message(msg);
-  }
-  on Some(Await(int value)) -> {
-    handle_result(value);
-  }
-  on Some(Timeout) -> {
-    handle_timeout();
-  }
-  on Some(Cancelled) -> {
-    handle_cancel();
-  }
-  on Some(Write) -> {
-    handle_write_ready();
-  }
-  on Some(Default) -> {
-    handle_default();
-  }
-  on None -> {
-    handle_not_ready();
-  }
-  on _ -> {
-    // Select<T> currently carries the payload union, not the exact
-    // case-to-payload correlation. This defensive fallback keeps the match
-    // exhaustive for heterogeneous payload unions.
-    unreachable();
-  }
-end
-```
-
-`SelectResult` remains the legacy erased spelling of the result for source
-compatibility; new typed code should prefer `Select<T>`.
+- `operation` (`read`, `write`, or `default`)
+- `value` for a read result
 
 The outer `Option` is intentionally part of the language-facing selection
 contract. It also composes uniformly with `trap` and Future APIs; the runtime
@@ -500,35 +435,8 @@ no required per-iteration observable behavior and the referenced channel/value
 bindings are stable. Otherwise the compiler must keep the original lowering.
 
 Dynamic selection can explicitly build a plan after constructing its runtime
-case list:
-
-```ores
-val Channel<int> a = Channel.new<int>(16);
-val Channel<int> b = Channel.new<int>(16);
-
-val SelectPlan<int> plan = SelectPlan.new([
-  SelectCase.read(a),
-  SelectCase.read(b)
-]);
-
-loop {
-  val Option<Select<int>> next = select from plan;
-  // The plan object and FAIR cursor are reused. This iteration gets a fresh
-  // winner generation and fresh wait registrations; stale waiters are never
-  // carried into the next iteration.
-}
-```
-
-This is the preferred hot-loop form when the case set is stable. `select from
-plan`, `nb select from plan`, and `try select from plan` execute the plan
-directly; they do not reconstruct a `SelectSet` from its cases on each
-iteration.
-
-`SelectPlan.new(SelectSet.new(cases))` is also valid. Construction snapshots
-the case descriptors. Mutating the source list afterward does not mutate the
-plan; create a new plan for a changed case set. A plan with `SelectCase.timeout`
-treats the timeout as a **relative duration per invocation**, so reusing a plan
-does not reuse an expired deadline. A later versioned dynamic-plan builder may
+case list. Mutating the source list afterward does not mutate the plan; create a
+new plan for a changed case set. A later versioned dynamic-plan builder may
 support incremental add/remove/rebind without changing this snapshot contract.
 
 ## Cancellation

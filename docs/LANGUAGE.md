@@ -182,7 +182,7 @@ fnc fixed(): [int, bool, string] {
 }
 
 fnc named(): {foo: int, bar: string} {
-  return obj{foo: 5, bar: "x"};
+  return infer struct{foo: 5, bar: "x"};
 }
 ```
 
@@ -511,36 +511,48 @@ define class Names extends List as
 end
 ```
 
-Inline object and array literals are values, not classes, and cannot be inherited from.
+Anonymous structs and array literals are values, not classes, and cannot be inherited from.
 
 ## Inline values
 
-Structural inline object:
+Oreslang structs always have a compile-time-known, closed field shape. The
+canonical inferred spelling is `infer struct{...}`:
 
 ```ores
-val user = obj{name: "Ada", age: 37};
+const user = infer struct{name: "Ada", age: 37};
 stdio.println(user.name);
 ```
 
-Static object/map keys may be identifiers, reserved member keys such as
+Whitespace before the initializer is optional: `infer struct {...}`.
+An inferred struct is permanently readonly: its field set and field values
+cannot be mutated through aliases or mutable bindings.
+
+Static struct keys may be identifiers, reserved member keys such as
 `stop`/`do`/`done`, or strings written with either single or double
-quotes. Backticks make the key dynamic: the expression between the backticks
-must evaluate to a string.
+quotes:
 
 ```ores
-val key = "score";
-val stats = obj{
+const stats = infer struct{
   stop: 1,
   'do': 2,
-  "done": 3,
-  `key`: 4
+  "done": 3
 };
 ```
 
-An `obj{...}` containing a dynamic key has type `DynamicStruct<T>`, where
-`T` is the joined value type. A `DynamicStruct<T>` can also be created
-directly with `new DynamicStruct<T>()`; it accepts arbitrary string keys but
-only values assignable to `T`.
+Computed/backtick struct keys are rejected. Oreslang intentionally has no
+`DynamicStruct<T>` or open-ended anonymous object shape; this keeps anonymous
+struct layout statically knowable for AOT compilation.
+
+When mutation or staged initialization is required, declare the complete shape
+explicitly:
+
+```ores
+val stats = struct{score: int, ready: bool}{score: 1};
+stats.ready = true;
+```
+
+Explicit structs are still closed: only fields declared in the shape may ever
+exist.
 
 Inline array:
 
@@ -1349,6 +1361,9 @@ The same Oreslang source model supports three deployment profiles:
 
 The CLI accepts `--mode=jit|aot|hybrid` and `--platform=server|windows|macos|linux|android|ios`. The iOS execution contract is intentionally AOT-only. Source hot reload does not depend on executable dynamic libraries, JNI, or NFI.
 
+Build capability is fixed in the native executable; `--build-info` reports it.
+AOT-only images reject runtime requests for JIT/hybrid. See [native deployment](NATIVE_DEPLOYMENT.md).
+
 Maven profiles:
 - `mvn -Pnative-aot -DskipTests package`
 - `mvn -Pnative-hybrid -DskipTests package`
@@ -1711,30 +1726,50 @@ fnc example(): void {
 }
 ```
 
-Shared immutable borrowing uses `&T`:
+Immutable borrowing uses `rt borrow value`, with `borrow T` in type positions:
 
 ```ores
-fnc inspect(&Bar value): void {
+fnc inspect(borrow Bar value): void {
   stdio.println(value.foo);
   return;
 }
 ```
 
-Exclusive mutable borrowing uses `&mut T`:
+Exclusive mutable borrowing uses `rt borrow mut value` and `borrow mut T`:
 
 ```ores
-fnc change(&mut Bar value): void {
+fnc change(borrow mut Bar value): void {
   value.foo = "changed";
   return;
 }
 
 fnc example(): void {
-  let Bar b = new Bar();
-  change(&mut b);
-  stdio.println(b.foo); // owner is usable again after the call
+  val Bar b = new Bar();
+  change(rt borrow mut b);
+  stdio.println(b.foo);
   return;
 }
 ```
+
+Parentheses group expressions; they do not create singleton tuples:
+
+```ores
+val Array<int> values = new Array<int>();
+val borrowed = (rt borrow values);
+```
+
+The explicit `tuple (...)` constructor supports zero, one, or multiple elements.
+Parenthesized sequence bindings can unpack it:
+
+```ores
+val (borrowed) = tuple (rt borrow values);
+```
+
+Immediate tuple unpacking gives each borrowed binding a lexical lease. Storing
+borrows in an owned tuple remains rejected until container lifetimes are supported.
+Neither `await` nor `rt cooperate` may suspend with an ordinary live borrow.
+Legacy ampersand borrow spellings remain parser compatibility aliases; new code
+uses the keyword forms above. There is no pointer dereference operation.
 
 Borrow rules:
 

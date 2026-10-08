@@ -6,6 +6,7 @@
 #endif
 
 #include <jni.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -389,5 +390,32 @@ static uint64_t pthread_cpu_time_nanos(pthread_t pthread) {
 #else
     (void)pthread;
     return 0;
+#endif
+}
+
+/* Validate against the caller's allowed CPUs before creating any actor workers. */
+JNIEXPORT jint JNICALL Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeCpuAffinity(
+        JNIEnv *env, jclass cls, jint cpu, jboolean bind) {
+    (void)env; (void)cls;
+#if defined(__linux__)
+    if (cpu < 0 || cpu >= CPU_SETSIZE) return EINVAL;
+    cpu_set_t allowed;
+    if (sched_getaffinity(0, sizeof allowed, &allowed) != 0) return errno;
+    if (!bind) return CPU_ISSET(cpu, &allowed) ? 0 : EINVAL;
+    cpu_set_t selected; CPU_ZERO(&selected); CPU_SET(cpu, &selected);
+    return sched_setaffinity(0, sizeof selected, &selected) == 0 ? 0 : errno;
+#else
+    (void)cpu; (void)bind;
+    return ENOTSUP;
+#endif
+}
+
+JNIEXPORT jint JNICALL Java_dev_oreslang_runtime_NativeCarrierExecutor_nativeCurrentCpu(
+        JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+#if defined(__linux__)
+    return sched_getcpu();
+#else
+    return -1;
 #endif
 }

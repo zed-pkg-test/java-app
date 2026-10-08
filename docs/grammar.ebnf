@@ -120,6 +120,7 @@ type_return_spec= [ "=>" type_ref ] ;
 generic_params  = "<" IDENT { "," IDENT } ">" ;
 param_list      = param { "," param } ;
 param           = type_ref [ "mut" ] IDENT
+                | IDENT ":" type_ref [ "mut" ]  (* compatibility; formatter emits type-first *)
                 | "structural" type_ref IDENT
                 | "@Structural" type_ref IDENT
                 | IDENT "structural" type_ref ;
@@ -211,23 +212,17 @@ select_stmt     = ( "do" [ "nb" ] | [ select_wait_mode ] )
                   "{" select_arm { select_arm } [ select_default ] "}" ;
 select_wait_mode= "nb" | "try" ;
 select_policy   = "first" | "fair" | "random" ;
-select_arm_kw   = "when" | "case" ;
-select_arm      = select_arm_kw "readch" expression ":"
-                  [ binding_kind IDENT ] block
-                | select_arm_kw "writech" expression "," expression ":"
-                  block
-                | select_arm_kw "await" expression ":"
-                  [ binding_kind IDENT ] block
-                | select_arm_kw "timeout" select_duration block
-                | select_arm_kw "cancelled" expression block ;
-select_duration = ( INT_LITERAL | FLOAT_LITERAL )
-                  ( "ns" | "us" | "ms" | "s" | "m" | "h" ) ;
-select_default  = "default" ":" block ;
+select_arm      = select_arm_keyword "readch" expression ":"
+                  [ binding_kind IDENT ] { statement }
+                | select_arm_keyword "writech" expression "," expression ":"
+                  { statement } ;
+select_arm_keyword = "when" | "case" ; (* "when" is canonical; "case" is accepted for compatibility. *)
+(* "when" and "case" are contextual keywords: outside these grammar positions they are ordinary IDENT names. *)
+select_default  = "default" ":" { statement } ;
 
-(* "when" is canonical inside select; legacy "case" is accepted for source
-   compatibility and oresfmt rewrites it to "when". Every arm body is braced.
-   readch/await may bind a selected value; timeout/cancelled deliberately use no
-   ':' separator before the block. At most one default arm is permitted. *)
+(* In select_arm/select_default bodies, the next when/case/default or the closing
+   brace is a structural arm boundary and is not consumed as a nested
+   statement. At most one default arm is permitted. *)
 
 for_stmt        = "for" "(" for_of_head ")" loop_body
                 | "for" "(" c_for_head ")" loop_body
@@ -293,7 +288,8 @@ primary         = literal
                 | tuple_literal
                 | array_literal
                 | legacy_array_literal
-                | object_literal
+                | inferred_struct_literal
+                | explicit_struct_literal
                 | "(" expression ")" ;
 
 lambda          = [ "nlex" ] ( pipe_lambda | typed_legacy_lambda ) ;
@@ -306,10 +302,20 @@ lambda_body     = block | expression ;
 tuple_literal   = "(" expression "," expression { "," expression } ")" ;
 array_literal   = "arr" "[" [ expression { "," expression } ] "]" ;
 legacy_array_literal = "[" [ expression { "," expression } ] "]" ;
-object_literal  = "obj" "{" [ object_field { "," object_field } ] "}" ;
-object_field    = static_object_key ":" expression
-                | "`" expression "`" ":" expression ;
-static_object_key
+inferred_struct_literal
+                = "infer" "struct"
+                  "{" [ struct_value_field { "," struct_value_field } ] "}" ;
+explicit_struct_literal
+                = "struct" "{"
+                  [ struct_field_spec { "," struct_field_spec } ]
+                  "}" "{"
+                  [ struct_value_field { "," struct_value_field } ]
+                  "}" ;
+struct_field_spec
+                = static_struct_key ":" type_ref ;
+struct_value_field
+                = static_struct_key ":" expression ;
+static_struct_key
                 = member_name | STRING_LITERAL ;
 
 literal         = INT_LITERAL | FLOAT_LITERAL | IMAG_LITERAL | STRING_LITERAL
@@ -451,13 +457,14 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      and single-fi "else if" as aliases. All forms lower to the same semantics.
    - "loop" and "block" are contextual statement keywords: outside the
      statement-plus-"{" form they remain legal callable names/references.
-   - Single- and double-quoted object keys are equivalent static string keys.
-     Reserved stop/do/done are legal static object/map/member keys.
-   - A backtick-delimited object key evaluates its enclosed expression at
-     runtime and requires a string value.
-   - An obj{} literal containing any dynamic key has DynamicStruct<T> type,
-     where T is the joined value type. DynamicStruct<T> accepts arbitrary
-     string keys and values assignable to T.
+   - Single- and double-quoted struct keys are equivalent static field names.
+     Reserved stop/do/done are legal static struct/member keys.
+   - Anonymous structs always have a closed compile-time-known field set.
+     infer struct{...} is canonical; whitespace before the initializer is optional.
+     Computed/backtick struct keys are rejected.
+   - DynamicStruct<T> and obj{...} are not language value forms. Open-ended
+     keyed collections must use a dedicated collection abstraction rather than
+     changing an anonymous struct's shape at runtime.
    - Each source file is a separately versioned compilation/code unit and is the
      default package identity when no explicit namespace is declared.
    - Source namespaces are flat: namespace a.b; is illegal.
@@ -560,9 +567,8 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
      typed iterator snapshot without runtime type discovery. Object rest is
      allowed only when the source has a statically known record shape; its type
      is the compile-time record obtained by omitting all explicitly selected
-     members. DynamicStruct/object shapes with unknown keys cannot use rest
-     destructuring because AOT compilation must know the complete remainder type
-     without runtime reflection.
+     members. Anonymous struct shapes are always statically known, so object
+     rest destructuring never depends on runtime-discovered fields.
    - Sequence destructuring targets returned arrays/lists, finite tuple types,
      and statically typed iterable classes; object destructuring targets returned
      record/map-like values.
@@ -593,7 +599,8 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - [Symbol.iterator]() may provide iterator behavior for for-of.
    - standalone null values are illegal.
    - null is a type marker only directly inside Option<null>.
-   - inline obj{} / arr[] values cannot be subclassed; extend Object/List.
+   - anonymous struct / arr[] values cannot be subclassed; extend Object/List
+     when nominal inheritance is required.
    - "structural" is contextual in parameter and callable-modifier positions, not globally reserved.
      Structural views are read-only borrows: they cannot be mut, cross async
      suspension, cross actor mailbox boundaries, or erase actor identity.

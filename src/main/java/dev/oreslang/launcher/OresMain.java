@@ -6,6 +6,7 @@ import dev.oreslang.compiler.TreeShaker;
 import dev.oreslang.config.OresProjectConfig;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.ExecutionProfile;
+import dev.oreslang.runtime.NativeBuildMode;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.LinkedProgramRunner;
 import dev.oreslang.runtime.PermissionCheckMode;
@@ -30,12 +31,19 @@ public final class OresMain {
     private OresMain() { }
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 1 && args[0].equals("--build-info")) {
+            System.out.println("{\"build_mode\":\"" + NativeBuildMode.kind().name().toLowerCase(Locale.ROOT)
+                    + "\",\"default_execution_mode\":\"" + NativeBuildMode.defaultExecutionMode()
+                    + "\",\"guest_execution\":\"" + (NativeBuildMode.kind() == NativeBuildMode.Kind.AOT
+                        ? "interpreter-no-jit" : "runtime-selected") + "\"}");
+            return;
+        }
         boolean strict = false;
         boolean checkOnly = false;
         boolean buildAnalysis = false;
         List<String> buildDefines = new ArrayList<>();
         Set<String> buildEntryPoints = new LinkedHashSet<>();
-        String mode = "jit";
+        String mode = NativeBuildMode.defaultExecutionMode();
         String platform = "server";
         PermissionCheckMode permissionCheckMode = PermissionCheckMode.RUNTIME;
         RuntimePermissions.Builder permissionBuilder = new RuntimePermissions.Builder();
@@ -92,6 +100,7 @@ public final class OresMain {
             else throw new IllegalArgumentException("only one .ores or .java source file may be supplied");
         }
 
+        NativeBuildMode.requireCompatible(ExecutionProfile.parse(mode, platform));
         Path path;
         if (filename == null) {
             OresProjectConfig project = OresProjectConfig.discover(
