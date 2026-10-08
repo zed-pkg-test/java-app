@@ -36,6 +36,125 @@ final class OresSchedulerTest {
     }
 
     @Test
+    void completionBeforeOrAfterWaiterRegistrationNeverLosesWakeup() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(2)) {
+            for (int iteration = 0; iteration < 256; iteration++) {
+                final int expected = iteration;
+                OresFuture<Integer> signal = new OresFuture<>();
+                AtomicInteger resumes = new AtomicInteger();
+                OresFuture<Integer> task = scheduler.start(resume -> {
+                    resumes.incrementAndGet();
+                    if (resume.initial()) {
+                        return OresScheduler.await(signal);
+                    }
+                    assertNull(resume.failure());
+                    return OresScheduler.done((Integer) resume.value());
+                });
+
+                if ((iteration & 1) != 0) {
+                    // Force the pending path rather than only testing the
+                    // already-completed fast path.
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (signal.pendingRuntimeWaiterCount() == 0
+                            && System.nanoTime() < deadline) {
+                        Thread.onSpinWait();
+                    }
+                    assertEquals(1, signal.pendingRuntimeWaiterCount());
+                }
+                assertTrue(signal.completeFromRuntime(expected));
+                assertEquals(expected, task.get(5, TimeUnit.SECONDS));
+                assertEquals(2, resumes.get(), "each task must resume exactly once");
+                assertEquals(0, signal.pendingRuntimeWaiterCount(),
+                        "terminal wakeup must not retain the suspended task");
+            }
+        }
+    }
+
+    @Test
+    void concurrentProducerCompletionOnlyEnqueuesOneContinuation() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(2);
+                ExecutorService producers = Executors.newFixedThreadPool(8)) {
+            OresFuture<Integer> signal = new OresFuture<>();
+            AtomicInteger resumes = new AtomicInteger();
+            AtomicInteger acceptedCompletions = new AtomicInteger();
+            java.util.Set<Thread> producerThreads =
+                    java.util.concurrent.ConcurrentHashMap.newKeySet();
+            OresFuture<Integer> task = scheduler.start(resume -> {
+                int turn = resumes.incrementAndGet();
+                assertSame(scheduler, OresScheduler.current());
+                assertFalse(producerThreads.contains(Thread.currentThread()),
+                        "producer thread must only notify, never run guest continuation");
+                if (resume.initial()) {
+                    return OresScheduler.await(signal);
+                }
+                assertEquals(2, turn, "duplicate wake must not enqueue another turn");
+                assertNull(resume.failure());
+                return OresScheduler.done((Integer) resume.value());
+            });
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (signal.pendingRuntimeWaiterCount() == 0
+                    && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(1, signal.pendingRuntimeWaiterCount());
+
+            CountDownLatch release = new CountDownLatch(1);
+            CountDownLatch completed = new CountDownLatch(32);
+            for (int attempt = 0; attempt < 32; attempt++) {
+                producers.execute(() -> {
+                    producerThreads.add(Thread.currentThread());
+                    try {
+                        release.await();
+                        if (signal.completeFromRuntime(77)) {
+                            acceptedCompletions.incrementAndGet();
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        completed.countDown();
+                    }
+                });
+            }
+            release.countDown();
+            assertTrue(completed.await(5, TimeUnit.SECONDS));
+            assertEquals(77, task.get(5, TimeUnit.SECONDS));
+            assertEquals(1, acceptedCompletions.get());
+            assertEquals(2, resumes.get());
+            assertEquals(0, signal.pendingRuntimeWaiterCount());
+        }
+    }
+
+    @Test
+    void cancelledTaskDetachesItsWakerWithoutCancellingSharedProducer() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> shared = new OresFuture<>();
+            AtomicInteger resumes = new AtomicInteger();
+            OresFuture<Integer> task = scheduler.start(resume -> {
+                resumes.incrementAndGet();
+                if (resume.initial()) {
+                    return OresScheduler.await(shared);
+                }
+                return OresScheduler.done((Integer) resume.value());
+            });
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (shared.pendingRuntimeWaiterCount() == 0
+                    && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(1, shared.pendingRuntimeWaiterCount());
+            assertTrue(task.cancel(false));
+            assertEquals(0, shared.pendingRuntimeWaiterCount());
+            assertFalse(shared.isCancelled(),
+                    "cancelling an awaiting consumer must not cancel its producer");
+            assertTrue(shared.completeFromRuntime(91));
+            assertTrue(task.isCancelled());
+            assertEquals(1, resumes.get());
+        }
+    }
+
+    @Test
     void rejectedGuestContextAdmissionSettlesTheOwningTask() throws Exception {
         IllegalStateException failure = new IllegalStateException("guest context entry rejected");
         try (OresScheduler scheduler = OresScheduler.managed(1, runnable -> { throw failure; })) {

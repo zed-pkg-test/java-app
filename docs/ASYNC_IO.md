@@ -40,6 +40,45 @@ work execute off the actor carrier. Only immutable argument values are captured.
 HTTP redirects remain disabled so a response cannot bypass the destination grant.
 Failures retain their cause and a bounded `native:io` boundary annotation.
 
+## Wakeup and executor handoff contract
+
+The Java/Graal reference scheduler already provides a Rust-Waker-equivalent
+**behavioral contract** without exposing a native raw-pointer/vtable API:
+
+1. A resumable source task encountering pending `await`, `readch`,
+   `writech`, or `select` returns an `OresScheduler.Await` step and
+   releases its carrier. The logical frame remains heap-owned.
+2. A pending `OresFuture` registers a detachable, single-delivery completion
+   waiter. The `TaskRunner` itself is its reusable callback target, avoiding a
+   new capturing lambda for each await.
+3. Producer, timer, I/O, and channel completion threads **only publish the
+   result and notify the scheduler**. They do not run guest code inline.
+4. The scheduler's task phase transition `WAITING -> QUEUED` coalesces
+   scheduling: a task cannot be queued or executed twice for one completion.
+   A completion while the previous turn still runs is deferred until its
+   guest context and execution lease have unwound.
+5. Registration racing with completion is safe: an already-terminal Future has
+   a registration-free fast path, and the pending registration path rechecks
+   terminal state. Task cancellation detaches the waiter without cancelling
+   an independently owned/shared producer Future.
+6. The task resumes on its **own** scheduler, not the producer's thread or
+   any scheduler the producer happens to use.
+
+An Ores `Future<T>` is currently a single-assignment completion object, so
+its callback may deliver a terminal value/failure directly to the resumed
+task. Rust's more general `Waker` notifies an executor to **poll again**;
+it does not guarantee the I/O operation is ready or that each wake maps to
+a distinct queue entry. When a native readiness reactor is introduced,
+spurious notifications, nonblocking socket retries (`EAGAIN`), interest
+rearming, and generation-checked cancellation must respect that distinction.
+
+This contract does **not** claim Tokio-style work stealing, allocation-free
+pending-wait registration, or reactor-backed socket I/O. The reference
+scheduler currently uses a bounded thread-pool queue; standard-library I/O
+still offloads blocking host calls to bounded virtual-thread workers.
+Native backends may represent their task notification with a pointer/vtable,
+but source semantics must not depend on the pointer layout.
+
 ## Execution and lifecycle
 
 Each context owns a virtual-thread executor with a hard maximum of 128 in-flight
