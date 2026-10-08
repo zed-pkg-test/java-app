@@ -884,6 +884,17 @@ public final class TypeChecker {
                             parent, concreteParent, method.name(), method.arity(),
                             new LinkedHashSet<>());
                     if (inherited == null) continue;
+                    // Ordinary private class methods are not inherited virtual
+                    // API slots. Do not let @Override silently claim otherwise.
+                    // Actor hooks are deliberately private but VM-dispatched,
+                    // so only source actor methods have this exception.
+                    if (override && klass.actorKind() == Ast.ActorKind.NONE
+                            && inherited.method().visibility() == Ast.Visibility.PRIVATE) {
+                        throw new IllegalArgumentException(
+                                "@Override on " + klass.name() + "." + method.name()
+                                        + " cannot override private inherited method from "
+                                        + inherited.owner().name());
+                    }
                     found = true;
                     // Actor handlers are the public mailbox ABI, despite being
                     // private methods. Require invariant payload/reply types so

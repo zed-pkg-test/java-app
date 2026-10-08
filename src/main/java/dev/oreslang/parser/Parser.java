@@ -3233,6 +3233,14 @@ public final class Parser {
             if (isCallableStructuralAnnotation(annotation)) {
                 throw error(previous(), "@structural is compile-time callable metadata and is not valid on " + target);
             }
+            // Declarations such as classes, interfaces and actor types do not
+            // retain annotations in their AST. Reject method-only intent here
+            // instead of silently dropping the annotation before type checking.
+            if (annotation.name().equals("Implementation")
+                    || annotation.name().equals("Override")) {
+                throw error(previous(), "@" + annotation.name()
+                        + " is only valid on class/actor methods, not " + target);
+            }
         }
     }
 

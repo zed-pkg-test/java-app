@@ -109,6 +109,65 @@ final class ActorRequestReplyRuntimeTest {
     }
 
     @Test
+    void lifecycleOnlyActorRejectsBothProtocolsBeforeMessageValidation() throws Exception {
+        try (var store = new SharedCodeImageStore();
+             var runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            var image = store.publish("lifecycle-only-abi-guard.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            var invoked = new AtomicInteger();
+            ActorRuntime.ActorCodeExecutor executor = new ActorRuntime.ActorCodeExecutor() {
+                @Override public SharedCodeImageStore.CodeImage codeImage() {
+                    return image;
+                }
+
+                @Override public ActorRuntime.ActorProtocol actorProtocol(String actorTypeName) {
+                    return ActorRuntime.ActorProtocol.LIFECYCLE_ONLY;
+                }
+
+                @Override public ActorRuntime.ActorOwnedGuestState initializeActor(
+                        String name, ActorRuntime.ActorContext<Object> context) {
+                    return context.self()::id;
+                }
+
+                @Override public void receiveActor(
+                        String name, ActorRuntime.ActorOwnedGuestState state,
+                        ActorRuntime.ActorInboxMail<Object> mail,
+                        ActorRuntime.ActorContext<Object> context) {
+                    invoked.incrementAndGet();
+                    fail("lifecycle-only actors have no receive entrypoint");
+                }
+
+                @Override public Object requestActor(
+                        String name, ActorRuntime.ActorOwnedGuestState state,
+                        Object request, ActorRuntime.ActorContext<Object> context) {
+                    invoked.incrementAndGet();
+                    fail("lifecycle-only actors have no run entrypoint");
+                    return null;
+                }
+            };
+
+            for (var kind : ActorRuntime.ActorKind.values()) {
+                var actor = runtime.spawnCodeActor(kind, executor, "Worker");
+                actor.ready().get(2, TimeUnit.SECONDS);
+                // Invalid transport graphs are rejected at the protocol gate,
+                // before graph validation, serialization or mailbox reservation.
+                var sendError = assertThrows(IllegalArgumentException.class,
+                        () -> actor.send(new Object()));
+                assertTrue(sendError.getMessage().contains("stream actor"),
+                        sendError.getMessage());
+                var requestError = assertThrows(IllegalArgumentException.class,
+                        () -> actor.request(new Object()));
+                assertTrue(requestError.getMessage().contains("unary actor"),
+                        requestError.getMessage());
+                assertEquals(0, invoked.get());
+                assertTrue(actor.isAlive());
+                actor.stop();
+                actor.done().get(2, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Test
     void ordinaryRequestFailureDoesNotDestroyActor() throws Exception {
         try (var store = new SharedCodeImageStore();
              var runtime = new ActorRuntime(IsolatePolicy.developer())) {

@@ -183,6 +183,47 @@ final class ActorProtocolAnnotationTest {
     }
 
     @Test
+    void ordinaryPrivateParentMethodIsNotAnOverrideTarget() {
+        rejects("""
+                define class Parent as
+                  private helper(int delta): int { return delta; }
+                end
+                define class Child extends Parent as
+                  @Override
+                  pub helper(int delta): int { return delta; }
+                end
+                """, "cannot override private inherited method");
+    }
+
+    @Test
+    void declarationAnnotationsMayNotBeSilentlyDropped() {
+        rejects("""
+                @Implementation
+                define actor Worker as
+                  fnc run(int delta): int { return delta; }
+                end
+                """, "only valid on class/actor methods");
+        rejects("""
+                @Override
+                define class Child as
+                  pub helper(): void { return; }
+                end
+                """, "only valid on class/actor methods");
+        rejects("""
+                @Implementation
+                define interface Contract as
+                  fnc helper(): void;
+                end
+                """, "only valid on class/actor methods");
+        rejects("""
+                @Override
+                define module service as
+                  pub fnc helper(): void { return; }
+                end
+                """, "only valid on class/actor methods");
+    }
+
+    @Test
     void annotationsCannotAppearOnFieldsOrTopLevelFunctions() {
         rejects("""
                 define actor Worker as
