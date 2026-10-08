@@ -162,6 +162,12 @@ public final class ActorRuntime implements AutoCloseable {
 
     public enum ActorKind { PRIVATE, SHARED, UNTRUSTED }
 
+    /**
+     * VM-owned mailbox ABI for a source actor; independent of isolation kind.
+     * This is not a guest-visible superclass or callable dispatch method.
+     */
+    public enum ActorProtocol { UNARY, STREAM, LIFECYCLE_ONLY }
+
     public static final class UntrustedActorQuotaExceededException extends SecurityException {
         public enum Resource { FUEL, WALL_TIME, CPU_TIME }
         private final Resource resource;
@@ -1180,6 +1186,15 @@ public final class ActorRuntime implements AutoCloseable {
      */
     public interface ActorCodeExecutor {
         SharedCodeImageStore.CodeImage codeImage();
+
+        /**
+         * Immutable, link-validated protocol for the named source actor.
+         * Default preserves legacy receive-only executor implementations;
+         * request executors must opt into UNARY explicitly.
+         */
+        default ActorProtocol actorProtocol(String actorTypeName) {
+            return ActorProtocol.STREAM;
+        }
 
         ActorOwnedGuestState initializeActor(
                 String actorTypeName,
@@ -4232,6 +4247,18 @@ public final class ActorRuntime implements AutoCloseable {
         if (reply != null && cell.codeExecutor == null) {
             throw new IllegalArgumentException("ActorRef.request requires a source actor with private run handler");
         }
+        // Host/dynamic calls must obey the same unary/stream ABI as the compiler.
+        // Reject before reserving capacity, copying graphs, or allocating envelopes.
+        if (cell.codeExecutor != null) {
+            if (reply != null && cell.sourceProtocol != ActorProtocol.UNARY) {
+                throw new IllegalArgumentException(
+                        "ActorRef.request requires unary actor with private run handler");
+            }
+            if (reply == null && cell.sourceProtocol != ActorProtocol.STREAM) {
+                throw new IllegalArgumentException(
+                        "ActorRef.send requires stream actor with private receive handler");
+            }
+        }
         if (!cell.reserveMailboxSlot()) {
             throw new IllegalStateException("actor mailbox limit exceeded for " + ref.id());
         }
@@ -5729,6 +5756,8 @@ public final class ActorRuntime implements AutoCloseable {
         private final SharedCodeImageStore.CodeImage codeImage;
         /** Shared compiler/interpreter code executor; never exposed to guest source. */
         private final ActorCodeExecutor codeExecutor;
+        /** Captured once at spawn: no protocol lookup or mode switch per turn. */
+        private final ActorProtocol sourceProtocol;
         /** Closed-world source actor declaration selected for this actor. */
         private final String codeActorType;
         /** Mutable source actor state, created on this actor's dispatcher. */
@@ -5812,6 +5841,10 @@ public final class ActorRuntime implements AutoCloseable {
             this.trustedFactory = trustedFactory;
             this.codeImage = codeImage;
             this.codeExecutor = codeExecutor;
+            this.sourceProtocol = codeExecutor == null ? null
+                    : Objects.requireNonNull(
+                            codeExecutor.actorProtocol(codeActorType),
+                            "source actor protocol cannot be null");
             this.codeActorType = codeActorType;
             this.parent = parent;
             int mailboxCapacity = policy.maxMailboxMessages() >

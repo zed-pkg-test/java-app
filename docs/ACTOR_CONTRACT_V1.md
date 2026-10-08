@@ -109,6 +109,35 @@ therefore requires a separate stop/end path in actual runnable code.
     and cannot use `super` to invoke the old handler. The runtime sealed base
     is not present in source-level class linearization or diamond resolution.
 
+## Unary and stream actor protocols
+
+Protocol and isolation are independent: `define actor`, `define shared actor`,
+and `define isoactor` determine the actor's isolation; its **effective**
+inherited private handler determines its mailbox protocol.
+
+- **Unary actor:** `fnc run(T): R` permits `ActorRef.request(T): Future<R>`.
+  Each request has one runtime-owned reply slot. The actor keeps its state
+  between requests, and `run` cannot be invoked or captured directly.
+- **Stream actor:** `fnc receive(ActorMail<T>): void` permits
+  `ActorRef.send(T)`; outbound events use `self.send(value)` and the
+  bounded, parent-observable `ActorRef.outputs` stream.
+- **Lifecycle-only actor:** no request or event handler. `ready`, `done`
+  and supervisor-controlled stop remain available, but neither `send`
+  nor `request` is an accepted inbound operation.
+
+The compiler rejects mixed, overloaded, incompatible inherited, or incorrectly
+typed protocols. The runtime also caches the resolved source protocol at spawn
+and rejects host/dynamic calls to the wrong `ActorRef` operation **before**
+mailbox slot reservation, payload freezing/copying or guest dispatch. Legacy
+host-side event-only `ActorCodeExecutor` bridges default to STREAM; a
+request/reply bridge must explicitly declare UNARY. The legacy bridge default
+is a compatibility choice, not a source-level implicit protocol.
+
+The spelling `define unary actor` / `define stream actor` is a potential
+future explicit annotation; it is **not** accepted grammar in this change.
+Existing `define actor` source declarations infer the mode without breaking
+compatibility.
+
 ## Event-only compatibility and migration
 
 Current `receive(ActorMail<T> mail): void` is a **private event handler**

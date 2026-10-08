@@ -409,6 +409,34 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         @Override
+        public ActorRuntime.ActorProtocol actorProtocol(String actorTypeName) {
+            Ast.ClassDecl actor = requireLocalActorClass(actorTypeName);
+            Ast.MethodDecl run = findMethod(
+                    actor, CallableSelector.instance("run", 1), new LinkedHashSet<>());
+            Ast.MethodDecl receive = findMethod(
+                    actor, CallableSelector.instance("receive", 1), new LinkedHashSet<>());
+            if (run != null && receive != null) {
+                throw new IllegalArgumentException(
+                        "actor '" + actorTypeName + "' cannot mix unary and stream handlers");
+            }
+            if (run != null) {
+                if (run.visibility() != Ast.Visibility.PRIVATE
+                        || run.isStatic() || run.parameters().size() != 1) {
+                    throw new SecurityException("invalid unary actor run handler");
+                }
+                return ActorRuntime.ActorProtocol.UNARY;
+            }
+            if (receive != null) {
+                if (receive.visibility() != Ast.Visibility.PRIVATE
+                        || receive.isStatic() || receive.parameters().size() != 1) {
+                    throw new SecurityException("invalid stream actor receive handler");
+                }
+                return ActorRuntime.ActorProtocol.STREAM;
+            }
+            return ActorRuntime.ActorProtocol.LIFECYCLE_ONLY;
+        }
+
+        @Override
         public ActorRuntime.ActorOwnedGuestState initializeActor(
                 String actorTypeName,
                 ActorRuntime.ActorContext<Object> actorContext) {

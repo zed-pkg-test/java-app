@@ -28,6 +28,11 @@ final class ActorRequestReplyRuntimeTest {
 
         @Override public SharedCodeImageStore.CodeImage codeImage() { return image; }
 
+        @Override public ActorRuntime.ActorProtocol actorProtocol(String actorTypeName) {
+            assertEquals("Worker", actorTypeName);
+            return ActorRuntime.ActorProtocol.UNARY;
+        }
+
         @Override public ActorRuntime.ActorOwnedGuestState initializeActor(
                 String name, ActorRuntime.ActorContext<Object> context) {
             return context.self()::id;
@@ -78,6 +83,28 @@ final class ActorRequestReplyRuntimeTest {
                 actor.stop();
                 assertNull(actor.done().get(2, TimeUnit.SECONDS));
             }
+        }
+    }
+
+    @Test
+    void unaryActorsRejectOneWaySendWithoutDispatchingGuestCode() throws Exception {
+        try (var store = new SharedCodeImageStore();
+             var runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            var image = store.publish("unary-abi-guard.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            var executor = new Executor(image, null, null);
+            var actor = runtime.spawnCodeActor(ActorRuntime.ActorKind.SHARED,
+                    executor, "Worker");
+            actor.ready().get(2, TimeUnit.SECONDS);
+
+            var error = assertThrows(IllegalArgumentException.class,
+                    () -> actor.send("wrong-protocol"));
+            assertTrue(error.getMessage().contains("stream actor"), error.getMessage());
+            assertEquals(0, executor.executed.get());
+            assertEquals("ok:valid", actor.request("valid").get(2, TimeUnit.SECONDS));
+            assertEquals(1, executor.executed.get());
+            actor.stop();
+            actor.done().get(2, TimeUnit.SECONDS);
         }
     }
 
