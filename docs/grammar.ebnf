@@ -161,6 +161,7 @@ statement       = binding_decl
                 | switch_stmt
                 | try_stmt
                 | select_stmt
+                | do_channel_stmt
                 | defer_stmt
                 | for_stmt
                 | loop_stmt
@@ -262,6 +263,10 @@ multiplicative  = unary { ( "*" | "/" | "%" ) unary } ;
 unary           = [ "!" | "-" | "+" | "await" ] postfix
                 | "&" [ "mut" ] unary
                 | channel_expr ;
+
+(* Explicit statement-only channel calls discard the returned item/Future. *)
+do_channel_stmt = "do" [ "nb" ] ( "readch" unary
+                  | "writech" unary "," expression ) stmt_terminator ;
 
 channel_expr    = [ channel_wait_mode ] "readch" unary
                 | [ channel_wait_mode ] "writech" unary "," expression
@@ -385,7 +390,10 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - Channel/select waiting has three distinct modes. Plain readch/writech/select
      is suspending; nb registers and returns a Future/arms a detached static
      select continuation; try probes once without leaving a waiter. "do select"
-     and "do nb select" mark static, no-result dispatch explicitly; dynamic
+     and "do nb select" mark static, no-result dispatch explicitly. The
+     statement-only "do readch", "do writech", "do nb readch", and "do nb
+     writech" forms reuse the same channel operations and wait modes; "do"
+     discards their result, not their registration. Dynamic
      "select from" remains an Option-valued expression, and dynamic "nb select
      from" remains Future<Option<SelectResult>>. "cb select" and "nb cb select"
      are rejected; nb cb writech retains its separate literal callback syntax.

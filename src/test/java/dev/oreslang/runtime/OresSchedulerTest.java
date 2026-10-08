@@ -16,6 +16,26 @@ import static org.junit.jupiter.api.Assertions.*;
 final class OresSchedulerTest {
 
     @Test
+    void pendingFutureBlockingBridgesRejectSchedulerCarriersButAllowReadyValues() throws Exception {
+        try (OresScheduler scheduler = new OresScheduler(1)) {
+            OresFuture<Integer> pending = new OresFuture<>();
+            OresFuture<Integer> task = scheduler.start(resume -> {
+                assertThrows(IllegalStateException.class, () -> pending.get());
+                assertThrows(IllegalStateException.class, () -> pending.join());
+                assertThrows(IllegalStateException.class, () -> AsyncRuntime.await(pending));
+
+                // Observing already-published values never parks a carrier.
+                OresFuture<Integer> ready = OresFuture.completed(42);
+                assertEquals(42, ready.get());
+                assertEquals(42, ready.join());
+                assertEquals(42, AsyncRuntime.await(ready));
+                return OresScheduler.done(42);
+            });
+            assertEquals(42, task.get(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void rejectedGuestContextAdmissionSettlesTheOwningTask() throws Exception {
         IllegalStateException failure = new IllegalStateException("guest context entry rejected");
         try (OresScheduler scheduler = OresScheduler.managed(1, runnable -> { throw failure; })) {

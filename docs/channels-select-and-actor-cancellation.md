@@ -164,6 +164,32 @@ val Future<void> pending_write = nb writech output, value;
 This distinction is important. A pending `nb readch` remains registered until
 it completes or is cancelled.
 
+### Explicit no-result channel statements
+
+```ores
+do readch input;                 // suspend until a value is consumed; discard it
+do writech output, value;       // suspend until the write commits
+do nb readch input;              // register read immediately; discard its Future
+do nb writech output, value;    // register write immediately; discard its Future
+```
+
+`do` is a statement prefix, not a new channel primitive. The parser lowers
+these four spellings to the existing channel expression statement, so they
+retain the same scheduler, fairness, ownership checks, cancellation behavior,
+and execution-domain restrictions as the corresponding undecorated operations.
+They cannot be used where a value is expected. `do try readch` and
+`do try writech` are not part of this syntax: immediate probes already
+return a result that callers should examine.
+
+**Important:** `do nb` intentionally discards the handle to its registration.
+Inside actors, the existing runtime tracks outstanding channel Futures and
+cancels them on actor teardown. Outside an actor, a discarded pending future
+cannot be individually cancelled or awaited by the caller. Prefer retaining
+the Future (or use blocking `do` to wait) when completion, failure handling,
+or scope-bound cancellation matters. A follow-up must introduce structured
+non-actor child-operation ownership before making `do nb` a fully safe
+fire-and-forget primitive in ordinary functions.
+
 ### Immediate probe forms
 
 ```ores

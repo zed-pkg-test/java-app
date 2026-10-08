@@ -611,6 +611,10 @@ public final class OresFuture<T> implements Future<T>, Awaitable<T> {
             throw new IllegalStateException(
                     "await would block an actor dispatcher carrier; actor continuation lowering must suspend/resume the mailbox turn");
         }
+        if (OresScheduler.current() != null || OresScheduler.isSchedulerCarrierThread()) {
+            throw new IllegalStateException(
+                    "pending Future cannot block an OresScheduler carrier; return an Await step to suspend the task");
+        }
     }
 
     @SuppressWarnings("unchecked")

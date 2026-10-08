@@ -1495,6 +1495,12 @@ public final class Parser {
                     + "dynamic 'select from cases' produces a result and "
                     + "has no callback arms to handle discarded reads");
         }
+        // "do" explicitly discards a channel operation's result. It does
+        // not change the wait mode: plain readch/writech suspend, while "nb"
+        // registers and immediately returns a Future that the statement ignores.
+        if (looksLikeDoChannelStatement()) {
+            return parseDoChannelStatement();
+        }
         if (looksLikeImmediateChannelExpression()) {
             Ast.Expr expression = parseExpression();
             consumeStatementTerminator("channel probe expression should end with ';'");
@@ -1596,6 +1602,32 @@ public final class Parser {
 
         Ast.Expr expression = parseExpression();
         consumeExpressionStatementTerminator(expression, "expression statement should end with ';'");
+        return new Ast.ExprStmt(expression);
+    }
+
+    private boolean looksLikeDoChannelStatement() {
+        if (!check(DO)) return false;
+        int index = current + 1;
+        if (index < tokens.size() && tokens.get(index).type() == NB) index++;
+        return index < tokens.size()
+                && (tokens.get(index).type() == READCH
+                        || tokens.get(index).type() == WRITECH);
+    }
+
+    private Ast.Stmt parseDoChannelStatement() {
+        consume(DO, "expected 'do' before channel statement");
+        Ast.WaitMode mode = match(NB)
+                ? Ast.WaitMode.NONBLOCKING
+                : Ast.WaitMode.BLOCKING;
+        Ast.ChannelOperation operation = match(READCH)
+                ? Ast.ChannelOperation.READ
+                : Ast.ChannelOperation.WRITE;
+        if (operation == Ast.ChannelOperation.WRITE) {
+            consume(WRITECH, "expected 'writech' after 'do' or 'do nb'");
+        }
+        Ast.Expr expression = parseChannelOperation(operation, mode);
+        consumeExpressionStatementTerminator(
+                expression, "do channel statement should end with ';'");
         return new Ast.ExprStmt(expression);
     }
 
