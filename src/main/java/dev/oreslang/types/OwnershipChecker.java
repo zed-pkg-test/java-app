@@ -768,8 +768,34 @@ public final class OwnershipChecker {
                     }
                 }
             }
-            checkExpr(member.receiver(), scope, false);
+            ValueInfo receiverValue = checkExpr(member.receiver(), scope, false);
             Ast.TypeRef concreteReceiver = receiverType(member.receiver(), scope);
+            if (concreteReceiver == null) {
+                concreteReceiver = receiverValue.type != null && receiverValue.type.isBorrow()
+                        ? receiverValue.type.borrowedTarget() : receiverValue.type;
+            }
+            // Select<T>.payload is Option<T>, not an erased/dynamic field.
+            // Preserve its exact ownership kind so nested payload extraction
+            // does not re-evaluate an earlier consuming Option.unwrap().
+            if (concreteReceiver != null
+                    && concreteReceiver.name().equals("Select")
+                    && concreteReceiver.arguments().size() == 1) {
+                return switch (member.member()) {
+                    case "index" -> new ValueInfo(Ast.TypeRef.simple("int"), ValueKind.COPY, null);
+                    case "operation" -> new ValueInfo(Ast.TypeRef.simple("string"), ValueKind.COPY, null);
+                    case "value" -> new ValueInfo(Ast.TypeRef.inferred(), ValueKind.MOVE_ONLY, null);
+                    case "payload" -> {
+                        Ast.TypeRef payload = new Ast.TypeRef(
+                                "Option", List.of(concreteReceiver.arguments().getFirst()), false);
+                        if (!isCopyType(payload) && member.receiver() instanceof Ast.NameExpr name) {
+                            VarState state = scope.lookup(name.name());
+                            if (state != null) move(state, name.name());
+                        }
+                        yield new ValueInfo(payload, kindOfType(payload), null);
+                    }
+                    default -> throw error("unknown Select<T> member '" + member.member() + "'");
+                };
+            }
             if (concreteReceiver != null
                     && concreteReceiver.name().equals("DynamicStruct")
                     && concreteReceiver.arguments().size() == 1) {
