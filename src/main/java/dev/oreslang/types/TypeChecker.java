@@ -883,6 +883,23 @@ public final class TypeChecker {
         // child to declare an explicit local override/hide for that slot.
         effectiveCallableTargets(klass, new LinkedHashSet<>());
 
+        // Validate the resolved inherited ABI, not just declarations in this
+        // file. Imported actor proxies and multiple source-actor parents must
+        // agree on one mailbox protocol before any typed ActorRef is formed.
+        if (klass.actorKind() != Ast.ActorKind.NONE) {
+            var inherited = effectiveInstanceMethods(klass, new LinkedHashSet<>());
+            long runHandlers = inherited.keySet().stream()
+                    .filter(slot -> slot.name().equals("run")).count();
+            long receiveHandlers = inherited.keySet().stream()
+                    .filter(slot -> slot.name().equals("receive")).count();
+            if (runHandlers > 1 || receiveHandlers > 1
+                    || (runHandlers != 0 && receiveHandlers != 0)) {
+                throw new IllegalArgumentException(
+                        "actor '" + klass.name()
+                                + "' has an ambiguous inherited request/event mailbox ABI");
+            }
+        }
+
         for (Ast.FieldDecl field : klass.fields()) {
             if (klass.actorKind() != Ast.ActorKind.NONE && field.visibility() == Ast.Visibility.PUBLIC) {
                 throw new IllegalArgumentException("actor state field '" + klass.name() + "." + field.name()
