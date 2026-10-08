@@ -80,7 +80,7 @@ final class SerializationAnnotationTest {
                 end
 
                 pub fnc main() : void {
-                  let MyBlob blob = new MyBlob("before", false);
+                  val MyBlob blob = new MyBlob("before", false);
                   blob.setFoo("after");
                   blob.setBar(true);
                   stdio.println(blob.getFoo());
@@ -149,7 +149,7 @@ final class SerializationAnnotationTest {
                 end
 
                 pub fnc main() : void {
-                  val MyBlob blob = new MyBlob("before");
+                  const MyBlob blob = new MyBlob("before");
                   blob.setFoo("after");
                   return;
                 }

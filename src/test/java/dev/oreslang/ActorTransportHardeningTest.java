@@ -118,6 +118,27 @@ final class ActorTransportHardeningTest {
         assertTrue(error.getMessage().contains("live actor/shared capabilities"));
     }
     @Test
+    void actorMailboxesRejectExecutableAndRawObjectReferencesTransitively() {
+        try (ActorRuntime runtime = new ActorRuntime()) {
+            var privateRef = runtime.<Object>spawnPrivate(() -> (message, context) -> { });
+            var sharedRef = runtime.<Object>spawnShared(() -> (message, context) -> { });
+
+            Runnable executable = () -> { };
+            Object rawObject = new Object();
+
+            assertThrows(IllegalArgumentException.class, () -> privateRef.send(executable));
+            assertThrows(IllegalArgumentException.class, () -> sharedRef.send(executable));
+            assertThrows(IllegalArgumentException.class, () -> privateRef.send(List.of(executable)));
+            assertThrows(IllegalArgumentException.class, () -> sharedRef.send(List.of(executable)));
+
+            assertThrows(IllegalArgumentException.class, () -> privateRef.send(rawObject));
+            assertThrows(IllegalArgumentException.class, () -> sharedRef.send(rawObject));
+            assertThrows(IllegalArgumentException.class, () -> privateRef.send(List.of(rawObject)));
+            assertThrows(IllegalArgumentException.class, () -> sharedRef.send(List.of(rawObject)));
+        }
+    }
+
+    @Test
     void actorStartupFailureDoesNotLeaveUsableRefOrActorQuota() throws Exception {
         try (ActorRuntime runtime = new ActorRuntime()) {
             java.util.concurrent.CountDownLatch attempted = new java.util.concurrent.CountDownLatch(1);

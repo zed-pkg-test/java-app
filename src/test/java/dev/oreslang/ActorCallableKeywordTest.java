@@ -174,11 +174,15 @@ final class ActorCallableKeywordTest {
                 .mimeType(OresLanguage.MIME_TYPE)
                 .build();
 
-        try (Context context = Context.newBuilder(OresLanguage.ID)
+        Context context = Context.newBuilder(OresLanguage.ID)
                 .allowAllAccess(false)
                 .out(output)
-                .build()) {
+                .build();
+        try {
             context.eval(source);
+        } finally {
+            // Actor results can be observed before their final turn has unwound.
+            context.close(true);
         }
         return output.toString(StandardCharsets.UTF_8);
     }

@@ -18,6 +18,7 @@ final class InitializationBarrierTest {
     @Test
     void moduleAndRootInitHooksRunBeforeMainAfterAllModulesAreIndexed() throws Exception {
         String output = run("""
+
                 define module early
                   routine init() : void  {
                     stdio.stdout.write("early:");
