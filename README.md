@@ -13,9 +13,9 @@ The language is intentionally opinionated:
 - classes cannot nest inside classes; class bodies contain fields, an optional constructor, methods, and `static fnc` members only;
 - one return value only (tuples/arrays/records are ordinary single values);
 - `val`, `const`, and `let` are the only variable declarations;
-- actor heaps are isolated: mutable values are never shared between actors;
+- private actor state is logically confined in the current backend; shared actors may access explicit synchronized shared cells; protected per-actor heaps are under development;
 - immutable/sendable values may be message-passed, and explicitly frozen regions may be shared read-only;
-- isolates are stricter security boundaries for FaaS/mobile workloads, with host access denied and Oreslang APIs capability-gated by default;
+- host access is denied and Oreslang APIs are capability-gated by default; the current actor kinds alone do not establish an OS sandbox;
 - JIT, AOT/interpreter, and AOT-host + guest-JIT hybrid execution profiles;
 - file-granular incremental compilation with stable code-unit/package identities and reverse-dependency invalidation;
 - flat optional file namespaces and flat modules (neither may nest);
@@ -30,3 +30,11 @@ The language is intentionally opinionated:
 - generics, tuples, arrays, complex numbers, futures/`await`, lambdas, `defer`, and `try/catch/finally` are language-level features.
 
 The first implementation is developed on a feature branch and will land with an executable Truffle skeleton, grammar/specification, examples, tests, and CI.
+
+Native inbound HTTP capabilities and actor-owned request transfer are documented in [docs/HTTP_SERVER.md](docs/HTTP_SERVER.md).
+
+The implemented actor scheduling guarantees, native descriptor-transfer experiment,
+and remaining physical-isolation work are tracked in
+[Actor physical boundaries](docs/runtime/actor-physical-boundaries.md).
+
+Async filesystem, TCP and HTTP client APIs: [usage and execution guarantees](docs/ASYNC_IO.md).
