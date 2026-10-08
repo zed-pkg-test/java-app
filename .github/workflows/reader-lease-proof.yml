@@ -1,0 +1,34 @@
+name: reactive reader lease exact-tree proof
+on:
+  push:
+    branches: ["proof/reader-lease-hardening-20261008"]
+permissions:
+  contents: read
+concurrency:
+  group: rx-reader-proof-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  reactive-reader:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bed1d705409c7b8bc6f8ddac2cbd89b98ffdfe00
+          persist-credentials: false
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          cache: maven
+      - name: Assert exact upstream source tree
+        run: test "$(git rev-parse 'HEAD^{tree}')" = 4969853e02498c31130d309e1bf36af95bd8abcd
+      - name: Full Maven verification
+        run: mvn -B -ntp clean verify
+      - name: Repeat lifecycle and reader regression tests
+        run: |
+          for iteration in $(seq 1 12); do
+            echo "reader regression iteration $iteration"
+            mvn -B -ntp -Dtest=ReactiveReaderLeaseTest,ReactiveReaderLanguageTest,ActorStreamLifecycleTest,ActorSpawnStreamContractTest,LinkedProgramRunnerTest test
+          done
