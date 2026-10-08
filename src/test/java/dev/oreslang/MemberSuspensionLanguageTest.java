@@ -1,6 +1,8 @@
 package dev.oreslang;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.oreslang.runtime.ExecutionProfile;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.LinkedProgramRunner;
@@ -19,7 +21,7 @@ final class MemberSuspensionLanguageTest {
     @TempDir Path temp;
 
     @Test
-    void importedPolymorphicPullMethodsResumeTheirCallers() throws Exception {
+    void importedPolymorphicPullCannotSuspendWithBorrowedReceiver() throws Exception {
         Files.writeString(temp.resolve("library.ores"), """
                 define module library
                   pub define class Pull as
@@ -33,7 +35,7 @@ final class MemberSuspensionLanguageTest {
                   end
                 end
                 """);
-        assertEquals("42", run("""
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> run("""
                 import class Pull, ChannelPull from './library.ores';
                 define module app
                   pub async fnc main(): void {
@@ -47,10 +49,12 @@ final class MemberSuspensionLanguageTest {
                   }
                 end
                 """));
+        assertTrue(error.getMessage().contains("cannot await while an ordinary borrow is live"),
+                error.getMessage());
     }
 
     @Test
-    void importedReceiverNamedLikeBuiltinNamespaceStillSuspends() throws Exception {
+    void importedReceiverNamedLikeBuiltinNamespaceCannotHideBorrowedSuspension() throws Exception {
         Files.writeString(temp.resolve("library.ores"), """
                 define module library
                   pub define class Pull as
@@ -64,7 +68,7 @@ final class MemberSuspensionLanguageTest {
                   end
                 end
                 """);
-        assertEquals("43", run("""
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> run("""
                 import class Pull, ChannelPull from './library.ores';
                 define module app
                   fnc consume(ChannelPull Math): int {
@@ -82,6 +86,8 @@ final class MemberSuspensionLanguageTest {
                   }
                 end
                 """));
+        assertTrue(error.getMessage().contains("cannot await while an ordinary borrow is live"),
+                error.getMessage());
     }
 
     @Test
