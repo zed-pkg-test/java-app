@@ -1,3 +1,4 @@
+
 define module contracts
   define contract MathApi as
     fnc add(int a, int b) => int;
@@ -35,7 +36,7 @@ define module app
     answer = answer + 1;
     val complex z = 3 + 4i;
     val values = arr[answer, 2];
-    val info = obj{name: "oreslang", stable: true};
+    const info = infer struct{name: "oreslang", stable: true};
     [const first, let second] = (values[0], values[1]);
 
     if first == 43, info.stable | false; do

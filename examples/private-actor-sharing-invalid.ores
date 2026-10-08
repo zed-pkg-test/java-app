@@ -1,21 +1,11 @@
 // Compile-valid but capability-invalid by design.
 // This file is a negative regression fixture for PRIVATE actor isolation.
+// Actor dependencies are real cross-file imports; same-file actor dependency
+// escape hatches are intentionally not supported.
 
-type SharedCounterCell = SharedMutex<int>;
-
-fnc make_shared_cell(): void {
-  val shared = SharedMutex.new(10);
-  stdio.println(shared.is_poisoned());
-  return;
-}
-
-define class Helpers as
-  pub static fnc make_shared(): void {
-    val shared = SharedMutex.new(11);
-    stdio.println(shared.is_poisoned());
-    return;
-  }
-end
+import fnc make_shared_cell from "./private-actor-sharing-support.ores";
+import class Helpers from "./private-actor-sharing-support.ores";
+import type SharedCounterCell from "./private-actor-sharing-support.ores";
 
 isoactor InvalidPrivateCounter {
   // Type-alias laundering must be rejected.
