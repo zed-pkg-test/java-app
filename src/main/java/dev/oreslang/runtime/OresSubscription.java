@@ -159,29 +159,42 @@ public abstract class OresSubscription<T> {
         }
 
         source.whenCompleteRuntime((notification, failure) -> {
-            boolean cleanup = false;
+            boolean cleanup = failure != null || notification == null
+                    || notification.isComplete() || source.isCancelled();
+            Throwable effectiveFailure = failure;
+            if (failure == null && notification == null) {
+                effectiveFailure = new IllegalStateException(
+                        "rx-ores source completed a pull with null notification");
+            }
+
             synchronized (gate) {
                 if (cancelled) {
-                    // Subscription cancellation has won; a late producer
-                    // completion must never resurrect the released subscription.
+                    // Subscription cancellation has already won.
                     if (active == exposed) active = null;
                     pulling = false;
                     return;
                 }
-                Throwable effectiveFailure = failure;
-                if (failure != null || notification == null || notification.isComplete()) {
-                    terminal = true;
-                    cleanup = true;
-                    if (failure == null && notification == null) {
-                        effectiveFailure = new IllegalStateException(
-                                "rx-ores source completed a pull with null notification");
-                    }
-                }
+                // Keep the outstanding-pull slot occupied while cleanup is
+                // enqueued: actor shutdown must not overtake source cleanup.
+                if (cleanup) terminal = true;
+            }
 
-                // Retire the old pull before publishing its outcome, but keep
-                // the gate held through Future settlement. A resumed reader
-                // can never observe a finished Future and an outstanding
-                // demand slot, nor admit a second pull before settlement.
+            if (cleanup) {
+                try {
+                    cancelRuntimeOnce();
+                } catch (RuntimeException | Error ignored) {
+                    // Preserve the source's terminal value/failure.
+                }
+            }
+
+            synchronized (gate) {
+                if (cancelled) {
+                    if (active == exposed) active = null;
+                    pulling = false;
+                    return;
+                }
+                // Settle before releasing the gate so a waking consumer
+                // cannot observe a completed Future and an occupied slot.
                 active = null;
                 pulling = false;
                 if (source.isCancelled()) {
@@ -190,13 +203,6 @@ public abstract class OresSubscription<T> {
                     exposed.completeFromRuntime(notification);
                 } else {
                     exposed.failFromRuntime(OresFuture.unwrap(effectiveFailure));
-                }
-            }
-            if (cleanup) {
-                try {
-                    cancelRuntimeOnce();
-                } catch (RuntimeException | Error ignored) {
-                    // Stream terminal state is already authoritative.
                 }
             }
         });

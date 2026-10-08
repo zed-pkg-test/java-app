@@ -208,6 +208,35 @@ final class ReactiveReaderLeaseTest {
                 OresObservable.fromValues(java.util.Arrays.asList(1, null)));
     }
 
+
+    @Test
+    void terminalCleanupIsScheduledBeforeTheFutureNotifiesWaiters() throws Exception {
+        OresFuture<OresNotification<Integer>> source = new OresFuture<>();
+        java.util.concurrent.atomic.AtomicBoolean cleanupRequested =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicBoolean ordered =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        OresSubscription<Integer> sub = new OresSubscription<>() {
+            @Override protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                return source;
+            }
+            @Override protected void cancelFromRuntime() {
+                cleanupRequested.set(true);
+            }
+        };
+        var item = sub.next();
+        item.whenCompleteRuntime((notification, failure) ->
+                ordered.set(cleanupRequested.get()));
+        Thread producer = new Thread(() ->
+                source.completeFromRuntime(OresNotification.complete()));
+        producer.start();
+        assertTrue(read(item).isComplete());
+        producer.join(3000);
+        assertFalse(producer.isAlive());
+        assertTrue(ordered.get(),
+                "actor termination must not overtake reactive source cleanup");
+    }
+
     @Test
     void completedPullAlwaysReleasesDemandBeforeReaderCanBeReleased() throws Exception {
         for (int iteration = 0; iteration < 150; iteration++) {
