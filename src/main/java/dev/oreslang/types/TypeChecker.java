@@ -1123,6 +1123,8 @@ public final class TypeChecker {
             boolean actorStartupHook = method.name().equals("on_start");
             boolean actorReceiveHook = klass.actorKind() != Ast.ActorKind.NONE
                     && method.name().equals("receive");
+            boolean actorRequestHook = klass.actorKind() != Ast.ActorKind.NONE
+                    && method.name().equals("run");
             if (actorStartupHook) {
                 if (klass.actorKind() == Ast.ActorKind.NONE) {
                     throw new IllegalArgumentException(
@@ -1259,6 +1261,13 @@ public final class TypeChecker {
                             false,
                             "parameter '" + param.name() + "' of async static function '" + klass.name() + "." + method.name() + "'");
                 }
+                if (actorRequestHook) {
+                    // The ABI must be valid when the actor is defined, not only
+                    // when a source caller later invokes ActorRef.request(...).
+                    validateActorCallableBoundaryType(
+                            parameterType, klass.actorKind(), false,
+                            "request payload of actor '" + klass.name() + ".run'");
+                }
                 if (actorReceiveHook) {
                     if (!(parameterType instanceof Named mail)
                             || !mail.name().equals("ActorMail")
@@ -1284,6 +1293,11 @@ public final class TypeChecker {
             if (actorReceiveHook && returns != Primitive.VOID) {
                 throw new IllegalArgumentException(
                         "actor mailbox handler '" + klass.name() + ".receive' must return void");
+            }
+            if (actorRequestHook) {
+                validateActorCallableBoundaryType(
+                        returns, klass.actorKind(), true,
+                        "request reply of actor '" + klass.name() + ".run'");
             }
             if (method.async()) {
                 validateAsyncBoundaryType(

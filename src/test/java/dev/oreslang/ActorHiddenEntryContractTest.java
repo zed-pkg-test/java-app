@@ -67,6 +67,26 @@ final class ActorHiddenEntryContractTest {
     }
 
     @Test
+    void requestTransportTypesAreCheckedAtDeclarationWithoutCallers() {
+        rejects("""
+                define actor Worker as
+                  @Implementation
+                  fnc run(Channel<int> payload): int {
+                    return 1;
+                  }
+                end
+                """, "request payload of actor");
+        rejects("""
+                define actor Worker as
+                  @Implementation
+                  fnc run(int delta): Future<int> {
+                    return delta;
+                  }
+                end
+                """, "request reply of actor");
+    }
+
+    @Test
     void requestAndEventHandlersCannotShareOneActorMailboxAbi() {
         rejects("""
                 define actor Worker as
