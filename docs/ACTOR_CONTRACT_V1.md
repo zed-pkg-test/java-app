@@ -138,6 +138,39 @@ future explicit annotation; it is **not** accepted grammar in this change.
 Existing `define actor` source declarations infer the mode without breaking
 compatibility.
 
+## Contract-intent annotations
+
+`@Implementation` is an optional compile-time assertion that the annotated
+actor method implements an OresVM runtime hook. Supported hooks are the
+private, non-public actor `run(T): R`, `receive(ActorMail<T>): void`
+and `on_start(): void`. The compiler rejects the annotation on ordinary
+helpers, ordinary class methods, and unsupported source declaration sites;
+the annotation never grants runtime dispatch authority.
+
+`@Override` is an optional compile-time assertion that a class or actor
+instance method intentionally replaces a name/arity slot inherited from a
+source parent. It rejects non-inherited or static methods, and accepts an
+inherited actor handler. For an inherited runtime hook, both
+`@Implementation` and `@Override` can be present:
+
+```ores
+define actor BaseCounter as
+  @Implementation
+  fnc run(int delta): int { return delta; }
+end
+
+define actor Counter extends BaseCounter as
+  @Implementation
+  @Override
+  fnc run(int delta): int { return delta + 1; }
+end
+```
+
+Existing source without annotations remains valid. Both markers are
+zero-argument, non-repeatable and enforced during compilation and linking.
+They do not replace the actor's sealed entrypoint, supply a constructor,
+allow `super` calls, or allow direct invocation of `run` / `receive`.
+
 ## Event-only compatibility and migration
 
 Current `receive(ActorMail<T> mail): void` is a **private event handler**
