@@ -66,6 +66,8 @@ public final class ActorRuntime implements AutoCloseable {
     private static final ThreadMXBean THREAD_MX_BEAN = ManagementFactory.getThreadMXBean();
     private static final ThreadLocal<Boolean> ACTOR_CARRIER = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<ActorExecutionContext> CURRENT_ACTOR_EXECUTION = new ThreadLocal<>();
+    /** Logical UNTRUSTED source task scope, never a carrier-global budget. */
+    private static final ThreadLocal<UntrustedTaskQuota> CURRENT_UNTRUSTED_TASK_QUOTA = new ThreadLocal<>();
     private static final ThreadLocal<ActorGroupMailmanExecution> CURRENT_ACTOR_GROUP_MAILMAN =
             new ThreadLocal<>();
     /**
@@ -1400,7 +1402,39 @@ public final class ActorRuntime implements AutoCloseable {
             throw new IllegalStateException(
                     "source actor task requires an executing actor turn");
         }
-        return cell.sourceScheduler().start(task);
+        if (cell.kind != ActorKind.UNTRUSTED) return cell.sourceScheduler().start(task);
+        UntrustedTaskQuota quota = new UntrustedTaskQuota(cell.policy);
+        OresScheduler.Task<T> guarded = resume -> {
+            if (currentActor.get() != cell) {
+                throw new SecurityException("untrusted task resumed outside its owning actor");
+            }
+            UntrustedTaskQuota previous = CURRENT_UNTRUSTED_TASK_QUOTA.get();
+            boolean entered = false;
+            try {
+                quota.enter();
+                entered = true;
+                CURRENT_UNTRUSTED_TASK_QUOTA.set(quota);
+                return task.resume(resume);
+            } catch (UntrustedActorQuotaExceededException exceeded) {
+                // Exhaustion is actor-fatal, not merely a failed child Future:
+                // otherwise hostile code could repeatedly mint new task budgets.
+                cell.fail(exceeded);
+                throw exceeded;
+            } finally {
+                try {
+                    if (entered) quota.leave();
+                } catch (UntrustedActorQuotaExceededException exceeded) {
+                    cell.fail(exceeded);
+                    throw exceeded;
+                } finally {
+                    if (previous == null) CURRENT_UNTRUSTED_TASK_QUOTA.remove();
+                    else CURRENT_UNTRUSTED_TASK_QUOTA.set(previous);
+                }
+            }
+        };
+        OresFuture<T> result = cell.sourceScheduler().start(guarded);
+        result.whenCompleteRuntime((value, failure) -> quota.close());
+        return result;
     }
 
     private boolean ownFuture(
@@ -4256,6 +4290,11 @@ public final class ActorRuntime implements AutoCloseable {
             throw new ActorCancellationSignal("actor execution stopped");
         }
         if (cell != null && cell.kind == ActorKind.UNTRUSTED) {
+            UntrustedTaskQuota quota = CURRENT_UNTRUSTED_TASK_QUOTA.get();
+            if (quota != null) {
+                quota.safepoint();
+                return;
+            }
             cell.untrustedSafepoints++;
             if (--cell.untrustedFuelRemaining < 0) {
                 throw new UntrustedActorQuotaExceededException(
@@ -4282,6 +4321,87 @@ public final class ActorRuntime implements AutoCloseable {
         // is represented by ActorCell/runtime state above. Non-cooperative
         // untrusted termination belongs to the host-owned revocable isolate
         // boundary used by FORCE_ISOLATED.
+    }
+
+    /**
+     * Stable logical-task budget across cooperate/await and carrier migration.
+     * Per-segment CPU deltas (not absolute per-thread CPU clocks) are summed.
+     */
+    private static final class UntrustedTaskQuota {
+        private final long startedWallNanos = System.nanoTime();
+        private final long wallBudgetNanos;
+        private long remainingFuel;
+        private long cpuNanos;
+        private long segmentCpuStart = -1L;
+        private boolean entered;
+        private boolean closed;
+
+        private UntrustedTaskQuota(IsolatePolicy policy) {
+            wallBudgetNanos = policy.maxWallTime().toNanos();
+            remainingFuel = untrustedFuelBudget(policy);
+        }
+
+        private synchronized void enter() {
+            if (closed || entered) {
+                throw new IllegalStateException("untrusted task quota already closed or active");
+            }
+            checkDeadlineAndCpu();
+            segmentCpuStart = currentThreadCpuNanos();
+            entered = true;
+        }
+
+        private synchronized void safepoint() {
+            if (closed || !entered) {
+                throw new SecurityException("untrusted quota checked outside its task");
+            }
+            if (--remainingFuel < 0) {
+                throw new UntrustedActorQuotaExceededException(
+                        UntrustedActorQuotaExceededException.Resource.FUEL,
+                        "untrusted source task exhausted execution fuel");
+            }
+            checkDeadlineAndCpu();
+        }
+
+        private synchronized void leave() {
+            try {
+                if (entered) checkDeadlineAndCpu();
+            } finally {
+                if (entered) {
+                    long now = currentThreadCpuNanos();
+                    if (segmentCpuStart >= 0 && now >= segmentCpuStart) {
+                        cpuNanos = saturatingAdd(cpuNanos, now - segmentCpuStart);
+                    }
+                }
+                segmentCpuStart = -1L;
+                entered = false;
+            }
+        }
+
+        private synchronized void close() {
+            closed = true;
+        }
+
+        private void checkDeadlineAndCpu() {
+            if (System.nanoTime() - startedWallNanos > wallBudgetNanos) {
+                throw new UntrustedActorQuotaExceededException(
+                        UntrustedActorQuotaExceededException.Resource.WALL_TIME,
+                        "untrusted source task exceeded wall-time budget");
+            }
+            long used = cpuNanos;
+            long now = currentThreadCpuNanos();
+            if (entered && segmentCpuStart >= 0 && now >= segmentCpuStart) {
+                used = saturatingAdd(used, now - segmentCpuStart);
+            }
+            if (used > wallBudgetNanos) {
+                throw new UntrustedActorQuotaExceededException(
+                        UntrustedActorQuotaExceededException.Resource.CPU_TIME,
+                        "untrusted source task exceeded CPU-time budget");
+            }
+        }
+
+        private static long saturatingAdd(long a, long b) {
+            return a > Long.MAX_VALUE - b ? Long.MAX_VALUE : a + b;
+        }
     }
 
     private static long currentThreadCpuNanos() {
