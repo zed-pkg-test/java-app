@@ -883,6 +883,23 @@ public final class TypeChecker {
         // child to declare an explicit local override/hide for that slot.
         effectiveCallableTargets(klass, new LinkedHashSet<>());
 
+        // Validate the resolved inherited ABI, not just declarations in this
+        // file. Imported actor proxies and multiple source-actor parents must
+        // agree on one mailbox protocol before any typed ActorRef is formed.
+        if (klass.actorKind() != Ast.ActorKind.NONE) {
+            var inherited = effectiveInstanceMethods(klass, new LinkedHashSet<>());
+            long runHandlers = inherited.keySet().stream()
+                    .filter(slot -> slot.name().equals("run")).count();
+            long receiveHandlers = inherited.keySet().stream()
+                    .filter(slot -> slot.name().equals("receive")).count();
+            if (runHandlers > 1 || receiveHandlers > 1
+                    || (runHandlers != 0 && receiveHandlers != 0)) {
+                throw new IllegalArgumentException(
+                        "actor '" + klass.name()
+                                + "' has an ambiguous inherited request/event mailbox ABI");
+            }
+        }
+
         for (Ast.FieldDecl field : klass.fields()) {
             if (klass.actorKind() != Ast.ActorKind.NONE && field.visibility() == Ast.Visibility.PUBLIC) {
                 throw new IllegalArgumentException("actor state field '" + klass.name() + "." + field.name()
@@ -2252,6 +2269,19 @@ public final class TypeChecker {
                                         + " does not accept call-site type arguments");
                     }
                     return switch (member.member()) {
+                        case "request" -> {
+                            if (call.arguments().size() != 1) {
+                                throw new IllegalArgumentException(
+                                        "ActorRef.request expects exactly one request value");
+                            }
+                            ActorRequestContract contract = actorRequestContract(actorRef);
+                            Type payload = typeOf(call.arguments().getFirst(), env, generics, self);
+                            validateActorCallableBoundaryType(
+                                    payload, actorClass.actorKind(), false, "ActorRef.request payload");
+                            requireAssignable(payload, contract.input(),
+                                    "ActorRef.request payload for actor '" + actorClass.name() + "'");
+                            yield new Named("Future", List.of(contract.output()));
+                        }
                         case "send" -> {
                             if (call.arguments().size() != 1) {
                                 throw new IllegalArgumentException(
@@ -2777,7 +2807,7 @@ public final class TypeChecker {
                             List.of(Unknown.INSTANCE));
                     case "id" -> new Named("ActorId", List.of());
                     case "kind" -> new Named("ActorKind", List.of());
-                    case "send", "stop", "cancel", "kill" ->
+                    case "send", "request", "stop", "cancel", "kill" ->
                             throw new IllegalArgumentException(
                                     "ActorRef." + member.member()
                                             + " is direct-call-only; invoke it with (...)");
@@ -4041,6 +4071,37 @@ public final class TypeChecker {
             return new Record(members, record.readOnly());
         }
         return type;
+    }
+
+    private record ActorRequestContract(Type input, Type output) { }
+
+    private ActorRequestContract actorRequestContract(Named actorRef) {
+        Ast.ClassDecl actorClass = actorClassForRef(actorRef);
+        Type target = receiverDispatchType(deref(actorRef.arguments().getFirst()));
+        Named actorType = (Named) target;
+        ResolvedMethod resolved = findMethodTarget(
+                actorClass, actorType, "run", 1, new LinkedHashSet<>());
+        if (resolved == null) {
+            throw new IllegalArgumentException(
+                    "actor '" + actorClass.name() + "' has no private run(T): R request handler");
+        }
+        Ast.MethodDecl run = resolved.method();
+        if (run.parameters().size() != 1 || run.visibility() != Ast.Visibility.PRIVATE
+                || run.isStatic() || run.returnType().name().equals("void")) {
+            throw new IllegalArgumentException(
+                    "actor '" + actorClass.name() + "' has invalid private run request ABI");
+        }
+        Set<String> generics = Set.copyOf(resolved.owner().genericParameters());
+        Map<String, Type> bindings = classGenericBindings(resolved.owner(), resolved.ownerType());
+        Type input = substituteGenerics(
+                resolve(run.parameters().getFirst().type(), generics, resolved.ownerType()), bindings);
+        Type output = substituteGenerics(
+                resolve(run.returnType(), generics, resolved.ownerType()), bindings);
+        validateActorCallableBoundaryType(input, actorClass.actorKind(), false,
+                "actor '" + actorClass.name() + "' request input");
+        validateActorCallableBoundaryType(output, actorClass.actorKind(), true,
+                "actor '" + actorClass.name() + "' request reply");
+        return new ActorRequestContract(input, output);
     }
 
     private Type actorMailboxPayloadType(Named actorRef) {

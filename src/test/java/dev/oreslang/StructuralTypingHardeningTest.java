@@ -185,7 +185,7 @@ final class StructuralTypingHardeningTest {
                   }
 
                   fnc bad(structural Worker worker): int {
-                    return worker.run();
+                    return worker.helper();
                   }
                 end
                 """)));
@@ -292,7 +292,7 @@ final class StructuralTypingHardeningTest {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
                   actor Worker {
-                    structural pub run(): int { return 1; }
+                    structural pub helper(): int { return 1; }
                   }
 
                   @structural
@@ -305,11 +305,11 @@ final class StructuralTypingHardeningTest {
         assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
                 define module app
                   actor Worker {
-                    structural pub run(): int { return 1; }
+                    structural pub helper(): int { return 1; }
                   }
 
                   fnc bad(structural Worker worker): int {
-                    return worker.run();
+                    return worker.helper();
                   }
                 end
                 """)));

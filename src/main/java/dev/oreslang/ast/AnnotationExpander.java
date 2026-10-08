@@ -30,6 +30,7 @@ public final class AnnotationExpander {
     private AnnotationExpander() { }
 
     public static Ast.Program expand(Ast.Program program) {
+        ActorContractValidator.validate(program);
         List<Ast.ModuleDecl> modules = new ArrayList<>(program.modules().size());
         for (Ast.ModuleDecl module : program.modules()) modules.add(expandModule(module));
         return new Ast.Program(program.namespace(), program.imports(), modules);

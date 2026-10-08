@@ -113,7 +113,7 @@ final class ActorDeclarationLexicalBoundaryTest {
                     return;
                   }
 
-                  pub run(): void {
+                  pub work(): void {
                     self.ping();
                     return;
                   }
@@ -210,7 +210,7 @@ final class ActorDeclarationLexicalBoundaryTest {
                           pub fnc value(): int { return 1; }
                         end
                         define actor Worker as
-                          pub run(): int { return helpers.value(); }
+                          pub work(): int { return helpers.value(); }
                         end
                         """)));
         assertTrue(moduleFailure.getMessage().contains("actor 'Worker'"), moduleFailure.getMessage());
@@ -222,7 +222,7 @@ final class ActorDeclarationLexicalBoundaryTest {
                           pub static fnc value(): int { return 1; }
                         end
                         define actor Worker as
-                          pub run(): int { return Helper.value(); }
+                          pub work(): int { return Helper.value(); }
                         end
                         """)));
         assertTrue(classFailure.getMessage().contains("actor 'Worker'"), classFailure.getMessage());
@@ -232,7 +232,7 @@ final class ActorDeclarationLexicalBoundaryTest {
                 () -> TypeChecker.check(Parser.parse("""
                         type Payload = int;
                         define actor Worker as
-                          pub run(Payload payload): int { return payload; }
+                          pub work(Payload payload): int { return payload; }
                         end
                         """)));
         assertTrue(typeFailure.getMessage().contains("same-file type alias 'Payload'"), typeFailure.getMessage());
@@ -501,7 +501,7 @@ final class ActorDeclarationLexicalBoundaryTest {
                             return;
                           }
 
-                          pub run(): void {
+                          pub work(): void {
                             self.on_start();
                             return;
                           }

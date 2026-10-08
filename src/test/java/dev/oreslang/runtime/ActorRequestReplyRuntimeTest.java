@@ -1,0 +1,154 @@
+package dev.oreslang.runtime;
+
+import dev.oreslang.parser.Parser;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@Timeout(20)
+final class ActorRequestReplyRuntimeTest {
+    private static final class Executor implements ActorRuntime.ActorCodeExecutor {
+        private final SharedCodeImageStore.CodeImage image;
+        private final CountDownLatch started;
+        private final CountDownLatch release;
+        private final AtomicInteger executed = new AtomicInteger();
+
+        private Executor(SharedCodeImageStore.CodeImage image,
+                         CountDownLatch started, CountDownLatch release) {
+            this.image = image;
+            this.started = started;
+            this.release = release;
+        }
+
+        @Override public SharedCodeImageStore.CodeImage codeImage() { return image; }
+
+        @Override public ActorRuntime.ActorOwnedGuestState initializeActor(
+                String name, ActorRuntime.ActorContext<Object> context) {
+            return context.self()::id;
+        }
+
+        @Override public void receiveActor(String name,
+                ActorRuntime.ActorOwnedGuestState state,
+                ActorRuntime.ActorInboxMail<Object> mail,
+                ActorRuntime.ActorContext<Object> context) {
+            fail("request actor must not execute the event receive handler");
+        }
+
+        @Override public Object requestActor(String name,
+                ActorRuntime.ActorOwnedGuestState state,
+                Object request,
+                ActorRuntime.ActorContext<Object> context) throws Exception {
+            assertEquals(context.self().id(), state.ownerActorId());
+            assertEquals(request, context.currentMail().orElseThrow().value());
+            executed.incrementAndGet();
+            switch ((String) request) {
+                case "block" -> {
+                    if (started != null) started.countDown();
+                    if (release != null && !release.await(3, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("request test release expired");
+                    }
+                    return "first";
+                }
+                case "ordinary" -> throw new IllegalStateException("recoverable");
+                case "panic" -> throw new ActorRuntime.ActorPanicException("actor failed", null);
+                case "unsendable" -> { return new StringBuilder("unsafe"); }
+                default -> { return "ok:" + request; }
+            }
+        }
+    }
+
+    @Test
+    void requestReplyIsRuntimeOwnedAcrossActorKinds() throws Exception {
+        try (var store = new SharedCodeImageStore();
+             var runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            var image = store.publish("actor-request-proof.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            for (var kind : ActorRuntime.ActorKind.values()) {
+                var actor = runtime.spawnCodeActor(kind,
+                        new Executor(image, null, null), "Worker");
+                assertNull(actor.ready().get(2, TimeUnit.SECONDS));
+                assertEquals("ok:hello", actor.request("hello").get(2, TimeUnit.SECONDS));
+                assertEquals("ok:again", actor.request("again").get(2, TimeUnit.SECONDS));
+                actor.stop();
+                assertNull(actor.done().get(2, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    @Test
+    void ordinaryRequestFailureDoesNotDestroyActor() throws Exception {
+        try (var store = new SharedCodeImageStore();
+             var runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            var image = store.publish("actor-fail-local.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            var actor = runtime.spawnCodeActor(ActorRuntime.ActorKind.SHARED,
+                    new Executor(image, null, null), "Worker");
+            actor.ready().get(2, TimeUnit.SECONDS);
+            ExecutionException error = assertThrows(ExecutionException.class,
+                    () -> actor.request("ordinary").get(2, TimeUnit.SECONDS));
+            assertTrue(error.getCause().getMessage().contains("recoverable"));
+            assertTrue(actor.isAlive());
+            assertEquals("ok:recovered", actor.request("recovered").get(2, TimeUnit.SECONDS));
+            actor.stop();
+        }
+    }
+
+    @Test
+    void cancellationBeforeDispatchSkipsGuestHandlerWithoutRewindingTurn()
+            throws Exception {
+        try (var store = new SharedCodeImageStore();
+             var runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            var image = store.publish("actor-cancel-queued.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            var started = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var executor = new Executor(image, started, release);
+            var actor = runtime.spawnCodeActor(ActorRuntime.ActorKind.SHARED,
+                    executor, "Worker");
+            try {
+                actor.ready().get(2, TimeUnit.SECONDS);
+                var running = actor.request("block");
+                assertTrue(started.await(2, TimeUnit.SECONDS));
+                var cancelled = actor.request("skipped");
+                assertTrue(cancelled.cancel(false));
+                release.countDown();
+                assertEquals("first", running.get(2, TimeUnit.SECONDS));
+                assertEquals("ok:later", actor.request("later").get(2, TimeUnit.SECONDS));
+                assertEquals(2, executor.executed.get(),
+                        "cancelled queued request may not invoke guest code");
+            } finally {
+                release.countDown();
+                actor.cancel();
+            }
+        }
+    }
+
+    @Test
+    void actorPanicRejectsReplyAndStopsOnlyThatActor() throws Exception {
+        try (var store = new SharedCodeImageStore();
+             var runtime = new ActorRuntime(IsolatePolicy.developer())) {
+            var image = store.publish("actor-panic.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            var failing = runtime.spawnCodeActor(ActorRuntime.ActorKind.SHARED,
+                    new Executor(image, null, null), "Worker");
+            var healthy = runtime.spawnCodeActor(ActorRuntime.ActorKind.SHARED,
+                    new Executor(image, null, null), "Worker");
+            failing.ready().get(2, TimeUnit.SECONDS);
+            healthy.ready().get(2, TimeUnit.SECONDS);
+            var failure = assertThrows(ExecutionException.class,
+                    () -> failing.request("panic").get(2, TimeUnit.SECONDS));
+            assertInstanceOf(ActorRuntime.ActorPanicException.class, failure.getCause());
+            assertTrue(failing.awaitTermination(2, TimeUnit.SECONDS));
+            assertFalse(failing.isAlive());
+            assertTrue(failing.failure().isPresent());
+            assertEquals("ok:alive", healthy.request("alive").get(2, TimeUnit.SECONDS));
+            healthy.stop();
+        }
+    }
+}

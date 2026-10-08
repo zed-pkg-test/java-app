@@ -544,6 +544,42 @@ public final class OresEvalRootNode extends RootNode {
             }
         }
 
+        @Override
+        public Object requestActor(
+                String actorTypeName,
+                ActorRuntime.ActorOwnedGuestState rawState,
+                Object request,
+                ActorRuntime.ActorContext<Object> actorContext) {
+            SourceActorState state = rawState instanceof SourceActorState source
+                    ? source : null;
+            if (state == null
+                    || !state.ownerActorId().equals(actorContext.self().id())
+                    || !state.actorTypeName().equals(actorTypeName)) {
+                throw new SecurityException(
+                        "source actor request does not match actor-owned state");
+            }
+            Ast.MethodDecl run = findMethod(
+                    state.object().klass,
+                    CallableSelector.instance("run", 1),
+                    new LinkedHashSet<>());
+            if (run == null || run.visibility() != Ast.Visibility.PRIVATE
+                    || run.isStatic() || run.parameters().size() != 1) {
+                throw new SecurityException(
+                        "actor '" + actorTypeName + "' has no valid private run request handler");
+            }
+            if (methodContainsPotentialSuspension(run)) {
+                // The runtime owns the reply Future. A suspended source method
+                // yields only its internal task Future; it never sees the reply slot.
+                return startSourceMethodTask(run, state.object(), List.of(request));
+            }
+            try {
+                return invoke(methodInvocation(state.object(), run, List.of(request)));
+            } catch (OresPanic panic) {
+                throw new ActorRuntime.ActorPanicException(
+                        "actor '" + actorTypeName + "' panicked", panic);
+            }
+        }
+
         private Ast.ClassDecl requireLocalActorClass(String actorTypeName) {
             Ast.ClassDecl klass = findClass(actorTypeName);
             if (klass == null) {
@@ -3924,6 +3960,7 @@ public final class OresEvalRootNode extends RootNode {
                             List.of());
                 }
 
+                forbidDirectActorHandler(object, member.member());
                 Ast.MethodDecl method =
                         object.owner.findMethod(
                                 object.klass,
@@ -5243,6 +5280,7 @@ public final class OresEvalRootNode extends RootNode {
                                 List.of());
                     }
 
+                    forbidDirectActorHandler(object, methodCall.member());
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, CallableSelector.instance(methodCall.member(), args.size()), new LinkedHashSet<>());
                     if (method != null) {
@@ -5310,6 +5348,7 @@ public final class OresEvalRootNode extends RootNode {
                         && !methodCall.member().equals("release")
                         && !methodCall.member().equals("is_released")
                         && guard.value() instanceof OresObject object) {
+                    forbidDirectActorHandler(object, methodCall.member());
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, CallableSelector.instance(methodCall.member(), args.size()), new LinkedHashSet<>());
                     if (method != null) {
@@ -6277,6 +6316,10 @@ public final class OresEvalRootNode extends RootNode {
                         typedRef.send(args.getFirst());
                         return null;
                     };
+                    case "request" -> (Invokable) args -> {
+                        requireOne(args, "ActorRef.request");
+                        return typedRef.request(args.getFirst());
+                    };
                     case "stop" -> (Invokable) args -> {
                         requireZero(args, "ActorRef.stop");
                         actorRef.stop();
@@ -6430,6 +6473,13 @@ public final class OresEvalRootNode extends RootNode {
                 throw new IllegalArgumentException("unknown static member " + klass.klass().name() + "." + name);
             }
             if (receiver instanceof OresObject object) {
+                if (object.klass.actorKind() != Ast.ActorKind.NONE
+                        && (name.equals("run") || name.equals("receive")
+                            || name.equals("on_start"))) {
+                    throw new SecurityException(
+                            "actor runtime handler " + name
+                                    + " cannot be read or invoked through guest member access");
+                }
                 if (object.fields.containsKey(name)) {
                     OwnedField ownedField = object.owner.findField(
                             object.klass, name, new LinkedHashSet<>());
@@ -6702,7 +6752,17 @@ public final class OresEvalRootNode extends RootNode {
             };
         }
 
+        private void forbidDirectActorHandler(OresObject receiver, String name) {
+            if (receiver.klass.actorKind() != Ast.ActorKind.NONE
+                    && (name.equals("run") || name.equals("receive")
+                        || name.equals("on_start"))) {
+                throw new SecurityException(
+                        "actor runtime handler '" + name + "' is dispatched by OresVM only");
+            }
+        }
+
         private Invocation prepareBoundMethodInvocation(OresObject receiver, String name, List<Object> args, Ast.ClassDecl accessClass) {
+            forbidDirectActorHandler(receiver, name);
             CallableSelector selector = CallableSelector.instance(name, args.size());
             Ast.MethodDecl method = findMethod(receiver.klass, selector, new LinkedHashSet<>());
             if (method == null) throw new IllegalArgumentException("no method " + receiver.klass.name() + "." + name + " with arity " + args.size());
