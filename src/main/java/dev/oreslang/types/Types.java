@@ -36,8 +36,14 @@ public final class Types {
     /** Compile-time meta-value for access to static class functions. */
     public record ClassNamespace(String className) implements Type { }
 
-    public record Record(Map<String, Type> members) implements Type {
+    /**
+     * Closed structural record type. readOnly is a value capability, not a
+     * structural compatibility dimension: it prevents mutation from being
+     * regained through aliases while preserving ordinary shape matching.
+     */
+    public record Record(Map<String, Type> members, boolean readOnly) implements Type {
         public Record { members = Map.copyOf(members); }
+        public Record(Map<String, Type> members) { this(members, false); }
     }
 
     public record Function(

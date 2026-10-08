@@ -5,6 +5,7 @@ import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.TruffleLanguage.ContextReference;
 import com.oracle.truffle.api.nodes.Node;
 import dev.oreslang.OresLanguage;
+import dev.oreslang.ast.Ast;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -32,6 +33,11 @@ public final class OresContext implements AutoCloseable {
     private final ActorRuntime actors;
     private final AsyncRuntime asyncRuntime;
     private final RuntimeGarbageCollector garbageCollector;
+    private final AsyncNativeIo nativeIo = new AsyncNativeIo();
+    public AsyncNativeIo nativeIo() { return nativeIo; }
+    private final NativeHttp http = new NativeHttp(this);
+    public NativeHttp http() { return http; }
+
     private final UUID contextId = UUID.randomUUID();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
     private final IsolatePolicy isolatePolicy;
@@ -40,7 +46,29 @@ public final class OresContext implements AutoCloseable {
     private final ExecutionProfile executionProfile;
     private final ReentrantLock adversarialActorTurnLock = new ReentrantLock(true);
     private final Map<String, Object> linkedCodeUnits = new HashMap<>();
+    // Exactly one immutable code image per linked source unit for all actor kinds.
+    // Per-actor mutable heaps/closures are never published into this store.
+    private final SharedCodeImageStore sharedCodeImages = new SharedCodeImageStore();
     private final Map<String, Map<String, String>> linkedImportResolutions = new HashMap<>();
+
+    public Object asGuestHostValue(Object value) {
+        requireCapability(IsolatePolicy.Capability.JAVA_INTEROP, "Java host argument conversion");
+        return env.asGuestValue(value);
+    }
+
+    /** Recover only supported runtime handles from an allowlisted host call. */
+    public Object unwrapHostRuntimeValue(Object value) {
+        requireCapability(IsolatePolicy.Capability.JAVA_INTEROP, "Java runtime handle conversion");
+        if (env.isHostObject(value)) {
+            Object host = env.asHostObject(value);
+            if (host instanceof ChannelRuntime.Channel<?>
+                    || host instanceof OresFuture<?>
+                    || host instanceof CompletionStage<?>) {
+                return host;
+            }
+        }
+        return value;
+    }
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
@@ -182,6 +210,15 @@ public final class OresContext implements AutoCloseable {
      * units that the host has explicitly loaded into this context; import
      * syntax never grants filesystem access.
      */
+    public SharedCodeImageStore.CodeImage registerSharedCodeImage(
+            String codeUnitId, Ast.Program immutableProgram) {
+        return sharedCodeImages.publish(codeUnitId, immutableProgram);
+    }
+
+    public SharedCodeImageStore.CodeImage sharedCodeImage(String codeUnitId) {
+        return sharedCodeImages.get(codeUnitId);
+    }
+
     public synchronized void registerLinkedCodeUnit(String codeUnitId, Object unit) {
         if (codeUnitId == null || codeUnitId.isBlank()) {
             throw new IllegalArgumentException("linked code unit id cannot be blank");
@@ -369,6 +406,8 @@ public final class OresContext implements AutoCloseable {
 
     @Override
     public void close() {
+        nativeIo.close();
+        http.close();
         RuntimeException failure = null;
         try {
             asyncRuntime.close();
@@ -390,6 +429,7 @@ public final class OresContext implements AutoCloseable {
             synchronized (this) {
                 linkedCodeUnits.clear();
                 linkedImportResolutions.clear();
+                sharedCodeImages.close();
             }
             garbageCollector.close();
             output.flush();

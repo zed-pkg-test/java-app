@@ -87,6 +87,27 @@ public final class NativeCarrierExecutor extends AbstractExecutorService impleme
         }
     }
 
+    static void requireAllowedCpu(int cpu) {
+        ensureNativeLibraryLoaded();
+        int error = nativeCpuAffinity(cpu, false);
+        if (error != 0) throw new IllegalArgumentException(
+                "hard CPU affinity unavailable for CPU " + cpu + " (OS error " + error + ")");
+    }
+
+    static void bindCurrentThreadToCpu(int cpu) {
+        int error = nativeCpuAffinity(cpu, true);
+        if (error != 0) throw new IllegalStateException(
+                "hard CPU affinity failed for CPU " + cpu + " (OS error " + error + ")");
+    }
+
+    static int currentCpu() {
+        ensureNativeLibraryLoaded();
+        return nativeCurrentCpu();
+    }
+
+    private static native int nativeCurrentCpu();
+    private static native int nativeCpuAffinity(int cpu, boolean bind);
+
     static void ensureNativeLibraryLoaded() {
         if (nativeLibraryLoaded) return;
         synchronized (NATIVE_LIBRARY_LOCK) {

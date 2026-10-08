@@ -140,7 +140,7 @@ public final class NativeIo {
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(Duration.ofSeconds(15))
                 .build();
-        try {
+        try (client) {
             HttpResponse<String> response = client.send(
                     request.build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -162,11 +162,14 @@ public final class NativeIo {
         }
         String endpoint = host.toLowerCase(java.util.Locale.ROOT) + ":" + port;
         context.requirePermission(RuntimePermissions.Permission.NET, endpoint, "network.connect");
+        Socket socket = new Socket();
         try {
-            Socket socket = new Socket();
+            context.nativeIo().register(socket);
             socket.connect(new InetSocketAddress(host, port), 15_000);
             return new TcpConnection(context, endpoint, socket);
-        } catch (IOException failure) {
+        } catch (Exception failure) {
+            context.nativeIo().unregister(socket);
+            try { socket.close(); } catch (IOException cleanup) { failure.addSuppressed(cleanup); }
             throw new IllegalStateException("network connection failed for " + endpoint + ": " + failure.getMessage(), failure);
         }
     }
@@ -211,6 +214,7 @@ public final class NativeIo {
         public void close() {
             try {
                 socket.close();
+                context.nativeIo().unregister(socket);
             } catch (IOException failure) {
                 throw new IllegalStateException("network close failed for " + endpoint + ": " + failure.getMessage(), failure);
             }

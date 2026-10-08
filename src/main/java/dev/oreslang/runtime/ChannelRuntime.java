@@ -34,18 +34,6 @@ public final class ChannelRuntime {
 
     private static final ReentrantLock COORDINATOR = new ReentrantLock(true);
     private static final Set<SelectRegistration> ACTIVE = new LinkedHashSet<>();
-    private static final java.util.concurrent.ScheduledThreadPoolExecutor TIMER =
-            new java.util.concurrent.ScheduledThreadPoolExecutor(
-                    1,
-                    runnable -> {
-                        Thread thread = new Thread(runnable, "ores-select-timer");
-                        thread.setDaemon(true);
-                        return thread;
-                    });
-    static {
-        TIMER.setRemoveOnCancelPolicy(true);
-        TIMER.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
-    }
     private static long nextTicket;
 
     public enum SelectPolicy {
@@ -60,9 +48,6 @@ public final class ChannelRuntime {
     public enum SelectOperation {
         READ,
         WRITE,
-        AWAIT,
-        TIMEOUT,
-        CANCELLED,
         DEFAULT
     }
 
@@ -233,8 +218,7 @@ public final class ChannelRuntime {
         }
     }
 
-    public sealed interface SelectCase permits
-            ReadCase, WriteCase, AwaitCase, TimeoutCase, CancelledCase, DefaultCase { }
+    public sealed interface SelectCase permits ReadCase, WriteCase, DefaultCase { }
 
     public record ReadCase<T>(Channel<T> channel) implements SelectCase {
         public ReadCase {
@@ -252,26 +236,6 @@ public final class ChannelRuntime {
         }
     }
 
-    public record AwaitCase<T>(OresFuture<T> future) implements SelectCase {
-        public AwaitCase {
-            Objects.requireNonNull(future, "future");
-        }
-    }
-
-    public record TimeoutCase(long timeoutNanos) implements SelectCase {
-        public TimeoutCase {
-            if (timeoutNanos < 0L) {
-                throw new IllegalArgumentException("select timeout cannot be negative");
-            }
-        }
-    }
-
-    public record CancelledCase(CancellationToken token) implements SelectCase {
-        public CancelledCase {
-            Objects.requireNonNull(token, "token");
-        }
-    }
-
     public record DefaultCase() implements SelectCase { }
 
     public static <T> ReadCase<T> read(Channel<T> channel) {
@@ -280,18 +244,6 @@ public final class ChannelRuntime {
 
     public static <T> WriteCase<T> write(Channel<T> channel, T value) {
         return new WriteCase<>(channel, value);
-    }
-
-    public static <T> AwaitCase<T> await(OresFuture<T> future) {
-        return new AwaitCase<>(future);
-    }
-
-    public static TimeoutCase timeout(long timeoutNanos) {
-        return new TimeoutCase(timeoutNanos);
-    }
-
-    public static CancelledCase cancelled(CancellationToken token) {
-        return new CancelledCase(token);
     }
 
     public static DefaultCase defaultCase() {
@@ -413,12 +365,7 @@ public final class ChannelRuntime {
         }
 
         private void selected(int index, SelectPolicy policy) {
-            if (policy == SelectPolicy.FAIR
-                    && !cases.isEmpty()
-                    && !(cases.get(index) instanceof DefaultCase)) {
-                // default is an idle probe, not a readiness winner. Letting it
-                // advance the cursor would make repeated empty polls bias which
-                // real arm wins when work eventually arrives.
+            if (policy == SelectPolicy.FAIR && !cases.isEmpty()) {
                 fairCursor.set((index + 1L) % cases.size());
             }
         }
@@ -491,14 +438,6 @@ public final class ChannelRuntime {
         private final int index;
         private final SelectCase selectCase;
         private final long ticket;
-        private final long timeoutStartedNanos;
-
-        private boolean externalReady;
-        private Object externalValue;
-        private Throwable externalFailure;
-        private OresFuture.RuntimeWaiterRegistration<?> futureWaiter;
-        private CancellationToken.Registration cancellationWaiter;
-        private java.util.concurrent.ScheduledFuture<?> timeoutTask;
 
         private CaseRegistration(
                 SelectRegistration selection,
@@ -508,44 +447,23 @@ public final class ChannelRuntime {
             this.index = index;
             this.selectCase = selectCase;
             this.ticket = nextTicket++;
-            this.timeoutStartedNanos =
-                    selectCase instanceof TimeoutCase
-                            ? System.nanoTime()
-                            : 0L;
         }
 
         private Channel<?> channel() {
             if (selectCase instanceof ReadCase<?> read) return read.channel();
             if (selectCase instanceof WriteCase<?> write) return write.channel();
-            return null;
+            throw new IllegalStateException(
+                    "default case is never channel-registered");
         }
 
         private SelectOperation operation() {
             if (selectCase instanceof ReadCase<?>) return SelectOperation.READ;
             if (selectCase instanceof WriteCase<?>) return SelectOperation.WRITE;
-            if (selectCase instanceof AwaitCase<?>) return SelectOperation.AWAIT;
-            if (selectCase instanceof TimeoutCase) return SelectOperation.TIMEOUT;
-            if (selectCase instanceof CancelledCase) return SelectOperation.CANCELLED;
             return SelectOperation.DEFAULT;
         }
 
         private Object writeValue() {
             return ((WriteCase<?>) selectCase).value();
-        }
-
-        private void detachExternal() {
-            if (futureWaiter != null) {
-                futureWaiter.detach();
-                futureWaiter = null;
-            }
-            if (cancellationWaiter != null) {
-                cancellationWaiter.detach();
-                cancellationWaiter = null;
-            }
-            if (timeoutTask != null) {
-                timeoutTask.cancel(false);
-                timeoutTask = null;
-            }
         }
     }
 
@@ -595,7 +513,6 @@ public final class ChannelRuntime {
             COORDINATOR.lock();
             try {
                 registerLocked(this);
-                refreshExternalReadyLocked(this);
                 pumpLocked(completions);
 
                 if (!decided && defaultIndex >= 0) {
@@ -611,8 +528,6 @@ public final class ChannelRuntime {
                 if (!decided && immediateOnly) {
                     decided = true;
                     unregisterLocked(this);
-                } else if (!decided) {
-                    armExternalWaitersLocked(this);
                 }
             } finally {
                 COORDINATOR.unlock();
@@ -646,8 +561,7 @@ public final class ChannelRuntime {
             CaseRegistration registration =
                     new CaseRegistration(selection, index, selectCase);
             selection.registrations.add(registration);
-            Channel<?> channel = registration.channel();
-            if (channel != null) channel.registrations.add(registration);
+            channelOf(selectCase).registrations.add(registration);
         }
     }
 
@@ -657,117 +571,9 @@ public final class ChannelRuntime {
         ACTIVE.remove(selection);
         for (CaseRegistration registration :
                 List.copyOf(selection.registrations)) {
-            Channel<?> channel = registration.channel();
-            if (channel != null) channel.registrations.remove(registration);
-            registration.detachExternal();
+            registration.channel().registrations.remove(registration);
         }
         selection.registrations.clear();
-    }
-
-    private static void refreshExternalReadyLocked(SelectRegistration selection) {
-        long now = System.nanoTime();
-        for (CaseRegistration registration : selection.registrations) {
-            if (registration.externalReady) continue;
-
-            if (registration.selectCase instanceof AwaitCase<?> awaited) {
-                if (!awaited.future().isDone()) continue;
-                try {
-                    registration.externalValue = awaited.future().join();
-                } catch (RuntimeException failure) {
-                    registration.externalFailure = OresFuture.unwrap(failure);
-                }
-                registration.externalReady = true;
-                continue;
-            }
-
-            if (registration.selectCase instanceof CancelledCase cancelled) {
-                if (cancelled.token().isCancelled()) {
-                    registration.externalReady = true;
-                }
-                continue;
-            }
-
-            if (registration.selectCase instanceof TimeoutCase timeout
-                    && now - registration.timeoutStartedNanos >= timeout.timeoutNanos()) {
-                registration.externalReady = true;
-            }
-        }
-    }
-
-    private static void armExternalWaitersLocked(SelectRegistration selection) {
-        for (CaseRegistration registration :
-                List.copyOf(selection.registrations)) {
-            if (selection.decided || registration.externalReady) continue;
-
-            if (registration.selectCase instanceof AwaitCase<?> awaited) {
-                OresFuture.RuntimeWaiterRegistration<?> waiter =
-                        awaited.future().whenCompleteRuntimeCancellable(
-                                (value, failure) ->
-                                        signalExternalReady(
-                                                registration,
-                                                value,
-                                                failure == null
-                                                        ? null
-                                                        : OresFuture.unwrap(failure)));
-                registration.futureWaiter = waiter;
-                if (selection.decided || !selection.registered) {
-                    waiter.detach();
-                    registration.futureWaiter = null;
-                }
-                continue;
-            }
-
-            if (registration.selectCase instanceof CancelledCase cancelled) {
-                CancellationToken.Registration waiter =
-                        cancelled.token().whenCancelledRuntime(
-                                () -> signalExternalReady(
-                                        registration,
-                                        null,
-                                        null));
-                registration.cancellationWaiter = waiter;
-                if (selection.decided || !selection.registered) {
-                    waiter.detach();
-                    registration.cancellationWaiter = null;
-                }
-                continue;
-            }
-
-            if (registration.selectCase instanceof TimeoutCase timeout) {
-                long elapsed = System.nanoTime() - registration.timeoutStartedNanos;
-                long remaining = timeout.timeoutNanos() - Math.max(0L, elapsed);
-                registration.timeoutTask = TIMER.schedule(
-                        () -> signalExternalReady(
-                                registration,
-                                null,
-                                null),
-                        Math.max(0L, remaining),
-                        java.util.concurrent.TimeUnit.NANOSECONDS);
-            }
-        }
-    }
-
-    private static void signalExternalReady(
-            CaseRegistration registration,
-            Object value,
-            Throwable failure) {
-        ArrayList<Runnable> completions = new ArrayList<>();
-        COORDINATOR.lock();
-        try {
-            SelectRegistration selection = registration.selection;
-            if (selection.decided || !selection.registered) return;
-            registration.externalReady = true;
-            registration.externalValue = value;
-            registration.externalFailure = failure;
-
-            // Refresh every external arm before arbitration. A Future/token may
-            // have become ready before its callback was attached, and FAIR or
-            // PRIORITY ordering must still see the complete ready set.
-            refreshExternalReadyLocked(selection);
-            pumpLocked(completions);
-        } finally {
-            COORDINATOR.unlock();
-        }
-        runCompletions(completions);
     }
 
     /**
@@ -782,34 +588,13 @@ public final class ChannelRuntime {
 
             for (SelectRegistration selection : List.copyOf(ACTIVE)) {
                 if (selection.decided) continue;
-                refreshExternalReadyLocked(selection);
 
                 CaseRegistration chosen =
                         preferredCommittableCaseLocked(selection);
                 if (chosen == null) continue;
 
-                if (chosen.operation() == SelectOperation.AWAIT
-                        || chosen.operation() == SelectOperation.TIMEOUT
-                        || chosen.operation() == SelectOperation.CANCELLED) {
-                    if (chosen.externalFailure != null) {
-                        commitFailureLocked(
-                                chosen,
-                                chosen.externalFailure,
-                                completions);
-                    } else {
-                        commitSingleLocked(
-                                chosen,
-                                new SelectResult(
-                                        chosen.index,
-                                        chosen.operation(),
-                                        chosen.externalValue),
-                                completions);
-                    }
-                    progressed = true;
-                    break;
-                }
-
                 Channel<?> channel = chosen.channel();
+
                 if (chosen.operation() == SelectOperation.READ) {
                     if (!channel.buffer.isEmpty()) {
                         Object value = channel.buffer.removeFirst();
@@ -894,13 +679,6 @@ public final class ChannelRuntime {
                     findRegistration(selection, index);
             if (registration == null) continue;
 
-            if (registration.operation() == SelectOperation.AWAIT
-                    || registration.operation() == SelectOperation.TIMEOUT
-                    || registration.operation() == SelectOperation.CANCELLED) {
-                if (registration.externalReady) return registration;
-                continue;
-            }
-
             Channel<?> channel = registration.channel();
             if (registration.operation() == SelectOperation.READ) {
                 if (!channel.buffer.isEmpty() || channel.closed) {
@@ -944,12 +722,6 @@ public final class ChannelRuntime {
     }
 
     private static boolean basicReadyLocked(CaseRegistration registration) {
-        if (registration.operation() == SelectOperation.AWAIT
-                || registration.operation() == SelectOperation.TIMEOUT
-                || registration.operation() == SelectOperation.CANCELLED) {
-            return registration.externalReady;
-        }
-
         Channel<?> channel = registration.channel();
 
         if (registration.operation() == SelectOperation.READ) {
@@ -1087,6 +859,13 @@ public final class ChannelRuntime {
         unregisterLocked(selection);
         completions.add(() ->
                 selection.future.failFromRuntime(failure));
+    }
+
+    private static Channel<?> channelOf(SelectCase selectCase) {
+        if (selectCase instanceof ReadCase<?> read) return read.channel();
+        if (selectCase instanceof WriteCase<?> write) return write.channel();
+        throw new IllegalArgumentException(
+                "default select case has no channel");
     }
 
     private static <T> OresFuture<T> mapSelection(

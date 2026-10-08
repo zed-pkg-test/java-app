@@ -329,7 +329,7 @@ public final class CapabilityChecker {
                 checkStatements(s.defaultBody(), policy);
             } else if (stmt instanceof Ast.SelectStmt s) {
                 for (Ast.SelectArm arm : s.arms()) {
-                    if (arm.source() != null) checkExpr(arm.source(), policy);
+                    if (arm.channel() != null) checkExpr(arm.channel(), policy);
                     if (arm.value() != null) checkExpr(arm.value(), policy);
                     checkStatements(arm.body(), policy);
                 }
@@ -384,6 +384,19 @@ public final class CapabilityChecker {
             if (referenced != null) checkReferencedFunction(referenced, policy);
         }
         else if (expr instanceof Ast.RuntimeCallExpr runtime) {
+            if (runtime.operation().equals("spawn")) {
+                // Parser-only encoding for source `spawn Actor()`. There is no
+                // guest-visible `rt spawn` spelling: admission is the actor
+                // spawn capability plus normal checks of the encoded target.
+                require(
+                        policy,
+                        IsolatePolicy.Capability.ACTOR_SPAWN,
+                        "source actor spawn");
+                for (Ast.Expr argument : runtime.arguments()) {
+                    checkExpr(argument, policy);
+                }
+                return;
+            }
             if (!Set.of("copy", "take", "borrow", "share", "cooperate").contains(runtime.operation())) {
                 throw new SecurityException(
                         "runtime intrinsic 'rt " + runtime.operation() + "' is not admitted on this compiler head");
@@ -480,7 +493,6 @@ public final class CapabilityChecker {
         else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
         else if (expr instanceof Ast.ObjectExpr e) {
             for (Ast.ObjectField f : e.fields()) {
-                if (f.isDynamic()) checkExpr(f.dynamicName(), policy);
                 checkExpr(f.value(), policy);
             }
         }

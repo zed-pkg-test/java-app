@@ -7,8 +7,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,12 +25,17 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
     private static final int DEFAULT_MAX_TRACKED_PER_ACTOR = 4_096;
     private static final int DEFAULT_MAX_ACTOR_SWEEP_ENTRIES = 256;
     private static final Object PROCESS_DOMAIN = new Object();
-    private static final ScheduledExecutorService SWEEP_TIMER =
-            Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread thread = new Thread(r, "ores-gc-timer");
-                thread.setDaemon(true);
-                return thread;
-            });
+    private static final ScheduledThreadPoolExecutor SWEEP_TIMER = createSweepTimer();
+
+    private static ScheduledThreadPoolExecutor createSweepTimer() {
+        ScheduledThreadPoolExecutor timer = new ScheduledThreadPoolExecutor(1, r -> {
+            Thread thread = new Thread(r, "ores-gc-timer");
+            thread.setDaemon(true);
+            return thread;
+        });
+        timer.setRemoveOnCancelPolicy(true);
+        return timer;
+    }
 
     public record CollectionReport(
             String scope,
@@ -57,7 +61,7 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
 
     private static final class TrackedCleanup extends WeakReference<Object> {
         private final Object domain;
-        private final Runnable cleanup;
+        private Runnable cleanup;
         private final AtomicBoolean cleaning = new AtomicBoolean();
         private final AtomicBoolean cleaned = new AtomicBoolean();
 
@@ -82,6 +86,7 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                 // and our acquisition of the cleanup slot.
                 if (cleaned.get()) return false;
                 cleanup.run();
+                cleanup = null; // A retained closed handle must not retain captured resources.
                 cleaned.set(true);
                 return true;
             } finally {
@@ -107,12 +112,12 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                 } else if (!entry.cleaned.get()) {
                     // A concurrent cleanup owns the slot. If it later fails,
                     // retain an independent retry path even without a queue event.
-                    retryableFailures.add(entry);
+                    retainRetry(entry);
                 }
             } catch (VirtualMachineError | ThreadDeath fatal) {
                 throw fatal;
             } catch (RuntimeException | Error cleanupFailure) {
-                retryableFailures.add(entry);
+                retainRetry(entry);
                 throw cleanupFailure;
             }
         }
@@ -206,6 +211,8 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
     public CleanupHandle track(Object owner, Runnable cleanup) {
         synchronized (lifecycleLock) {
             ensureOpen();
+            Objects.requireNonNull(owner, "owner");
+            Objects.requireNonNull(cleanup, "cleanup");
             if (tracked.size() >= maxTracked) {
                 throw new IllegalStateException("runtime cleanup registry limit exceeded: " + maxTracked);
             }
@@ -252,8 +259,12 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
      */
     public CollectionReport retireActorDomain(Object actorDomain) {
         Objects.requireNonNull(actorDomain, "actorDomain");
-        ensureOpen();
-        retiredDomains.add(actorDomain);
+        synchronized (lifecycleLock) {
+            ensureOpen();
+            // Actors without resources are the common case. Do not retain their
+            // domain (and potentially their heap) indefinitely in a tombstone set.
+            if (trackedByDomain.containsKey(actorDomain)) retiredDomains.add(actorDomain);
+        }
         return sweep(actorDomain, false, Integer.MAX_VALUE);
     }
 
@@ -317,12 +328,12 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                         // Polling consumes the only queue notification. A
                         // concurrent explicit release can still fail, so keep
                         // this entry eligible for a later sweep.
-                        retryableFailures.add(entry);
+                        retainRetry(entry);
                     }
                 } catch (VirtualMachineError | ThreadDeath fatal) {
                     throw fatal;
                 } catch (Throwable cleanupFailure) {
-                    retryableFailures.add(entry);
+                    retainRetry(entry);
                     cleanupFailures++;
                 }
             }
@@ -343,7 +354,7 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                     } catch (VirtualMachineError | ThreadDeath fatal) {
                         throw fatal;
                     } catch (Throwable cleanupFailure) {
-                        retryableFailures.add(entry);
+                        retainRetry(entry);
                         cleanupFailures++;
                     }
                 }
@@ -363,7 +374,7 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                 } catch (VirtualMachineError | ThreadDeath fatal) {
                     throw fatal;
                 } catch (Throwable cleanupFailure) {
-                    retryableFailures.add(entry);
+                    retainRetry(entry);
                     cleanupFailures++;
                 }
             }
@@ -381,6 +392,14 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
                 after,
                 cleanupFailures,
                 jvmGcRequested);
+    }
+
+    private void retainRetry(TrackedCleanup entry) {
+        synchronized (lifecycleLock) {
+            if (!closed.get() && tracked.contains(entry) && !entry.cleaned.get()) {
+                retryableFailures.add(entry);
+            }
+        }
     }
 
     private void removeTracked(TrackedCleanup entry) {
