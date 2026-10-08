@@ -1192,11 +1192,14 @@ public final class ActorRuntime implements AutoCloseable {
                 ActorContext<Object> context) throws Exception;
 
         /** Called only through an admitted runtime-owned request envelope. */
-        Object requestActor(
+        default Object requestActor(
                 String actorTypeName,
                 ActorOwnedGuestState state,
                 Object request,
-                ActorContext<Object> context) throws Exception;
+                ActorContext<Object> context) throws Exception {
+            throw new SecurityException(
+                    "source actor executor does not implement private run request dispatch");
+        }
     }
 
     /** Explicit actor-fatal source panic, distinct from request-local throws. */
@@ -1579,9 +1582,16 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private static boolean isFatalRequestFailure(Throwable failure) {
-        return failure instanceof ActorPanicException
-                || failure instanceof SecurityException
-                || failure instanceof Error;
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof ActorPanicException
+                    || current instanceof SecurityException
+                    || current instanceof Error
+                    || current.getClass().getSimpleName().equals("OresPanic")) {
+                return true;
+            }
+            if (current.getCause() == current) break;
+        }
+        return false;
     }
 
     /** No guest callable can settle, forge or retain the reply authority. */

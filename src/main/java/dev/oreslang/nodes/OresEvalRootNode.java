@@ -3960,6 +3960,7 @@ public final class OresEvalRootNode extends RootNode {
                             List.of());
                 }
 
+                forbidDirectActorHandler(object, member.member());
                 Ast.MethodDecl method =
                         object.owner.findMethod(
                                 object.klass,
@@ -5279,6 +5280,7 @@ public final class OresEvalRootNode extends RootNode {
                                 List.of());
                     }
 
+                    forbidDirectActorHandler(object, methodCall.member());
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, CallableSelector.instance(methodCall.member(), args.size()), new LinkedHashSet<>());
                     if (method != null) {
@@ -5346,6 +5348,7 @@ public final class OresEvalRootNode extends RootNode {
                         && !methodCall.member().equals("release")
                         && !methodCall.member().equals("is_released")
                         && guard.value() instanceof OresObject object) {
+                    forbidDirectActorHandler(object, methodCall.member());
                     Ast.MethodDecl method = object.owner.findMethod(
                             object.klass, CallableSelector.instance(methodCall.member(), args.size()), new LinkedHashSet<>());
                     if (method != null) {
@@ -6749,7 +6752,17 @@ public final class OresEvalRootNode extends RootNode {
             };
         }
 
+        private void forbidDirectActorHandler(OresObject receiver, String name) {
+            if (receiver.klass.actorKind() != Ast.ActorKind.NONE
+                    && (name.equals("run") || name.equals("receive")
+                        || name.equals("on_start"))) {
+                throw new SecurityException(
+                        "actor runtime handler '" + name + "' is dispatched by OresVM only");
+            }
+        }
+
         private Invocation prepareBoundMethodInvocation(OresObject receiver, String name, List<Object> args, Ast.ClassDecl accessClass) {
+            forbidDirectActorHandler(receiver, name);
             CallableSelector selector = CallableSelector.instance(name, args.size());
             Ast.MethodDecl method = findMethod(receiver.klass, selector, new LinkedHashSet<>());
             if (method == null) throw new IllegalArgumentException("no method " + receiver.klass.name() + "." + name + " with arity " + args.size());
