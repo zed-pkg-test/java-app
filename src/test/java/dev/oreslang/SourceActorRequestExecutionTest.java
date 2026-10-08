@@ -45,6 +45,36 @@ final class SourceActorRequestExecutionTest {
     }
 
     @Test
+    void annotatedInheritedUnaryHandlerUsesRuntimeDispatch() throws Exception {
+        assertEquals("6", run("""
+                define actor BaseWorker as
+                  @Implementation
+                  fnc run(int value): int {
+                    return value;
+                  }
+                end
+
+                define actor Worker extends BaseWorker as
+                  @Implementation
+                  @Override
+                  fnc run(int value): int {
+                    return value + 1;
+                  }
+                end
+
+                pub async routine main(): void {
+                  val worker = spawn Worker();
+                  await worker.ready;
+                  val result = await worker.request(5);
+                  stdio.stdout.write(result);
+                  worker.stop();
+                  await worker.done;
+                  return;
+                }
+                """));
+    }
+
+    @Test
     void requestSuspensionResumesBeforeFollowingRequest() throws Exception {
         assertEquals("3|7", run("""
                 define isoactor Worker as
