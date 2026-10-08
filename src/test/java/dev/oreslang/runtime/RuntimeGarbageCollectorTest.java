@@ -26,6 +26,46 @@ final class RuntimeGarbageCollectorTest {
     }
 
     @Test
+    void emptyRetiredDomainsAndInvalidRegistrationsDoNotRetainHeaps() throws Exception {
+        try (var gc = new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1))) {
+            for (int i = 0; i < 1000; i++) gc.retireActorDomain(new Object());
+            assertThrows(NullPointerException.class, () -> gc.track(new Object(), null));
+            for (String field : new String[] {"retiredDomains", "trackedByDomain"}) {
+                var declared = gc.getClass().getDeclaredField(field);
+                declared.setAccessible(true);
+                Object value = declared.get(gc);
+                assertTrue(value instanceof java.util.Map<?, ?> map ? map.isEmpty()
+                        : ((java.util.Set<?>) value).isEmpty(), field);
+            }
+        }
+    }
+
+    @Test
+    void lateFailingHandleCannotRepopulateClosedCollector() throws Exception {
+        var gc = new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1));
+        var handle = gc.track(new Object(), () -> { throw new IllegalStateException("failure"); });
+        gc.close();
+        assertThrows(IllegalStateException.class, handle::close);
+        var field = gc.getClass().getDeclaredField("retryableFailures");
+        field.setAccessible(true);
+        assertTrue(((java.util.Set<?>) field.get(gc)).isEmpty());
+    }
+
+    @Test
+    void completedHandleReleasesCleanupClosure() throws Exception {
+        try (var gc = new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1))) {
+            var handle = gc.track(new Object(), () -> {});
+            handle.close();
+            var field = handle.getClass().getDeclaredField("entry");
+            field.setAccessible(true);
+            var entry = field.get(handle);
+            var cleanup = entry.getClass().getDeclaredField("cleanup");
+            cleanup.setAccessible(true);
+            assertNull(cleanup.get(entry));
+        }
+    }
+
+    @Test
     void explicitReleaseFailureIsRetriedWhileOwnerRemainsReachable() {
         AtomicInteger attempts = new AtomicInteger();
         Object owner = new Object();

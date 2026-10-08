@@ -377,4 +377,81 @@ final class ProjectManifestImportTest {
         assertEquals(2, build.units().size());
         assertTrue(out.toString(StandardCharsets.UTF_8).contains("oreslang-path"));
     }
+
+    @Test
+    void actorClassMayExecuteExplicitCrossFileImportedFunction() throws Exception {
+        Path app = temp.resolve("actor-explicit-import");
+        Files.createDirectories(app);
+        Path helper = app.resolve("helper.ores");
+        Path main = app.resolve("main.ores");
+
+        Files.writeString(helper, """
+                pub fnc imported_marker(): void {
+                  stdio.stdout.write("imported");
+                  return;
+                }
+                """);
+
+        Files.writeString(main, """
+                import fnc imported_marker from "./helper.ores";
+
+                define actor Worker as
+                  receive(ActorMail<String> mail): void {
+                    imported_marker();
+                    self.end();
+                    return;
+                  }
+                end
+
+                pub async routine main(): void {
+                  val worker = spawn Worker();
+                  await worker.ready;
+                  worker.send("go");
+                  await worker.done;
+                  return;
+                }
+                """);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        LinkedProgramRunner.run(
+                main,
+                IsolatePolicy.developer(),
+                ExecutionProfile.serverJit(),
+                Set.of(),
+                Map.of(),
+                out,
+                new ByteArrayOutputStream());
+
+        assertEquals("imported", out.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void resolvedSelfImportByFilenameCannotBypassActorLexicalBoundary() throws Exception {
+        Path app = temp.resolve("actor-self-import");
+        Files.createDirectories(app);
+        Path main = app.resolve("main.ores");
+
+        Files.writeString(main, """
+                import fnc helper from "./main.ores";
+
+                pub fnc helper(): int {
+                  return 7;
+                }
+
+                define actor Worker as
+                  pub run(): int {
+                    return helper();
+                  }
+                end
+
+                pub routine main(): void { return; }
+                """);
+
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> LinkedProgramRunner.validate(main));
+        assertTrue(failure.getMessage().contains("cannot import itself"),
+                failure.getMessage());
+    }
+
 }

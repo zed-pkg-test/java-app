@@ -178,6 +178,10 @@ final class CooperativeActorGroupMailmanTest {
             assertTrue(joined.await(5, TimeUnit.SECONDS));
             emitter.send(1);
             assertTrue(suspended.await(5, TimeUnit.SECONDS));
+            // The latch fires inside resume(), before the scheduler installs
+            // the waiter returned by that turn. Drain the single control
+            // carrier so the assertion observes completed registration.
+            control.submit(() -> { }).get(5, TimeUnit.SECONDS);
             assertEquals(1, never.pendingRuntimeWaiterCount());
 
             group.close();

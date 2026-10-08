@@ -80,6 +80,7 @@ final class StructuralTypingHardeningTest {
     @Test
     void structuralMethodsCheckFullSignatureWithNominalVariance() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+
                 define module app
                   define class Base as end
                   define class Derived extends Base as end

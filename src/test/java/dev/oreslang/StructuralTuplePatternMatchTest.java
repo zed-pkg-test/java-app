@@ -112,6 +112,49 @@ final class StructuralTuplePatternMatchTest {
     }
 
     @Test
+    void structuralPatternsPreserveInferredStructReadonlyCapability() {
+        for (String target : new String[]{"{ bar: string }", "Readable"}) {
+            String source = """
+                    define trait Readable as
+                      bar: string;
+                    end
+                    fnc bad(): void {
+                      const value = infer struct{bar: "before"};
+                      match value over
+                        on structural %s narrowed -> {
+                          narrowed.bar = "after";
+                        }
+                        on _ -> { return; }
+                      end
+                      return;
+                    }
+                    """.formatted(target);
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> TypeChecker.check(Parser.parse(source)));
+            assertTrue(error.getMessage().contains("readonly"), error.getMessage());
+        }
+    }
+
+    @Test
+    void structuralPatternCanReadCanonicalInferredStructWithContextualGuard() {
+        assertDoesNotThrow(() -> {
+            var typed = TypeChecker.check(Parser.parse("""
+                    fnc read(): string {
+                      const when = true;
+                      const value = infer struct{bar: "ok"};
+                      match value over
+                        on structural { bar: string } narrowed when when -> {
+                          return narrowed.bar;
+                        }
+                        on _ -> { return "missing"; }
+                      end
+                    }
+                    """));
+            OwnershipChecker.check(typed);
+        });
+    }
+
+    @Test
     void listPatternsAndDefaultMatchArmsAreRejected() {
         assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
                 fnc bad(List<int> values): int {
