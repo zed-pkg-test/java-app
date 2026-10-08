@@ -128,6 +128,52 @@ final class UntrustedSourceTaskQuotaTest {
         }
     }
 
+    @Test
+    void caughtFuelExhaustionStillFailsTheOwningActor() throws Exception {
+        CountDownLatch scheduled = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicBoolean guestCaught = new java.util.concurrent.atomic.AtomicBoolean();
+
+        try (SharedCodeImageStore store = new SharedCodeImageStore();
+             ActorRuntime runtime = new ActorRuntime()) {
+            var image = store.publish("quota-catch.ores",
+                    Parser.parse("pub routine main(): void { return; }"));
+            ActorRuntime.ActorCodeExecutor executor = new ActorRuntime.ActorCodeExecutor() {
+                @Override public SharedCodeImageStore.CodeImage codeImage() { return image; }
+                @Override public ActorRuntime.ActorOwnedGuestState initializeActor(
+                        String type, ActorRuntime.ActorContext<Object> context) {
+                    return context.self()::id;
+                }
+                @Override public void receiveActor(String type, ActorRuntime.ActorOwnedGuestState state,
+                        ActorRuntime.ActorInboxMail<Object> mail, ActorRuntime.ActorContext<Object> context) {
+                    context.runtime().startActorTask(resume -> {
+                        setActiveQuotaFuel(0L);
+                        try {
+                            context.runtime().schedulerSafepoint();
+                        } catch (ActorRuntime.UntrustedActorQuotaExceededException swallowed) {
+                            guestCaught.set(true);
+                        }
+                        return OresScheduler.done(7);
+                    });
+                    scheduled.countDown();
+                }
+            };
+            var actor = runtime.spawnCodeActor(ActorRuntime.ActorKind.UNTRUSTED, executor, "Worker");
+            try {
+                actor.ready().get(5, TimeUnit.SECONDS);
+                actor.send("catch");
+                assertTrue(scheduled.await(5, TimeUnit.SECONDS));
+                assertTrue(actor.awaitTermination(5, TimeUnit.SECONDS));
+                assertTrue(guestCaught.get(), "the test must prove guest code caught the first exception");
+                assertInstanceOf(ActorRuntime.UntrustedActorQuotaExceededException.class,
+                        actor.failure().orElseThrow(),
+                        "a swallowed fuel exception must still terminate the actor on unwind");
+            } finally {
+                actor.cancel();
+                actor.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
     private static void setActiveQuotaFuel(long fuel) {
         try {
             Field scope = ActorRuntime.class.getDeclaredField("CURRENT_UNTRUSTED_TASK_QUOTA");

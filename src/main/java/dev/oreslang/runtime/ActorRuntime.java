@@ -4382,6 +4382,13 @@ public final class ActorRuntime implements AutoCloseable {
         }
 
         private void checkDeadlineAndCpu() {
+            // Guest code may catch a thrown quota exception. Exhaustion must
+            // remain sticky and fail the actor when the task segment unwinds.
+            if (remainingFuel < 0) {
+                throw new UntrustedActorQuotaExceededException(
+                        UntrustedActorQuotaExceededException.Resource.FUEL,
+                        "untrusted source task exhausted execution fuel");
+            }
             if (System.nanoTime() - startedWallNanos > wallBudgetNanos) {
                 throw new UntrustedActorQuotaExceededException(
                         UntrustedActorQuotaExceededException.Resource.WALL_TIME,
