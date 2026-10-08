@@ -3882,11 +3882,17 @@ public final class ActorRuntime implements AutoCloseable {
     }
 
     private void releaseSharedRuntimeBytes(long bytes) {
+        if (bytes < 0) throw new IllegalArgumentException("shared memory release cannot be negative");
         if (bytes == 0 || closed.get()) return;
-        long remaining = sharedMemoryBytes.addAndGet(-bytes);
-        if (remaining < 0) {
-            sharedMemoryBytes.set(0);
-            throw new IllegalStateException("shared actor memory accounting underflow");
+        synchronized (memoryBudgetLock) {
+            if (closed.get()) return;
+            long current = sharedMemoryBytes.get();
+            if (bytes > current) {
+                throw new IllegalStateException(
+                        "shared actor memory accounting underflow"
+                                + ": release=" + bytes + " sharedUsed=" + current);
+            }
+            sharedMemoryBytes.set(current - bytes);
         }
     }
 

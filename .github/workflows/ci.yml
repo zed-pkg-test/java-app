@@ -133,8 +133,8 @@ jobs:
           test -n "$lib"
           echo "path=$PWD/$lib" >> "$GITHUB_OUTPUT"
       - name: Run strict program in Oreslang polyglot isolate
-        run: timeout 180s mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"
+        run: timeout 180s mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=hybrid --platform=linux examples/together.ores"
       - name: Resume root await inside strict isolate JNI scope
         run: |
-          timeout 180s mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/strict-root-await.ores" | tee /tmp/ores-strict-root-await.out
+          timeout 180s mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="${{ steps.isolate.outputs.path }}" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=hybrid --platform=linux examples/strict-root-await.ores" | tee /tmp/ores-strict-root-await.out
           grep -x "42" /tmp/ores-strict-root-await.out
