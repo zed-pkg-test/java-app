@@ -80,6 +80,50 @@ final class ChannelSelectSyntaxTest {
     }
 
     @Test
+    void staticSelectAcceptsWhenAndLegacyCaseAsEquivalentArmKeywords() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                fnc blocking(Channel<int> input, Channel<int> output): void {
+                  do select first {
+                    when readch input: val value {
+                      stdio.println(value);
+                    }
+                    case writech output, 7: {
+                      stdio.println("sent");
+                    }
+                    default: {
+                    }
+                  }
+                  return;
+                }
+
+                actor fnc nonblocking(): void {
+                  val Channel<int> input = Channel.new<int>(1);
+                  do nb select {
+                    when readch input: const value {
+                      stdio.println(value);
+                    }
+                  }
+                  return;
+                }
+                """));
+
+        Ast.FunctionDecl blocking =
+                (Ast.FunctionDecl) program.modules().getFirst().declarations().get(0);
+        Ast.SelectStmt select = assertInstanceOf(Ast.SelectStmt.class, blocking.body().getFirst());
+        assertEquals(3, select.arms().size());
+        assertEquals(Ast.ChannelOperation.READ, select.arms().get(0).operation());
+        assertEquals(Ast.ChannelOperation.WRITE, select.arms().get(1).operation());
+        assertEquals(Ast.ChannelOperation.DEFAULT, select.arms().get(2).operation());
+
+        Ast.FunctionDecl nonblocking =
+                (Ast.FunctionDecl) program.modules().getFirst().declarations().get(1);
+        Ast.SelectStmt nb = assertInstanceOf(Ast.SelectStmt.class, nonblocking.body().get(1));
+        assertEquals(Ast.WaitMode.NONBLOCKING, nb.mode());
+
+        assertDoesNotThrow(() -> OwnershipChecker.check(program));
+    }
+
+    @Test
     void explicitDoSelectParsesAsNoResultDispatchWithoutChangingLegacySelect() {
         Ast.Program checked = TypeChecker.check(Parser.parse("""
                 fnc consume(Channel<int> input): void {

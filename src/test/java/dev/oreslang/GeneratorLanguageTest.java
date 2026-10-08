@@ -217,6 +217,7 @@ final class GeneratorLanguageTest {
     @Test
     void classCanExposeAsyncIteratorProtocolWithoutGeneratorMethods() throws Exception {
         String output = run("""
+
                 async generator fnc stream(): int {
                   yield 7;
                   yield 8;

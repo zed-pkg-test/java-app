@@ -304,6 +304,7 @@ final class ArityOverloadAotTest {
     @Test
     void expectedFunctionTypeBindsOverloadedMethodValueAndSelfWithoutCloningMethodCode() throws Exception {
         String program = """
+
                 pub fnc call0(Fnc<int> callback) : int {
                   return callback();
                 }

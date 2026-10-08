@@ -256,9 +256,14 @@ final class ChannelStreamingLanguageTest {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         Source source = Source.newBuilder(OresLanguage.ID, program, "channel-streaming.ores")
                 .mimeType(OresLanguage.MIME_TYPE).build();
-        try (Context context = Context.newBuilder(OresLanguage.ID)
-                .allowAllAccess(false).out(output).build()) {
+        Context context = Context.newBuilder(OresLanguage.ID)
+                .allowAllAccess(false).out(output).build();
+        try {
             context.eval(source);
+        } finally {
+            // Evaluation can finish while the final actor turn is unwinding.
+            // This fixture owns the context and cancels remaining work on teardown.
+            context.close(true);
         }
         return output.toString(StandardCharsets.UTF_8);
     }

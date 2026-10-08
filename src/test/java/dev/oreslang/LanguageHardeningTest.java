@@ -54,6 +54,7 @@ final class LanguageHardeningTest {
     @Test
     void modulesAreTypedNamespacesAndCanConformToContracts() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+
                 define module contracts
                   define contract MathApi as
                     fnc add(int a, int b) => int;
@@ -498,11 +499,11 @@ final class LanguageHardeningTest {
     }
 
     @Test
-    void objArrTupleIndexAndLetAssignmentAreStaticallyChecked() {
+    void structArrTupleIndexAndLetAssignmentAreStaticallyChecked() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
                 define module app
                   pub fnc main(): void {
-                    val person = obj{name: "ore", age: 1};
+                    const person = infer struct{name: "ore", age: 1};
                     val values = arr[10, 20, 30];
                     val first = values[0];
                     [const left, let right] = (1, "two");

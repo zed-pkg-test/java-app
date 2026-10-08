@@ -21,7 +21,7 @@ final class PointerlessFncOwnershipTest {
                 end
 
                 fnc ok(): int {
-                  let Box box = new Box();
+                  let mut Box box = new Box();
                   val Fnc<Box, int> read = |value| -> {
                     return value.value;
                   };
@@ -120,6 +120,96 @@ final class PointerlessFncOwnershipTest {
                         }
                         """)));
         assertTrue(shared.getMessage().contains("rt share"), shared.getMessage());
+    }
+
+    @Test
+    void groupedBorrowIsNotATupleAndExplicitSingletonUnpacks() throws Exception {
+        for (String binding : new String[] {
+                "val borrowed = (rt borrow values);",
+                "val (borrowed) = tuple (rt borrow values);"}) {
+            assertEquals("1", run("""
+                    pub routine main(): void {
+                      val Array<int> values = new Array<int>();
+                      values.add(7);
+                      %s
+                      stdio.stdout.write(borrowed.size);
+                      return;
+                    }
+                    """.formatted(binding)));
+            var error = assertThrows(IllegalArgumentException.class, () ->
+                    TypeChecker.check(Parser.parse("""
+                    fnc bad(): void {
+                      val Array<int> values = new Array<int>();
+                      %s
+                      values.add(8);
+                      stdio.println(borrowed.size);
+                      return;
+                    }
+                    """.formatted(binding))));
+            assertTrue(error.getMessage().contains("borrow"), error.getMessage());
+        }
+    }
+
+    @Test
+    void explicitTupleArityAndGroupingHaveDistinctAstNodes() {
+        var program = Parser.parse("""
+                fnc syntax(): void {
+                  val grouped = (rt borrow values);
+                  val singleton = tuple (rt borrow values);
+                  val empty = tuple ();
+                  val pair = tuple (1, 2);
+                  return;
+                }
+                """);
+        var function = (dev.oreslang.ast.Ast.FunctionDecl) program.modules().getFirst().declarations().getFirst();
+        var grouped = (dev.oreslang.ast.Ast.BindingStmt) function.body().get(0);
+        assertInstanceOf(dev.oreslang.ast.Ast.RuntimeCallExpr.class, grouped.initializer());
+        for (int i = 1; i <= 3; i++) {
+            var binding = (dev.oreslang.ast.Ast.BindingStmt) function.body().get(i);
+            var tuple = assertInstanceOf(dev.oreslang.ast.Ast.TupleExpr.class, binding.initializer());
+            assertEquals(new int[] {1, 0, 2}[i - 1], tuple.elements().size());
+        }
+    }
+
+    @Test
+    void tupleBorrowCannotEscapeOrSurviveCooperation() {
+        for (String operation : new String[] {"return borrowed;", "rt cooperate; return;"}) {
+            var error = assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                    fnc bad(): %s {
+                      val Array<int> values = new Array<int>();
+                      val (borrowed) = tuple (rt borrow values);
+                      %s
+                    }
+                    """.formatted(operation.startsWith("return") ? "borrow Array<int>" : "void", operation))));
+            assertTrue(error.getMessage().contains("borrow"), error.getMessage());
+        }
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                fnc bad(): void {
+                  val Array<int> values = new Array<int>();
+                  val packed = tuple (rt borrow values);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
+    void keywordMutableBorrowPreservesExclusiveAccess() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                fnc update(borrow mut Array<int> values): void { values.add(7); return; }
+                fnc ok(): void {
+                  val Array<int> values = new Array<int>();
+                  update(rt borrow mut values);
+                  return;
+                }
+                """)));
+        assertThrows(IllegalArgumentException.class, () -> TypeChecker.check(Parser.parse("""
+                fnc bad(): void {
+                  val Array<int> values = new Array<int>();
+                  val first = rt borrow mut values;
+                  val second = rt borrow values;
+                  return;
+                }
+                """)));
     }
 
     private String run(String code) throws Exception {

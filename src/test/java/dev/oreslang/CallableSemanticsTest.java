@@ -395,7 +395,7 @@ final class CallableSemanticsTest {
     void onlyImmediateBraceAfterArrowStartsLambdaBlock() {
         assertDoesNotThrow(() -> Parser.parse("""
                 pub routine main(): void {
-                  val make = |value| -> obj{return: value};
+                  val make = |value| -> infer struct{return: value};
                   return;
                 }
                 """));
@@ -477,7 +477,7 @@ final class CallableSemanticsTest {
         String output = run("""
                 pub routine main(): void {
                   val Fnc<int, {value: int}> wrap =
-                    |value| -> obj{value: value * 2};
+                    |value| -> struct{value: int}{value: value * 2};
                   val wrapped = wrap(4);
                   stdio.stdout.write(wrapped.value);
                   return;
