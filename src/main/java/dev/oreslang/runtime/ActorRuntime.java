@@ -836,7 +836,8 @@ public final class ActorRuntime implements AutoCloseable {
             Runnable release,
             Runnable continuation,
             ActorId sender,
-            long sequence) implements AutoCloseable {
+            long sequence,
+            OresFuture<Object> reply) implements AutoCloseable {
         private static MessageEnvelope message(
                 Object value,
                 Runnable release,
@@ -845,7 +846,15 @@ public final class ActorRuntime implements AutoCloseable {
             if (sequence < 0) {
                 throw new IllegalArgumentException("actor mailbox sequence cannot be negative");
             }
-            return new MessageEnvelope(value, release, null, sender, sequence);
+            return new MessageEnvelope(value, release, null, sender, sequence, null);
+        }
+
+        private static MessageEnvelope request(
+                Object value, Runnable release, ActorId sender, long sequence,
+                OresFuture<Object> reply) {
+            if (sequence < 0) throw new IllegalArgumentException("actor request sequence cannot be negative");
+            return new MessageEnvelope(value, release, null, sender, sequence,
+                    Objects.requireNonNull(reply, "reply future"));
         }
 
         private static MessageEnvelope continuation(Runnable continuation) {
@@ -854,7 +863,8 @@ public final class ActorRuntime implements AutoCloseable {
                     null,
                     Objects.requireNonNull(continuation, "continuation"),
                     null,
-                    -1L);
+                    -1L,
+                    null);
         }
 
         private boolean isContinuation() {
@@ -1180,6 +1190,20 @@ public final class ActorRuntime implements AutoCloseable {
                 ActorOwnedGuestState state,
                 ActorInboxMail<Object> mail,
                 ActorContext<Object> context) throws Exception;
+
+        /** Called only through an admitted runtime-owned request envelope. */
+        Object requestActor(
+                String actorTypeName,
+                ActorOwnedGuestState state,
+                Object request,
+                ActorContext<Object> context) throws Exception;
+    }
+
+    /** Explicit actor-fatal source panic, distinct from request-local throws. */
+    public static final class ActorPanicException extends RuntimeException {
+        public ActorPanicException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     public interface ActorContext<M> {
@@ -1489,6 +1513,12 @@ public final class ActorRuntime implements AutoCloseable {
      * actor's bounded runtime-continuation lane may execute.
      */
     public void suspendCurrentUserMailboxUntil(OresFuture<?> future) {
+        suspendCurrentUserMailboxUntil(future, null);
+    }
+
+    /** Request variant: normal exceptions reject only this reply; panic fails the actor. */
+    public void suspendCurrentUserMailboxUntil(
+            OresFuture<?> future, OresFuture<Object> reply) {
         Objects.requireNonNull(future, "future");
         requireCallerRuntimeAffinity("suspend current actor mailbox turn");
         ActorCell<?> cell = currentActor.get();
@@ -1511,7 +1541,7 @@ public final class ActorRuntime implements AutoCloseable {
             cell.sourceReceiveSuspended = true;
         }
 
-        future.whenCompleteRuntime((ignored, failure) -> {
+        future.whenCompleteRuntime((value, failure) -> {
             if (!enqueueContinuation(cell.ref.id(), () -> {
                 synchronized (cell.lifecycleLock) {
                     cell.sourceReceiveSuspended = false;
@@ -1524,9 +1554,16 @@ public final class ActorRuntime implements AutoCloseable {
                             && cell.endRequested) {
                         return;
                     }
+                    if (reply != null && !isFatalRequestFailure(terminal)) {
+                        reply.failFromRuntime(terminal);
+                        return;
+                    }
                     if (terminal instanceof RuntimeException runtime) throw runtime;
                     if (terminal instanceof Error error) throw error;
                     throw new RuntimeException(terminal);
+                }
+                if (reply != null && !reply.isDone()) {
+                    completeRequestReply(cell, reply, value);
                 }
             })) {
                 synchronized (cell.lifecycleLock) {
@@ -1539,6 +1576,42 @@ public final class ActorRuntime implements AutoCloseable {
                 }
             }
         });
+    }
+
+    private static boolean isFatalRequestFailure(Throwable failure) {
+        return failure instanceof ActorPanicException
+                || failure instanceof SecurityException
+                || failure instanceof Error;
+    }
+
+    /** No guest callable can settle, forge or retain the reply authority. */
+    private void completeRequestReply(
+            ActorCell<?> cell, OresFuture<Object> reply, Object result) {
+        if (reply.isDone() || cell.stopped.get()) return;
+        try {
+            validateMessageGraph(result);
+            requireOwnedActorRefs(result, new IdentityHashMap<>(), 0);
+            requireMutexTransport(cell, result, new IdentityHashMap<>(), 0);
+            if (cell.kind == ActorKind.UNTRUSTED) {
+                rejectUntrustedInboundCapabilities(result, new IdentityHashMap<>(), 0);
+            }
+            Object prepared = isPrivateKind(cell.kind)
+                    ? isolateCopy(result) : freezeForTransport(result);
+            // A reply is limited independently of the inbox capacity. This
+            // guards the source actor against unbounded result graphs.
+            long bytes = isPrivateKind(cell.kind)
+                    ? estimatePrivateTransportBytes(prepared, new IdentityHashMap<>(), 0,
+                            cell.policy.maxHeapBytes())
+                    : estimateSharedMailboxBytes(prepared, new IdentityHashMap<>(), 0);
+            if (bytes > cell.policy.maxHeapBytes()) {
+                throw new IllegalStateException(
+                        "actor request reply exceeds heap transport quota");
+            }
+            reply.completeFromRuntime(prepared);
+        } catch (RuntimeException violation) {
+            reply.failFromRuntime(violation);
+            if (violation instanceof SecurityException) throw violation;
+        }
     }
 
     public final class ActorRef<M> {
@@ -1607,6 +1680,11 @@ public final class ActorRuntime implements AutoCloseable {
 
         public void send(M message) {
             ActorRuntime.this.send(this, message);
+        }
+
+        /** Runtime-owned request/reply operation. Guest code never owns a reply slot. */
+        public OresFuture<Object> request(M message) {
+            return ActorRuntime.this.request(this, message);
         }
 
         public void stop() {
@@ -4109,6 +4187,23 @@ public final class ActorRuntime implements AutoCloseable {
 
     @SuppressWarnings("unchecked")
     public <M> void send(ActorRef<M> ref, M message) {
+        admitUserMessage(ref, message, null);
+    }
+
+    /**
+     * A request is transported exactly like a one-way mailbox message, but its
+     * reply authority is kept exclusively in runtime-private envelope state.
+     * Cancelling an exposed Future prevents queued guest dispatch; it never
+     * rewinds a turn that already started.
+     */
+    public <M> OresFuture<Object> request(ActorRef<M> ref, M message) {
+        Objects.requireNonNull(ref, "actor reference");
+        OresFuture<Object> reply = new OresFuture<>();
+        admitUserMessage(ref, message, reply);
+        return reply;
+    }
+
+    private <M> void admitUserMessage(ActorRef<M> ref, M message, OresFuture<Object> reply) {
         requireCallerRuntimeAffinity("send messages");
         if (currentActorKind() == ActorKind.UNTRUSTED) {
             throw new SecurityException("untrusted actors cannot send actor messages");
@@ -4120,6 +4215,9 @@ public final class ActorRuntime implements AutoCloseable {
         }
         ActorCell<M> cell = (ActorCell<M>) actors.get(ref.id());
         if (cell == null || cell.stopped.get()) throw terminated(ref);
+        if (reply != null && cell.codeExecutor == null) {
+            throw new IllegalArgumentException("ActorRef.request requires a source actor with private run handler");
+        }
         if (!cell.reserveMailboxSlot()) {
             throw new IllegalStateException("actor mailbox limit exceeded for " + ref.id());
         }
@@ -4210,14 +4308,19 @@ public final class ActorRuntime implements AutoCloseable {
                                 "actor mailbox sequence exhausted for " + ref.id(),
                                 exhausted);
                     }
-                    envelope = MessageEnvelope.message(
-                            prepared, release, sender, sequence);
+                    envelope = reply == null
+                            ? MessageEnvelope.message(prepared, release, sender, sequence)
+                            : MessageEnvelope.request(prepared, release, sender, sequence, reply);
                     if (!cell.mailbox.tryWrite(envelope)) {
                         throw new IllegalStateException("actor mailbox limit exceeded for " + ref.id());
                     }
                     cell.nextUserMessageSequence = nextSequence;
                     mailboxSlotTransferred = true;
                     admitted = true;
+                    if (reply != null) {
+                        cell.pendingReplies.add(reply);
+                        reply.whenCompleteRuntime((ignored, failure) -> cell.pendingReplies.remove(reply));
+                    }
                     commitSharedMutexBindings(sharedMutexReservations);
                 }
             }
@@ -5619,6 +5722,8 @@ public final class ActorRuntime implements AutoCloseable {
         private final ActorCell<?> parent;
         private final Set<ActorCell<?>> children = ConcurrentHashMap.newKeySet();
         private final Set<OresFuture<?>> pendingOperations = ConcurrentHashMap.newKeySet();
+        /** Reply authority belongs to this actor cell and is never guest-visible. */
+        private final Set<OresFuture<Object>> pendingReplies = ConcurrentHashMap.newKeySet();
         /**
          * Mutable scheduler metadata belongs to this actor, never to the shared
          * AST/evaluator. Keys are immutable shared code-site identities.
@@ -6267,11 +6372,33 @@ public final class ActorRuntime implements AutoCloseable {
                                     @SuppressWarnings("unchecked")
                                     ActorContext<Object> sourceContext =
                                             (ActorContext<Object>) (ActorContext<?>) context;
-                                    codeExecutor.receiveActor(
-                                            codeActorType,
-                                            codeActorState,
-                                            sourceMail,
-                                            sourceContext);
+                                    OresFuture<Object> reply = activeEnvelope.reply();
+                                    if (reply != null) {
+                                        // Caller cancellation before dispatch never runs guest code.
+                                        if (!reply.isDone()) {
+                                            try {
+                                                Object outcome = codeExecutor.requestActor(
+                                                        codeActorType, codeActorState,
+                                                        mail.value(), sourceContext);
+                                                if (outcome instanceof OresFuture<?> suspended) {
+                                                    suspendCurrentUserMailboxUntil(suspended, reply);
+                                                } else {
+                                                    completeRequestReply(this, reply, outcome);
+                                                }
+                                            } catch (Throwable requestFailure) {
+                                                if (isFatalRequestFailure(requestFailure)) {
+                                                    if (requestFailure instanceof RuntimeException runtime) throw runtime;
+                                                    if (requestFailure instanceof Error error) throw error;
+                                                    throw new RuntimeException(requestFailure);
+                                                }
+                                                reply.failFromRuntime(requestFailure);
+                                            }
+                                        }
+                                    } else {
+                                        codeExecutor.receiveActor(
+                                                codeActorType, codeActorState,
+                                                sourceMail, sourceContext);
+                                    }
                                 } else {
                                     behavior.onMessage(mail.value(), context);
                                 }
@@ -6372,6 +6499,7 @@ public final class ActorRuntime implements AutoCloseable {
         private void terminateTree(Throwable cause, boolean recordCause) {
             List<ActorCell<?>> descendants;
             List<OresFuture<?>> pending;
+            List<OresFuture<Object>> replies;
             synchronized (lifecycleLock) {
                 if (finalized) return;
                 if (recordCause && cause != null) {
@@ -6385,6 +6513,8 @@ public final class ActorRuntime implements AutoCloseable {
                 descendants = List.copyOf(children);
                 pending = List.copyOf(pendingOperations);
                 pendingOperations.clear();
+                replies = List.copyOf(pendingReplies);
+                pendingReplies.clear();
                 finalizeStopLocked();
                 lifecycleLock.notifyAll();
             }
@@ -6392,6 +6522,10 @@ public final class ActorRuntime implements AutoCloseable {
             // Cancellation removes channel/select waiter registrations before
             // any future channel activity can revive work for this dead actor.
             for (OresFuture<?> future : pending) future.cancel(false);
+            for (OresFuture<Object> reply : replies) {
+                reply.failFromRuntime(
+                        cause == null ? terminated(ref) : cause);
+            }
 
             for (ActorCell<?> child : descendants) {
                 child.cancel(new ActorCancelledException(
