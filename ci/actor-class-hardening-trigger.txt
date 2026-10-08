@@ -1,0 +1,1 @@
+Temporary CI trigger for actor/class hardening audit on 2026-10-05.

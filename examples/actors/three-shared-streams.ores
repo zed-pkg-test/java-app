@@ -1,0 +1,25 @@
+actor fnc worker(id: int): Stream<int> {
+  return Stream.from_values([id * 10, id * 10 + 1]);
+}
+
+pub routine main() => void {
+  val w1 = spawn worker(1);
+  val w2 = spawn worker(2);
+  val w3 = spawn worker(3);
+  val s1 = (await w1.result).subscribe();
+  val s2 = (await w2.result).subscribe();
+  val s3 = (await w3.result).subscribe();
+  stdio.println((await s1.next()).value);
+  stdio.println((await s2.next()).value);
+  stdio.println((await s3.next()).value);
+  stdio.println((await s1.next()).value);
+  stdio.println((await s2.next()).value);
+  stdio.println((await s3.next()).value);
+  stdio.println((await s1.next()).is_complete());
+  stdio.println((await s2.next()).is_complete());
+  stdio.println((await s3.next()).is_complete());
+  await w1.done;
+  await w2.done;
+  await w3.done;
+  return;
+}

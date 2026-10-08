@@ -1,0 +1,15 @@
+actor fnc produce(): Stream<int> {
+  return Stream.from_values([10, 20, 30]);
+}
+pub routine main() => void {
+  val producer = spawn produce();
+  val values = await producer.result;
+  val subscription = values.subscribe();
+  let item = await subscription.next();
+  for (; item.is_next(); ) {
+    stdio.println(item.value);
+    item = await subscription.next();
+  }
+  await producer.done;
+  return;
+}
