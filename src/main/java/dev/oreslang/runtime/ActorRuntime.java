@@ -4223,6 +4223,10 @@ public final class ActorRuntime implements AutoCloseable {
         if (!ref.ownedBy(this)) {
             throw new IllegalArgumentException("ActorRef belongs to a different ActorRuntime");
         }
+        if (reply != null && currentActorId().filter(ref.id()::equals).isPresent()) {
+            throw new IllegalStateException(
+                    "actor cannot request itself synchronously through its own mailbox");
+        }
         ActorCell<M> cell = (ActorCell<M>) actors.get(ref.id());
         if (cell == null || cell.stopped.get()) throw terminated(ref);
         if (reply != null && cell.codeExecutor == null) {
