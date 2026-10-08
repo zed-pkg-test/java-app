@@ -180,6 +180,8 @@ final class UntrustedSourceTaskQuotaTest {
         AtomicReference<Object> quotaAtFirstResume = new AtomicReference<>();
         CountDownLatch published = new CountDownLatch(1);
         CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch mailboxBarrier = new CountDownLatch(1);
+        AtomicReference<Object> quotaAtBarrier = new AtomicReference<>();
         AtomicInteger resumes = new AtomicInteger();
         OresFuture<Integer> producer = new OresFuture<>();
 
@@ -195,6 +197,11 @@ final class UntrustedSourceTaskQuotaTest {
                 }
                 @Override public void receiveActor(String type, ActorRuntime.ActorOwnedGuestState state,
                         ActorRuntime.ActorInboxMail<Object> mail, ActorRuntime.ActorContext<Object> context) {
+                    if ("barrier".equals(mail.value())) {
+                        quotaAtBarrier.set(currentQuota());
+                        mailboxBarrier.countDown();
+                        return;
+                    }
                     taskResult.set(context.runtime().startActorTask(resume -> {
                         resumes.incrementAndGet();
                         quotaAtFirstResume.set(currentQuota());
@@ -224,6 +231,14 @@ final class UntrustedSourceTaskQuotaTest {
                 assertFalse(sourceTask.cancel(false), "task cancellation must settle exactly once");
 
                 producer.completeFromRuntime(42);
+                // A wrong continuation would enter the control lane before
+                // this later user-mail turn. Observe that ordering, not an
+                // immediate assertion on the producer-completion thread.
+                actor.send("barrier");
+                assertTrue(mailboxBarrier.await(5, TimeUnit.SECONDS),
+                        "actor mailbox must advance after cancellation");
+                assertNull(quotaAtBarrier.get(),
+                        "the reused carrier must not retain cancelled task quota authority");
                 assertTrue(sourceTask.isCancelled());
                 assertEquals(1, resumes.get(), "a cancelled await cannot run guest code again");
             } finally {
