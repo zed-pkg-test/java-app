@@ -1,14 +1,15 @@
 # Oreslang actor contracts: sealed runtime entrypoint, private source handlers
 
 **Decision, October 7, 2026.** This document is the target language/runtime
-contract. **Status:** this draft branch implements AST admission checks for
-local private `run`, duplicate/mixed handlers, locally resolvable inherited
-mode conflicts and direct `self` handler references; it is **not merged or
-runtime-complete**. Current execution still uses private
-`receive(ActorMail<T>): void` and `ActorRef.send(T)`; it does not yet
-dispatch a value-returning `run(T): R` nor provide `ActorRef.request(T)`.
-The migration must not be called shipped until exact-head CI exercises those
-paths. See [ACTOR_CLASS_LIFECYCLE_DESIGN.md](ACTOR_CLASS_LIFECYCLE_DESIGN.md)
+contract. **Status:** this draft branch implements an end-to-end private
+`run(T): R` request/reply slice, including typed `ActorRef.request(T)`,
+runtime-private reply Future envelopes, cancellation-before-dispatch,
+actor-turn suspension, and independent actor-fatal panic propagation.
+The existing private `receive(ActorMail<T>): void` and `send(T)`
+event protocol remains supported. Request dispatch passes exact-source-tree
+JVM CI, but the branch is **not merged or fully hardened**: imported ABI
+compatibility, full return-graph transport lifetime accounting, cancellation
+race model-checks, and explicit source `raise` semantics remain separate gates. See [ACTOR_CLASS_LIFECYCLE_DESIGN.md](ACTOR_CLASS_LIFECYCLE_DESIGN.md)
 for the currently executable event/stream surface.
 
 ## Canonical user model
@@ -200,17 +201,23 @@ expressions, actor-scoped closures, and reflection/dynamic lookup bypasses.
    `run`, mixed local and locally resolvable inherited `run`/`receive`, and
    direct `self.run`/`self.receive`/`self.on_start` captures, including lambdas.
    The existing parser already rejects actor constructors and `super` syntax.
-   Still required: resolved cross-file inheritance/link-time ABI checks,
-   transport-safe request/response type validation, and runtime denial of
-   dynamic/interop alias paths.
-2. **Typed `ActorRef`:** infer request parameter/return type (including
-   imported actor ABI), resolve virtual actor inheritance uniquely, prevent
-   first-class handler capture and provide runtime-owned `request` intrinsic.
-3. **Runtime lowering:** add a typed request/reply envelope; route to the
-   private handler under an actor lease with exact-once result settlement,
-   cancellation/backpressure/supervision and safe transport rules.
-4. **Error semantics:** distinguish request `throw`, recovered/unrecovered
-   `raise`, and actor-fatal `panic` without VM-fatal propagation.
+   Runtime method and bound-method lookup now deny direct actor handler
+   invocation even through aliases. Still required: imported actor
+   inheritance/link-time ABI validation and exhaustive foreign-interop probes.
+2. **Typed `ActorRef` (implemented locally):** `request` checks an input
+   against the private handler signature and types the returned `Future<R>`.
+   Imported actor ABI digest/revision checks and generics/AOT parity need
+   separate acceptance proofs.
+3. **Runtime lowering (implemented first slice):** runtime-owned envelopes
+   dispatch private handlers; synchronous and suspended replies complete once,
+   and caller cancellation suppresses not-yet-dispatched work. Admission shares
+   bounded send transport; replies validate/freeze/copy sendable graphs.
+   Outstanding: lifetime-based result-memory accounting and adversarial races.
+4. **Error semantics (partially implemented):** ordinary handler exceptions
+   fail only their request. `OresPanic` and explicit runtime panic exceptions
+   terminate their actor and reject its replies while peers continue. Full
+   source-language `panic`/`raise` surface, handler recovery, and precise
+   supervisor observability are still separate gates.
 5. **Tests + CI:** add the negative/positive proofs above and run on the exact
    SHA using both Java and native carriers. If source Actions cannot allocate
    runners, mirror the **exact Git tree** to a funded test organization,
@@ -219,4 +226,6 @@ expressions, actor-scoped closures, and reflection/dynamic lookup bypasses.
 6. **Downstream migration:** update actor demos, lifecycle docs, marketing
    examples and compiler ABI pins **only after** the above runtime is green.
 
-A design-only commit is not evidence that the new protocol is implemented.
+A passing local request/reply execution test is evidence for that specific
+runtime slice, **not** proof that all imported/AOT/interop/failure and
+isolation acceptance gates are complete. Do not merge until those gates pass.
