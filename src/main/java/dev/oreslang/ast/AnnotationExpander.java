@@ -30,6 +30,7 @@ public final class AnnotationExpander {
     private AnnotationExpander() { }
 
     public static Ast.Program expand(Ast.Program program) {
+        ActorContractValidator.validate(program);
         List<Ast.ModuleDecl> modules = new ArrayList<>(program.modules().size());
         for (Ast.ModuleDecl module : program.modules()) modules.add(expandModule(module));
         return new Ast.Program(program.namespace(), program.imports(), modules);
@@ -94,11 +95,18 @@ public final class AnnotationExpander {
     }
 
     private static Ast.ModuleDecl expandModule(Ast.ModuleDecl module) {
+        rejectMethodIntentAnnotations(module.annotations(), "module '" + module.name() + "'");
         List<Ast.Decl> declarations = new ArrayList<>(module.declarations().size());
         for (Ast.Decl declaration : module.declarations()) {
             if (declaration instanceof Ast.ClassDecl klass) {
                 declarations.add(expandClass(klass));
             } else {
+                if (declaration instanceof Ast.FieldDecl field) {
+                    rejectMethodIntentAnnotations(field.annotations(), "module binding '" + field.name() + "'");
+                }
+                if (declaration instanceof Ast.FunctionDecl function) {
+                    rejectMethodIntentAnnotations(function.annotations(), "function '" + function.name() + "'");
+                }
                 if (declaration instanceof Ast.FieldDecl field && fromJsonKey(field) != null) {
                     throw new IllegalArgumentException("@FromJson is only valid on class fields, not module binding '" + field.name() + "'");
                 }
@@ -112,6 +120,14 @@ public final class AnnotationExpander {
     }
 
     private static Ast.ClassDecl expandClass(Ast.ClassDecl klass) {
+        if (klass.constructor() != null) {
+            rejectMethodIntentAnnotations(
+                    klass.constructor().annotations(), "constructor of '" + klass.name() + "'");
+        }
+        for (Ast.FieldDecl field : klass.fields()) {
+            rejectMethodIntentAnnotations(
+                    field.annotations(), "field '" + klass.name() + "." + field.name() + "'");
+        }
         List<Ast.MethodDecl> methods = new ArrayList<>(klass.methods());
         Map<String, Ast.MethodDecl> signatures = new HashMap<>();
         for (Ast.MethodDecl method : methods) {
@@ -241,6 +257,17 @@ public final class AnnotationExpander {
 
     private static String signature(String name, int arity) {
         return name + "/" + arity;
+    }
+
+    private static void rejectMethodIntentAnnotations(
+            List<Ast.Annotation> annotations, String target) {
+        for (Ast.Annotation annotation : annotations) {
+            if (annotation.name().equals("Implementation")
+                    || annotation.name().equals("Override")) {
+                throw new IllegalArgumentException(
+                        "@" + annotation.name() + " is only valid on class/actor methods, not " + target);
+            }
+        }
     }
 
     private static boolean hasAnnotation(List<Ast.Annotation> annotations, String name) {

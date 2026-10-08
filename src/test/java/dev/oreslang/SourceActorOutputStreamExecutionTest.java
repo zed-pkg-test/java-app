@@ -15,6 +15,7 @@ final class SourceActorOutputStreamExecutionTest {
     void sourceActorStreamsOrderedOutputsAndClosesAfterFinalization() throws Exception {
         String program = """
                 define actor Worker as
+                  @Implementation
                   receive(ActorMail<String> mail): void {
                     self.send("hello");
                     self.send("world");
@@ -67,6 +68,7 @@ final class SourceActorOutputStreamExecutionTest {
     void forAwaitConsumesActorOutputsUntilActorFinalization() throws Exception {
         String program = """
                 define actor Worker as
+                  @Implementation
                   receive(ActorMail<String> mail): void {
                     self.send("hello");
                     self.send("world");

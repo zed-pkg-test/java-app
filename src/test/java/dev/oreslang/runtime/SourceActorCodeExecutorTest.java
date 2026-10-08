@@ -81,6 +81,10 @@ final class SourceActorCodeExecutorTest {
                 assertNull(ref.ready().join());
                 assertTrue(ref.isAlive());
 
+                var incompatible = assertThrows(IllegalArgumentException.class,
+                        () -> ref.request("not-a-unary-request"));
+                assertTrue(incompatible.getMessage().contains("unary actor"),
+                        incompatible.getMessage());
                 ref.send("stop");
                 assertTrue(ref.awaitTermination(2, TimeUnit.SECONDS),
                         "actor kind " + kind);
