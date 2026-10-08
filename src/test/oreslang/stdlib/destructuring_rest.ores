@@ -57,7 +57,7 @@ fnc vector_rest_contract(): TestOutcome {
 }
 
 fnc record_rest_prefix_contract(): TestOutcome {
-  val Row row = obj{v: 5, label: "alpha", active: true};
+  val Row row = struct{v: int, label: string, active: bool}{v: 5, label: "alpha", active: true};
   const {v, ...rest} = row;
 
   if v != 5 || rest.label != "alpha" || rest.active != true; do
@@ -67,7 +67,7 @@ fnc record_rest_prefix_contract(): TestOutcome {
 }
 
 fnc record_rest_inline_kind_contract(): TestOutcome {
-  val Row row = obj{v: 8, label: "beta", active: false};
+  val Row row = struct{v: int, label: string, active: bool}{v: 8, label: "beta", active: false};
   {const v, const ...rest} = row;
 
   if v != 8 || rest.label != "beta" || rest.active != false; do

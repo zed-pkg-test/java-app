@@ -19,7 +19,7 @@ final class NativeCollectionMemberRuntimeTest {
     void nativeArrayMembersTypecheckAndExecuteWithoutHostInterop() throws Exception {
         String program = """
                 pub routine main(): void {
-                  let Array<int> values = new Array<int>();
+                  let mut Array<int> values = new Array<int>();
                   values.add(4);
                   values.add(9);
 
