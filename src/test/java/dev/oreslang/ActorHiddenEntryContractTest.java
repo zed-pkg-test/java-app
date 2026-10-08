@@ -116,7 +116,7 @@ final class ActorHiddenEntryContractTest {
         rejects("""
                 define actor Worker as
                   fnc run(int job): int {
-                    val cb = self.run;
+                    val callback = self.run;
                     return job;
                   }
                 end
@@ -124,7 +124,7 @@ final class ActorHiddenEntryContractTest {
         rejects("""
                 define actor Worker as
                   fnc run(int job): int {
-                    val cb = || -> {
+                    val callback = || -> {
                       self.run(job);
                       return;
                     };

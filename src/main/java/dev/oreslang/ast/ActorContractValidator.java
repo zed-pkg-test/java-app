@@ -91,6 +91,10 @@ public final class ActorContractValidator {
             // overload resolution. The actor's mailbox ABI is a single slot.
             if (method.name().equals("run")) {
                 runs++;
+                if (runs > 1) {
+                    throw new IllegalArgumentException(
+                            "actor '" + actor.name() + "' cannot overload run");
+                }
                 if (method.visibility() != Ast.Visibility.PRIVATE
                         || method.isStatic() || method.isAbstract()
                         || method.async() || method.structural()
@@ -104,11 +108,18 @@ public final class ActorContractValidator {
                                     + "take exactly one message, and return a non-void result");
                 }
             }
-            if (method.name().equals("receive")) receives++;
+            if (method.name().equals("receive")) {
+                receives++;
+                if (receives > 1) {
+                    throw new IllegalArgumentException(
+                            "actor '" + actor.name() + "' cannot overload receive");
+                }
+            }
             if (method.name().equals("on_start")
                     && method.visibility() == Ast.Visibility.PUBLIC) {
                 throw new IllegalArgumentException(
-                        "actor '" + actor.name() + "': on_start is private");
+                        "actor lifecycle hook '" + actor.name()
+                                + ".on_start' is actor-local and cannot be public");
             }
             String signature = method.name() + "/" + method.arity()
                     + "/" + method.isStatic();
@@ -193,7 +204,9 @@ public final class ActorContractValidator {
                     && name.name().equals("self")
                     && RUNTIME_HANDLERS.contains(member.member())) {
                 throw new IllegalArgumentException(
-                        "actor runtime handler self." + member.member()
+                        (member.member().equals("run")
+                                ? "actor runtime handler self.run"
+                                : "reserved actor lifecycle hook self." + member.member())
                                 + " cannot be called directly or captured as a value");
             }
             checkExpr(member.receiver());
