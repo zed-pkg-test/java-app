@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: bed1d705409c7b8bc6f8ddac2cbd89b98ffdfe00
+          ref: 39f091067756aa8503d1d67b5c71ca9aa19b74e2
           persist-credentials: false
       - uses: graalvm/setup-graalvm@v1
         with:
@@ -23,7 +23,7 @@ jobs:
           distribution: 'graalvm'
           cache: maven
       - name: Assert exact upstream source tree
-        run: test "$(git rev-parse 'HEAD^{tree}')" = 4969853e02498c31130d309e1bf36af95bd8abcd
+        run: test "$(git rev-parse 'HEAD^{tree}')" = 291d9f6e1da8215304b1de7e0f8781d2800c7782
       - name: Full Maven verification
         run: mvn -B -ntp clean verify
       - name: Repeat lifecycle and reader regression tests
