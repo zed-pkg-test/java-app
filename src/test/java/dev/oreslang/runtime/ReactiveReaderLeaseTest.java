@@ -16,6 +16,111 @@ final class ReactiveReaderLeaseTest {
     }
 
     @Test
+    void cancelDuringSourceRegistrationPreservesCancelledFutureAndCleansUp() throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var proceed = new java.util.concurrent.CountDownLatch(1);
+        var source = new OresFuture<OresNotification<Integer>>();
+        var cleanup = new AtomicInteger();
+        OresSubscription<Integer> sub = new OresSubscription<>() {
+            @Override protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                entered.countDown();
+                try {
+                    if (!proceed.await(3, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("registration timed out");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+                return source;
+            }
+            @Override protected void cancelFromRuntime() { cleanup.incrementAndGet(); }
+        };
+        var returned = new java.util.concurrent.atomic.AtomicReference<OresFuture<OresNotification<Integer>>>();
+        var reader = sub.getReader();
+        Thread register = new Thread(() -> returned.set(reader.next()));
+        try {
+            register.start();
+            assertTrue(entered.await(3, TimeUnit.SECONDS));
+            assertThrows(IllegalStateException.class, reader::releaseLock,
+                    "registration must count as an outstanding read");
+            assertTrue(reader.cancel());
+            proceed.countDown();
+            register.join(3000);
+            assertFalse(register.isAlive());
+            assertNotNull(returned.get());
+            assertTrue(returned.get().isCancelled(),
+                    "cancellation must not be converted into ordinary COMPLETE");
+            assertTrue(source.isCancelled(), "late-created source must be cancelled");
+            assertEquals(1, cleanup.get());
+            reader.releaseLock();
+        } finally {
+            proceed.countDown();
+            register.join(3000);
+        }
+    }
+
+    @Test
+    void cancelDuringThrowingSourceRegistrationDoesNotPublishFailureOverCancellation()
+            throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var proceed = new java.util.concurrent.CountDownLatch(1);
+        var cleanup = new AtomicInteger();
+        OresSubscription<Integer> sub = new OresSubscription<>() {
+            @Override protected OresFuture<OresNotification<Integer>> nextFromRuntime() {
+                entered.countDown();
+                try {
+                    if (!proceed.await(3, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("registration timed out");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+                throw new IllegalArgumentException("late synchronous failure");
+            }
+            @Override protected void cancelFromRuntime() { cleanup.incrementAndGet(); }
+        };
+        var returned = new java.util.concurrent.atomic.AtomicReference<OresFuture<OresNotification<Integer>>>();
+        Thread register = new Thread(() -> returned.set(sub.next()));
+        try {
+            register.start();
+            assertTrue(entered.await(3, TimeUnit.SECONDS));
+            assertTrue(sub.cancel());
+            proceed.countDown();
+            register.join(3000);
+            assertFalse(register.isAlive());
+            assertTrue(returned.get().isCancelled());
+            assertEquals(1, cleanup.get());
+        } finally {
+            proceed.countDown();
+            register.join(3000);
+        }
+    }
+
+    @Test
+    void observableReaderLeaseContentionIsIndependentPerSubscription() throws Exception {
+        var sharedProducer = new OresFuture<Integer>();
+        var observable = OresObservable.fromFuture(sharedProducer);
+        var a = observable.subscribe();
+        var b = observable.subscribe();
+        var aReader = a.getReader();
+        var bReader = b.getReader();
+        var aFuture = aReader.next();
+        var bFuture = bReader.next();
+        assertFalse(aFuture.isDone());
+        assertFalse(bFuture.isDone());
+        assertThrows(IllegalStateException.class, aReader::releaseLock);
+        assertTrue(aReader.cancel());
+        aReader.releaseLock();
+        assertFalse(sharedProducer.isCancelled());
+        sharedProducer.completeFromRuntime(123);
+        assertTrue(aFuture.isCancelled());
+        assertEquals(123, read(bFuture).value());
+        bReader.releaseLock();
+    }
+
+    @Test
     void streamReleaseTransfersTheSameCursorWithoutResubscribing() throws Exception {
         OresStream<Integer> stream = OresStream.fromValues(List.of(10, 20));
         OresSubscription.Reader<Integer> first = stream.getReader();

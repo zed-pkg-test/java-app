@@ -102,6 +102,9 @@ public abstract class OresSubscription<T> {
     }
 
     private OresFuture<OresNotification<T>> nextWithReader(Reader<T> lease) {
+        final java.util.concurrent.atomic.AtomicReference<OresFuture<OresNotification<T>>> sourceRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final OresFuture<OresNotification<T>> exposed;
         synchronized (gate) {
             if (reader != lease) {
                 return OresFuture.failed(new IllegalStateException(
@@ -115,6 +118,16 @@ public abstract class OresSubscription<T> {
                         "rx-ores subscription already has an outstanding next()"));
             }
             pulling = true;
+
+            // Publish the exposed Future *before* invoking source registration.
+            // Cancellation racing a slow nextFromRuntime() now settles this
+            // Future as CANCELLED instead of returning a fabricated COMPLETE.
+            exposed = new OresFuture<>(() -> {
+                OresFuture<OresNotification<T>> source = sourceRef.get();
+                if (source != null) source.cancel(true);
+                cancel();
+            });
+            active = exposed;
         }
 
         final OresFuture<OresNotification<T>> source;
@@ -126,36 +139,29 @@ public abstract class OresSubscription<T> {
             boolean wasCancelled;
             synchronized (gate) {
                 wasCancelled = cancelled;
+                if (active == exposed) active = null;
                 pulling = false;
                 terminal = true;
             }
-            // Synchronous producer failure must also run source cleanup once.
             try {
                 cancelRuntimeOnce();
             } catch (RuntimeException | Error ignored) {
-                // Preserve the original source failure.
+                // Preserve the source failure or cancellation identity.
             }
-            return wasCancelled
-                    ? OresFuture.completed(OresNotification.complete())
-                    : OresFuture.failed(failure);
+            if (!wasCancelled) exposed.failFromRuntime(failure);
+            return exposed;
         }
 
-        OresFuture<OresNotification<T>> exposed =
-                new OresFuture<>(() -> source.cancel(true));
-
+        sourceRef.set(source);
         boolean aborted;
         synchronized (gate) {
-            aborted = cancelled || terminal;
-            if (aborted) {
-                pulling = false;
-            } else {
-                active = exposed;
-            }
+            aborted = cancelled;
         }
-        // Never invoke a source cancellation hook while holding the gate.
+        // No producer hooks under the gate, including when cancellation wins
+        // before nextFromRuntime() has returned its source Future.
         if (aborted) {
             source.cancel(true);
-            return OresFuture.completed(OresNotification.complete());
+            return exposed;
         }
 
         source.whenCompleteRuntime((notification, failure) -> {
