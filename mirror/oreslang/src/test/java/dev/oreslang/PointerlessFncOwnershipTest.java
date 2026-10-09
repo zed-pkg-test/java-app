@@ -361,6 +361,43 @@ final class PointerlessFncOwnershipTest {
                         || error.getMessage().toLowerCase().contains("immutable"), error.getMessage());
     }
 
+
+    @Test
+    void inlineStructuralViewOfInferredStructRunsWithoutMoving() throws Exception {
+        String output = run("""
+                fnc inspect(structural {x: String} v): String {
+                  return v.x;
+                }
+                pub routine main(): void {
+                  const z = infer struct{x: "whatever"};
+                  stdio.stdout.write(inspect(z));
+                  stdio.stdout.write(z.x);
+                  return;
+                }
+                """);
+        assertEquals("whateverwhatever", output);
+    }
+
+    @Test
+    void nominalStructuralReadAndExplicitBorrowRunWithoutMoving() throws Exception {
+        String output = run("""
+                define class Box as
+                  pub let String value = "start";
+                end
+                fnc inspect(structural Box v): String {
+                  return v.value;
+                }
+                pub routine main(): void {
+                  let mut Box box = new Box();
+                  stdio.stdout.write(inspect(box));
+                  stdio.stdout.write(inspect(rt borrow box));
+                  stdio.stdout.write(box.value);
+                  return;
+                }
+                """);
+        assertEquals("startstartstart", output);
+    }
+
     private String run(String code) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         try (Context context = Context.newBuilder("ores")
