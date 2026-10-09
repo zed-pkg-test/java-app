@@ -2020,6 +2020,13 @@ public final class TypeChecker {
             if (mutexMember != null) return mutexMember;
 
             Type selectedReceiver = deref(receiver);
+            // Array/list and tuple lengths are native integer properties.
+            // Returning Unknown here makes safe bounds checks and subtraction
+            // fail typechecking even when the receiver is statically typed.
+            if ((selectedReceiver instanceof ListType || selectedReceiver instanceof Tuple)
+                    && member.member().equals("length")) {
+                return Primitive.INT;
+            }
             if (selectedReceiver instanceof Named selected
                     && selected.name().equals("SelectResult")) {
                 return switch (member.member()) {
@@ -2915,6 +2922,15 @@ public final class TypeChecker {
             boolean returnPosition,
             String where) {
         if (returnPosition && type == Primitive.VOID) return;
+        // A typed channel handle is an Ores-owned synchronized transport, not
+        // an actor/mailbox capability. Async tasks may receive the handle when
+        // its payload is concrete, owned and task-safe. Actor boundaries retain
+        // their stricter rule and continue to reject Channel<T> entirely.
+        if (type instanceof Named named && named.name().equals("Channel")
+                && named.arguments().size() == 1
+                && isSharedSafe(named.arguments().getFirst(), new LinkedHashSet<>(), Map.of())) {
+            return;
+        }
         if (type == Primitive.VOID
                 || !isSharedSafe(type, new LinkedHashSet<>(), Map.of())) {
             throw new IllegalArgumentException(

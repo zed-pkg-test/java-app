@@ -571,6 +571,10 @@ public final class OwnershipChecker {
                             || (taken.type != null && taken.type.isBorrow())) {
                         throw error("rt take requires owned data; a borrow cannot regain ownership");
                     }
+                    if (argument instanceof Ast.NameExpr name && taken.kind == ValueKind.COPY) {
+                        VarState binding = scope.lookup(name.name());
+                        if (binding != null) move(binding, name.name());
+                    }
                     yield taken;
                 }
                 case "copy" -> {
