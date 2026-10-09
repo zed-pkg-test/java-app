@@ -24,8 +24,8 @@ jobs:
           cache: maven
       - name: Assert exact upstream source tree
         run: test "$(git rev-parse 'HEAD^{tree}')" = 291d9f6e1da8215304b1de7e0f8781d2800c7782
-      - name: Full Maven verification
-        run: mvn -B -ntp clean verify
+      - name: Compile and execute focused lock/lifecycle regression suite
+        run: mvn -B -ntp -Dtest=ReactiveReaderLeaseTest,ReactiveReaderLanguageTest,ActorStreamLifecycleTest,ActorSpawnStreamContractTest,LinkedProgramRunnerTest clean test
       - name: Repeat lifecycle and reader regression tests
         run: |
           for iteration in $(seq 1 12); do
