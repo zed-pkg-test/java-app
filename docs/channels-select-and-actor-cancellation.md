@@ -113,6 +113,13 @@ val Channel<int> input = Channel.new<int>(64);
 
 Capacity zero is a rendezvous/unbuffered channel.
 
+Channel payloads are data, not executable capabilities. `Fnc<...>` / function
+values cannot be channel element types, including when nested inside Options,
+tuples, records, collections, or nominal objects with callable state. A closure
+may capture execution-domain-local authority, so moving it through a channel
+would make the transport boundary depend on hidden capture state. Keep callbacks
+local and send explicit data describing the requested operation instead.
+
 ### Blocking/suspending forms
 
 ```ores
