@@ -6410,6 +6410,7 @@ public final class TypeChecker {
         for (int i = 0; i < expanded.size(); i++) {
             Type actual = expandedCallArgumentType(
                     expanded.get(i), patterns.get(i), env, callerGenerics, callerSelf);
+            actual = structuralBorrowTarget(actual, params.get(i), i + 1);
             inferGenericBindings(patterns.get(i), actual, bindings, fixedBindings, label);
         }
         Set<String> unbound = new HashSet<>(unique);
@@ -6426,6 +6427,7 @@ public final class TypeChecker {
             }
             Type actual = expandedCallArgumentType(
                     argument, expected, env, callerGenerics, callerSelf);
+            actual = structuralBorrowTarget(actual, params.get(i), i + 1);
             if (!params.get(i).structural()) {
                 requireReadonlyCapabilityPreserved(
                         actual,
@@ -6446,6 +6448,20 @@ public final class TypeChecker {
             throw new IllegalArgumentException("cannot infer generic return type for " + label + "; add an inferable value parameter");
         }
         return result;
+    }
+
+    /**
+     * Structural parameters are read-only views. An explicit immutable
+     * borrow has the same structural shape as its referent; an exclusive
+     * mutable borrow must not silently lose its ownership/effect intent.
+     */
+    private Type structuralBorrowTarget(Type actual, Ast.Param parameter, int position) {
+        if (!parameter.structural() || !(actual instanceof Borrow borrowed)) return actual;
+        if (borrowed.mutable()) {
+            throw new IllegalArgumentException("argument " + position
+                    + " is a read-only structural view; rt borrow mut is not permitted");
+        }
+        return borrowed.target();
     }
 
     private void inferGenericBindings(Type pattern, Type actual, Map<String, Type> bindings, Set<String> fixedBindings, String label) {
