@@ -1532,10 +1532,7 @@ public final class TypeChecker {
                         Primitive.INT,
                         "Channel.new capacity");
                 Type element = resolve(call.typeArguments().getFirst(), generics, self);
-                if (element == Primitive.VOID) {
-                    throw new IllegalArgumentException(
-                            "Channel<void> cannot carry a value; use an explicit signal/unit type");
-                }
+                validateChannelPayloadType(element, "Channel.new");
                 return new Named("Channel", List.of(element));
             }
 
@@ -2332,10 +2329,94 @@ public final class TypeChecker {
         if (channel instanceof Named named
                 && named.name().equals("Channel")
                 && named.arguments().size() == 1) {
-            return named.arguments().getFirst();
+            Type element = named.arguments().getFirst();
+            validateChannelPayloadType(element, where);
+            return element;
         }
         throw new IllegalArgumentException(
                 where + " requires Channel<T>; got " + channel);
+    }
+
+    private void validateChannelPayloadType(Type element, String where) {
+        if (element == Primitive.VOID) {
+            throw new IllegalArgumentException(
+                    "Channel<void> cannot carry a value; use an explicit signal/unit type");
+        }
+        if (containsChannelCallable(element, new LinkedHashSet<>(), Map.of())) {
+            throw new IllegalArgumentException(
+                    where + " cannot transport callable values; "
+                            + "Fnc/function values and values containing callable state stay in their owning execution domain");
+        }
+    }
+
+    private boolean containsChannelCallable(
+            Type type,
+            Set<Ast.ClassDecl> seen,
+            Map<String, Type> genericBindings) {
+        type = deref(type);
+        if (type instanceof Function) return true;
+        if (type instanceof SelfType receiverSelf) {
+            return containsChannelCallable(receiverSelf.bound(), seen, genericBindings);
+        }
+        if (type instanceof Borrow borrow) {
+            return containsChannelCallable(borrow.target(), seen, genericBindings);
+        }
+        if (type instanceof ListType list) {
+            return containsChannelCallable(list.element(), seen, genericBindings);
+        }
+        if (type instanceof Tuple tuple) {
+            return tuple.elements().stream()
+                    .anyMatch(element -> containsChannelCallable(element, seen, genericBindings));
+        }
+        if (type instanceof Union union) {
+            return union.options().stream()
+                    .anyMatch(option -> containsChannelCallable(option, seen, genericBindings));
+        }
+        if (type instanceof Record record) {
+            return record.members().values().stream()
+                    .anyMatch(member -> containsChannelCallable(member, seen, genericBindings));
+        }
+        if (type instanceof Generic generic) {
+            Type bound = genericBindings.get(generic.name());
+            return bound != null
+                    && bound != type
+                    && containsChannelCallable(bound, seen, genericBindings);
+        }
+        if (!(type instanceof Named named)) return false;
+
+        for (Type argument : named.arguments()) {
+            if (containsChannelCallable(argument, seen, genericBindings)) return true;
+        }
+
+        Ast.ClassDecl klass = findClass(named.name());
+        if (klass == null || !seen.add(klass)) return false;
+        try {
+            if (named.arguments().size() != klass.genericParameters().size()) return false;
+            Map<String, Type> classBindings = new HashMap<>(genericBindings);
+            for (int i = 0; i < klass.genericParameters().size(); i++) {
+                classBindings.put(
+                        klass.genericParameters().get(i),
+                        resolveSharedGeneric(named.arguments().get(i), genericBindings));
+            }
+
+            for (Ast.FieldDecl field : klass.fields()) {
+                Type fieldType = resolveSharedGeneric(classFieldType(klass, field), classBindings);
+                if (containsChannelCallable(fieldType, seen, classBindings)) return true;
+            }
+
+            Set<String> classGenerics = Set.copyOf(klass.genericParameters());
+            Type nominal = nominalClassType(klass);
+            for (Ast.TypeRef parentRef : klass.parents()) {
+                if (parentRef.name().equals("Object") || parentRef.name().equals("List")) continue;
+                Type parentType = resolveSharedGeneric(
+                        resolve(parentRef, classGenerics, nominal),
+                        classBindings);
+                if (containsChannelCallable(parentType, seen, classBindings)) return true;
+            }
+            return false;
+        } finally {
+            seen.remove(klass);
+        }
     }
 
     private static boolean isBuiltinStdoutCall(Ast.CallExpr call, String memberName, Env env) {
@@ -5080,6 +5161,14 @@ public final class TypeChecker {
                     throw new IllegalArgumentException("Mutex<T> requires an owned value type; borrowed payload types are invalid");
                 }
                 yield new Named("Mutex", List.of(element));
+            }
+            case "Channel" -> {
+                if (ref.inferArguments() || ref.arguments().size() != 1) {
+                    throw new IllegalArgumentException("Channel requires exactly one explicit type argument");
+                }
+                Type element = resolve(ref.arguments().getFirst(), generics, self);
+                validateChannelPayloadType(element, "Channel<T>");
+                yield new Named("Channel", List.of(element));
             }
             case "Future" -> {
                 if (ref.inferArguments() || ref.arguments().size() != 1) throw new IllegalArgumentException("Future requires exactly one explicit type argument");
