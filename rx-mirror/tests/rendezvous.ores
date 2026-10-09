@@ -1,0 +1,16 @@
+import * as rx_channels from '../src/rx.ores';
+import class Observable, Subscription from '../src/rx.ores';
+pub async fnc main(): void {
+  val Channel<Option<int>> input = Channel.new<Option<int>>(0);
+  val Future<void> producing = rx_channels.send(input, 42);
+  val Observable<int> source = rx_channels.from_channel(input);
+  val Subscription<int> sub = source.subscribe();
+  val Option<int> value = sub.next();
+  stdio.println(value.unwrap());
+  await producing;
+  val Future<void> finishing = rx_channels.complete(input);
+  val Option<int> terminal = sub.next();
+  stdio.println(terminal.is_none());
+  await finishing;
+  return;
+}
