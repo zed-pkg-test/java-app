@@ -810,15 +810,25 @@ public final class Parser {
 
         Ast.TypeRef receiverType = null;
         List<Ast.Param> params;
-        if (mods.isStatic && check(SELF)) throw error(peek(), "static class functions do not have a self receiver");
+        boolean mutableReceiver = check(MUT) && checkNext(SELF);
+        if (mods.isStatic && (check(SELF) || mutableReceiver)) {
+            throw error(peek(), "static class functions do not have a self receiver");
+        }
 
         // `self` is both the receiver keyword and a receiver-polymorphic type.
-        // Disambiguate by the explicit-receiver form's second parameter list:
-        //   method(self Foo)(int x)  -> explicit receiver
-        //   method(self other)       -> ordinary parameter typed `self`
+        // Canonical pointerless mutation uses:
+        //   method(mut self)(params)
+        // The older explicit read-receiver form remains:
+        //   method(self Foo)(params)
         int parameterStart = current;
         boolean explicitReceiver = false;
-        if (check(SELF)) {
+        if (mutableReceiver) {
+            advance(); // mut
+            consume(SELF, "mutable receiver syntax is 'mut self'");
+            Ast.TypeRef target = check(RPAREN) ? Ast.TypeRef.simple("self") : parseTypeRef();
+            receiverType = Ast.TypeRef.borrowed(target, true);
+            explicitReceiver = true;
+        } else if (check(SELF)) {
             advance();
             Ast.TypeRef candidateReceiver = parseTypeRef();
             if (check(RPAREN) && checkNext(LPAREN)) {
@@ -831,7 +841,9 @@ public final class Parser {
 
         if (explicitReceiver) {
             consume(RPAREN, "expected ')' after explicit self receiver");
-            consume(LPAREN, "explicit receiver form is method(self Type)(params)");
+            consume(LPAREN, mutableReceiver
+                    ? "explicit mutable receiver form is method(mut self)(params)"
+                    : "explicit receiver form is method(self Type)(params)");
             params = parseParametersUntil(RPAREN);
             consume(RPAREN, "expected ')' after method parameters");
         } else {

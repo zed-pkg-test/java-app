@@ -7,17 +7,31 @@ import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.types.TypeChecker;
 import dev.oreslang.types.OwnershipChecker;
 
+import java.util.Set;
+
 /** Trusted compiler front-end API for build systems and isolate admission. */
 public final class OresCompiler {
     private OresCompiler() { }
 
     public static Ast.Program parseAndTypeCheck(String source) {
-        return analyze(Parser.parse(source));
+        return parseAndTypeCheck(source, Set.of());
+    }
+
+    public static Ast.Program parseAndTypeCheck(
+            String source,
+            Set<String> importedAsyncCallables) {
+        return analyze(Parser.parse(source), importedAsyncCallables);
     }
 
     /** Runs the complete front-end admission policy on an already parsed program. */
     public static Ast.Program analyze(Ast.Program program) {
-        program = TypeChecker.checkTypes(program);
+        return analyze(program, Set.of());
+    }
+
+    public static Ast.Program analyze(
+            Ast.Program program,
+            Set<String> importedAsyncCallables) {
+        program = TypeChecker.checkTypes(program, importedAsyncCallables);
         OwnershipChecker.check(program);
         return program;
     }
