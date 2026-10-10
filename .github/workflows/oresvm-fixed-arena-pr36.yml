@@ -18,6 +18,7 @@ jobs:
           set -euo pipefail
           test "$(git hash-object mirror/llvm/src/main/cpp/oreslang/runtime/FixedArena.hpp)" = "d8b0e7555712567d530b60f57aa8917d68df4b8a"
           test "$(git hash-object mirror/llvm/tests/fixed_arena_test.cpp)" = "7c989cad754da980eacccb08ea3677dc9beb5b9a"
+          test "$(git hash-object mirror/llvm/CMakeLists.txt)" = "ced77ee3c1c795d58284b855dba05cab3468a45e"
       - name: Compile and run with GCC
         shell: bash
         run: |
@@ -30,3 +31,11 @@ jobs:
           set -euo pipefail
           clang++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -I mirror/llvm/src/main/cpp mirror/llvm/tests/fixed_arena_test.cpp -o /tmp/oreslang-fixed-arena-clang-test
           /tmp/oreslang-fixed-arena-clang-test
+      - name: Install full LLVM CTest dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang llvm-dev python3
+      - name: Configure and build LLVM/native CTest with PR36 source
+        run: |
+          cmake -S mirror/llvm -B mirror/llvm/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build mirror/llvm/build --parallel 2
+      - name: Run complete LLVM native CTest matrix
+        run: ctest --test-dir mirror/llvm/build --output-on-failure
