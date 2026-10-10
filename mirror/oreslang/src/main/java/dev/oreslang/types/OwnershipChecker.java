@@ -1098,27 +1098,12 @@ public final class OwnershipChecker {
             return new ValueInfo(Ast.TypeRef.simple("bool"), ValueKind.COPY, null);
         }
         if (isBuiltinStdoutCall(call, "log", scope) || isBuiltinStdoutCall(call, "logList", scope)) {
-            // Formatting borrows values for the entire logging operation.
-            // Later argument evaluation cannot consume an earlier argument's
-            // owner, and logging must not become a disguised move boundary.
-            ArrayList<CallLoan> logLoans = new ArrayList<>();
-            try {
-                for (Ast.Expr argument : call.arguments()) {
-                    Ast.Expr value = argument instanceof Ast.SpreadExpr spread ? spread.expression() : argument;
-                    if (value instanceof Ast.RuntimeCallExpr runtime && runtime.operation().equals("take")) {
-                        throw error("stdio.stdout logging arguments are read-only; rt take cannot transfer ownership");
-                    }
-                    ValueInfo info = checkExpr(value, scope, false);
-                    if (containsMutexGuardType(info.type)) {
-                        throw error("MutexGuard cannot be formatted or logged");
-                    }
-                    if (info.kind != ValueKind.COPY) {
-                        VarState root = projectedCallRoot(value, scope);
-                        if (root != null) reserveBorrowLease(root, false, logLoans);
-                    }
+            for (Ast.Expr argument : call.arguments()) {
+                Ast.Expr value = argument instanceof Ast.SpreadExpr spread ? spread.expression() : argument;
+                ValueInfo info = checkExpr(value, scope, false);
+                if (containsMutexGuardType(info.type)) {
+                    throw error("MutexGuard cannot be formatted or logged");
                 }
-            } finally {
-                releaseCallLoans(logLoans);
             }
             return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
         }
@@ -1415,32 +1400,14 @@ public final class OwnershipChecker {
                 && !callableType.arguments().isEmpty()) {
             int parameterCount = callableType.arguments().size() - 1;
             if (parameterCount == call.arguments().size()) {
-                // Ordinary Fnc arguments are non-consuming reads, including
-                // across later argument evaluation. Retain temporary loans
-                // until every argument has been checked, just like named
-                // callable parameters.
-                ArrayList<CallLoan> fncLoans = new ArrayList<>();
-                try {
-                    for (int i = 0; i < call.arguments().size(); i++) {
-                        Ast.Expr expression = call.arguments().get(i);
-                        if (expression instanceof Ast.RuntimeCallExpr runtime
-                                && runtime.operation().equals("take")) {
-                            throw error("ordinary Fnc<T,...> arguments are read-only call borrows; rt take cannot transfer ownership into them");
-                        }
-                        ValueInfo argument = checkExpr(expression, scope, false);
-                        if (containsMutexGuardType(argument.type)) {
-                            throw error("guard-bearing values cannot cross a first-class Fnc call boundary");
-                        }
-                        if (argument.kind == ValueKind.MUT_BORROW) {
-                            throw error("ordinary Fnc<T,...> parameters are read-only call borrows; use an explicit mutable callable contract when that surface lands");
-                        }
-                        if (argument.kind != ValueKind.COPY) {
-                            VarState root = projectedCallRoot(expression, scope);
-                            if (root != null) reserveBorrowLease(root, false, fncLoans);
-                        }
+                for (int i = 0; i < call.arguments().size(); i++) {
+                    ValueInfo argument = checkExpr(call.arguments().get(i), scope, false);
+                    if (containsMutexGuardType(argument.type)) {
+                        throw error("guard-bearing values cannot cross a first-class Fnc call boundary");
                     }
-                } finally {
-                    releaseCallLoans(fncLoans);
+                    if (argument.kind == ValueKind.MUT_BORROW) {
+                        throw error("ordinary Fnc<T,...> parameters are read-only call borrows; use an explicit mutable callable contract when that surface lands");
+                    }
                 }
                 Ast.TypeRef result = callableType.arguments().getLast();
                 return new ValueInfo(result, kindOfType(result), null);
@@ -1537,115 +1504,40 @@ public final class OwnershipChecker {
         return new ValueInfo(okType, kindOfType(okType), null);
     }
 
-    // A temporary call borrow lives through *all* arguments, not just its
-    // own expression evaluation. Releasing it sooner admits f(read x, take x).
-    private record CallLoan(VarState state, boolean mutable) {}
-
     private void checkArguments(List<Ast.Expr> arguments, List<Ast.Param> params, Scope scope, String callable) {
-        ArrayList<CallLoan> callLoans = new ArrayList<>();
-        try {
-            int parameterIndex = 0;
-            for (Ast.Expr argument : arguments) {
-                if (argument instanceof Ast.SpreadExpr spread) {
-                    Ast.TypeRef spreadType = syntacticType(spread.expression(), scope);
-                    if (spreadType.isBorrow()) spreadType = spreadType.borrowedTarget();
-                    if (!spreadType.isTupleType()) {
-                        throw error(callable
-                                + " spread requires a statically known tuple; runtime-length collections "
-                                + "need an explicitly variadic callable");
-                    }
-                    int width = spreadType.arguments().size();
-                    if (parameterIndex + width > params.size()) return;
-                    for (int i = 0; i < width; i++) {
-                        Ast.Param target = params.get(parameterIndex + i);
-                        if (target.structural() || target.type().isBorrow()) {
-                            throw error(callable + " argument " + (parameterIndex + i + 1)
-                                    + " cannot currently receive tuple spread into a structural/borrowed parameter; "
-                                    + "pass that argument explicitly");
-                        }
-                    }
-                    ValueInfo aggregate = checkExpr(spread.expression(), scope, true);
-                    if (containsMutexGuardType(aggregate.type)) {
-                        throw error(callable + " spread cannot consume a guard-bearing tuple");
-                    }
-                    parameterIndex += width;
-                    continue;
+        int parameterIndex = 0;
+        for (Ast.Expr argument : arguments) {
+            if (argument instanceof Ast.SpreadExpr spread) {
+                Ast.TypeRef spreadType = syntacticType(spread.expression(), scope);
+                if (spreadType.isBorrow()) spreadType = spreadType.borrowedTarget();
+                if (!spreadType.isTupleType()) {
+                    throw error(callable
+                            + " spread requires a statically known tuple; runtime-length collections "
+                            + "need an explicitly variadic callable");
                 }
-                if (parameterIndex >= params.size()) return;
-                Ast.Param param = params.get(parameterIndex);
-                checkArgument(argument, param, scope, callable, parameterIndex + 1);
-                reserveCallLoan(argument, param, scope, callLoans);
-                parameterIndex++;
+
+                int width = spreadType.arguments().size();
+                if (parameterIndex + width > params.size()) return; // TypeChecker reports arity.
+                for (int i = 0; i < width; i++) {
+                    Ast.Param target = params.get(parameterIndex + i);
+                    if (target.structural() || target.type().isBorrow()) {
+                        throw error(callable + " argument " + (parameterIndex + i + 1)
+                                + " cannot currently receive tuple spread into a structural/borrowed parameter; "
+                                + "pass that argument explicitly");
+                    }
+                }
+
+                ValueInfo aggregate = checkExpr(spread.expression(), scope, true);
+                if (containsMutexGuardType(aggregate.type)) {
+                    throw error(callable + " spread cannot consume a guard-bearing tuple");
+                }
+                parameterIndex += width;
+                continue;
             }
-        } finally {
-            releaseCallLoans(callLoans);
-        }
-    }
 
-    private void releaseCallLoans(List<CallLoan> loans) {
-        for (int i = loans.size() - 1; i >= 0; i--) {
-            CallLoan loan = loans.get(i);
-            if (loan.mutable()) loan.state().mutableBorrowed = false;
-            else loan.state().immutableBorrows--;
-        }
-    }
-
-    private VarState projectedCallRoot(Ast.Expr expression, Scope scope) {
-        Ast.Expr current = expression;
-        while (true) {
-            if (current instanceof Ast.MemberExpr member) current = member.receiver();
-            else if (current instanceof Ast.IndexExpr index) current = index.receiver();
-            else if (current instanceof Ast.RuntimeCallExpr runtime
-                    && runtime.operation().equals("borrow") && runtime.arguments().size() == 1) {
-                current = runtime.arguments().getFirst();
-            } else if (current instanceof Ast.UnaryExpr unary
-                    && (unary.operator().equals("&") || unary.operator().equals("&mut"))) {
-                current = unary.operand();
-            } else break;
-        }
-        if (!(current instanceof Ast.NameExpr name)) return null;
-        VarState state = scope.lookup(name.name());
-        if (state != null) {
-            state.debugName = name.name();
-            requireUsable(state, name.name(), false);
-        }
-        return state;
-    }
-
-    /** Conservatively reserve the whole owner for a projected structural read. */
-    private void reserveCallLoan(Ast.Expr argument, Ast.Param param, Scope scope, List<CallLoan> loans) {
-        boolean structural = param.structural() && !param.type().isBorrow();
-        if (!structural && !param.type().isBorrow()) return;
-        Ast.Expr source = argument;
-        if (source instanceof Ast.RuntimeCallExpr runtime
-                && runtime.operation().equals("borrow") && runtime.arguments().size() == 1) {
-            source = runtime.arguments().getFirst();
-        } else if (source instanceof Ast.UnaryExpr unary
-                && (unary.operator().equals("&") || unary.operator().equals("&mut"))) {
-            source = unary.operand();
-        }
-        VarState owner = structural ? projectedCallRoot(source, scope)
-                : source instanceof Ast.NameExpr ? borrowOwner(source, scope) : null;
-        if (owner == null) return; // No caller-owned named root.
-        boolean mutable = param.type().isBorrow() && param.type().mutableBorrow();
-        reserveBorrowLease(owner, mutable, loans);
-    }
-
-    private void reserveBorrowLease(VarState owner, boolean mutable, List<CallLoan> loans) {
-        if (owner.kind == ValueKind.IMM_BORROW || owner.kind == ValueKind.MUT_BORROW || owner.type.isBorrow()) {
-            if (mutable && owner.kind != ValueKind.MUT_BORROW
-                    && !(owner.type.isBorrow() && owner.type.mutableBorrow())) {
-                throw error("mutable call loan requires an exclusive borrowed view");
-            }
-            if (owner.mutableBorrowed || (mutable && owner.immutableBorrows > 0)) {
-                throw error("cannot overlap call loans for borrowed value '" + owner.debugName + "'");
-            }
-            if (mutable) owner.mutableBorrowed = true;
-            else owner.immutableBorrows++;
-            loans.add(new CallLoan(owner, mutable));
-        } else {
-            beginPersistentBorrow(owner, mutable);
-            loans.add(new CallLoan(ownershipRoot(owner), mutable));
+            if (parameterIndex >= params.size()) return; // TypeChecker reports arity.
+            checkArgument(argument, params.get(parameterIndex), scope, callable, parameterIndex + 1);
+            parameterIndex++;
         }
     }
 
@@ -1660,14 +1552,6 @@ public final class OwnershipChecker {
             arg = new Ast.UnaryExpr("&", runtime.arguments().getFirst());
         }
         if (param.structural() && !param.type().isBorrow()) {
-            if (arg instanceof Ast.RuntimeCallExpr runtime && runtime.operation().equals("take")) {
-                throw error(callable + " argument " + position
-                        + " is a read-only structural view; rt take would transfer ownership");
-            }
-            if (arg instanceof Ast.UnaryExpr unary && unary.operator().equals("&mut")) {
-                throw error(callable + " argument " + position
-                        + " is a read-only structural view; rt borrow mut is not permitted");
-            }
             ValueInfo argument = checkExpr(arg, scope, false);
             if (containsMutexGuardType(argument.type)
                     || (mutexCriticalSectionDepth > 0 && argument.type.isBorrow())) {
@@ -1706,10 +1590,6 @@ public final class OwnershipChecker {
             throw error(callable + " argument " + position + " must be an explicit borrow");
         }
         ValueInfo argument = checkExpr(arg, scope, true);
-        if (isBorrowValue(argument)) {
-            throw error(callable + " argument " + position
-                    + " is owned by-value; a borrowed view cannot transfer ownership");
-        }
         if (containsMutexGuardType(argument.type)) {
             throw error(callable + " argument " + position + " cannot consume a guard-bearing value");
         }

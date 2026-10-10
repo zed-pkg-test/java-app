@@ -1,0 +1,29 @@
+name: Oreslang PR555 GC source-exact Java regression
+on:
+  push:
+    branches: [test/oreslang-gc-pr555-jvm-20261010]
+permissions:
+  contents: read
+jobs:
+  gc-jvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify every one of the 62 source Java blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(wc -l < mirror/oreslang-pr555-java-blobs.txt)" -eq 62
+          test "$(find mirror/oreslang/src/main/java -type f -name '*.java' | wc -l)" -eq 62
+          while read -r expected filename; do
+            test "$(git hash-object "$filename")" = "$expected" || exit 1
+          done < mirror/oreslang-pr555-java-blobs.txt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Run exact Java GC and actor exit tests
+        run: mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java -Dtest=RuntimeGarbageCollectorTest test
