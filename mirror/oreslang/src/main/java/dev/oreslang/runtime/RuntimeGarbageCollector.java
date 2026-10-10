@@ -294,6 +294,10 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
     public CleanupHandle track(Object owner, Runnable cleanup) {
         synchronized (lifecycleLock) {
             ensureOpen();
+            // Validate before allocating a domain bucket: rejected registrations
+            // must not retain an otherwise empty actor/VM execution domain.
+            Objects.requireNonNull(owner, "owner");
+            Objects.requireNonNull(cleanup, "cleanup");
             if (tracked.size() >= maxTracked) {
                 throw new IllegalStateException("runtime cleanup registry limit exceeded: " + maxTracked);
             }
