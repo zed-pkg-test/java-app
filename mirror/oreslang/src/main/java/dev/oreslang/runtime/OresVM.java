@@ -32,6 +32,8 @@ public final class OresVM implements AutoCloseable {
     private volatile StartupState startupState = StartupState.NEW;
 
     private OresVM(int controlParallelism, OresScheduler.TurnExecutor turnExecutor, Executor rootAdmission) {
+        ActorHeapAdmission.requireSupportedJvmMode(
+                System.getProperty("ores.runtime.gc.mode", "hybrid"));
         if (controlParallelism <= 0) {
             throw new IllegalArgumentException("control parallelism must be positive");
         }

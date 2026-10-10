@@ -1,0 +1,31 @@
+name: OresVM strict GC admission and cyclic references PR557
+on:
+  push:
+    branches: [test/oreslang-cycles-gc-pr557-20261010]
+permissions:
+  contents: read
+jobs:
+  gc-cycles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify 63 exact Java source blobs and cycle contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(wc -l < mirror/oreslang-pr557-java-blobs.txt)" -eq 63
+          test "$(find mirror/oreslang/src/main/java -type f -name '*.java' | wc -l)" -eq 63
+          while read -r expected filename; do
+            test "$(git hash-object "$filename")" = "$expected" || exit 1
+          done < mirror/oreslang-pr557-java-blobs.txt
+          test "$(git hash-object mirror/oreslang/src/test/java/dev/oreslang/runtime/ActorHeapAdmissionTest.java)" = "a5ce419ecba7adfd079c2c66dca7956679e9ca35"
+          test "$(git hash-object mirror/oreslang/src/test/java/dev/oreslang/runtime/CircularReferenceContractTest.java)" = "5e11b0291dcb4af3aaf6d00c75d2f4ff30c1aecd"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Run GC admission, cycle transport and collector regressions
+        run: mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java -Dtest=ActorHeapAdmissionTest,CircularReferenceContractTest,RuntimeGarbageCollectorTest test
