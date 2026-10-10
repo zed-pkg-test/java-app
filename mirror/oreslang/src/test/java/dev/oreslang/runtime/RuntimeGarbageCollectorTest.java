@@ -11,6 +11,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -444,6 +445,30 @@ final class RuntimeGarbageCollectorTest {
                 assertEquals(0, report.trackedAfter());
             }
             assertEquals(0, gc.collectPeriodic().inspected());
+        }
+    }
+
+    @Test
+    void idleAutomaticSweepDoesNoWorkWithoutFallbackResources() throws Exception {
+        try (RuntimeGarbageCollector gc =
+                     new RuntimeGarbageCollector(() -> {}, Duration.ofHours(1))) {
+            var tick = RuntimeGarbageCollector.class.getDeclaredMethod("safePeriodicSweep");
+            tick.setAccessible(true);
+            var counter = RuntimeGarbageCollector.class.getDeclaredField("collections");
+            counter.setAccessible(true);
+            AtomicLong collections = (AtomicLong) counter.get(gc);
+
+            tick.invoke(gc);
+            assertEquals(0, collections.get(),
+                    "ownership-only workloads must not run empty automatic sweeps");
+            Object owner = new Object();
+            var handle = gc.track(owner, () -> {});
+            tick.invoke(gc);
+            assertEquals(1, collections.get(), "tracked fallback handles enable maintenance");
+            handle.close();
+            tick.invoke(gc);
+            assertEquals(1, collections.get(), "deterministic drop disables empty sweeps");
+            assertNotNull(owner);
         }
     }
 }

@@ -553,7 +553,10 @@ public final class RuntimeGarbageCollector implements AutoCloseable {
     }
 
     private void safePeriodicSweep() {
-        if (closed.get()) return;
+        // Zero host/interop fallback resources is the overwhelmingly common
+        // ownership-first case. Do no registry scan or collection accounting.
+        // New registrations will be observed by a subsequent timer tick.
+        if (closed.get() || tracked.isEmpty()) return;
         try {
             collectPeriodic();
         } catch (VirtualMachineError | ThreadDeath fatal) {
