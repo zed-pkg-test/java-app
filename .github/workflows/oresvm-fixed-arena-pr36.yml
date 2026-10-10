@@ -17,7 +17,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git hash-object mirror/llvm/src/main/cpp/oreslang/runtime/FixedArena.hpp)" = "d8b0e7555712567d530b60f57aa8917d68df4b8a"
-          test "$(git hash-object mirror/llvm/tests/fixed_arena_test.cpp)" = "7c989cad754da980eacccb08ea3677dc9beb5b9a"
+          test "$(git hash-object mirror/llvm/tests/fixed_arena_test.cpp)" = "e222cad00c7240ac9084e8e3ca2f9895d1573e61"
           test "$(git hash-object mirror/llvm/CMakeLists.txt)" = "ced77ee3c1c795d58284b855dba05cab3468a45e"
       - name: Compile and run with GCC
         shell: bash
