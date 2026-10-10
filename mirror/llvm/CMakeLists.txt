@@ -76,13 +76,11 @@ if(BUILD_TESTING)
         message(WARNING "Clang unavailable: native executable tests are disabled")
     endif()
 
-    # Inert native POD allocator: deterministic ownership without tracing GC.
-    # The test does not establish compiler-enforced object lifetime parity.
-    add_executable(oreslang-fixed-arena-test tests/fixed_arena_test.cpp)
-    target_include_directories(oreslang-fixed-arena-test PRIVATE
+    add_executable(oreslang-deterministic-graph-arena-test tests/deterministic_graph_arena_test.cpp)
+    target_include_directories(oreslang-deterministic-graph-arena-test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp")
-    target_compile_options(oreslang-fixed-arena-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    add_test(NAME native_fixed_arena_contract COMMAND oreslang-fixed-arena-test)
+    target_compile_options(oreslang-deterministic-graph-arena-test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME native_deterministic_graph_arena COMMAND oreslang-deterministic-graph-arena-test)
 
     # Linux-specific actor-neutral wake/park primitive. This does NOT
     # implement the actor scheduler or certify lock-free mailbox delivery.

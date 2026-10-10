@@ -1,0 +1,37 @@
+name: OresVM deterministic cyclic ownership PR38
+on:
+  push:
+    branches: [ci/graph-arena-20261010]
+permissions:
+  contents: read
+jobs:
+  native-graph:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check exact new LLVM source hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object mirror/llvm/src/main/cpp/oreslang/runtime/DeterministicGraphArena.hpp)" = "fbba477ae6a6bb4a9b221cc0e3a64357275e370f"
+          test "$(git hash-object mirror/llvm/tests/deterministic_graph_arena_test.cpp)" = "895394c84de7a544086647e7f89b52c66d4e35b2"
+          test "$(git hash-object mirror/llvm/CMakeLists.txt)" = "e0d71596935c21acf19b8441be20ff7203632de2"
+      - name: Standalone GCC and Clang tests (always-on checks)
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O2 -DNDEBUG -Wall -Wextra -Wpedantic -Werror -I mirror/llvm/src/main/cpp mirror/llvm/tests/deterministic_graph_arena_test.cpp -o /tmp/graph-gcc
+          /tmp/graph-gcc
+          clang++ -std=c++17 -O2 -DNDEBUG -Wall -Wextra -Wpedantic -Werror -I mirror/llvm/src/main/cpp mirror/llvm/tests/deterministic_graph_arena_test.cpp -o /tmp/graph-clang
+          /tmp/graph-clang
+      - name: Install LLVM build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang llvm-dev python3
+      - name: Build full LLVM CTest configuration in Release
+        run: |
+          cmake -S mirror/llvm -B mirror/llvm/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build mirror/llvm/build --parallel 2
+      - name: Execute full native CTest suite
+        run: ctest --test-dir mirror/llvm/build --output-on-failure
