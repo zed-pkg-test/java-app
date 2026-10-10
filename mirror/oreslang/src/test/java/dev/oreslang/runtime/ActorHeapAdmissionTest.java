@@ -66,6 +66,8 @@ final class ActorHeapAdmissionTest {
             System.setProperty(key, "strict-no-gc");
             assertThrows(IllegalStateException.class, () ->
                     OresVM.create(Runnable::run));
+            assertThrows(IllegalStateException.class, ActorRuntime::new,
+                    "standalone ActorRuntime must not bypass the strict-mode admission gate");
         } finally {
             if (old == null) System.clearProperty(key);
             else System.setProperty(key, old);
