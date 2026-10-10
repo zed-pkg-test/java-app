@@ -101,7 +101,7 @@ public final class TypeChecker {
     private void validateImports(Ast.Program program) {
         Set<String> exposed = new HashSet<>();
         Set<String> localNames = new HashSet<>(Set.of(
-                "stdio", "process", "actor", "fs", "File", "network", "net", "http", "env",
+                "stdio", "std", "process", "actor", "fs", "File", "network", "net", "http", "env",
                 "print", "Some", "None", "Ok", "Err", "And", "Or", "Xor", "BooleanOps",
                 "Mutex", "SharedMutex", "Channel", "SelectCase", "SelectSet", "SelectResult", "Object", "List", "Option", "Result", "Future",
                 "HttpServer", "HttpExchange", "HttpHandler", "TcpConnection",
@@ -622,11 +622,24 @@ public final class TypeChecker {
                 if (local.isStatic() != staticNamespace || !local.overloadIdentity().equals(entry.getKey())) continue;
                 for (MethodOrigin origin : entry.getValue()) {
                     for (Ast.MethodDecl parentMethod : origin.owner().methods()) {
-                        if (parentMethod.isStatic() == staticNamespace
-                                && parentMethod.overloadIdentity().equals(entry.getKey())
-                                && parentMethod.genericParameters().size() != local.genericParameters().size()) {
+                        if (parentMethod.isStatic() != staticNamespace
+                                || !parentMethod.overloadIdentity().equals(entry.getKey())) continue;
+                        if (parentMethod.genericParameters().size() != local.genericParameters().size()) {
                             throw new IllegalArgumentException("incompatible generic arity for method slot '"
                                     + klass.name() + "." + local.name() + "' with arity " + local.arity());
+                        }
+                        // Dispatch selects the child's declaration, but inherited public
+                        // contracts still advertise this slot to callers (including through
+                        // a base-typed receiver). A private override would typecheck as
+                        // public and then fail runtime access checks.
+                        if (parentMethod.visibility() == Ast.Visibility.PUBLIC
+                                && local.visibility() != Ast.Visibility.PUBLIC) {
+                            String kind = staticNamespace ? "static function" : "method";
+                            throw new IllegalArgumentException("private " + kind + " '"
+                                    + klass.name() + "." + local.name() + "' with arity " + local.arity()
+                                    + " cannot override inherited public " + kind + " from "
+                                    + methodOriginLabel(origin)
+                                    + "; keep the overriding declaration public");
                         }
                     }
                 }
@@ -1683,6 +1696,7 @@ public final class TypeChecker {
                 return local.type();
             }
             if (name.name().equals("stdio")
+                    || name.name().equals("std")
                     || name.name().equals("process")
                     || name.name().equals("actor")
                     || name.name().equals("fs")
@@ -2731,6 +2745,19 @@ public final class TypeChecker {
                 }
                 Ast.ClassDecl memberClass = classes.get(namespace.name() + "." + member.member());
                 if (memberClass != null) return new ClassNamespace(qualifiedClassName(memberClass));
+            }
+            if (member.receiver() instanceof Ast.NameExpr stdName && stdName.name().equals("std")
+                    && env.lookup("std") == null && member.member().equals("process")) {
+                return new Named("process", List.of());
+            }
+            if (member.member().equals("exit")
+                    && ((member.receiver() instanceof Ast.NameExpr processName
+                             && processName.name().equals("process") && env.lookup("process") == null)
+                        || (member.receiver() instanceof Ast.MemberExpr namespace
+                             && namespace.member().equals("process")
+                             && namespace.receiver() instanceof Ast.NameExpr root
+                             && root.name().equals("std") && env.lookup("std") == null))) {
+                return new Function(List.of(Primitive.INT), Primitive.VOID);
             }
             if (member.receiver() instanceof Ast.NameExpr idName && idName.name().equals("process")
                     && env.lookup("process") == null && member.member().equals("unique_id")) {
@@ -6450,11 +6477,7 @@ public final class TypeChecker {
         return result;
     }
 
-    /**
-     * Structural parameters are read-only views. An explicit immutable
-     * borrow has the same structural shape as its referent; an exclusive
-     * mutable borrow must not silently lose its ownership/effect intent.
-     */
+    /** A structural view may inspect a read borrow but never an exclusive one. */
     private Type structuralBorrowTarget(Type actual, Ast.Param parameter, int position) {
         if (!parameter.structural() || !(actual instanceof Borrow borrowed)) return actual;
         if (borrowed.mutable()) {

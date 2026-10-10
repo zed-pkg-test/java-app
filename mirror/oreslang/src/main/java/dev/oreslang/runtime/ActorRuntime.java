@@ -415,6 +415,7 @@ public final class ActorRuntime implements AutoCloseable {
             DispatcherConfig dispatcherConfig,
             TurnExecutor turnExecutor,
             ControlDispatcher controlDispatcher) {
+        long poolsPerf = CorePerf.start();
         this.policyCeiling = Objects.requireNonNull(policyCeiling);
         this.dispatcherConfig = Objects.requireNonNull(dispatcherConfig);
         this.turnExecutor = Objects.requireNonNull(turnExecutor);
@@ -437,6 +438,14 @@ public final class ActorRuntime implements AutoCloseable {
         this.privateDispatcher = privatePool;
         this.sharedDispatcher = sharedPool;
         this.untrustedDispatcher = untrustedPool;
+        CorePerf.end(CorePerf.ACTOR_POOLS_STARTUP, poolsPerf);
+        if (CoreDebug.enabled()) {
+            CoreDebug.event(CoreDebug.ACTOR_POOLS_CREATED, dispatcherConfig.privateParallelism());
+        }
+        if (poolsPerf != 0L) {
+            CorePerf.actorBackend(carrierBackend() == CarrierBackend.NATIVE_PTHREAD,
+                    dispatcherConfig.privateParallelism(), dispatcherConfig.sharedParallelism());
+        }
     }
 
     public IsolatePolicy policyCeiling() { return policyCeiling; }

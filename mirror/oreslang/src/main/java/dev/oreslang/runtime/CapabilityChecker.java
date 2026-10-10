@@ -437,6 +437,7 @@ public final class CapabilityChecker {
                 Ast.MethodDecl staticValue = findUniqueStaticMethodValue(m);
                 if (staticValue != null) checkReferencedMethod(staticValue, policy);
                 if (path.startsWith("stdio.") || path.equals("stdio")) require(policy, IsolatePolicy.Capability.STDOUT, path);
+                if (path.equals("std.process.exit") || path.equals("process.exit")) require(policy, IsolatePolicy.Capability.PROCESS_EXIT, path);
                 if (path.startsWith("process.descriptor") || path.equals("process.context_id")) require(policy, IsolatePolicy.Capability.PROCESS_INFO, path);
                 if (path.startsWith("process.share_readonly")) require(policy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, path);
                 if (path.equals("process.gc") || path.startsWith("process.gc.")) require(policy, IsolatePolicy.Capability.GC_CONTROL, path);
@@ -511,7 +512,7 @@ public final class CapabilityChecker {
 
     private static boolean isRestrictedFacadeRoot(String name) {
         return switch (name) {
-            case "stdio", "process", "actor", "network", "ipc", "gpu",
+            case "stdio", "std", "process", "actor", "network", "ipc", "gpu",
                     "fs", "env", "ffi", "polyglot", "thread",
                     "SharedMutex", "print" -> true;
             default -> false;

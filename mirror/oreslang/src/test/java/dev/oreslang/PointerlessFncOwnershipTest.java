@@ -212,7 +212,6 @@ final class PointerlessFncOwnershipTest {
                 """)));
     }
 
-
     @Test
     void structuralCallsReadBorrowImplicitlyAndReleaseAtReturn() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
@@ -363,6 +362,69 @@ final class PointerlessFncOwnershipTest {
 
 
     @Test
+    void structuralProjectedFieldRetainsRootReadLoanAcrossLaterOwnedArgument() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Inner as
+                          pub let String value = "ok";
+                        end
+                        define class Container as
+                          pub let Inner inner = new Inner();
+                        end
+                        fnc overlap(structural Inner view, Container moved): void { return; }
+                        fnc bad(): void {
+                          let mut Container container = new Container();
+                          overlap(container.inner, container);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
+    }
+
+    @Test
+    void deeplyProjectedStructuralArgumentCannotAliasLaterMutableBorrow() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Inner as
+                          pub let String value = "ok";
+                        end
+                        define class Middle as
+                          pub let Inner inner = new Inner();
+                        end
+                        define class Outer as
+                          pub let Middle middle = new Middle();
+                        end
+                        fnc overlap(structural Inner view, borrow mut Outer other): void { return; }
+                        fnc bad(): void {
+                          let mut Outer outer = new Outer();
+                          overlap(outer.middle.inner, rt borrow mut outer);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
+    }
+
+    @Test
+    void structuralProjectedReadLoanEndsAtCallReturn() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Inner as
+                  pub let String value = "ok";
+                end
+                define class Container as
+                  pub let Inner inner = new Inner();
+                end
+                fnc inspect(structural Inner view): String { return view.value; }
+                fnc consume(Container value): void { return; }
+                fnc ok(): void {
+                  let mut Container container = new Container();
+                  inspect(container.inner);
+                  consume(container);
+                  return;
+                }
+                """)));
+    }
+
+    @Test
     void inlineStructuralViewOfInferredStructRunsWithoutMoving() throws Exception {
         String output = run("""
                 fnc inspect(structural {x: String} v): String {
@@ -396,6 +458,45 @@ final class PointerlessFncOwnershipTest {
                 }
                 """);
         assertEquals("startstartstart", output);
+    }
+
+
+    @Test
+    void projectedStructuralCallReservesWholeRootAgainstLaterMove() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let String value = "start";
+                        end
+                        define class Wrap as
+                          pub val Box nested = new Box();
+                        end
+                        fnc overlap(structural Box a, Wrap b): void { return; }
+                        fnc bad(): void {
+                          let mut Wrap outer = new Wrap();
+                          overlap(outer.nested, outer);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
+    }
+
+    @Test
+    void projectedStructuralArrayElementConflictsWithMutableOwner() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 1;
+                        end
+                        fnc overlap(structural Box a, borrow mut Array<Box> list): void { return; }
+                        fnc bad(): void {
+                          val Array<Box> list = new Array<Box>();
+                          list.add(new Box());
+                          overlap(list[0], rt borrow mut list);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
     }
 
     private String run(String code) throws Exception {
