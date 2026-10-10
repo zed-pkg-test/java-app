@@ -58,7 +58,7 @@ db0d306c81216556fd39840108eef67208a995c2 mirror/oreslang/src/main/java/dev/oresl
 e2798a9f35501a88314c7a77b6f6f4102e24c376 mirror/oreslang/src/main/java/dev/oreslang/runtime/SourceBoundaryTrace.java
 c51f61e50974b2daa8d360927353f92cb6b6605d mirror/oreslang/src/main/java/dev/oreslang/stdlib/CoreLibrarySources.java
 0a4503d776750c6c72cb450e6d859300bb09a410 mirror/oreslang/src/main/java/dev/oreslang/types/OwnershipChecker.java
-168207df7c74a9e42eff3cb9acb27f951c578916 mirror/oreslang/src/main/java/dev/oreslang/types/TypeChecker.java
+17d6668af7b89d8705cab7bbb5a9c455ac9fb5ea mirror/oreslang/src/main/java/dev/oreslang/types/TypeChecker.java
 32d001aecde67b78d755f8d4be5383480354bb9c mirror/oreslang/src/main/java/dev/oreslang/types/Types.java
 44e23c91c50f034ca3c7f4fc315b97f45c7c1eac mirror/oreslang/src/main/java/module-info.java
 b7d162e2377f6c75c883fdcbbee71b7ccfeb892a mirror/oreslang/src/main/resources/META-INF/native-image/dev.oreslang/oreslang/native-image.properties

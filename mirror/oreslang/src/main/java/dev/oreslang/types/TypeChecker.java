@@ -1570,10 +1570,12 @@ public final class TypeChecker {
                             typeOf(arm.channel(), env, generics, self),
                             "select " + arm.operation().name().toLowerCase());
                     if (arm.operation() == Ast.ChannelOperation.WRITE) {
-                        requireAssignable(
-                                typeOf(arm.value(), env, generics, self),
-                                element,
-                                "writech select value");
+                        Type payloadType = typeOf(arm.value(), env, generics, self);
+                        if (payloadType instanceof Borrow) {
+                            throw new IllegalArgumentException(
+                                    "writech cannot transport a borrowed reference; select payload must own, copy or share its data");
+                        }
+                        requireAssignable(payloadType, element, "writech select value");
                     } else if (arm.bindingName() != null) {
                         requireMutableReferentCompatible(
                                 element, arm.mutableReferent(),
@@ -3130,10 +3132,12 @@ public final class TypeChecker {
                     channelOp.operation() == Ast.ChannelOperation.READ ? "readch" : "writech");
 
             if (channelOp.operation() == Ast.ChannelOperation.WRITE) {
-                requireAssignable(
-                        typeOf(channelOp.value(), env, generics, self),
-                        element,
-                        "writech value");
+                Type payloadType = typeOf(channelOp.value(), env, generics, self);
+                if (payloadType instanceof Borrow) {
+                    throw new IllegalArgumentException(
+                            "writech cannot transport a borrowed reference; channel payload must own, copy or share its data");
+                }
+                requireAssignable(payloadType, element, "writech value");
                 if (channelOp.callback()) {
                     if (channelOp.mode() != Ast.WaitMode.NONBLOCKING) {
                         throw new IllegalArgumentException(
