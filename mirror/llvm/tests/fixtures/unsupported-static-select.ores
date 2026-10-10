@@ -1,0 +1,9 @@
+// Must not compile until native channel arbitration and select lowering exist.
+pub fnc main(): int {
+  select {
+    when readch inbox: val value {
+      return value;
+    }
+  }
+  return 0;
+}

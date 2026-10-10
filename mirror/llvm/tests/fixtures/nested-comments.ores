@@ -1,0 +1,5 @@
+/* beginning /* nested */ end */
+pub fnc main(): int {
+    // numeric underscores mirror Java lexer behavior.
+    return 4_0 + 2;
+}

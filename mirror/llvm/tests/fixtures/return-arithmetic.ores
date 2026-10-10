@@ -1,0 +1,3 @@
+pub routine main(): int {
+  return 4 + 6 * (5 - 1);
+}

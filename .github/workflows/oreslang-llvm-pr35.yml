@@ -1,0 +1,32 @@
+name: LLVM PR35 ownership fail-closed CTest
+on:
+  push:
+    branches: [test/llvm-ownership-fail-closed-20261010]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  llvm-ownership:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify 43 exact LLVM source blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(wc -l < mirror/llvm-pr35-blobs.txt)" -eq 43
+          while read -r expected filename; do
+            actual="$(git hash-object "$filename")"
+            if [ "$actual" != "$expected" ]; then echo "blob mismatch: $filename" >&2; exit 1; fi
+          done < mirror/llvm-pr35-blobs.txt
+      - name: Install LLVM toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang llvm-dev python3
+      - name: Compile native LLVM parser and codegen
+        run: |
+          cmake -S mirror/llvm -B mirror/llvm/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build mirror/llvm/build --parallel 2
+      - name: Validate positive native execution and negative borrow admission
+        run: ctest --test-dir mirror/llvm/build --output-on-failure
