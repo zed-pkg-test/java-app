@@ -1408,6 +1408,10 @@ public final class OwnershipChecker {
                 try {
                     for (int i = 0; i < call.arguments().size(); i++) {
                         Ast.Expr expression = call.arguments().get(i);
+                        if (expression instanceof Ast.RuntimeCallExpr runtime
+                                && runtime.operation().equals("take")) {
+                            throw error("ordinary Fnc<T,...> arguments are read-only call borrows; rt take cannot transfer ownership into them");
+                        }
                         ValueInfo argument = checkExpr(expression, scope, false);
                         if (containsMutexGuardType(argument.type)) {
                             throw error("guard-bearing values cannot cross a first-class Fnc call boundary");

@@ -507,10 +507,11 @@ final class PointerlessFncOwnershipTest {
                         define class Box as
                           pub let int value = 7;
                         end
+                        fnc consume(Box input): Box { return input; }
                         fnc bad(): void {
                           let mut Box box = new Box();
                           val Fnc<Box, Box, int> read = |left, right| -> { return left.value + right.value; };
-                          val int observed = read(box, rt take box);
+                          val int observed = read(box, consume(box));
                           return;
                         }
                         """)));
@@ -527,10 +528,11 @@ final class PointerlessFncOwnershipTest {
                         define class Wrap as
                           pub val Box nested = new Box();
                         end
+                        fnc consume(Wrap input): Wrap { return input; }
                         fnc bad(): void {
                           let mut Wrap outer = new Wrap();
                           val Fnc<Box, Wrap, int> read = |item, holder| -> { return item.value; };
-                          val int observed = read(outer.nested, rt take outer);
+                          val int observed = read(outer.nested, consume(outer));
                           return;
                         }
                         """)));
@@ -551,6 +553,24 @@ final class PointerlessFncOwnershipTest {
                   return;
                 }
                 """)));
+    }
+
+
+    @Test
+    void firstClassFncRejectsExplicitTakeEvenAsFirstArgument() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 7;
+                        end
+                        fnc bad(): void {
+                          let mut Box box = new Box();
+                          val Fnc<Box, int> read = |item| -> { return item.value; };
+                          val int observed = read(rt take box);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().contains("read-only"), error.getMessage());
     }
 
     private String run(String code) throws Exception {
