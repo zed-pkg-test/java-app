@@ -60,3 +60,7 @@ e2798a9f35501a88314c7a77b6f6f4102e24c376 mirror/oreslang/src/main/java/dev/oresl
 b7d162e2377f6c75c883fdcbbee71b7ccfeb892a mirror/oreslang/src/main/resources/META-INF/native-image/dev.oreslang/oreslang/native-image.properties
 fe79bd59fe84643d6ff8dc3c4415b36d9d0721e4 mirror/oreslang/src/main/resources/META-INF/native-image/dev.oreslang/oreslang/reachability-metadata.json
 e4d9f8a6ddd10594bb386cc205ee471d7e18f0f6 mirror/oreslang/src/test/java/dev/oreslang/PointerlessFncOwnershipTest.java
+101d9abbfada99070cf47a0dc57947c498eea85e mirror/oreslang/src/main/java/dev/oreslang/runtime/CoreDebug.java
+cff5dd4aaab41c114ba62e0b48542c3b4522e40f mirror/oreslang/src/main/java/dev/oreslang/runtime/CorePerf.java
+36c980874c0770381661cc893c70ced97fbba7a8 mirror/oreslang/src/main/java/dev/oreslang/runtime/ProcessExitSignal.java
+c51f61e50974b2daa8d360927353f92cb6b6605d mirror/oreslang/src/main/java/dev/oreslang/stdlib/CoreLibrarySources.java

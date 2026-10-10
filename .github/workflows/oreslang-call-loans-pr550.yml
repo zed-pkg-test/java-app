@@ -13,11 +13,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Verify 62 exact JVM source Git hashes
+      - name: Verify 66 exact JVM source Git hashes
         shell: bash
         run: |
           set -euo pipefail
-          test "$(wc -l < mirror/oreslang-pr550-blobs.txt)" -eq 62
+          test "$(wc -l < mirror/oreslang-pr550-blobs.txt)" -eq 66
           while read -r expected filename; do
             actual="$(git hash-object "$filename")"
             if [ "$expected" != "$actual" ]; then
