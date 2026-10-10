@@ -573,6 +573,40 @@ final class PointerlessFncOwnershipTest {
         assertTrue(error.getMessage().contains("read-only"), error.getMessage());
     }
 
+
+    @Test
+    void builtinLoggerReadLoanBlocksLaterArgumentMove() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 7;
+                        end
+                        fnc consume(Box input): Box { return input; }
+                        fnc bad(): void {
+                          let mut Box box = new Box();
+                          stdio.stdout.log(box, consume(box));
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
+    }
+
+    @Test
+    void builtinLoggerRejectsDirectOwnershipTransfer() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 7;
+                        end
+                        fnc bad(): void {
+                          let mut Box box = new Box();
+                          stdio.stdout.log(rt take box);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().contains("read-only"), error.getMessage());
+    }
+
     private String run(String code) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         try (Context context = Context.newBuilder("ores")

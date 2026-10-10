@@ -1098,12 +1098,27 @@ public final class OwnershipChecker {
             return new ValueInfo(Ast.TypeRef.simple("bool"), ValueKind.COPY, null);
         }
         if (isBuiltinStdoutCall(call, "log", scope) || isBuiltinStdoutCall(call, "logList", scope)) {
-            for (Ast.Expr argument : call.arguments()) {
-                Ast.Expr value = argument instanceof Ast.SpreadExpr spread ? spread.expression() : argument;
-                ValueInfo info = checkExpr(value, scope, false);
-                if (containsMutexGuardType(info.type)) {
-                    throw error("MutexGuard cannot be formatted or logged");
+            // Formatting borrows values for the entire logging operation.
+            // Later argument evaluation cannot consume an earlier argument's
+            // owner, and logging must not become a disguised move boundary.
+            ArrayList<CallLoan> logLoans = new ArrayList<>();
+            try {
+                for (Ast.Expr argument : call.arguments()) {
+                    Ast.Expr value = argument instanceof Ast.SpreadExpr spread ? spread.expression() : argument;
+                    if (value instanceof Ast.RuntimeCallExpr runtime && runtime.operation().equals("take")) {
+                        throw error("stdio.stdout logging arguments are read-only; rt take cannot transfer ownership");
+                    }
+                    ValueInfo info = checkExpr(value, scope, false);
+                    if (containsMutexGuardType(info.type)) {
+                        throw error("MutexGuard cannot be formatted or logged");
+                    }
+                    if (info.kind != ValueKind.COPY) {
+                        VarState root = projectedCallRoot(value, scope);
+                        if (root != null) reserveBorrowLease(root, false, logLoans);
+                    }
                 }
+            } finally {
+                releaseCallLoans(logLoans);
             }
             return new ValueInfo(Ast.TypeRef.simple("void"), ValueKind.COPY, null);
         }
