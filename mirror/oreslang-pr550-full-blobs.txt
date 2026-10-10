@@ -228,4 +228,4 @@ f8901d58783998c619a9b8338c17a7b682b07aad mirror/oreslang/src/test/java/dev/oresl
 eddc2017049fdfa671137cb1a49bf5e5b687c670 mirror/oreslang/src/test/java/dev/oreslang/TypeofFncKeywordTest.java
 acc03759010e03b9fd6835fdfa95b184b08e3d37 mirror/oreslang/src/test/java/dev/oreslang/UntrustedActorTest.java
 fcc2939e8e4135c2731c76cc6d855403a9d3cbe2 mirror/oreslang/src/test/resources/oreslang/stack-cli-main.ores
-5b7789e64dbd8d246d14337439625637c9c6ee4b mirror/oreslang/src/test/java/dev/oreslang/AsyncSuspensionOwnershipMatrixTest.java
+2913fa9ff95ebb3aaa0ce2252e19654875c330e6 mirror/oreslang/src/test/java/dev/oreslang/AsyncSuspensionOwnershipMatrixTest.java

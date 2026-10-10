@@ -311,4 +311,94 @@ final class AsyncSuspensionOwnershipMatrixTest {
                             """.formatted(statement)), statement);
         }
     }
+    @Test
+    void GeneratorYieldCannotSuspendWithOrdinaryBorrow() {
+        reject("""
+                generator fnc bad(): int {
+                  val Bar owner = new Bar();
+                  val view = rt borrow owner;
+                  yield 7;
+                  stdio.println(view.value);
+                  return;
+                }
+                """, "cannot yield while a borrow is live");
+    }
+
+    @Test
+    void AsyncForAwaitCannotKeepBorrowAlive() {
+        reject("""
+                async generator fnc stream(): int { yield 7; return; }
+                async fnc bad(): void {
+                  val Bar owner = new Bar();
+                  val view = rt borrow owner;
+                  for await const entry of stream() {
+                    stdio.println(entry);
+                  }
+                  stdio.println(view.value);
+                  return;
+                }
+                """, "cannot suspend for async iteration while a borrow or MutexGuard is live");
+    }
+
+    @Test
+    void DynamicImmediateAndNonblockingSelectDoNotSuspendCaller() {
+        accept("""
+                fnc good(): void {
+                  val Channel<int> ch = Channel.new<int>(1);
+                  val Array<SelectCase> cases = [SelectCase.read(ch)];
+                  val Bar owner = new Bar();
+                  val view = rt borrow owner;
+                  val Option<SelectResult> immediate = try select from cases;
+                  val Future<SelectResult> pending = nb select from cases;
+                  stdio.println(view.value);
+                  return;
+                }
+                """);
+    }
+
+    @Test
+    void StaticDefaultDoesNotExemptNestedAwaitInsideSelectedArm() {
+        reject("""
+                async fnc bad(): void {
+                  val Channel<int> ch = Channel.new<int>(1);
+                  val Bar owner = new Bar();
+                  val view = rt borrow owner;
+                  select {
+                    when readch ch: val received {
+                      val int next = await (nb readch ch);
+                      stdio.println(next);
+                    }
+                    default: { stdio.println(view.value); }
+                  }
+                  return;
+                }
+                """, "cannot await while an ordinary borrow is live");
+    }
+
+    @Test
+    void NbSelectWriteArmCannotTransportBorrowedPayload() {
+        reject("""
+                actor fnc bad(): void {
+                  val Channel<Bar> output = Channel.new<Bar>(1);
+                  val Bar owner = new Bar();
+                  nb select {
+                    when writech output, rt borrow owner: { }
+                  }
+                  return;
+                }
+                """, "writech cannot transport a borrowed reference");
+    }
+
+    @Test
+    void BlockingChannelWriteCannotTransportBorrowedPayload() {
+        reject("""
+                fnc bad(): void {
+                  val Channel<Bar> output = Channel.new<Bar>(1);
+                  val Bar owner = new Bar();
+                  writech output, rt borrow owner;
+                  return;
+                }
+                """, "writech cannot transport a borrowed reference");
+    }
+
 }
