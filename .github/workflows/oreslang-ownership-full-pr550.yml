@@ -1,0 +1,61 @@
+name: Oreslang PR550 full JVM ownership hardening
+on:
+  push:
+    branches: [test/ownership-full-jvm-20261010]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  full-jvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify all 230 Java/Graal source and test Git blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(wc -l < mirror/oreslang-pr550-full-blobs.txt)" -eq 230
+          while read -r expected filename; do
+            actual="$(git hash-object "$filename")"
+            if [ "$expected" != "$actual" ]; then
+              echo "Git source mismatch: $filename" >&2
+              exit 1
+            fi
+          done < mirror/oreslang-pr550-full-blobs.txt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Compile compiler and run complete JVM test suite
+        run: mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java test
+  ownership-stress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify all 230 pinned source blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(wc -l < mirror/oreslang-pr550-full-blobs.txt)" -eq 230
+          while read -r expected filename; do
+            test "$(git hash-object "$filename")" = "$expected"
+          done < mirror/oreslang-pr550-full-blobs.txt
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Repeated borrow, channel, select, actor and domain-model regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for trial in 1 2 3 4 5; do
+            echo "::group::Ownership and actor stress trial $trial"
+            mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java -Dtest=PointerlessFncOwnershipTest,OwnershipAndClosureTest,SelectBorrowLifetimeTest,DeferredChannelOwnershipHardeningTest,FormalOwnershipDomainModelCheckTest,ActorMailboxExecutionBoundaryTest,ActorRuntimeTest,ChannelCallableTransportTest test
+            echo "::endgroup::"
+          done
