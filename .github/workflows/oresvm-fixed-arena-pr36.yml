@@ -1,0 +1,32 @@
+name: OresVM native FixedArena PR36 source-blob CTest
+on:
+  push:
+    branches: [test/oreslang-llvm-gc-arena-pr36-20261010]
+permissions:
+  contents: read
+jobs:
+  native-arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact LLVM FixedArena and regression blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object mirror/llvm/src/main/cpp/oreslang/runtime/FixedArena.hpp)" = "d8b0e7555712567d530b60f57aa8917d68df4b8a"
+          test "$(git hash-object mirror/llvm/tests/fixed_arena_test.cpp)" = "7c989cad754da980eacccb08ea3677dc9beb5b9a"
+      - name: Compile and run with GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -I mirror/llvm/src/main/cpp mirror/llvm/tests/fixed_arena_test.cpp -o /tmp/oreslang-fixed-arena-test
+          /tmp/oreslang-fixed-arena-test
+      - name: Compile and run with Clang
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -I mirror/llvm/src/main/cpp mirror/llvm/tests/fixed_arena_test.cpp -o /tmp/oreslang-fixed-arena-clang-test
+          /tmp/oreslang-fixed-arena-clang-test

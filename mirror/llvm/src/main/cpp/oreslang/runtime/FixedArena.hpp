@@ -27,7 +27,9 @@ public:
     std::size_t used() const noexcept { return used_; }
 
     void* allocate(std::size_t count, std::size_t align) noexcept {
-        if (!align || (align & (align - 1)) || align > alignof(std::max_align_t))
+        // A zero-byte result would alias the next live allocation without
+        // acquiring any storage or a unique lifetime. Reject it outright.
+        if (count == 0 || !align || (align & (align - 1)) || align > alignof(std::max_align_t))
             return nullptr;
         const auto address = reinterpret_cast<std::uintptr_t>(storage_.data());
         if (count > Capacity || used_ > Capacity) return nullptr;
