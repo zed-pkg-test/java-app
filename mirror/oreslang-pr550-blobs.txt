@@ -64,3 +64,7 @@ e4d9f8a6ddd10594bb386cc205ee471d7e18f0f6 mirror/oreslang/src/test/java/dev/oresl
 cff5dd4aaab41c114ba62e0b48542c3b4522e40f mirror/oreslang/src/main/java/dev/oreslang/runtime/CorePerf.java
 36c980874c0770381661cc893c70ced97fbba7a8 mirror/oreslang/src/main/java/dev/oreslang/runtime/ProcessExitSignal.java
 c51f61e50974b2daa8d360927353f92cb6b6605d mirror/oreslang/src/main/java/dev/oreslang/stdlib/CoreLibrarySources.java
+cc4876a4d8bb35911055386d31b1c9d0f14d3108 mirror/oreslang/src/test/java/dev/oreslang/OwnershipAndClosureTest.java
+b59e73b4b23db4e786db50a9e302b11747bd2c25 mirror/oreslang/src/test/java/dev/oreslang/DeferredChannelOwnershipHardeningTest.java
+f57e7ed2affee376acb124420fa429e4c1215bbc mirror/oreslang/src/test/java/dev/oreslang/SelectBorrowLifetimeTest.java
+9f0fcc255b663b9e580edfada0fd6265e2739d6d mirror/oreslang/src/test/java/dev/oreslang/runtime/FormalOwnershipDomainModelCheckTest.java
