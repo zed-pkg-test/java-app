@@ -1,0 +1,4 @@
+// Deliberately tiny subset of oreslang-source.java grammar.
+pub fnc main(): int {
+  return 42;
+}

@@ -1,0 +1,2 @@
+// No LLVM native I/O registry/runtime exists yet: never emit a fake host call.
+pub fnc main(): int { return read_text_blocking(1); }

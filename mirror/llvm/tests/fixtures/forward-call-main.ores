@@ -1,0 +1,7 @@
+// Functions may call later declarations in the same file.
+pub fnc main(): int {
+  return add(40, 2);
+}
+fnc add(int a, int b): int {
+  return a + b;
+}

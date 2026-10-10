@@ -1,0 +1,2 @@
+// Legacy bare native I/O is neither implemented nor silently admitted.
+pub fnc main(): int { return read_text(1); }
