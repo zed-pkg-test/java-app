@@ -53,13 +53,13 @@ da6a0d3aff4cb2b5f8dc4ecd28c0e9a7fb723492 mirror/oreslang/src/main/java/dev/oresl
 90bcb9305c04dfe593cd75045ad604d887d4c66f mirror/oreslang/src/main/java/dev/oreslang/runtime/RuntimePermissions.java
 db0d306c81216556fd39840108eef67208a995c2 mirror/oreslang/src/main/java/dev/oreslang/runtime/SharedCodeImageStore.java
 e2798a9f35501a88314c7a77b6f6f4102e24c376 mirror/oreslang/src/main/java/dev/oreslang/runtime/SourceBoundaryTrace.java
-398a89e68bcb908af780b132130e1013b44e726e mirror/oreslang/src/main/java/dev/oreslang/types/OwnershipChecker.java
+9b73ea45405132ef7f7f23948a9cd9f147a1648e mirror/oreslang/src/main/java/dev/oreslang/types/OwnershipChecker.java
 168207df7c74a9e42eff3cb9acb27f951c578916 mirror/oreslang/src/main/java/dev/oreslang/types/TypeChecker.java
 32d001aecde67b78d755f8d4be5383480354bb9c mirror/oreslang/src/main/java/dev/oreslang/types/Types.java
 44e23c91c50f034ca3c7f4fc315b97f45c7c1eac mirror/oreslang/src/main/java/module-info.java
 b7d162e2377f6c75c883fdcbbee71b7ccfeb892a mirror/oreslang/src/main/resources/META-INF/native-image/dev.oreslang/oreslang/native-image.properties
 fe79bd59fe84643d6ff8dc3c4415b36d9d0721e4 mirror/oreslang/src/main/resources/META-INF/native-image/dev.oreslang/oreslang/reachability-metadata.json
-e4d9f8a6ddd10594bb386cc205ee471d7e18f0f6 mirror/oreslang/src/test/java/dev/oreslang/PointerlessFncOwnershipTest.java
+5b3283884453363119bc3044f1198fea84b3a88d mirror/oreslang/src/test/java/dev/oreslang/PointerlessFncOwnershipTest.java
 101d9abbfada99070cf47a0dc57947c498eea85e mirror/oreslang/src/main/java/dev/oreslang/runtime/CoreDebug.java
 cff5dd4aaab41c114ba62e0b48542c3b4522e40f mirror/oreslang/src/main/java/dev/oreslang/runtime/CorePerf.java
 36c980874c0770381661cc893c70ced97fbba7a8 mirror/oreslang/src/main/java/dev/oreslang/runtime/ProcessExitSignal.java

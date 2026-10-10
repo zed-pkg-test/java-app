@@ -499,6 +499,60 @@ final class PointerlessFncOwnershipTest {
         assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
     }
 
+
+    @Test
+    void firstClassFncReadLoanBlocksSubsequentTakeOfSameOwner() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 7;
+                        end
+                        fnc bad(): void {
+                          let mut Box box = new Box();
+                          val Fnc<Box, Box, int> read = |left, right| -> { return left.value + right.value; };
+                          val int observed = read(box, rt take box);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
+    }
+
+    @Test
+    void firstClassFncProjectedReadLoanBlocksTakingOwner() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> TypeChecker.check(Parser.parse("""
+                        define class Box as
+                          pub let int value = 7;
+                        end
+                        define class Wrap as
+                          pub val Box nested = new Box();
+                        end
+                        fnc bad(): void {
+                          let mut Wrap outer = new Wrap();
+                          val Fnc<Box, Wrap, int> read = |item, holder| -> { return item.value; };
+                          val int observed = read(outer.nested, rt take outer);
+                          return;
+                        }
+                        """)));
+        assertTrue(error.getMessage().toLowerCase().contains("borrow"), error.getMessage());
+    }
+
+    @Test
+    void firstClassFncMultipleSharedReadsReleaseBeforeMutation() {
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define class Box as
+                  pub let int value = 7;
+                end
+                fnc ok(): void {
+                  let mut Box box = new Box();
+                  val Fnc<Box, Box, int> read = |left, right| -> { return left.value + right.value; };
+                  val int observed = read(box, box);
+                  box.value = observed;
+                  return;
+                }
+                """)));
+    }
+
     private String run(String code) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         try (Context context = Context.newBuilder("ores")
