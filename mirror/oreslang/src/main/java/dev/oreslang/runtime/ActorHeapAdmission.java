@@ -69,6 +69,12 @@ public final class ActorHeapAdmission {
             throw new IllegalStateException("strict native ownership requires compiler-generated"
                     + " drops, cycle policy, actor/async/FFI quiescence, and explicit native release");
         }
+        // A caller can construct a record full of true values. This is NOT a
+        // trusted compiler witness or evidence that the source object's
+        // allocator and drop paths are actually implemented. No current
+        // backend can activate strict mode through this public API.
+        throw new IllegalStateException("strict no-guest-tracing remains unavailable:"
+                + " native backend requires an unforgeable compiler/runtime lowering witness");
     }
 
     /**

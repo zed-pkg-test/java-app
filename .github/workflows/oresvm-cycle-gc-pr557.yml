@@ -21,7 +21,7 @@ jobs:
           while read -r expected filename; do
             test "$(git hash-object "$filename")" = "$expected" || exit 1
           done < mirror/oreslang-pr557-java-blobs.txt
-          test "$(git hash-object mirror/oreslang/src/test/java/dev/oreslang/runtime/ActorHeapAdmissionTest.java)" = "a5ce419ecba7adfd079c2c66dca7956679e9ca35"
+          test "$(git hash-object mirror/oreslang/src/test/java/dev/oreslang/runtime/ActorHeapAdmissionTest.java)" = "0d7f4a4b06c2dd9adc38f0389a5c5c72ce126634"
           test "$(git hash-object mirror/oreslang/src/test/java/dev/oreslang/runtime/CircularReferenceContractTest.java)" = "5e11b0291dcb4af3aaf6d00c75d2f4ff30c1aecd"
       - uses: actions/setup-java@v4
         with:

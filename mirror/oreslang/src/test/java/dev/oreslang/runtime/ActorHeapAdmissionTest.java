@@ -25,8 +25,11 @@ final class ActorHeapAdmissionTest {
         for (var backend : new ActorHeapAdmission.Backing[] {
                 ActorHeapAdmission.Backing.EXPLICIT_NATIVE_REGION,
                 ActorHeapAdmission.Backing.LLVM_NATIVE_ARENA }) {
-            assertDoesNotThrow(() -> ActorHeapAdmission.requireZeroGuestTracing(
-                    backend, COMPLETE));
+            assertTrue(COMPLETE.complete(),
+                    "declared checklist is necessary but is not a trusted compiler proof");
+            var denial = assertThrows(IllegalStateException.class, () ->
+                    ActorHeapAdmission.requireZeroGuestTracing(backend, COMPLETE));
+            assertTrue(denial.getMessage().contains("compiler/runtime lowering witness"));
             assertThrows(IllegalStateException.class, () ->
                     ActorHeapAdmission.requireZeroGuestTracing(
                             backend, ActorHeapAdmission.OwnershipProof.unproven()));
