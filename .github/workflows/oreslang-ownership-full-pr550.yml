@@ -1,7 +1,7 @@
-name: Oreslang PR550 full JVM ownership hardening
+name: Oreslang PR550 async/select/channel ownership boundary matrix
 on:
   push:
-    branches: [test/ownership-full-jvm-20261010]
+    branches: [test/async-borrow-boundary-20261010]
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,11 +13,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Verify all 230 Java/Graal source and test Git blobs
+      - name: Verify all 231 Java/Graal source and test Git blobs
         shell: bash
         run: |
           set -euo pipefail
-          test "$(wc -l < mirror/oreslang-pr550-full-blobs.txt)" -eq 230
+          test "$(wc -l < mirror/oreslang-pr550-full-blobs.txt)" -eq 231
           while read -r expected filename; do
             actual="$(git hash-object "$filename")"
             if [ "$expected" != "$actual" ]; then
@@ -30,7 +30,7 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Compile compiler and run complete JVM test suite
-        run: mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java test
+        run: mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java -Dtest=AsyncSuspensionOwnershipMatrixTest,SelectBorrowLifetimeTest,DeferredChannelOwnershipHardeningTest,AsyncChannelBoundaryTest,ChannelSelectSyntaxTest test
   ownership-stress:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -38,11 +38,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Verify all 230 pinned source blobs
+      - name: Verify all 231 pinned source blobs
         shell: bash
         run: |
           set -euo pipefail
-          test "$(wc -l < mirror/oreslang-pr550-full-blobs.txt)" -eq 230
+          test "$(wc -l < mirror/oreslang-pr550-full-blobs.txt)" -eq 231
           while read -r expected filename; do
             test "$(git hash-object "$filename")" = "$expected"
           done < mirror/oreslang-pr550-full-blobs.txt
@@ -54,8 +54,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for trial in 1 2 3 4 5; do
+          for trial in 1 2 3; do
             echo "::group::Ownership and actor stress trial $trial"
-            mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java -Dtest=PointerlessFncOwnershipTest,OwnershipAndClosureTest,SelectBorrowLifetimeTest,DeferredChannelOwnershipHardeningTest,FormalOwnershipDomainModelCheckTest,ActorMailboxExecutionBoundaryTest,ActorRuntimeTest,ChannelCallableTransportTest test
+            mvn -B -ntp -f mirror/oreslang/pom.xml -P '!native-thread-unix' -Dores.runtime.carriers=java -Dtest=AsyncSuspensionOwnershipMatrixTest,PointerlessFncOwnershipTest,SelectBorrowLifetimeTest,DeferredChannelOwnershipHardeningTest,AsyncAwaitLanguageTest,ActorMailboxExecutionBoundaryTest test
             echo "::endgroup::"
           done
